@@ -1570,4 +1570,6 @@
   <string name="setting_files_page_cleanup_message">سيؤدي هذا إلى حذف الملفات في مجلد الرفع نهائيًا. لن تُحذف المحادثات.</string>
   <string name="setting_files_page_cleanup_title">هل تريد مسح كل الملفات المرفوعة؟</string>
   <string name="setting_files_page_cleanup_failed">تعذر مسح الملفات المرفوعة. تم الاحتفاظ بسجلات الملفات التي قد تظل موجودة.</string>
+  <string name="system_assistant_surface_ai_key_overlay">نقطة الدخول الحالية: نافذة زر AI العائمة</string>
+  <string name="system_assistant_surface_ai_key_overlay_running">نافذة زر AI العائمة - ستستمر المهمة في المحادثة الأصلية</string>
 </resources>

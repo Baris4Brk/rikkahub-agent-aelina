@@ -1,12 +1,56 @@
 package me.rerere.rikkahub.data.ai
 
+import me.rerere.rikkahub.assistant.InvocationSurfaceContext
+import me.rerere.rikkahub.assistant.InvocationSurfacePresence
+import me.rerere.rikkahub.assistant.SystemAssistantHostKind
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlin.uuid.Uuid
 
 class InvocationSurfacePolicyTest {
+    @Test
+    fun `AI key activity plan exposes advanced tools while voice session stays background only`() {
+        val conversationId = Uuid.random()
+        val activity = ToolExposurePlan.create(
+            origin = ToolCallOrigin.SystemAssistant,
+            deviceLocked = false,
+            hasAuthorizedInvocation = true,
+            surfaceContext = InvocationSurfaceContext(
+                origin = ToolCallOrigin.SystemAssistant,
+                hostKind = SystemAssistantHostKind.ACTIVITY_OVERLAY,
+                presence = InvocationSurfacePresence.OVERLAY_VISIBLE,
+                conversationId = conversationId,
+                commandId = Uuid.random(),
+                unlockedOwner = true,
+            ),
+        )
+        val voice = ToolExposurePlan.create(
+            origin = ToolCallOrigin.SystemAssistant,
+            deviceLocked = false,
+            hasAuthorizedInvocation = true,
+            surfaceContext = InvocationSurfaceContext(
+                origin = ToolCallOrigin.SystemAssistant,
+                hostKind = SystemAssistantHostKind.VOICE_SESSION,
+                presence = InvocationSurfacePresence.VOICE_SESSION_VISIBLE,
+                conversationId = conversationId,
+                commandId = Uuid.random(),
+                unlockedOwner = true,
+            ),
+        )
+
+        listOf("workspace_shell", "browser_open", "take_screenshot", "keyboard_input").forEach {
+            assertTrue("activity overlay should expose $it", activity.canExpose(it))
+            assertFalse("voice session must not expose $it", voice.canExpose(it))
+        }
+        assertTrue(activity.canExpose("get_battery_status"))
+        assertTrue(voice.canExpose("get_battery_status"))
+        assertFalse(activity.canExpose("call_phone"))
+        assertFalse(activity.canExpose("answer_phone_call"))
+    }
+
     @Test
     fun `unlocked system assistant is local interactive but cannot host Activity-only tools`() {
         val decision = InvocationSurfacePolicy.forOrigin(ToolCallOrigin.SystemAssistant)

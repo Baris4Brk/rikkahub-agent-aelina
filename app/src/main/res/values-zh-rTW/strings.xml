@@ -1839,4 +1839,6 @@
   <string name="setting_files_page_cleanup_message">此操作會永久刪除上傳資料夾中的檔案，但不會刪除對話。</string>
   <string name="setting_files_page_cleanup_title">清除所有上傳檔案？</string>
   <string name="setting_files_page_cleanup_failed">無法清除上傳檔案。可能仍存在的檔案所對應的記錄已保留。</string>
+  <string name="system_assistant_surface_ai_key_overlay">目前入口：AI 鍵浮層</string>
+  <string name="system_assistant_surface_ai_key_overlay_running">AI 鍵浮層 · 任務將在原對話繼續</string>
 </resources>

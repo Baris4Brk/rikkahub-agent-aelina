@@ -192,7 +192,8 @@ class GenerationRunControl(
     }
 
     private fun hasUndeliveredSteeringLocked(): Boolean = steering.any { note ->
-        steeringStates[note.commandId] == SteeringState.PENDING
+        steeringStates[note.commandId] == SteeringState.PENDING ||
+            steeringStates[note.commandId] == SteeringState.DELIVERING
     }
 
     fun submitSteering(note: SteeringNote): SteeringRegistrationResult {
@@ -238,18 +239,19 @@ class GenerationRunControl(
         val deliveries = synchronized(steeringLock) {
             if (steeringClosed) return@synchronized emptyList()
             buildList {
-                val iterator = steering.iterator()
-                while (iterator.hasNext()) {
-                    val queuedNote = iterator.next()
+                steering.forEach { queuedNote ->
                     val note = steeringNotes[queuedNote.commandId] ?: queuedNote
-                    val firstApplication = note.id !in appliedSteering
-                    add(SteeringDelivery(note, firstApplication))
-                    if (firstApplication) {
-                        appliedSteering += note.id
-                        steeringStates[note.commandId] = SteeringState.APPLIED
-                        transitions += SteeringTransition(note.commandId, SteeringState.APPLIED)
+                    when (steeringStates[note.commandId]) {
+                        SteeringState.PENDING -> {
+                            add(SteeringDelivery(note, firstApplication = true))
+                            steeringStates[note.commandId] = SteeringState.DELIVERING
+                            transitions += SteeringTransition(note.commandId, SteeringState.DELIVERING)
+                        }
+                        SteeringState.APPLIED -> if (note.scope == SteeringScope.REMAINDER_OF_RUN) {
+                            add(SteeringDelivery(note, firstApplication = false))
+                        }
+                        else -> Unit
                     }
-                    if (note.scope == SteeringScope.NEXT_MODEL_CALL) iterator.remove()
                 }
             }
         }
@@ -257,12 +259,47 @@ class GenerationRunControl(
         return deliveries
     }
 
+    /** Commits a delivery only after the provider has produced observable output. */
+    fun markSteeringProviderStarted(deliveries: List<SteeringDelivery>) {
+        val transitions = mutableListOf<SteeringTransition>()
+        synchronized(steeringLock) {
+            deliveries.filter { it.firstApplication }.forEach { delivery ->
+                val note = steeringNotes[delivery.note.commandId] ?: delivery.note
+                if (steeringStates[note.commandId] != SteeringState.DELIVERING) return@forEach
+                appliedSteering += note.id
+                steeringStates[note.commandId] = SteeringState.APPLIED
+                if (note.scope == SteeringScope.NEXT_MODEL_CALL) {
+                    steering.removeAll { it.commandId == note.commandId }
+                }
+                transitions += SteeringTransition(note.commandId, SteeringState.APPLIED)
+            }
+        }
+        transitions.forEach(onSteeringTransition)
+    }
+
+    /** Makes a never-started provider delivery eligible for the next call in the same run. */
+    fun markSteeringDeliveryFailed(deliveries: List<SteeringDelivery>) {
+        val transitions = mutableListOf<SteeringTransition>()
+        synchronized(steeringLock) {
+            deliveries.filter { it.firstApplication }.forEach { delivery ->
+                val commandId = delivery.note.commandId
+                if (steeringStates[commandId] != SteeringState.DELIVERING) return@forEach
+                steeringStates[commandId] = SteeringState.PENDING
+                transitions += SteeringTransition(commandId, SteeringState.PENDING)
+            }
+        }
+        transitions.forEach(onSteeringTransition)
+    }
+
     fun updateSteeringHistoryMode(commandId: Uuid, historyMode: SteeringHistoryMode): Boolean {
         var transitionState: SteeringState? = null
         val updated = synchronized(steeringLock) {
             if (steeringClosed) return@synchronized false
             val state = steeringStates[commandId] ?: return@synchronized false
-            if (state != SteeringState.PENDING && state != SteeringState.APPLIED) return@synchronized false
+            if (state != SteeringState.PENDING &&
+                state != SteeringState.DELIVERING &&
+                state != SteeringState.APPLIED
+            ) return@synchronized false
             transitionState = state
             val note = steeringNotes[commandId] ?: return@synchronized false
             steeringNotes[commandId] = note.copy(historyMode = historyMode)
@@ -290,7 +327,10 @@ class GenerationRunControl(
             if (steeringClosed) return@synchronized emptyList()
             steeringClosed = true
             val pending = steering
-                .filter { steeringStates[it.commandId] == SteeringState.PENDING }
+                .filter {
+                    steeringStates[it.commandId] == SteeringState.PENDING ||
+                        steeringStates[it.commandId] == SteeringState.DELIVERING
+                }
                 .map {
                     steeringStates[it.commandId] = SteeringState.NOT_APPLIED_RUN_FINISHED
                     SteeringTransition(
@@ -345,6 +385,7 @@ data class SteeringTransition(
 
 enum class SteeringState {
     PENDING,
+    DELIVERING,
     APPLIED,
     FALLBACK_QUEUED,
     NOT_APPLIED_RUN_FINISHED,

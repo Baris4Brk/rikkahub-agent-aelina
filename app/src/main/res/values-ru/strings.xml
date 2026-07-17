@@ -1841,4 +1841,6 @@
   <string name="setting_files_page_cleanup_message">Файлы в папке загрузок будут удалены безвозвратно. Диалоги не будут удалены.</string>
   <string name="setting_files_page_cleanup_title">Удалить все загруженные файлы?</string>
   <string name="setting_files_page_cleanup_failed">Не удалось очистить загруженные файлы. Записи о файлах, которые могут всё ещё существовать, сохранены.</string>
+  <string name="system_assistant_surface_ai_key_overlay">Текущий способ вызова: оверлей AI-клавиши</string>
+  <string name="system_assistant_surface_ai_key_overlay_running">Оверлей AI-клавиши · задача продолжится в исходном чате</string>
 </resources>

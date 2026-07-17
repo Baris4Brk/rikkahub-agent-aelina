@@ -8,6 +8,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import me.rerere.rikkahub.BuildConfig
 
 /**
  * The "hardline" tier — unconditional command blocklist.
@@ -38,6 +39,9 @@ import kotlinx.serialization.json.jsonPrimitive
  * Inspired by the same shape Hermes Agent uses for its hardline floor.
  */
 object HardlineCommandGuard {
+    private val appSelfPreservationPolicy by lazy {
+        SelfPreservationPolicy.forApplication(BuildConfig.APPLICATION_ID)
+    }
 
     /**
      * Match a regex anchored to "command position" — start of string, after `;` `&` `|`
@@ -124,13 +128,20 @@ object HardlineCommandGuard {
      * Returns the human-readable reason if blocked, or null if safe.
      * Case-insensitive; the input is lowercased before matching.
      */
-    fun checkCommand(command: String?): String? {
+    fun checkCommand(command: String?): String? =
+        checkCommand(command, appSelfPreservationPolicy)
+
+    /** Injectable variant used by tests and adapters protecting a different package id. */
+    fun checkCommand(
+        command: String?,
+        selfPreservationPolicy: SelfPreservationPolicy,
+    ): String? {
         if (command.isNullOrEmpty()) return null
         val normalised = command.lowercase()
         for ((pattern, reason) in PATTERNS) {
             if (pattern.containsMatchIn(normalised)) return reason
         }
-        return null
+        return selfPreservationPolicy.checkShellCommand(command)?.reason
     }
 
     /**
@@ -144,43 +155,60 @@ object HardlineCommandGuard {
      * the call is refused. This is the floor; a clueful MCP server should also gate
      * its own destructive tools with its own approval.
      */
-    fun checkTool(toolName: String, inputJson: String): String? {
+    fun checkTool(toolName: String, inputJson: String): String? =
+        checkTool(toolName, inputJson, appSelfPreservationPolicy)
+
+    /** Injectable variant preserving the same policy for every command-bearing argument. */
+    fun checkTool(
+        toolName: String,
+        inputJson: String,
+        selfPreservationPolicy: SelfPreservationPolicy,
+    ): String? {
         if (inputJson.isBlank()) return null
         val obj = runCatching {
             kotlinx.serialization.json.Json.parseToJsonElement(inputJson).jsonObject
         }.getOrNull() ?: return null
-        return checkToolParsed(toolName, obj)
+        return checkToolParsed(toolName, obj, selfPreservationPolicy)
     }
 
     /**
      * Convenience for callers that already have a parsed JsonObject (e.g. tool execution
      * paths). Mirrors [checkTool] but skips the parse step.
      */
-    fun checkToolParsed(toolName: String, input: JsonObject): String? {
+    fun checkToolParsed(toolName: String, input: JsonObject): String? =
+        checkToolParsed(toolName, input, appSelfPreservationPolicy)
+
+    fun checkToolParsed(
+        toolName: String,
+        input: JsonObject,
+        selfPreservationPolicy: SelfPreservationPolicy,
+    ): String? {
         return when {
             toolName == "termux_run_command" -> {
                 val cmd = input["command"]?.jsonPrimitive?.contentOrNull
-                checkCommand(cmd)?.let { return it }
+                checkCommand(cmd, selfPreservationPolicy)?.let { return it }
                 val exe = input["executable"]?.jsonPrimitive?.contentOrNull
                 val args = input["arguments"]?.jsonArray
                     ?.mapNotNull { it.jsonPrimitive.contentOrNull }
                     ?.joinToString(" ")
                 if (exe != null || args != null) {
-                    checkCommand("${exe.orEmpty()} ${args.orEmpty()}")
+                    checkCommand("${exe.orEmpty()} ${args.orEmpty()}", selfPreservationPolicy)
                 } else null
             }
+            toolName == "workspace_shell" ->
+                checkCommand(input["command"]?.jsonPrimitive?.contentOrNull, selfPreservationPolicy)
             toolName == "ssh_exec" || toolName == "ssh_exec_saved" ->
-                checkCommand(input["command"]?.jsonPrimitive?.contentOrNull)
+                checkCommand(input["command"]?.jsonPrimitive?.contentOrNull, selfPreservationPolicy)
             // Sub-agent dispatch — the spawned LLM gets the parent's full tool surface
             // headlessly, so a `task` / `prompt` containing a literal hardline-blocked
             // command (e.g. `rm -rf /`) shouldn't be authorised even if the parent
             // workflow_create approval was granted. Walk all string args.
-            toolName == "subagent_dispatch" -> walkAndCheck(input)
+            toolName == "subagent_dispatch" -> walkAndCheck(input, selfPreservationPolicy)
             // MCP-relayed tools: we don't know which server or what arg shape carries shell
             // content, so we recursively scan every string value in the input. False
             // positives are fine — an MCP tool whose legitimate-purpose arg happens to
             // contain a literal `rm -rf /` is too edge-case to design around.
-            toolName.startsWith("mcp__") -> walkAndCheck(input)
+            toolName.startsWith("mcp__") -> walkAndCheck(input, selfPreservationPolicy)
             // browser_eval_js: runs arbitrary JS in a real WebView with cookies, localStorage,
             // and fetch — completely unlike eval_javascript (sandboxed QuickJS). This is the
             // single highest-trust tool we ship, hence the dedicated HARDLINE arm + the
@@ -191,7 +219,7 @@ object HardlineCommandGuard {
             //       Function constructor, string-form setTimeout, data: script injection).
             toolName == "browser_eval_js" -> {
                 val code = input["code"]?.jsonPrimitive?.contentOrNull.orEmpty()
-                checkCommand(code)?.let { return it }
+                checkCommand(code, selfPreservationPolicy)?.let { return it }
                 val matched = JS_HARDLINE_PATTERNS.firstOrNull { (rx, _) -> rx.containsMatchIn(code) }
                 matched?.second
             }
@@ -231,22 +259,25 @@ object HardlineCommandGuard {
      * Walk a JSON element recursively. Run [checkCommand] on every string primitive we
      * find. Return the first match's reason, or null if everything is clean.
      */
-    private fun walkAndCheck(element: JsonElement): String? {
+    private fun walkAndCheck(
+        element: JsonElement,
+        selfPreservationPolicy: SelfPreservationPolicy,
+    ): String? {
         when (element) {
             is JsonPrimitive -> {
                 if (element.isString) {
-                    return checkCommand(element.contentOrNull)
+                    return checkCommand(element.contentOrNull, selfPreservationPolicy)
                 }
             }
             is JsonObject -> {
                 for ((_, v) in element) {
-                    val r = walkAndCheck(v)
+                    val r = walkAndCheck(v, selfPreservationPolicy)
                     if (r != null) return r
                 }
             }
             is JsonArray -> {
                 for (v in element) {
-                    val r = walkAndCheck(v)
+                    val r = walkAndCheck(v, selfPreservationPolicy)
                     if (r != null) return r
                 }
             }

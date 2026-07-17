@@ -133,17 +133,68 @@ class GenerationRunControlTest {
         )
 
         assertEquals(SteeringRegistrationResult.Accepted, control.submitSteering(note))
+        val deliveries = control.takeSteeringForCheckpoint(0)
         assertEquals(
             listOf(SteeringDelivery(note, firstApplication = true)),
-            control.takeSteeringForCheckpoint(0),
+            deliveries,
         )
+        control.markSteeringProviderStarted(deliveries)
         assertTrue(control.takeSteeringForCheckpoint(1).isEmpty())
         assertEquals(
             listOf(
                 SteeringTransition(commandId, SteeringState.PENDING),
+                SteeringTransition(commandId, SteeringState.DELIVERING),
                 SteeringTransition(commandId, SteeringState.APPLIED),
             ),
             transitions,
+        )
+    }
+
+    @Test
+    fun `next model call steering is only applied after provider output starts`() {
+        val control = GenerationRunControl(Uuid.random())
+        val commandId = Uuid.random()
+        val note = SteeringNote(
+            commandId = commandId,
+            runId = control.runId,
+            text = "Use the new requirement in this run",
+            source = CommandOrigin.APP_UI,
+            scope = SteeringScope.NEXT_MODEL_CALL,
+        )
+        control.submitSteering(note)
+
+        val deliveries = control.takeSteeringForCheckpoint(0)
+
+        assertEquals(SteeringState.DELIVERING, control.steeringStates()[commandId])
+        assertTrue(control.hasUndeliveredSteering())
+        assertTrue(control.takeSteeringForCheckpoint(1).isEmpty())
+
+        control.markSteeringProviderStarted(deliveries)
+
+        assertEquals(SteeringState.APPLIED, control.steeringStates()[commandId])
+        assertTrue(!control.hasUndeliveredSteering())
+        assertTrue(control.takeSteeringForCheckpoint(2).isEmpty())
+    }
+
+    @Test
+    fun `provider failure before first output returns steering to the same run queue`() {
+        val control = GenerationRunControl(Uuid.random())
+        val note = SteeringNote(
+            commandId = Uuid.random(),
+            runId = control.runId,
+            text = "Retry this guidance in the active run",
+            source = CommandOrigin.APP_UI,
+            scope = SteeringScope.NEXT_MODEL_CALL,
+        )
+        control.submitSteering(note)
+        val firstAttempt = control.takeSteeringForCheckpoint(0)
+
+        control.markSteeringDeliveryFailed(firstAttempt)
+
+        assertEquals(SteeringState.PENDING, control.steeringStates()[note.commandId])
+        assertEquals(
+            listOf(SteeringDelivery(note, firstApplication = true)),
+            control.takeSteeringForCheckpoint(1),
         )
     }
 
@@ -166,6 +217,28 @@ class GenerationRunControlTest {
         assertTrue(text.text.contains(note.text))
         assertTrue(text.text.contains("停止尚未开始的旧计划步骤"))
         assertEquals(null, buildSteeringUserGuidanceMessage(emptyList()))
+    }
+
+    @Test
+    fun `provider tail appends live steering after persisted context without mutating history`() {
+        val history = listOf(UIMessage.user("Original request"))
+        val note = SteeringNote(
+            commandId = Uuid.random(),
+            runId = Uuid.random(),
+            text = "Use the newly supplied constraint",
+            source = CommandOrigin.APP_UI,
+        )
+        val tail = ProviderTailMessages.fromSteering(
+            listOf(SteeringDelivery(note, firstApplication = true)),
+        )
+
+        val providerMessages = tail.appendTo(history)
+
+        assertEquals(1, history.size)
+        assertEquals(2, providerMessages.size)
+        assertEquals(MessageRole.USER, providerMessages.last().role)
+        assertTrue(providerMessages.last().parts.filterIsInstance<UIMessagePart.Text>()
+            .single().text.contains(note.text))
     }
 
     @Test
@@ -203,6 +276,8 @@ class GenerationRunControlTest {
             "User guidance for this run: Apply after the current tool batch",
             buildSteeringSystemAddendum(nextProviderCheckpoint),
         )
+        assertEquals(SteeringState.DELIVERING, control.steeringStates()[commandId])
+        control.markSteeringProviderStarted(nextProviderCheckpoint)
         assertEquals(SteeringState.APPLIED, control.steeringStates()[commandId])
         assertTrue(
             takeSteeringForProviderCheckpoint(
@@ -326,10 +401,12 @@ class GenerationRunControlTest {
         )
 
         assertEquals(SteeringRegistrationResult.Accepted, control.submitSteering(note))
+        val firstDelivery = control.takeSteeringForCheckpoint(0)
         assertEquals(
             listOf(SteeringDelivery(note, firstApplication = true)),
-            control.takeSteeringForCheckpoint(0),
+            firstDelivery,
         )
+        control.markSteeringProviderStarted(firstDelivery)
         assertEquals(
             listOf(SteeringDelivery(note, firstApplication = false)),
             control.takeSteeringForCheckpoint(1),

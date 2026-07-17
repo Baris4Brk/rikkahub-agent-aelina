@@ -38,13 +38,17 @@ class DefaultSystemAssistantSessionControllerFactory(
     private val parentScope: CoroutineScope,
     private val recentMessageLimit: Int = DEFAULT_RECENT_MESSAGE_LIMIT,
 ) : SystemAssistantSessionControllerFactory {
-    override fun create(invokedFromKeyguard: Boolean): SystemAssistantSessionController =
+    override fun create(
+        invokedFromKeyguard: Boolean,
+        hostKind: SystemAssistantHostKind,
+    ): SystemAssistantSessionController =
         DefaultSystemAssistantSessionController(
             targetResolver = targetResolver,
             chatBackend = chatBackend,
             accessState = accessState,
             emergencyStopState = emergencyStopState,
             invokedFromKeyguard = invokedFromKeyguard,
+            hostKind = hostKind,
             parentScope = parentScope,
             recentMessageLimit = recentMessageLimit,
         )
@@ -62,6 +66,7 @@ class DefaultSystemAssistantSessionController(
     private val accessState: SystemAssistantAccessState,
     private val emergencyStopState: SystemAssistantEmergencyStopState,
     private val invokedFromKeyguard: Boolean,
+    private val hostKind: SystemAssistantHostKind = SystemAssistantHostKind.VOICE_SESSION,
     parentScope: CoroutineScope,
     private val recentMessageLimit: Int = DEFAULT_RECENT_MESSAGE_LIMIT,
 ) : SystemAssistantSessionController {
@@ -71,6 +76,7 @@ class DefaultSystemAssistantSessionController(
         accessState: SystemAssistantAccessState,
         emergencyStopState: SystemAssistantEmergencyStopState,
         invokedFromKeyguard: Boolean,
+        hostKind: SystemAssistantHostKind = SystemAssistantHostKind.VOICE_SESSION,
         parentScope: CoroutineScope,
         recentMessageLimit: Int = DEFAULT_RECENT_MESSAGE_LIMIT,
     ) : this(
@@ -79,6 +85,7 @@ class DefaultSystemAssistantSessionController(
         accessState = accessState,
         emergencyStopState = emergencyStopState,
         invokedFromKeyguard = invokedFromKeyguard,
+        hostKind = hostKind,
         parentScope = parentScope,
         recentMessageLimit = recentMessageLimit,
     )
@@ -92,6 +99,7 @@ class DefaultSystemAssistantSessionController(
     private val invocationToken = SystemAssistantInvocationRegistry.register(
         invokedFromKeyguard = invokedFromKeyguard,
         ownerUser = ownerUser,
+        hostKind = hostKind,
     )
 
     private val _state = MutableStateFlow(
@@ -192,6 +200,7 @@ class DefaultSystemAssistantSessionController(
         val acceptedRun = SystemAssistantInvocationRegistry.acquireAcceptedRun(
             conversationId = target.conversationId,
             commandId = commandId,
+            hostKind = hostKind,
         ) ?: return@withLock reject(
             code = SystemAssistantSubmissionErrorCode.OVERLAY_NOT_VISIBLE,
             message = "The system-assistant overlay is no longer visible. Invoke it again.",

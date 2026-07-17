@@ -239,7 +239,10 @@ interface SystemAssistantSessionController : AutoCloseable {
 
 /** Creates one independent controller for each native session invocation. */
 fun interface SystemAssistantSessionControllerFactory {
-    fun create(invokedFromKeyguard: Boolean): SystemAssistantSessionController
+    fun create(
+        invokedFromKeyguard: Boolean,
+        hostKind: SystemAssistantHostKind,
+    ): SystemAssistantSessionController
 }
 
 internal fun MessageRole.toSystemAssistantTextRole(): SystemAssistantTextRole? = when (this) {

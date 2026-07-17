@@ -794,6 +794,8 @@ class ChatService(
         conversationId: Uuid,
         text: String,
         scope: SteeringScope = SteeringScope.REMAINDER_OF_RUN,
+        applyPolicy: me.rerere.rikkahub.service.chat.SteeringApplyPolicy =
+            me.rerere.rikkahub.service.chat.SteeringApplyPolicy.AFTER_CHECKPOINT,
         origin: CommandOrigin = CommandOrigin.APP_UI,
         historyMode: me.rerere.rikkahub.service.chat.SteeringHistoryMode =
             me.rerere.rikkahub.service.chat.SteeringHistoryMode.TRANSIENT,
@@ -801,7 +803,12 @@ class ChatService(
         if (text.isBlank()) return SubmitResult.Rejected("Steering text cannot be blank")
         return submitCommand(
             conversationId = conversationId,
-            command = SteerCommand(text = text, scope = scope, historyMode = historyMode),
+            command = SteerCommand(
+                text = text,
+                scope = scope,
+                applyPolicy = applyPolicy,
+                historyMode = historyMode,
+            ),
             origin = origin,
         )
     }
@@ -1720,24 +1727,26 @@ class ChatService(
             val privilegedBridgeStatus = shizukuBridgeManager.status()
             val deviceLocked = (context.getSystemService(Context.KEYGUARD_SERVICE) as? android.app.KeyguardManager)
                 ?.let { it.isDeviceLocked || it.isKeyguardLocked } == true
-            val invocationSurfaceCanExposeTools = me.rerere.rikkahub.data.ai.InvocationSurfacePolicy
-                .canExposeToolSurface(
-                    origin = callOrigin,
-                    deviceLocked = deviceLocked,
-                    hasAuthorizedInvocation = me.rerere.rikkahub.assistant
-                        .SystemAssistantInvocationRegistry
-                        .hasAuthorizedUnlockedInvocation(conversationId, activeCommandId),
-                )
+            val hasAuthorizedInvocation = me.rerere.rikkahub.assistant
+                .SystemAssistantInvocationRegistry
+                .hasAuthorizedUnlockedInvocation(conversationId, activeCommandId)
+            val invocationSurfaceContext = me.rerere.rikkahub.assistant
+                .SystemAssistantInvocationRegistry
+                .currentContext(callOrigin, conversationId, activeCommandId)
+            val toolExposurePlan = me.rerere.rikkahub.data.ai.ToolExposurePlan.create(
+                origin = callOrigin,
+                deviceLocked = deviceLocked,
+                hasAuthorizedInvocation = hasAuthorizedInvocation,
+                surfaceContext = invocationSurfaceContext,
+            )
+            val invocationSurfaceCanExposeTools = toolExposurePlan.surfaceAvailable
             val webSearchToolsEnabled = WebSearchPolicy.canInject(
                 assistant = assistant,
                 origin = callOrigin,
                 toolSurfaceAvailable = invocationSurfaceCanExposeTools,
             )
             fun canExposeTool(toolName: String): Boolean {
-                if (!invocationSurfaceCanExposeTools) return false
-                if (callOrigin != ToolCallOrigin.SystemAssistant) return true
-                return me.rerere.rikkahub.data.capability.CapabilityCatalog
-                    .isAvailableFromSystemAssistant(toolName)
+                return toolExposurePlan.canExpose(toolName)
             }
             fun canExposeLocalTool(toolName: String): Boolean {
                 return canExposeTool(toolName)
@@ -1897,6 +1906,8 @@ class ChatService(
                 conversationId = conversationId,
                 commandId = activeCommandId,
                 runControl = runControl,
+                invocationSurfaceContextProvider =
+                    me.rerere.rikkahub.assistant.SystemAssistantInvocationRegistry,
                 isEmergencyStopActive = {
                     agentSafetySettings.emergencyStopFlow.first()
                 },

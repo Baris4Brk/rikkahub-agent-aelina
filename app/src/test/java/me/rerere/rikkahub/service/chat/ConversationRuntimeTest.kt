@@ -335,7 +335,9 @@ class ConversationRuntimeTest {
                 executionCount.incrementAndGet()
                 runStarted.complete(Unit)
                 allowCheckpoint.await()
-                deliveredCommandId.complete(control.takeSteeringForCheckpoint(1).single().note.commandId)
+                val deliveries = control.takeSteeringForCheckpoint(1)
+                control.markSteeringProviderStarted(deliveries)
+                deliveredCommandId.complete(deliveries.single().note.commandId)
                 releaseRun.await()
                 RunOutcome.Completed()
             },
@@ -1462,7 +1464,9 @@ class ConversationRuntimeTest {
                 releaseTool.await()
                 control.unregisterTool("call-1", handle)
                 providerRegistration.close()
-                observed.complete(control.takeSteeringForCheckpoint(1).map { it.note })
+                val deliveries = control.takeSteeringForCheckpoint(1)
+                control.markSteeringProviderStarted(deliveries)
+                observed.complete(deliveries.map { it.note })
                 releaseRun.await()
                 RunOutcome.Completed()
             },
@@ -1593,7 +1597,7 @@ class ConversationRuntimeTest {
                 activeRunId.complete(control.runId)
                 runStarted.complete(Unit)
                 allowCheckpoint.await()
-                control.takeSteeringForCheckpoint(1).single()
+                control.takeSteeringForCheckpoint(1).also(control::markSteeringProviderStarted).single()
                 checkpointApplied.complete(Unit)
                 releaseRun.await()
                 RunOutcome.Completed()
@@ -1667,7 +1671,7 @@ class ConversationRuntimeTest {
             executor = RuntimeCommandExecutor { _, control ->
                 runStarted.complete(Unit)
                 allowCheckpoint.await()
-                control.takeSteeringForCheckpoint(1).single()
+                control.takeSteeringForCheckpoint(1).also(control::markSteeringProviderStarted).single()
                 releaseRun.await()
                 RunOutcome.Completed()
             },
@@ -1934,7 +1938,7 @@ class ConversationRuntimeTest {
                 if (envelope.command is SendMessageCommand) {
                     runStarted.complete(Unit)
                     applyCheckpoint.await()
-                    control.takeSteeringForCheckpoint(1).single()
+                    control.takeSteeringForCheckpoint(1).also(control::markSteeringProviderStarted).single()
                     releaseRun.await()
                 }
                 RunOutcome.Completed()

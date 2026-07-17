@@ -286,6 +286,7 @@ object ToolApprovalDefaults {
         // typing a string into a focused field is not shell execution, and agent-keyboard
         // itself refuses password / sensitive fields at the IME boundary.
         "keyboard_type",
+        "keyboard_input",
         "keyboard_press_key",
         "keyboard_delete",
         "keyboard_clear",

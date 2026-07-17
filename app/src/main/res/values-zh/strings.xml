@@ -1861,4 +1861,6 @@ mDNS 地址：使用 .local 主机名，同一网络中的其他设备可通过�
   <string name="setting_files_page_cleanup_message">此操作会永久删除上传文件夹中的文件，但不会删除对话。</string>
   <string name="setting_files_page_cleanup_title">清理所有上传文件？</string>
   <string name="setting_files_page_cleanup_failed">无法清理上传文件。可能仍存在的文件所对应的记录已保留。</string>
+  <string name="system_assistant_surface_ai_key_overlay">当前入口：AI 键浮层</string>
+  <string name="system_assistant_surface_ai_key_overlay_running">AI 键浮层 · 任务将在原会话继续</string>
 </resources>

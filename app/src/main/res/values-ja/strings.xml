@@ -1842,4 +1842,6 @@ mDNSアドレス: .localホスト名を使用し、IPを知らなくても同じ
   <string name="setting_files_page_cleanup_message">アップロードフォルダー内のファイルを完全に削除します。会話は削除されません。</string>
   <string name="setting_files_page_cleanup_title">すべてのアップロードファイルを消去しますか？</string>
   <string name="setting_files_page_cleanup_failed">アップロードファイルを消去できませんでした。まだ存在する可能性があるファイルの記録は保持されました。</string>
+  <string name="system_assistant_surface_ai_key_overlay">現在の入口：AI キーオーバーレイ</string>
+  <string name="system_assistant_surface_ai_key_overlay_running">AI キーオーバーレイ · タスクは元の会話で続行されます</string>
 </resources>

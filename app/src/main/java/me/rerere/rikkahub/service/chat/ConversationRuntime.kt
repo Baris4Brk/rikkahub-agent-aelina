@@ -902,54 +902,8 @@ class ConversationRuntime(
             complete(envelope, CommandOutcome.NotApplied("Run finished before the next model checkpoint"))
             return true
         }
-        if (envelope.command.applyPolicy == SteeringApplyPolicy.CANCEL_CURRENT_TOOL) {
-            // Hard steering is a bounded tool cancellation barrier. It deliberately does
-            // not cancel the provider stream: once every active tool is confirmed stopped,
-            // the guidance is queued for the next model checkpoint in the same ActiveRun.
-            val toolIds = run.control.activeToolCallIds()
-            if (toolIds.isNotEmpty()) {
-                run.control.requestCancelAllTools(ToolCancelReason.STEERING_OVERRIDE)
-                val terminations = run.control.awaitToolTermination(2.seconds)
-                val unconfirmed = terminations.filterValues {
-                    it != me.rerere.rikkahub.data.ai.tools.ToolTerminationState.StoppedConfirmed
-                }
-                if (unconfirmed.isNotEmpty()) {
-                    complete(
-                        envelope,
-                        CommandOutcome.NotApplied(
-                            "Hard steering waited for tool termination but state remained unknown: ${unconfirmed.keys.joinToString()}",
-                        ),
-                    )
-                    _steeringStatus.value = run.control.steeringStates()
-                    return true
-                }
-            }
-            // Cancel only the current provider child when one is active. STOP and INTERRUPT
-            // still cancel the whole ActiveRun through their emergency path.
-            val providerCancel = run.control.requestProviderCancel(ToolCancelReason.STEERING_OVERRIDE)
-            if (providerCancel is me.rerere.rikkahub.data.ai.tools.CancelRequestResult.Failed) {
-                complete(envelope, CommandOutcome.NotApplied("Provider cancellation failed: ${providerCancel.reason}"))
-                return true
-            }
-            // Repair partial assistant/tool state before exposing the hard steering note.
-            val repairFailure = runSuspendCatching {
-                repairer.repair(
-                    run.id,
-                    ToolCancelReason.STEERING_OVERRIDE,
-                    run.control.toolCancellationResults(),
-                )
-            }.getOrNull()?.let { it as? InterruptCleanupResult.PartialFailure }
-            if (repairFailure != null) {
-                complete(envelope, CommandOutcome.NotApplied("Hard steering repair failed: ${repairFailure.reason}"))
-                return true
-            }
-            val barrier = runSuspendCatching { persistenceCoordinator.flushThrough(stateRevision.get()) }
-                .getOrElse { PersistResult.Failed(it) }
-            if (barrier is PersistResult.Failed) {
-                complete(envelope, CommandOutcome.NotApplied("Hard steering persistence barrier failed"))
-                return true
-            }
-        }
+        // Linearize registration before cancelling provider/tool work. If cancellation wins
+        // first, the run can finish and close its steering queue before this note exists.
         publishPendingSteeringEntry(envelope, run.id)
         val registration = run.control.submitSteering(
             me.rerere.rikkahub.data.ai.SteeringNote(
@@ -961,7 +915,6 @@ class ConversationRuntime(
                 historyMode = envelope.command.historyMode,
             )
         )
-        // The executor marks a later model checkpoint; until then this command remains observable.
         when (registration) {
             me.rerere.rikkahub.data.ai.SteeringRegistrationResult.Accepted -> Unit
             me.rerere.rikkahub.data.ai.SteeringRegistrationResult.RunClosed -> {
@@ -975,9 +928,53 @@ class ConversationRuntime(
                     )
                 }
                 complete(envelope, CommandOutcome.NotApplied("Run finished before steering could be registered"))
+                return true
             }
-            is me.rerere.rikkahub.data.ai.SteeringRegistrationResult.Rejected ->
+            is me.rerere.rikkahub.data.ai.SteeringRegistrationResult.Rejected -> {
                 complete(envelope, CommandOutcome.NotApplied(registration.reason))
+                return true
+            }
+        }
+        if (envelope.command.applyPolicy == SteeringApplyPolicy.CANCEL_CURRENT_TOOL) {
+            // Hard steering is a bounded cancellation barrier. The note is already visible to
+            // the ActiveRun, so cancelling the provider child cannot accidentally end the run.
+            val toolIds = run.control.activeToolCallIds()
+            if (toolIds.isNotEmpty()) {
+                run.control.requestCancelAllTools(ToolCancelReason.STEERING_OVERRIDE)
+                val terminations = run.control.awaitToolTermination(2.seconds)
+                val unconfirmed = terminations.filterValues {
+                    it != me.rerere.rikkahub.data.ai.tools.ToolTerminationState.StoppedConfirmed
+                }
+                if (unconfirmed.isNotEmpty()) {
+                    _steeringStatus.value = run.control.steeringStates()
+                    return true
+                }
+            }
+            // Cancel only the current provider child when one is active. STOP and INTERRUPT
+            // still cancel the whole ActiveRun through their emergency path.
+            val providerCancel = run.control.requestProviderCancel(ToolCancelReason.STEERING_OVERRIDE)
+            if (providerCancel is me.rerere.rikkahub.data.ai.tools.CancelRequestResult.Failed) {
+                _steeringStatus.value = run.control.steeringStates()
+                return true
+            }
+            // Repair partial assistant/tool state before exposing the hard steering note.
+            val repairFailure = runSuspendCatching {
+                repairer.repair(
+                    run.id,
+                    ToolCancelReason.STEERING_OVERRIDE,
+                    run.control.toolCancellationResults(),
+                )
+            }.getOrNull()?.let { it as? InterruptCleanupResult.PartialFailure }
+            if (repairFailure != null) {
+                _steeringStatus.value = run.control.steeringStates()
+                return true
+            }
+            val barrier = runSuspendCatching { persistenceCoordinator.flushThrough(stateRevision.get()) }
+                .getOrElse { PersistResult.Failed(it) }
+            if (barrier is PersistResult.Failed) {
+                _steeringStatus.value = run.control.steeringStates()
+                return true
+            }
         }
         _steeringStatus.value = run.control.steeringStates()
         return true
@@ -1229,7 +1226,8 @@ class ConversationRuntime(
                 // returns. Never let the UI state move backwards in that race.
                 val mergedState = when {
                     latestState == me.rerere.rikkahub.data.ai.SteeringState.FALLBACK_QUEUED -> latestState
-                    current.state == me.rerere.rikkahub.data.ai.SteeringState.PENDING -> latestState
+                    current.state == me.rerere.rikkahub.data.ai.SteeringState.PENDING ||
+                        current.state == me.rerere.rikkahub.data.ai.SteeringState.DELIVERING -> latestState
                     else -> current.state
                 }
                 entries + (
@@ -1237,6 +1235,7 @@ class ConversationRuntime(
                         state = mergedState,
                         historyMode = latestHistoryMode ?: current.historyMode,
                         editable = mergedState == me.rerere.rikkahub.data.ai.SteeringState.PENDING ||
+                            mergedState == me.rerere.rikkahub.data.ai.SteeringState.DELIVERING ||
                             mergedState == me.rerere.rikkahub.data.ai.SteeringState.APPLIED,
                     )
                 )

@@ -113,5 +113,6 @@ enum class CapabilityId {
     StructuredPrivilegedSystemTools,
     StructuredPrivilegedSystemToolsV2,
     VerifiedAccessibility,
+    WorkspaceTools,
     WorkspaceProcessManagement,
 }

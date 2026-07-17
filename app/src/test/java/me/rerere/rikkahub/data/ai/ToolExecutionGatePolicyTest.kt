@@ -6,6 +6,7 @@ import me.rerere.rikkahub.BuildConfig
 import me.rerere.rikkahub.data.capability.CapabilityId
 import me.rerere.rikkahub.data.capability.CapabilityCatalog
 import me.rerere.rikkahub.data.ai.tools.ToolApprovalDefaults
+import me.rerere.rikkahub.data.ai.tools.SelfPreservationPolicy
 import me.rerere.rikkahub.privilege.STRUCTURED_PRIVILEGED_TOOL_NAMES
 import me.rerere.rikkahub.privilege.STRUCTURED_PRIVILEGED_WRITE_TOOL_NAMES
 import me.rerere.rikkahub.privilege.STRUCTURED_PRIVILEGED_V2_TOOL_NAMES
@@ -18,6 +19,36 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ToolExecutionGatePolicyTest {
+    @Test
+    fun `self preservation blocks structured and file mutations before unrestricted`() {
+        val policy = SelfPreservationPolicy.forApplication("me.rerere.rikkahub.test")
+
+        assertTrue(
+            selfPreservationBlockReason(
+                "privileged_package_uninstall",
+                buildJsonObject { put("package_name", "me.rerere.rikkahub.test") },
+                policy,
+            ) != null,
+        )
+        assertTrue(
+            selfPreservationBlockReason(
+                "delete_file",
+                buildJsonObject {
+                    put("path", "/data/user/0/me.rerere.rikkahub.test/databases/rikkahub.db")
+                },
+                policy,
+            ) != null,
+        )
+        assertEquals(
+            null,
+            selfPreservationBlockReason(
+                "privileged_package_uninstall",
+                buildJsonObject { put("package_name", "com.example.other") },
+                policy,
+            ),
+        )
+    }
+
     @Test
     fun `unrestricted does not bypass either external privilege capability`() {
         assertFalse(unrestrictedMayBypassCapability(CapabilityId.ExternalPrivilegeBridge))

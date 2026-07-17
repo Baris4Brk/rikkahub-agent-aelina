@@ -55,11 +55,17 @@ class SystemAssistantHardwareOverlayActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
-        if (surfaceCreated) adapter.onActivityShow(this)
+        if (surfaceCreated) {
+            SystemAssistantActivityOverlayCoordinator.attach(this)
+            adapter.onActivityShow(this)
+        }
     }
 
     override fun onStop() {
-        if (surfaceCreated) adapter.onActivityHide(this)
+        if (surfaceCreated) {
+            adapter.onActivityHide(this)
+            SystemAssistantActivityOverlayCoordinator.detach(this)
+        }
         super.onStop()
     }
 

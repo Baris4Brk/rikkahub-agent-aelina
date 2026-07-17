@@ -16,9 +16,9 @@ internal fun isSystemAssistantHardwareInvocationAction(action: String?): Boolean
 /**
  * Minimal exported adapter for OEM hardware-key launchers that require an Activity target.
  *
- * It runs beside the active voice service in the lightweight process, accepts no prompt or
- * destination extras, and can only ask the already-bound VoiceInteractionService to show its
- * existing local session for the unlocked Android owner.
+ * It accepts no prompt or destination extras and opens the Activity-hosted overlay only for the
+ * unlocked Android owner. The standard VoiceInteraction session remains reserved for navigation
+ * and power-button invocation, so the Honor AI key has an explicit Activity host.
  */
 class SystemAssistantOverlayEntryActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -28,10 +28,10 @@ class SystemAssistantOverlayEntryActivity : Activity() {
             return
         }
 
-        showSessionOrActivityFallback()
+        showActivityOverlay()
     }
 
-    private fun showSessionOrActivityFallback() {
+    private fun showActivityOverlay() {
         val userManager = getSystemService(UserManager::class.java)
         val keyguardManager = getSystemService(KeyguardManager::class.java)
         val mayShow = userManager != null && keyguardManager != null &&
@@ -46,18 +46,14 @@ class SystemAssistantOverlayEntryActivity : Activity() {
             return
         }
 
-        if (RikkaVoiceInteractionService.showLocalSession()) {
-            finish()
-        } else {
-            Log.i(TAG, "Voice service unavailable; using the activity-hosted local surface")
-            startActivity(
-                Intent(this, SystemAssistantHardwareOverlayActivity::class.java).apply {
-                    action = SYSTEM_ASSISTANT_HARDWARE_INVOCATION_ACTION
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-                },
-            )
-            finish()
-        }
+        Log.i(TAG, "Opening the activity-hosted AI-key surface")
+        startActivity(
+            Intent(this, SystemAssistantHardwareOverlayActivity::class.java).apply {
+                action = SYSTEM_ASSISTANT_HARDWARE_INVOCATION_ACTION
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            },
+        )
+        finish()
     }
 
     private companion object {

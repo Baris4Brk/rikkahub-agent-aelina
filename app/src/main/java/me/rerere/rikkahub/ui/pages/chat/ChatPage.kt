@@ -387,7 +387,8 @@ private fun ChatPageContent(
                             visibleSteering.forEach { entry ->
                                 val persistent = entry.historyMode == SteeringHistoryMode.PERSISTENT
                                 val stateLabel = when (entry.state) {
-                                    me.rerere.rikkahub.data.ai.SteeringState.PENDING -> "等我做完这一步就看"
+                                    me.rerere.rikkahub.data.ai.SteeringState.PENDING,
+                                    me.rerere.rikkahub.data.ai.SteeringState.DELIVERING -> "等我做完这一步就看"
                                     me.rerere.rikkahub.data.ai.SteeringState.APPLIED -> "已看见，可继续切换是否保留"
                                     me.rerere.rikkahub.data.ai.SteeringState.FALLBACK_QUEUED -> "没赶上这一步，已经放到下一条"
                                     me.rerere.rikkahub.data.ai.SteeringState.NOT_APPLIED_RUN_FINISHED -> "这次没来得及用上，请重新发一次"

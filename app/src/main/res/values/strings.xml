@@ -1943,4 +1943,6 @@
   <string name="setting_files_page_cleanup_message">This permanently deletes files in the upload folder. Conversations are not deleted.</string>
   <string name="setting_files_page_cleanup_title">Clear all uploaded files?</string>
   <string name="setting_files_page_cleanup_failed">Uploaded files could not be cleared. Records for files that may still exist were kept.</string>
+  <string name="system_assistant_surface_ai_key_overlay">Current entry: AI key overlay</string>
+  <string name="system_assistant_surface_ai_key_overlay_running">AI key overlay - task will continue in the original conversation</string>
 </resources>

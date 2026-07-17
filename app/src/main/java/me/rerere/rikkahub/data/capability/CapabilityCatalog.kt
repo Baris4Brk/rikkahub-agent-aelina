@@ -119,7 +119,7 @@ object CapabilityCatalog {
             "open_wifi_settings", "show_location_on_map",
         ),
         LocalToolOption.KeyboardControl to setOf(
-            "keyboard_type", "keyboard_read_field", "keyboard_press_key", "keyboard_delete",
+            "keyboard_type", "keyboard_input", "keyboard_read_field", "keyboard_press_key", "keyboard_delete",
             "keyboard_clear", "keyboard_editor_info", "keyboard_set_cursor",
             "keyboard_select_range",
         ),
@@ -237,12 +237,14 @@ object CapabilityCatalog {
         "ssh_exec_saved",
         "run_js",
         "eval_javascript",
+        "workspace_shell",
         "workspace_process_start",
         "workspace_process_restart",
         "ui_click_node_verified",
         "ui_set_text_verified",
         "ui_scroll_until",
         "keyboard_type",
+        "keyboard_input",
         "keyboard_press_key",
         "keyboard_delete",
         "keyboard_clear",
@@ -306,6 +308,8 @@ object CapabilityCatalog {
         "skill_install_from_url",
         "skill_install_from_text",
         "generate_bug_report",
+        "workspace_write_file",
+        "workspace_edit_file",
     )
 
     private val dataEgressToolNames: Set<String> = setOf(
@@ -456,6 +460,7 @@ object CapabilityCatalog {
         "workspace_process_logs",
         "ui_wait_for_window",
         "ui_wait_for_node",
+        "workspace_read_file",
     )
 
     private val registry: Map<CapabilityId, CapabilityDescriptor> = buildRegistry()
@@ -1532,6 +1537,18 @@ object CapabilityCatalog {
             approvalPolicy = ApprovalPolicy.AlwaysAsk,
             allowedOrigins = InvocationSurfacePolicy.LOCAL_UNLOCKED,
             requiresUnlockedDevice = true,
+        ))
+
+        reg(CapabilityDescriptor(
+            id = CapabilityId.WorkspaceTools,
+            localToolOption = null,
+            toolNames = me.rerere.rikkahub.data.ai.tools.WORKSPACE_TOOL_NAMES,
+            implementationState = ImplementationState.Implemented,
+            riskLevel = RiskLevel.Critical,
+            approvalPolicy = ApprovalPolicy.Default,
+            allowedOrigins = InvocationSurfacePolicy.LOCAL_UNLOCKED,
+            requiresUnlockedDevice = true,
+            requirements = emptyList(),
         ))
 
         reg(CapabilityDescriptor(

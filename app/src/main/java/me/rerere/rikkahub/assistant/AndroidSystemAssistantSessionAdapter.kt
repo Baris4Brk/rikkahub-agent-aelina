@@ -52,7 +52,12 @@ class AndroidSystemAssistantSessionAdapter(
         session: RikkaVoiceInteractionSession,
         args: android.os.Bundle?,
         showFlags: Int,
-    ) = bindSurface(session, session.context, session::finish)
+    ) = bindSurface(
+        surface = session,
+        viewContext = session.context,
+        hostKind = SystemAssistantHostKind.VOICE_SESSION,
+        finishSurface = session::finish,
+    )
 
     override fun onHide(session: RikkaVoiceInteractionSession) {
         unbindSurface(session)
@@ -67,7 +72,12 @@ class AndroidSystemAssistantSessionAdapter(
     }
 
     fun onActivityShow(activity: Activity) {
-        bindSurface(activity, activity, activity::finish)
+        bindSurface(
+            surface = activity,
+            viewContext = activity,
+            hostKind = SystemAssistantHostKind.ACTIVITY_OVERLAY,
+            finishSurface = activity::finish,
+        )
     }
 
     fun onActivityHide(activity: Activity) {
@@ -81,6 +91,7 @@ class AndroidSystemAssistantSessionAdapter(
     private fun bindSurface(
         surface: Any,
         viewContext: Context,
+        hostKind: SystemAssistantHostKind,
         finishSurface: () -> Unit,
     ) {
         val entry = synchronized(entries) {
@@ -88,12 +99,13 @@ class AndroidSystemAssistantSessionAdapter(
         }
         entry.closeBinding(appContext)
         val invokedFromKeyguard = isDeviceLocked()
-        val controller = controllerFactory.create(invokedFromKeyguard)
+        val controller = controllerFactory.create(invokedFromKeyguard, hostKind)
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
         entry.controller = controller
         entry.scope = scope
         entry.submitJob = null
         entry.deviceLocked = invokedFromKeyguard
+        entry.hostKind = hostKind
         entry.lockReceiver = createLockReceiver(entry, finishSurface)
         registerLockReceiver(entry.lockReceiver!!)
         entry.views.input.setText("")
@@ -130,7 +142,7 @@ class AndroidSystemAssistantSessionAdapter(
             controller.state.collectLatest { state ->
                 entry.lastState = state
                 entry.deviceLocked = isDeviceLocked()
-                render(entry.views, state, entry.deviceLocked)
+                render(entry.views, state, entry.deviceLocked, entry.hostKind)
             }
         }
     }
@@ -158,7 +170,25 @@ class AndroidSystemAssistantSessionAdapter(
         views: AssistantViews,
         state: SystemAssistantUiState,
         deviceLocked: Boolean,
+        hostKind: SystemAssistantHostKind,
     ) {
+        views.surface.visibility = if (hostKind == SystemAssistantHostKind.ACTIVITY_OVERLAY) {
+            View.VISIBLE
+        } else {
+            View.GONE
+        }
+        if (hostKind == SystemAssistantHostKind.ACTIVITY_OVERLAY) {
+            val commandRunning = state.runtimeState == RuntimeState.Running ||
+                state.submission is SystemAssistantSubmissionUiState.Submitting ||
+                state.submission is SystemAssistantSubmissionUiState.Accepted
+            views.surface.text = appContext.getString(
+                if (commandRunning) {
+                    R.string.system_assistant_surface_ai_key_overlay_running
+                } else {
+                    R.string.system_assistant_surface_ai_key_overlay
+                }
+            )
+        }
         val hideSensitiveContent = deviceLocked ||
             state.inputAvailability == SystemAssistantInputAvailability.InvokedFromKeyguard
         if (hideSensitiveContent) {
@@ -300,7 +330,9 @@ class AndroidSystemAssistantSessionAdapter(
                     return
                 }
                 entry.deviceLocked = isDeviceLocked()
-                entry.lastState?.let { state -> render(entry.views, state, entry.deviceLocked) }
+                entry.lastState?.let { state ->
+                    render(entry.views, state, entry.deviceLocked, entry.hostKind)
+                }
             }
         }
 
@@ -355,6 +387,10 @@ class AndroidSystemAssistantSessionAdapter(
             textSize = 20f
             setTextColor(Color.WHITE)
         }
+        val surface = TextView(context).apply {
+            textSize = 12f
+            setTextColor(Color.LTGRAY)
+        }
         val identity = TextView(context).apply {
             textSize = 13f
             setTextColor(Color.LTGRAY)
@@ -380,6 +416,7 @@ class AndroidSystemAssistantSessionAdapter(
             text = context.getString(R.string.system_assistant_open_configuration)
         }
         content.addView(title, matchWrap())
+        content.addView(surface, matchWrap(top = dp(3)))
         content.addView(identity, matchWrap(top = dp(4)))
         content.addView(latestUser, matchWrap(top = dp(14)))
         content.addView(latestAssistant, matchWrap(top = dp(8)))
@@ -398,6 +435,7 @@ class AndroidSystemAssistantSessionAdapter(
                     ),
                 )
             },
+            surface = surface,
             identity = identity,
             latestUser = latestUser,
             latestAssistant = latestAssistant,
@@ -432,6 +470,7 @@ class AndroidSystemAssistantSessionAdapter(
 
     private data class AssistantViews(
         val root: View,
+        val surface: TextView,
         val identity: TextView,
         val latestUser: TextView,
         val latestAssistant: TextView,
@@ -451,6 +490,7 @@ class AndroidSystemAssistantSessionAdapter(
         var lockReceiver: BroadcastReceiver? = null,
         var lastState: SystemAssistantUiState? = null,
         var deviceLocked: Boolean = true,
+        var hostKind: SystemAssistantHostKind = SystemAssistantHostKind.VOICE_SESSION,
     ) {
         fun closeBinding(context: Context) {
             lockReceiver?.let { receiver ->

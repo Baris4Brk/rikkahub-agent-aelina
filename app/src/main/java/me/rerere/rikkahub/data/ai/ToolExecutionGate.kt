@@ -14,6 +14,8 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import me.rerere.rikkahub.data.ai.tools.local.ContentUriSafetyGuard
 import me.rerere.rikkahub.data.ai.tools.local.PathSafetyGuard
+import me.rerere.rikkahub.data.ai.tools.SelfPreservationPolicy
+import me.rerere.rikkahub.service.RikkaAccessibilityService
 import me.rerere.rikkahub.privilege.STRUCTURED_PRIVILEGED_TOOL_NAMES
 import me.rerere.rikkahub.privilege.STRUCTURED_PRIVILEGED_WRITE_TOOL_NAMES
 import me.rerere.rikkahub.privilege.STRUCTURED_PRIVILEGED_V2_TOOL_NAMES
@@ -80,6 +82,49 @@ internal fun capabilityRequiresHardUnlock(capabilityId: CapabilityId?): Boolean 
         capabilityId == CapabilityId.StructuredPrivilegedSystemToolsV2 ||
         capabilityId == CapabilityId.VerifiedAccessibility
 
+private val SELF_PACKAGE_MUTATION_TOOLS = setOf(
+    "force_stop_app",
+    "clear_app_cache",
+    "privileged_package_disable",
+    "privileged_package_suspend",
+    "privileged_package_uninstall",
+    "privileged_appop_set",
+    "privileged_appop_reset",
+    "privileged_permission_revoke",
+)
+
+internal fun selfPreservationBlockReason(
+    toolName: String,
+    arguments: JsonObject?,
+    policy: SelfPreservationPolicy,
+): String? {
+    if (arguments == null) return null
+    if (toolName in SELF_PACKAGE_MUTATION_TOOLS) {
+        val targetPackage = sequenceOf("package_name", "package", "pkg")
+            .mapNotNull { key -> (arguments[key] as? JsonPrimitive)?.contentOrNull }
+            .firstOrNull()
+        policy.checkPackageMutation(targetPackage)?.let { return it.reason }
+    }
+    val pathMutation = toolName in setOf(
+        "write_binary_file",
+        "delete_file",
+        "move_file",
+        "copy_file",
+        "batch_move",
+        "batch_delete",
+        "workspace_write",
+        "workspace_edit",
+    )
+    if (pathMutation) {
+        sequenceOf("path", "target", "destination", "destination_path")
+            .mapNotNull { key -> (arguments[key] as? JsonPrimitive)?.contentOrNull }
+            .forEach { path ->
+                policy.checkAppPrivateMutation(path)?.let { return it.reason }
+            }
+    }
+    return null
+}
+
 internal fun foregroundRequirementBlockReason(
     toolName: String,
     requiresForegroundApp: Boolean,
@@ -143,6 +188,9 @@ class ToolExecutionGate(
     private val context: Context,
     private val safetySettings: AgentSafetySettings,
 ) {
+    private val selfPreservationPolicy by lazy {
+        SelfPreservationPolicy.forApplication(context.packageName)
+    }
     /**
      * Tools that are considered high-risk and require [AgentSafetySettings.highRiskToolsEnabled]
      * to be true. When the high-risk toggle is off, these tools are blocked at the gate.
@@ -244,6 +292,57 @@ class ToolExecutionGate(
     private fun isAppInForeground(): Boolean = ProcessLifecycleOwner.get().lifecycle.currentState
         .isAtLeast(Lifecycle.State.STARTED)
 
+    private fun isProtectedSelfSettingsSurface(toolName: String): Boolean {
+        val legacyMutation = toolName in setOf(
+                "tap",
+                "click_node",
+                "long_press",
+                "set_text",
+                "global_action",
+            )
+        if (!legacyMutation && toolName !in VERIFIED_ACCESSIBILITY_WRITE_TOOL_NAMES) return false
+        val root = RikkaAccessibilityService.instance?.rootInActiveWindow ?: return false
+        val windowPackage = root.packageName?.toString().orEmpty()
+        if (windowPackage !in setOf(
+                "com.android.settings",
+                "com.android.packageinstaller",
+                "com.google.android.packageinstaller",
+                "com.android.permissioncontroller",
+                "com.google.android.permissioncontroller",
+            )
+        ) return false
+        val appLabel = context.applicationInfo.loadLabel(context.packageManager)
+            .toString().lowercase()
+        val text = buildString {
+            val queue = ArrayDeque<android.view.accessibility.AccessibilityNodeInfo>()
+            queue.add(root)
+            var visited = 0
+            while (queue.isNotEmpty() && visited++ < 160) {
+                val node = queue.removeFirst()
+                append(' ')
+                append(node.text?.toString().orEmpty().lowercase())
+                append(' ')
+                append(node.contentDescription?.toString().orEmpty().lowercase())
+                repeat(node.childCount) { index -> node.getChild(index)?.let(queue::addLast) }
+            }
+        }
+        val identifiesSelf = text.contains(context.packageName.lowercase()) ||
+            (appLabel.isNotBlank() && text.contains(appLabel))
+        val destructiveSurface = listOf(
+            "uninstall",
+            "clear data",
+            "clear storage",
+            "force stop",
+            "disable",
+            "卸载",
+            "清除数据",
+            "清除存储",
+            "强行停止",
+            "停用",
+        ).any(text::contains)
+        return identifiesSelf && destructiveSurface
+    }
+
     internal fun canAutoApproveUnrestrictedCallNow(
         origin: ToolCallOrigin,
     ): Boolean = canAutoApproveUnrestrictedCall(
@@ -283,12 +382,23 @@ class ToolExecutionGate(
             return GateResult.Denied(reason)
         }
 
+        val deviceLocked = isDeviceLocked()
+        val hasAuthorizedInvocation = conversationId?.let { id ->
+            SystemAssistantInvocationRegistry.hasAuthorizedUnlockedInvocation(id, commandId)
+        } == true
+        val surfaceContext = conversationId?.let { id ->
+            SystemAssistantInvocationRegistry.currentContext(origin, id, commandId)
+        }
+        val toolExposurePlan = ToolExposurePlan.create(
+            origin = origin,
+            deviceLocked = deviceLocked,
+            hasAuthorizedInvocation = hasAuthorizedInvocation,
+            surfaceContext = surfaceContext,
+        )
         InvocationSurfacePolicy.systemAssistantVisibilityBlockReason(
             origin = origin,
-            deviceLocked = isDeviceLocked(),
-            hasAuthorizedInvocation = conversationId?.let { id ->
-                SystemAssistantInvocationRegistry.hasAuthorizedUnlockedInvocation(id, commandId)
-            } == true,
+            deviceLocked = deviceLocked,
+            hasAuthorizedInvocation = hasAuthorizedInvocation,
         )?.let { reason ->
             return GateResult.Denied(reason)
         }
@@ -297,9 +407,22 @@ class ToolExecutionGate(
         // before unrestrictedOverride so a high-autonomy assistant can skip the approval
         // card locally but can never turn a remote or locked-device request into a call.
         if (toolName == "call_phone" || toolName == "answer_phone_call") {
-            phoneActionHardBlockReason(toolName, origin, isDeviceLocked())?.let { reason ->
+            phoneActionHardBlockReason(toolName, origin, deviceLocked)?.let { reason ->
                 return GateResult.Denied(reason)
             }
+        }
+
+        selfPreservationBlockReason(
+            toolName = toolName,
+            arguments = arguments,
+            policy = selfPreservationPolicy,
+        )?.let { reason ->
+            return GateResult.Denied(reason)
+        }
+        if (isProtectedSelfSettingsSurface(toolName)) {
+            return GateResult.Denied(
+                "Accessibility actions are blocked on RikkaHub's uninstall, app-info, or data-clear surface.",
+            )
         }
 
         // ── Level 0: Unrestricted override ─────────────────────────────────────────
@@ -307,11 +430,16 @@ class ToolExecutionGate(
         // This check intentionally precedes unrestrictedOverride. A selected high-autonomy
         // assistant can skip approval, but cannot acquire an invocation origin or UI surface
         // that the Catalog never granted.
-        catalogOriginHardBlockReason(
-            toolName = toolName,
-            origin = origin,
-            capability = catalogEntry,
-        )?.let { reason ->
+        val catalogBlockReason = if (origin == ToolCallOrigin.SystemAssistant) {
+            toolExposurePlan.blockReason(toolName)
+        } else {
+            catalogOriginHardBlockReason(
+                toolName = toolName,
+                origin = origin,
+                capability = catalogEntry,
+            )
+        }
+        catalogBlockReason?.let { reason ->
             return GateResult.Denied(reason)
         }
         systemAssistantSensitivePathBlockReason(
@@ -321,13 +449,15 @@ class ToolExecutionGate(
         )?.let { reason ->
             return GateResult.Denied(reason)
         }
-        foregroundRequirementBlockReason(
-            toolName = toolName,
-            requiresForegroundApp = catalogEntry?.requiresForegroundApp == true,
-            appInForeground = isAppInForeground(),
-            origin = origin,
-        )?.let { reason ->
-            return GateResult.Denied(reason)
+        if (!toolExposurePlan.activityOverlayAuthorized) {
+            foregroundRequirementBlockReason(
+                toolName = toolName,
+                requiresForegroundApp = catalogEntry?.requiresForegroundApp == true,
+                appInForeground = isAppInForeground(),
+                origin = origin,
+            )?.let { reason ->
+                return GateResult.Denied(reason)
+            }
         }
         if (capabilityRequiresHardUnlock(catalogEntry?.id) && isDeviceLocked()) {
             return GateResult.Denied("Device must be unlocked to use $toolName.")

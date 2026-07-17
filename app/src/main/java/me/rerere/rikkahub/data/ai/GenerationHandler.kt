@@ -8,10 +8,10 @@ import android.util.Log
 import android.widget.Toast
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -22,6 +22,11 @@ import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.withTimeoutOrNull
 import me.rerere.rikkahub.service.AgentOverlay
 import me.rerere.rikkahub.service.RikkaAccessibilityService
+import me.rerere.rikkahub.assistant.InvocationSurfaceContextProvider
+import me.rerere.rikkahub.assistant.ActivityOverlayToolHandoffPolicy
+import me.rerere.rikkahub.assistant.SystemAssistantActivityOverlayCoordinator
+import me.rerere.rikkahub.assistant.SystemAssistantHostKind
+import me.rerere.rikkahub.assistant.toProviderAddendum
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toInstant
 import kotlinx.datetime.toLocalDateTime
@@ -423,6 +428,7 @@ class GenerationHandler(
         conversationId: Uuid? = null,
         commandId: Uuid? = null,
         runControl: GenerationRunControl? = null,
+        invocationSurfaceContextProvider: InvocationSurfaceContextProvider? = null,
         isEmergencyStopActive: suspend () -> Boolean = { false },
     ): Flow<GenerationChunk> = flow {
         // Suppress unused warnings for API-compat params restored for ChatService call sites.
@@ -466,6 +472,7 @@ class GenerationHandler(
             .filter { it.commandId == recoveryCommandKey }
             .maxOfOrNull { it.attempt }
             ?: 0
+        var modelCallIndex = 0
 
         // One extra index is reserved solely for a tool-free summary after a tool that completed
         // on the last planned step. [generationFinalizationStep] prevents that index from starting
@@ -543,14 +550,13 @@ class GenerationHandler(
             val steeringDeliveries = runControl?.let { control ->
                 takeSteeringForProviderCheckpoint(
                     runControl = control,
-                    modelCallIndex = stepIndex,
+                    modelCallIndex = modelCallIndex++,
                     hasResumableTools = pendingTools.isNotEmpty(),
                 )
             }.orEmpty()
-            val steeringAddendum = buildSteeringSystemAddendum(steeringDeliveries).orEmpty()
+            val providerTailMessages = ProviderTailMessages.fromSteering(steeringDeliveries)
             val effectiveSystemAddendum = listOfNotNull(
                 systemAddendum,
-                steeringAddendum.takeIf { it.isNotBlank() },
                 if (forceFinalization) {
                     settings.finalAnswerReminderPrompt.trim().ifBlank {
                         DEFAULT_FINAL_ANSWER_REMINDER_PROMPT
@@ -655,8 +661,20 @@ class GenerationHandler(
                             GenerationRequestPurpose.NORMAL
                         },
                         diagnosticHandle = generationDiagnostics,
+                        providerTailMessages = providerTailMessages,
+                        steeringDeliveries = steeringDeliveries,
+                        invocationSurfaceContextProvider = invocationSurfaceContextProvider,
+                        callOrigin = callOrigin,
+                        conversationId = conversationId,
+                        commandId = commandId,
                     )
                 } catch (t: Throwable) {
+                    if (t is CancellationException &&
+                        runControl?.hasUndeliveredSteering() == true &&
+                        !runControl.isRunCancellationRequested()
+                    ) {
+                        continue@generationLoop
+                    }
                     // CancellationException is honoured verbatim — stopGeneration has its
                     // own cancelToolByUser path that marks tools cancelled. We only need
                     // to handle non-cancel failures here.
@@ -696,6 +714,26 @@ class GenerationHandler(
                         .toLocalDateTime(TimeZone.currentSystemDefault())
                 )
                 emit(GenerationChunk.Messages(messages))
+
+                // Guidance submitted while this provider call was finishing wins over the old
+                // tool plan and over final-answer recovery. Completed output stays visible; only
+                // side effects that have not started are converted into stable skipped results.
+                if (runControl?.hasUndeliveredSteering() == true) {
+                    val last = messages.last()
+                    messages = messages.replaceLastMessage(
+                        last.copy(
+                            parts = last.parts.map { part ->
+                                if (part is UIMessagePart.Tool && !part.isExecuted) {
+                                    part.skippedDueToGuidance()
+                                } else {
+                                    part
+                                }
+                            },
+                        ),
+                    )
+                    emit(GenerationChunk.Messages(messages))
+                    continue@generationLoop
+                }
 
                 if (forceFinalization && messages.last().getTools().any { !it.isExecuted }) {
                     val last = messages.last()
@@ -748,6 +786,18 @@ class GenerationHandler(
                         var recoveryComplete = false
                         while (finalAnswerRecoveryAttempts < FINAL_ANSWER_MAX_ATTEMPTS) {
                             currentCoroutineContext().ensureActive()
+                            if (runControl?.hasUndeliveredSteering() == true) {
+                                continue@generationLoop
+                            }
+                            val recoverySteeringDeliveries = runControl?.let { control ->
+                                takeSteeringForProviderCheckpoint(
+                                    runControl = control,
+                                    modelCallIndex = modelCallIndex++,
+                                    hasResumableTools = false,
+                                )
+                            }.orEmpty()
+                            val recoveryTailMessages =
+                                ProviderTailMessages.fromSteering(recoverySteeringDeliveries)
                             finalAnswerRecoveryAttempts += 1
                             val attempt = finalAnswerRecoveryAttempts
                             generationDiagnostics.markRecovery(attempt, "STARTED")
@@ -799,6 +849,12 @@ class GenerationHandler(
                                             contextMessages = recoveryBase.currentTurnForFinalAnswer(),
                                             requestPurpose = GenerationRequestPurpose.FINAL_ANSWER_RECOVERY,
                                             diagnosticHandle = generationDiagnostics,
+                                            providerTailMessages = recoveryTailMessages,
+                                            steeringDeliveries = recoverySteeringDeliveries,
+                                            invocationSurfaceContextProvider = invocationSurfaceContextProvider,
+                                            callOrigin = callOrigin,
+                                            conversationId = conversationId,
+                                            commandId = commandId,
                                         )
                                     }
                                 } else {
@@ -811,6 +867,12 @@ class GenerationHandler(
                                     Result.success(recoveryTerminal)
                                 }
                             } catch (t: Throwable) {
+                                if (t is CancellationException &&
+                                    runControl?.hasUndeliveredSteering() == true &&
+                                    !runControl.isRunCancellationRequested()
+                                ) {
+                                    continue@generationLoop
+                                }
                                 if (t is CancellationException) throw t
                                 Result.failure(t)
                             } finally {
@@ -818,6 +880,9 @@ class GenerationHandler(
                             }
 
                             currentCoroutineContext().ensureActive()
+                            if (runControl?.hasUndeliveredSteering() == true) {
+                                continue@generationLoop
+                            }
                             val recoveryInvalidated = isEmergencyStopActive() ||
                                 runControl?.isRunCancellationRequested() == true ||
                                 runControl?.isUpdateFenced() == true
@@ -1250,6 +1315,30 @@ class GenerationHandler(
                                 ToolStartDecision.Proceed -> executionBoundaryStarted = true
                                 null -> Unit
                             }
+                            val liveSurface = conversationId?.let { id ->
+                                invocationSurfaceContextProvider?.currentContext(
+                                    callOrigin,
+                                    id,
+                                    commandId,
+                                )
+                            }
+                            if (liveSurface?.hostKind == SystemAssistantHostKind.ACTIVITY_OVERLAY &&
+                                ActivityOverlayToolHandoffPolicy.requiresOverlayDismissal(toolDef.name)
+                            ) {
+                                check(SystemAssistantActivityOverlayCoordinator.dismissAndAwait()) {
+                                    "AI-key overlay did not close before ${toolDef.name}"
+                                }
+                                check(withTimeoutOrNull(1_500L) {
+                                    while (RikkaAccessibilityService.instance
+                                            ?.rootInActiveWindow?.packageName?.toString() == context.packageName
+                                    ) {
+                                        delay(25L)
+                                    }
+                                    true
+                                } == true) {
+                                    "RikkaHub remained the active window; ${toolDef.name} was not executed"
+                                }
+                            }
                             // Mark the tool as "execution started" BEFORE actually running.
                             // ChatService persists this when it sees the chunk so a process
                             // kill between mark-and-output leaves a clear breadcrumb on disk:
@@ -1485,15 +1574,27 @@ class GenerationHandler(
         contextMessages: List<UIMessage>? = null,
         requestPurpose: GenerationRequestPurpose = GenerationRequestPurpose.NORMAL,
         diagnosticHandle: GenerationDiagnosticHandle,
+        providerTailMessages: ProviderTailMessages = ProviderTailMessages.Empty,
+        steeringDeliveries: List<SteeringDelivery> = emptyList(),
+        invocationSurfaceContextProvider: InvocationSurfaceContextProvider? = null,
+        callOrigin: ToolCallOrigin = ToolCallOrigin.LocalChat,
+        conversationId: Uuid? = null,
+        commandId: Uuid? = null,
     ): GenerationTerminal {
         val persistentSteeringContext = preparePersistentSteeringContext(
             (contextMessages ?: messages)
                 .limitContext(assistant.contextMessageSize)
                 .ageOldToolImages(),
         )
+        val invocationSurfaceAddendum = conversationId?.let { id ->
+            invocationSurfaceContextProvider
+                ?.currentContext(callOrigin, id, commandId)
+                ?.toProviderAddendum()
+        }
         val providerSystemAddendum = listOfNotNull(
             systemAddendum,
             persistentSteeringContext.systemAddendum,
+            invocationSurfaceAddendum,
         ).joinToString("\n\n").ifBlank { null }
         val unplannedInternalMessages = buildList {
             // Conversation-level system prompt override (upstream): when the assistant
@@ -1532,7 +1633,7 @@ class GenerationHandler(
             if (systemParts.isNotEmpty()) {
                 add(UIMessage(role = MessageRole.SYSTEM, parts = systemParts))
             }
-            addAll(persistentSteeringContext.messages)
+            addAll(providerTailMessages.appendTo(persistentSteeringContext.messages))
         }
         val contextPlanner = ProviderContextPlanner()
         val initialContextPlan = contextPlanner.plan(
@@ -1621,75 +1722,65 @@ class GenerationHandler(
                 }
             },
         )
-        val providerJob = currentCoroutineContext()[Job]
-        val providerRegistration = runControl?.registerProviderCancel {
-            providerJob?.cancel(CancellationException("Provider cancellation requested"))
+        var providerStarted = false
+        fun markProviderStarted() {
+            if (providerStarted) return
+            providerStarted = true
+            runControl?.markSteeringProviderStarted(steeringDeliveries)
         }
-        try {
-        if (stream) {
-            aiLoggingManager.addLog(
-                AILogging.Generation(
-                    modelId = model.modelId,
-                    providerType = provider::class.simpleName ?: "unknown",
-                    messageCount = internalMessages.size,
-                    inputCharacters = internalMessages.redactedInputCharacterCount(),
-                    toolCount = tools.size,
-                    requestPurpose = requestPurpose.name,
-                    stream = true
-                )
+        aiLoggingManager.addLog(
+            AILogging.Generation(
+                modelId = model.modelId,
+                providerType = provider::class.simpleName ?: "unknown",
+                messageCount = internalMessages.size,
+                inputCharacters = internalMessages.redactedInputCharacterCount(),
+                toolCount = tools.size,
+                requestPurpose = requestPurpose.name,
+                stream = stream,
             )
-            providerImpl.streamText(
-                providerSetting = provider,
-                messages = internalMessages,
-                params = params
-            ).collect {
-                terminalTracker.observe(it)
-                messages = messages.handleMessageChunk(chunk = it, model = model)
-                it.usage?.let { usage ->
-                    messages = messages.mapIndexed { index, message ->
-                        if (index == messages.lastIndex) {
-                            message.copy(usage = message.usage.merge(usage))
-                        } else {
-                            message
-                        }
-                    }
-                }
-                onUpdateMessages(messages)
-            }
-        } else {
-            aiLoggingManager.addLog(
-                AILogging.Generation(
-                    modelId = model.modelId,
-                    providerType = provider::class.simpleName ?: "unknown",
-                    messageCount = internalMessages.size,
-                    inputCharacters = internalMessages.redactedInputCharacterCount(),
-                    toolCount = tools.size,
-                    requestPurpose = requestPurpose.name,
-                    stream = false
-                )
-            )
-            val chunk = providerImpl.generateText(
-                providerSetting = provider,
-                messages = internalMessages,
-                params = params,
-            )
-            terminalTracker.observe(chunk)
-            messages = messages.handleMessageChunk(chunk = chunk, model = model)
-            chunk.usage?.let { usage ->
-                messages = messages.mapIndexed { index, message ->
-                    if (index == messages.lastIndex) {
-                        message.copy(
-                            usage = message.usage.merge(usage)
+        )
+        val providerOutcome = try {
+            DefaultProviderTurnRunner(runControl).run(
+                ProviderTurnRequest(
+                    stream = stream,
+                    streamCall = {
+                        providerImpl.streamText(
+                            providerSetting = provider,
+                            messages = internalMessages,
+                            params = params,
                         )
-                    } else {
-                        message
-                    }
-                }
-            }
-            onUpdateMessages(messages)
+                    },
+                    singleCall = {
+                        providerImpl.generateText(
+                            providerSetting = provider,
+                            messages = internalMessages,
+                            params = params,
+                        )
+                    },
+                    onChunk = { chunk ->
+                        markProviderStarted()
+                        terminalTracker.observe(chunk)
+                        messages = messages.handleMessageChunk(chunk = chunk, model = model)
+                        chunk.usage?.let { usage ->
+                            messages = messages.mapIndexed { index, message ->
+                                if (index == messages.lastIndex) {
+                                    message.copy(usage = message.usage.merge(usage))
+                                } else {
+                                    message
+                                }
+                            }
+                        }
+                        onUpdateMessages(messages)
+                    },
+                )
+            )
+        } catch (t: Throwable) {
+            if (!providerStarted) runControl?.markSteeringDeliveryFailed(steeringDeliveries)
+            throw t
         }
-        } finally {
-            providerRegistration?.close()
+        if (providerOutcome == ProviderTurnOutcome.CancelledForSteering) {
+            if (!providerStarted) runControl?.markSteeringDeliveryFailed(steeringDeliveries)
+            throw CancellationException("Provider child was cancelled for newer guidance")
         }
         val trackedTerminal = terminalTracker.finish()
         val terminal = messages.lastOrNull()?.let(trackedTerminal::withMessageStats)

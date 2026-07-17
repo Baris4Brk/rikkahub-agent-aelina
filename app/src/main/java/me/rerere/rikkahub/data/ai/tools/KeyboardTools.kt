@@ -159,6 +159,13 @@ fun keyboardTypeTool(client: KeyboardApiClient): Tool = Tool(
     },
 )
 
+/** Compatibility name used by older prompts; execution remains owned by keyboard_type. */
+fun keyboardInputTool(client: KeyboardApiClient): Tool = keyboardTypeTool(client).copy(
+    name = "keyboard_input",
+    description = "Compatibility alias for keyboard_type. Type text into the currently focused " +
+        "field through the agent-keyboard IME, optionally submitting it with Enter.",
+)
+
 fun keyboardReadFieldTool(client: KeyboardApiClient): Tool = Tool(
     name = "keyboard_read_field",
     description = "Read the full text content of the currently focused text field via the " +

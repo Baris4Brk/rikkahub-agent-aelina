@@ -1841,4 +1841,6 @@ mDNS 주소: .local 호스트네임을 사용하며, IP를 몰라도 같은 네�
   <string name="setting_files_page_cleanup_message">업로드 폴더의 파일을 영구적으로 삭제합니다. 대화는 삭제되지 않습니다.</string>
   <string name="setting_files_page_cleanup_title">모든 업로드 파일을 지울까요?</string>
   <string name="setting_files_page_cleanup_failed">업로드 파일을 지우지 못했습니다. 아직 존재할 수 있는 파일의 기록은 유지했습니다.</string>
+  <string name="system_assistant_surface_ai_key_overlay">현재 진입점: AI 키 오버레이</string>
+  <string name="system_assistant_surface_ai_key_overlay_running">AI 키 오버레이 · 작업은 원래 대화에서 계속됩니다</string>
 </resources>

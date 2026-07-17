@@ -3,6 +3,7 @@ package me.rerere.rikkahub.assistant
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import me.rerere.rikkahub.data.ai.ToolCallOrigin
 import kotlin.uuid.Uuid
 
 /**
@@ -12,12 +13,13 @@ import kotlin.uuid.Uuid
  * overlapping `onShow` calls cannot accidentally make another visible session disappear from the
  * main-process execution gate's view.
  */
-object SystemAssistantInvocationRegistry {
+object SystemAssistantInvocationRegistry : InvocationSurfaceContextProvider {
     private const val ACCEPTED_RUN_MAX_AGE_NANOS = 30L * 60L * 1_000_000_000L
 
     private data class Invocation(
         val invokedFromKeyguard: Boolean,
         val ownerUser: Boolean,
+        val hostKind: SystemAssistantHostKind,
         val conversationId: Uuid? = null,
     )
 
@@ -27,6 +29,7 @@ object SystemAssistantInvocationRegistry {
     private data class AcceptedRun(
         val conversationId: Uuid,
         val commandId: Uuid,
+        val hostKind: SystemAssistantHostKind,
         val expiresAtNanos: Long,
     )
 
@@ -35,16 +38,71 @@ object SystemAssistantInvocationRegistry {
     fun register(
         invokedFromKeyguard: Boolean,
         ownerUser: Boolean = true,
+        hostKind: SystemAssistantHostKind = SystemAssistantHostKind.VOICE_SESSION,
     ): SystemAssistantInvocationToken {
         val id = synchronized(mutationLock) {
             nextTokenId.incrementAndGet().also { tokenId ->
                 invocations[tokenId] = Invocation(
                     invokedFromKeyguard = invokedFromKeyguard,
                     ownerUser = ownerUser,
+                    hostKind = hostKind,
                 )
             }
         }
         return SystemAssistantInvocationToken(id)
+    }
+
+    override fun currentContext(
+        origin: ToolCallOrigin,
+        conversationId: Uuid,
+        commandId: Uuid?,
+    ): InvocationSurfaceContext {
+        val now = System.nanoTime()
+        acceptedRuns.forEach { (tokenId, run) ->
+            if (now >= run.expiresAtNanos) acceptedRuns.remove(tokenId, run)
+        }
+        val acceptedRun = commandId?.let { requestedCommandId ->
+            acceptedRuns.values.firstOrNull { run ->
+                run.conversationId == conversationId && run.commandId == requestedCommandId
+            }
+        }
+        val invocation = when (origin) {
+            ToolCallOrigin.SystemAssistant -> invocations.values.firstOrNull { candidate ->
+                candidate.ownerUser &&
+                    !candidate.invokedFromKeyguard &&
+                    candidate.conversationId == conversationId &&
+                    (acceptedRun == null || candidate.hostKind == acceptedRun.hostKind)
+            }
+
+            ToolCallOrigin.SystemAssistantKeyguard -> invocations.values.firstOrNull { candidate ->
+                candidate.invokedFromKeyguard && candidate.conversationId == conversationId
+            }
+
+            else -> null
+        }
+        val presence = when {
+            origin == ToolCallOrigin.LocalChat -> InvocationSurfacePresence.FULL_CHAT
+            origin != ToolCallOrigin.SystemAssistant &&
+                origin != ToolCallOrigin.SystemAssistantKeyguard ->
+                InvocationSurfacePresence.REMOTE_OR_WORKFLOW
+            acceptedRun != null && invocation == null ->
+                InvocationSurfacePresence.RUNNING_AFTER_OVERLAY_CLOSED
+            invocation?.hostKind == SystemAssistantHostKind.ACTIVITY_OVERLAY ->
+                InvocationSurfacePresence.OVERLAY_VISIBLE
+            invocation?.hostKind == SystemAssistantHostKind.VOICE_SESSION ->
+                InvocationSurfacePresence.VOICE_SESSION_VISIBLE
+            else -> InvocationSurfacePresence.RUNNING_AFTER_OVERLAY_CLOSED
+        }
+        return InvocationSurfaceContext(
+            origin = origin,
+            hostKind = acceptedRun?.hostKind ?: invocation?.hostKind,
+            presence = presence,
+            conversationId = conversationId,
+            commandId = commandId,
+            unlockedOwner = acceptedRun != null ||
+                invocation?.let { it.ownerUser && !it.invokedFromKeyguard } == true ||
+                origin == ToolCallOrigin.LocalChat,
+        )
     }
 
     fun hasActiveInvocation(): Boolean = invocations.isNotEmpty()
@@ -92,13 +150,21 @@ object SystemAssistantInvocationRegistry {
     fun acquireAcceptedRun(
         conversationId: Uuid,
         commandId: Uuid,
+        hostKind: SystemAssistantHostKind = SystemAssistantHostKind.VOICE_SESSION,
     ): SystemAssistantAcceptedRunToken? =
         synchronized(mutationLock) {
-            if (!hasActiveUnlockedInvocation(conversationId)) return@synchronized null
+            val matchingInvocation = invocations.values.any { invocation ->
+                invocation.ownerUser &&
+                    !invocation.invokedFromKeyguard &&
+                    invocation.conversationId == conversationId &&
+                    invocation.hostKind == hostKind
+            }
+            if (!matchingInvocation) return@synchronized null
             val id = nextTokenId.incrementAndGet()
             acceptedRuns[id] = AcceptedRun(
                 conversationId = conversationId,
                 commandId = commandId,
+                hostKind = hostKind,
                 expiresAtNanos = System.nanoTime() + ACCEPTED_RUN_MAX_AGE_NANOS,
             )
             SystemAssistantAcceptedRunToken(id)

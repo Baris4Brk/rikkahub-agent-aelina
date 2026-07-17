@@ -1125,6 +1125,7 @@ class LocalTools(
             // Write tools are approval-gated via ToolApprovalDefaults; the two read tools
             // (keyboard_read_field, keyboard_editor_info) are not.
             tools.add(keyboardTypeTool(keyboardApiClient))
+            tools.add(keyboardInputTool(keyboardApiClient))
             tools.add(keyboardReadFieldTool(keyboardApiClient))
             tools.add(keyboardPressKeyTool(keyboardApiClient))
             tools.add(keyboardDeleteTool(keyboardApiClient))
