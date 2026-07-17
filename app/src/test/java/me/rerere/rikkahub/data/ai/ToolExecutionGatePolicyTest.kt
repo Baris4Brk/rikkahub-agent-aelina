@@ -1,6 +1,8 @@
 package me.rerere.rikkahub.data.ai
 
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.add
 import kotlinx.serialization.json.put
 import me.rerere.rikkahub.BuildConfig
 import me.rerere.rikkahub.data.capability.CapabilityId
@@ -27,6 +29,18 @@ class ToolExecutionGatePolicyTest {
             selfPreservationBlockReason(
                 "privileged_package_uninstall",
                 buildJsonObject { put("package_name", "me.rerere.rikkahub.test") },
+                policy,
+            ) != null,
+        )
+        assertTrue(
+            selfPreservationBlockReason(
+                "batch_delete",
+                buildJsonObject {
+                    put("paths", buildJsonArray {
+                        add("/workspace/safe.txt")
+                        add("/data/user/0/me.rerere.rikkahub.test/shared_prefs/settings.xml")
+                    })
+                },
                 policy,
             ) != null,
         )

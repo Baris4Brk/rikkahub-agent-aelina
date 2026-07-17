@@ -11,6 +11,8 @@ import me.rerere.rikkahub.data.capability.CapabilityDescriptor
 import me.rerere.rikkahub.data.capability.CapabilityId
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.contentOrNull
 import me.rerere.rikkahub.data.ai.tools.local.ContentUriSafetyGuard
 import me.rerere.rikkahub.data.ai.tools.local.PathSafetyGuard
@@ -106,21 +108,30 @@ internal fun selfPreservationBlockReason(
         policy.checkPackageMutation(targetPackage)?.let { return it.reason }
     }
     val pathMutation = toolName in setOf(
+        "download_file",
+        "write_text_file",
         "write_binary_file",
         "delete_file",
         "move_file",
         "copy_file",
+        "create_directory",
+        "batch_copy",
         "batch_move",
         "batch_delete",
-        "workspace_write",
-        "workspace_edit",
+        "zip_files",
+        "unzip_file",
+        "workspace_write_file",
+        "workspace_edit_file",
     )
     if (pathMutation) {
-        sequenceOf("path", "target", "destination", "destination_path")
-            .mapNotNull { key -> (arguments[key] as? JsonPrimitive)?.contentOrNull }
-            .forEach { path ->
-                policy.checkAppPrivateMutation(path)?.let { return it.reason }
-            }
+        fun strings(element: JsonElement): Sequence<String> = when (element) {
+            is JsonPrimitive -> element.contentOrNull?.let(::sequenceOf) ?: emptySequence()
+            is JsonArray -> element.asSequence().flatMap(::strings)
+            is JsonObject -> element.values.asSequence().flatMap(::strings)
+        }
+        strings(arguments).forEach { path ->
+            policy.checkAppPrivateMutation(path)?.let { return it.reason }
+        }
     }
     return null
 }

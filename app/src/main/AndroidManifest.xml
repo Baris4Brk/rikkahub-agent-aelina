@@ -314,9 +314,9 @@
       </intent-filter>
     </activity>
 
-    <!-- Honor's AI-key framework launches an explicit Activity rather than the active
-         VoiceInteractionService. This adapter stays in the lightweight voice process and may
-         only show the existing unlocked-owner assistant session; it accepts no prompt extras. -->
+    <!-- Honor's AI-key framework launches this validated lightweight entry, which forwards only
+         the fixed hardware action to the main-process Activity overlay. It accepts no prompt,
+         conversation, or destination extras. -->
     <activity
       android:name=".assistant.SystemAssistantOverlayEntryActivity"
       android:enabled="@bool/system_assistant_voice_service_enabled"
