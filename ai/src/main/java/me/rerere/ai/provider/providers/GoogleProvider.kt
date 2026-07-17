@@ -37,6 +37,7 @@ import me.rerere.ai.provider.Provider
 import me.rerere.ai.provider.ProviderSetting
 import me.rerere.ai.provider.ProviderLogPrivacy
 import me.rerere.ai.provider.TextGenerationParams
+import me.rerere.ai.provider.ToolReplayArguments
 import me.rerere.ai.provider.bufferProviderStream
 import me.rerere.ai.provider.deliverProviderChunk
 import me.rerere.ai.provider.providers.vertex.ServiceAccountTokenProvider
@@ -793,7 +794,7 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
     private fun UIMessagePart.Tool.toFunctionCallPart() = buildJsonObject {
         put("functionCall", buildJsonObject {
             put("name", toolName)
-            put("args", inputAsJson())
+            put("args", ToolReplayArguments.from(input).json)
         })
         metadataAs<GoogleThoughtMetadata>()?.thoughtSignature?.let {
             put("thoughtSignature", it)

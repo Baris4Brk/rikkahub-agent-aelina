@@ -33,6 +33,7 @@ import me.rerere.ai.provider.Provider
 import me.rerere.ai.provider.ProviderSetting
 import me.rerere.ai.provider.ProviderLogPrivacy
 import me.rerere.ai.provider.TextGenerationParams
+import me.rerere.ai.provider.ToolReplayArguments
 import me.rerere.ai.provider.bufferProviderStream
 import me.rerere.ai.provider.deliverProviderChunk
 import me.rerere.ai.ui.ImageGenerationItem
@@ -567,7 +568,7 @@ class ClaudeProvider(private val client: OkHttpClient, context: Context? = null)
         put("type", "tool_use")
         put("id", toolCallId)
         put("name", toolName)
-        put("input", inputAsJson())
+        put("input", ToolReplayArguments.from(input).json)
     }
 
     private fun UIMessagePart.Tool.toToolResultBlock() = buildJsonObject {

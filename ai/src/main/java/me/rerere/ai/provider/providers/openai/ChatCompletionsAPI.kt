@@ -32,6 +32,7 @@ import me.rerere.ai.provider.ModelAbility
 import me.rerere.ai.provider.ProviderSetting
 import me.rerere.ai.provider.ProviderLogPrivacy
 import me.rerere.ai.provider.TextGenerationParams
+import me.rerere.ai.provider.ToolReplayArguments
 import me.rerere.ai.provider.bufferProviderStream
 import me.rerere.ai.provider.deliverProviderChunk
 import me.rerere.ai.provider.providers.PartGroup
@@ -751,7 +752,7 @@ class ChatCompletionsAPI(
                             put("type", "function")
                             put("function", buildJsonObject {
                                 put("name", tool.toolName)
-                                put("arguments", tool.input)
+                                put("arguments", ToolReplayArguments.from(tool.input).serialized)
                             })
                         })
                     }
