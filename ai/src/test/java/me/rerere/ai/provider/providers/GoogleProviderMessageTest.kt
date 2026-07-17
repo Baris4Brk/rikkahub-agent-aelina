@@ -8,6 +8,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import me.rerere.ai.core.MessageRole
 import me.rerere.ai.provider.Model
 import me.rerere.ai.provider.ModelAbility
+import me.rerere.ai.provider.Modality
 import me.rerere.ai.provider.TextGenerationParams
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
@@ -44,6 +45,19 @@ class GoogleProviderMessageTest {
         )
         method.isAccessible = true
         return method.invoke(provider, messages) as JsonArray
+    }
+
+    private fun invokeBuildContentsWithToolModalities(
+        messages: List<UIMessage>,
+        modalities: Collection<Modality>,
+    ): JsonArray {
+        val method = GoogleProvider::class.java.getDeclaredMethod(
+            "buildContents",
+            List::class.java,
+            Collection::class.java,
+        )
+        method.isAccessible = true
+        return method.invoke(provider, messages, modalities) as JsonArray
     }
 
     private fun invokeBuildCompletionRequestBody(
@@ -447,6 +461,37 @@ class GoogleProviderMessageTest {
         val systemInstruction = request["systemInstruction"]!!.jsonObject
         val parts = systemInstruction["parts"]!!.jsonArray
         assertEquals(prompt, parts.single().jsonObject["text"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun `google function response carries a tool image once and keeps output order`() {
+        val tool = UIMessagePart.Tool(
+            toolCallId = "call_image",
+            toolName = "screenshot",
+            input = "{}",
+            output = listOf(
+                UIMessagePart.Text("before"),
+                UIMessagePart.Image("data:image/png;base64,AA=="),
+                UIMessagePart.Text("after"),
+            ),
+        )
+
+        val result = invokeBuildContentsWithToolModalities(
+            messages = listOf(
+                UIMessage.user("inspect"),
+                UIMessage(role = MessageRole.ASSISTANT, parts = listOf(tool)),
+            ),
+            modalities = listOf(Modality.TEXT, Modality.IMAGE),
+        )
+        val parts = result
+            .map { it.jsonObject["parts"]!!.jsonArray }
+            .first { messageParts -> messageParts.any { it.jsonObject.containsKey("inlineData") } }
+
+        assertEquals(1, parts.count { it.jsonObject.containsKey("inlineData") })
+        assertTrue(parts.first().jsonObject.containsKey("functionResponse"))
+        assertEquals("before", parts[1].jsonObject["text"]!!.jsonPrimitive.content)
+        assertEquals("AA==", parts[2].jsonObject["inlineData"]!!.jsonObject["data"]!!.jsonPrimitive.content)
+        assertEquals("after", parts[3].jsonObject["text"]!!.jsonPrimitive.content)
     }
 
     // ==================== Helper Functions ====================

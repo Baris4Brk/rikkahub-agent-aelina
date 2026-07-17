@@ -33,6 +33,8 @@ import me.rerere.ai.provider.ProviderSetting
 import me.rerere.ai.provider.ProviderLogPrivacy
 import me.rerere.ai.provider.TextGenerationParams
 import me.rerere.ai.provider.ToolReplayArguments
+import me.rerere.ai.provider.ToolResultReplayItem
+import me.rerere.ai.provider.ToolResultReplayPlan
 import me.rerere.ai.provider.bufferProviderStream
 import me.rerere.ai.provider.deliverProviderChunk
 import me.rerere.ai.provider.providers.PartGroup
@@ -287,6 +289,7 @@ class ChatCompletionsAPI(
             providerSetting.includeHistoryReasoning,
             openRouterCache = openRouterCache,
             requireToolReasoningContent = requiresToolReasoningContent(params.model.modelId),
+            toolResultInputModalities = params.model.inputModalities,
         ).let {
             if (openRouterCache) insertOpenRouterCacheControl(it) else it
         }
@@ -566,6 +569,20 @@ class ChatCompletionsAPI(
         includeHistoryReasoning: Boolean = true,
         openRouterCache: Boolean = false,
         requireToolReasoningContent: Boolean = false,
+    ): JsonArray = buildMessages(
+        messages = messages,
+        includeHistoryReasoning = includeHistoryReasoning,
+        openRouterCache = openRouterCache,
+        requireToolReasoningContent = requireToolReasoningContent,
+        toolResultInputModalities = listOf(Modality.TEXT),
+    )
+
+    private fun buildMessages(
+        messages: List<UIMessage>,
+        includeHistoryReasoning: Boolean,
+        openRouterCache: Boolean,
+        requireToolReasoningContent: Boolean,
+        toolResultInputModalities: Collection<Modality>,
     ) = buildJsonArray {
         val filteredMessages = messages.filter { it.isValidToUpload() }
         val latestUserIndex = filteredMessages.indexOfLast { it.role == MessageRole.USER }
@@ -575,10 +592,11 @@ class ChatCompletionsAPI(
                 val isActiveToolTurn = requireToolReasoningContent &&
                     index > latestUserIndex &&
                     message.getTools().isNotEmpty()
-                addAssistantMessages(
-                    message = message,
-                    includeReasoning = includeHistoryReasoning || isActiveToolTurn,
-                    requireToolReasoningContent = requireToolReasoningContent,
+                    addAssistantMessages(
+                        message = message,
+                        includeReasoning = includeHistoryReasoning || isActiveToolTurn,
+                        requireToolReasoningContent = requireToolReasoningContent,
+                        toolResultInputModalities = toolResultInputModalities,
                 )
             } else {
                 addNonAssistantMessage(message, openRouterCache = openRouterCache)
@@ -590,6 +608,7 @@ class ChatCompletionsAPI(
         message: UIMessage,
         includeReasoning: Boolean,
         requireToolReasoningContent: Boolean,
+        toolResultInputModalities: Collection<Modality>,
     ) {
         val groups = groupPartsByToolBoundary(message.parts)
         val contentBuffer = mutableListOf<UIMessagePart>()
@@ -624,40 +643,46 @@ class ChatCompletionsAPI(
 
                     // 紧跟 tool 结果消息
                     group.tools.forEach { tool ->
+                        val replay = ToolResultReplayPlan.create(
+                            output = tool.output,
+                            inputModalities = toolResultInputModalities,
+                        )
                         add(buildJsonObject {
                             put("role", "tool")
                             put("name", tool.toolName)
                             put("tool_call_id", tool.toolCallId)
                             put(
                                 "content",
-                                tool.output.filterIsInstance<UIMessagePart.Text>().joinToString("\n") { it.text })
+                                if (replay.hasImages) {
+                                    ToolResultReplayPlan.MULTIMODAL_RESULT_FOLLOWS_TEXT
+                                } else {
+                                    replay.text
+                                },
+                            )
                         })
                         // Image lift: ChatCompletions tool messages are text-only, so any
                         // UIMessagePart.Image returned by the tool would be invisible to a
                         // vision-capable model otherwise. Emit a follow-up user message that
                         // carries those images so the model actually sees them on its next
                         // turn (e.g. take_screenshot, take_photo, etc.).
-                        val toolImages = tool.output.filterIsInstance<UIMessagePart.Image>()
-                        if (toolImages.isNotEmpty()) {
+                        if (replay.hasImages) {
                             add(buildJsonObject {
                                 put("role", "user")
                                 putJsonArray("content") {
-                                    add(buildJsonObject {
-                                        put("type", "text")
-                                        put("text", "[Tool ${tool.toolName} produced the image(s) below.]")
-                                    })
-                                    toolImages.forEach { part ->
-                                        add(buildJsonObject {
-                                            part.encodeBase64().onSuccess { encodedImage ->
+                                    replay.items.forEach { item ->
+                                        when (item) {
+                                            is ToolResultReplayItem.Text -> add(buildJsonObject {
+                                                put("type", "text")
+                                                put("text", item.value)
+                                            })
+
+                                            is ToolResultReplayItem.Image -> add(buildJsonObject {
                                                 put("type", "image_url")
                                                 put("image_url", buildJsonObject {
-                                                    put("url", encodedImage.base64)
+                                                    put("url", item.source)
                                                 })
-                                            }.onFailure {
-                                                put("type", "text")
-                                                put("text", "(image encode failed: ${it.message})")
-                                            }
-                                        })
+                                            })
+                                        }
                                     }
                                 }
                             })

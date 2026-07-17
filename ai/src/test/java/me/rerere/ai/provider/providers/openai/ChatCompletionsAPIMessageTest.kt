@@ -6,6 +6,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import me.rerere.ai.core.MessageRole
+import me.rerere.ai.provider.Modality
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.ai.util.KeyRoulette
@@ -51,6 +52,22 @@ class ChatCompletionsAPIMessageTest {
             false,
             requireToolReasoningContent,
         ) as JsonArray
+    }
+
+    private fun invokeBuildMessagesWithToolModalities(
+        messages: List<UIMessage>,
+        modalities: Collection<Modality>,
+    ): JsonArray {
+        val method = ChatCompletionsAPI::class.java.getDeclaredMethod(
+            "buildMessages",
+            List::class.java,
+            Boolean::class.javaPrimitiveType,
+            Boolean::class.javaPrimitiveType,
+            Boolean::class.javaPrimitiveType,
+            Collection::class.java,
+        )
+        method.isAccessible = true
+        return method.invoke(api, messages, true, false, false, modalities) as JsonArray
     }
 
     @Test
@@ -435,6 +452,37 @@ class ChatCompletionsAPIMessageTest {
         assertEquals("assistant", result[1].jsonObject["role"]?.jsonPrimitive?.content)
         assertEquals("thinking", result[1].jsonObject["reasoning_content"]?.jsonPrimitive?.content)
         assertEquals("", result[1].jsonObject["content"]?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun `vision tool result keeps text image text order in one follow-up message`() {
+        val tool = UIMessagePart.Tool(
+            toolCallId = "call_image",
+            toolName = "screenshot",
+            input = "{}",
+            output = listOf(
+                UIMessagePart.Text("before"),
+                UIMessagePart.Image("data:image/png;base64,AA=="),
+                UIMessagePart.Text("after"),
+            ),
+        )
+
+        val result = invokeBuildMessagesWithToolModalities(
+            messages = listOf(
+                UIMessage.user("inspect"),
+                UIMessage(role = MessageRole.ASSISTANT, parts = listOf(tool)),
+            ),
+            modalities = listOf(Modality.TEXT, Modality.IMAGE),
+        )
+        val multimodal = result
+            .mapNotNull { it.jsonObject["content"] as? JsonArray }
+            .first { content -> content.any { it.jsonObject["type"]?.jsonPrimitive?.content == "image_url" } }
+
+        assertEquals(
+            listOf("text", "image_url", "text"),
+            multimodal.map { it.jsonObject["type"]?.jsonPrimitive?.content },
+        )
+        assertEquals(1, result.toString().split("data:image/png;base64,AA==").size - 1)
     }
 
     // ==================== Helper Functions ====================

@@ -10,6 +10,7 @@ import me.rerere.ai.core.MessageRole
 import me.rerere.ai.core.ReasoningLevel
 import me.rerere.ai.provider.Model
 import me.rerere.ai.provider.ModelAbility
+import me.rerere.ai.provider.Modality
 import me.rerere.ai.provider.ProviderSetting
 import me.rerere.ai.provider.TextGenerationParams
 import me.rerere.ai.ui.FinishCategory
@@ -469,6 +470,42 @@ class ResponseAPIMessageTest {
         assertEquals(FinishCategory.SAFETY, chunk.terminal?.category)
         assertEquals("refusal", chunk.terminal?.providerReason)
         assertEquals("I cannot help with that request.", text)
+    }
+
+    @Test
+    fun `responses sends a tool image exactly once in the following multimodal item`() {
+        val tool = UIMessagePart.Tool(
+            toolCallId = "call_image",
+            toolName = "screenshot",
+            input = "{}",
+            output = listOf(
+                UIMessagePart.Text("before"),
+                UIMessagePart.Image("data:image/png;base64,AA=="),
+                UIMessagePart.Text("after"),
+            ),
+        )
+
+        val result = api.buildMessages(
+            messages = listOf(
+                UIMessage.user("inspect"),
+                UIMessage(role = MessageRole.ASSISTANT, parts = listOf(tool)),
+            ),
+            toolResultInputModalities = listOf(Modality.TEXT, Modality.IMAGE),
+        )
+        val imageBlocks = result.flatMap { item ->
+            (item.jsonObject["content"] as? JsonArray).orEmpty()
+        }.filter { it.jsonObject["type"]?.jsonPrimitive?.content == "input_image" }
+        val multimodal = result.first { item ->
+            (item.jsonObject["content"] as? JsonArray)
+                ?.any { it.jsonObject["type"]?.jsonPrimitive?.content == "input_image" } == true
+        }.jsonObject["content"]!!.jsonArray
+
+        assertEquals(1, imageBlocks.size)
+        assertEquals(
+            listOf("input_text", "input_image", "input_text"),
+            multimodal.map { it.jsonObject["type"]?.jsonPrimitive?.content },
+        )
+        assertEquals(1, result.toString().split("data:image/png;base64,AA==").size - 1)
     }
 
     // ==================== Helper Functions ====================

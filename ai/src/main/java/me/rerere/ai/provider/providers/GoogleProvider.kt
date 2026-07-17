@@ -38,6 +38,8 @@ import me.rerere.ai.provider.ProviderSetting
 import me.rerere.ai.provider.ProviderLogPrivacy
 import me.rerere.ai.provider.TextGenerationParams
 import me.rerere.ai.provider.ToolReplayArguments
+import me.rerere.ai.provider.ToolResultReplayItem
+import me.rerere.ai.provider.ToolResultReplayPlan
 import me.rerere.ai.provider.bufferProviderStream
 import me.rerere.ai.provider.deliverProviderChunk
 import me.rerere.ai.provider.providers.vertex.ServiceAccountTokenProvider
@@ -466,7 +468,7 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
         // Contents (user messages)
         put(
             "contents",
-            buildContents(messages)
+            buildContents(messages, params.model.inputModalities)
         )
 
         // Tools
@@ -654,13 +656,19 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
         }
     }
 
-    private fun buildContents(messages: List<UIMessage>): JsonArray {
+    private fun buildContents(messages: List<UIMessage>): JsonArray =
+        buildContents(messages, listOf(Modality.TEXT))
+
+    private fun buildContents(
+        messages: List<UIMessage>,
+        toolResultInputModalities: Collection<Modality>,
+    ): JsonArray {
         return buildJsonArray {
             messages
                 .filter { it.role != MessageRole.SYSTEM && it.isValidToUpload() }
                 .forEach { message ->
                     if (message.role == MessageRole.ASSISTANT) {
-                        addModelMessage(message)
+                        addModelMessage(message, toolResultInputModalities)
                     } else {
                         addUserMessage(message)
                     }
@@ -668,7 +676,10 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
         }
     }
 
-    private fun JsonArrayBuilder.addModelMessage(message: UIMessage) {
+    private fun JsonArrayBuilder.addModelMessage(
+        message: UIMessage,
+        toolResultInputModalities: Collection<Modality>,
+    ) {
         val groups = groupPartsByToolBoundary(message.parts)
         val partsBuffer = mutableListOf<JsonObject>()
         // Forward thoughtSignature from any preceding Reasoning part to the next Tool
@@ -722,7 +733,16 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
                     add(buildJsonObject {
                         put("role", "user")
                         putJsonArray("parts") {
-                            group.tools.forEach { add(it.toFunctionResponsePart()) }
+                            group.tools.forEach { tool ->
+                                val replay = ToolResultReplayPlan.create(
+                                    output = tool.output,
+                                    inputModalities = toolResultInputModalities,
+                                )
+                                add(tool.toFunctionResponsePart(replay))
+                                if (replay.hasImages) {
+                                    replay.items.forEach { item -> add(item.toGoogleReplayPart()) }
+                                }
+                            }
                         }
                     })
                 }
@@ -801,17 +821,44 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
         }
     }
 
-    private fun UIMessagePart.Tool.toFunctionResponsePart() = buildJsonObject {
+    private fun UIMessagePart.Tool.toFunctionResponsePart(
+        replay: ToolResultReplayPlan,
+    ) = buildJsonObject {
         put("functionResponse", buildJsonObject {
             put("name", toolName)
             put("response", buildJsonObject {
                 put(
                     "result",
-                    output.filterIsInstance<UIMessagePart.Text>()
-                        .joinToString("\n") { it.text }
+                    if (replay.hasImages) {
+                        ToolResultReplayPlan.MULTIMODAL_RESULT_FOLLOWS_TEXT
+                    } else {
+                        replay.text
+                    },
                 )
             })
         })
+    }
+
+    private fun ToolResultReplayItem.toGoogleReplayPart(): JsonObject = when (this) {
+        is ToolResultReplayItem.Text -> buildJsonObject {
+            put("text", value)
+        }
+
+        is ToolResultReplayItem.Image -> {
+            val payload = base64Payload
+            if (payload == null) {
+                buildJsonObject {
+                    put("text", ToolResultReplayPlan.IMAGE_ENCODING_FAILED_TEXT)
+                }
+            } else {
+                buildJsonObject {
+                    put("inlineData", buildJsonObject {
+                        put("mimeType", mimeType)
+                        put("data", payload)
+                    })
+                }
+            }
+        }
     }
 
     private fun parseUsageMeta(jsonObject: JsonObject?): TokenUsage? {

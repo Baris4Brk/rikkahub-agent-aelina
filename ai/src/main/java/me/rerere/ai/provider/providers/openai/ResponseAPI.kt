@@ -26,10 +26,12 @@ import me.rerere.ai.core.TokenUsage
 import me.rerere.ai.provider.BuiltInTools
 import me.rerere.ai.provider.Model
 import me.rerere.ai.provider.ModelAbility
+import me.rerere.ai.provider.Modality
 import me.rerere.ai.provider.ProviderSetting
 import me.rerere.ai.provider.ProviderLogPrivacy
 import me.rerere.ai.provider.TextGenerationParams
 import me.rerere.ai.provider.ToolReplayArguments
+import me.rerere.ai.provider.ToolResultReplayPlan
 import me.rerere.ai.provider.bufferProviderStream
 import me.rerere.ai.provider.deliverProviderChunk
 import me.rerere.ai.provider.providers.PartGroup
@@ -238,7 +240,7 @@ class ResponseAPI(
             }
 
             // messages
-            put("input", buildMessages(messages))
+            put("input", buildMessages(messages, params.model.inputModalities))
 
             // reasoning
             if (params.model.abilities.contains(ModelAbility.REASONING)) {
@@ -302,19 +304,28 @@ class ResponseAPI(
         }.mergeCustomBody(params.customBody)
     }
 
-    fun buildMessages(messages: List<UIMessage>) = buildJsonArray {
+    fun buildMessages(messages: List<UIMessage>): JsonArray =
+        buildMessages(messages, listOf(Modality.TEXT))
+
+    internal fun buildMessages(
+        messages: List<UIMessage>,
+        toolResultInputModalities: Collection<Modality>,
+    ) = buildJsonArray {
         messages
             .filter { it.isValidToUpload() && it.role != MessageRole.SYSTEM }
             .forEach { message ->
                 if (message.role == MessageRole.ASSISTANT) {
-                    addAssistantItems(message)
+                    addAssistantItems(message, toolResultInputModalities)
                 } else {
                     addUserItems(message)
                 }
             }
     }
 
-    private fun JsonArrayBuilder.addAssistantItems(message: UIMessage) {
+    private fun JsonArrayBuilder.addAssistantItems(
+        message: UIMessage,
+        toolResultInputModalities: Collection<me.rerere.ai.provider.Modality>,
+    ) {
         val groups = groupPartsByToolBoundary(message.parts)
         val contentBuffer = mutableListOf<UIMessagePart>()
 
@@ -374,6 +385,10 @@ class ResponseAPI(
 
                     // 输出 function_call + function_call_output
                     group.tools.forEach { tool ->
+                        val replay = ToolResultReplayPlan.create(
+                            output = tool.output,
+                            inputModalities = toolResultInputModalities,
+                        )
                         add(buildJsonObject {
                             put("type", "function_call")
                             put("call_id", tool.toolCallId)
@@ -383,49 +398,23 @@ class ResponseAPI(
                         add(buildJsonObject {
                             put("type", "function_call_output")
                             put("call_id", tool.toolCallId)
-                            val hasImage = tool.output.any { it is UIMessagePart.Image }
-                            if (hasImage) {
-                                putJsonArray("output") {
-                                    tool.output.forEach { part ->
-                                        when (part) {
-                                            is UIMessagePart.Image -> add(buildJsonObject {
-                                                part.encodeBase64().onSuccess { encoded ->
-                                                    put("type", "input_image")
-                                                    put("image_url", encoded.base64)
-                                                }.onFailure {
-                                                    it.printStackTrace()
-                                                    put("type", "input_text")
-                                                    put("text", "Error: Failed to encode image to base64")
-                                                }
-                                            })
-                                            is UIMessagePart.Text -> add(buildJsonObject {
-                                                put("type", "input_text")
-                                                put("text", part.text)
-                                            })
-                                            else -> {}
-                                        }
-                                    }
-                                }
-                            } else {
-                                put(
-                                    "output",
-                                    tool.output.filterIsInstance<UIMessagePart.Text>()
-                                        .joinToString("\n") { it.text }
-                                )
-                            }
+                            put(
+                                "output",
+                                if (replay.hasImages) {
+                                    ToolResultReplayPlan.MULTIMODAL_RESULT_FOLLOWS_TEXT
+                                } else {
+                                    replay.text
+                                },
+                            )
                         })
                         // Image lift: function_call_output is text-only, so a tool that
                         // returns UIMessagePart.Image (take_screenshot, take_photo, etc.)
                         // would otherwise be invisible to vision-capable models. Inject
                         // those images as a follow-up user content item.
-                        val toolImages = tool.output.filterIsInstance<UIMessagePart.Image>()
-                        if (toolImages.isNotEmpty()) {
+                        if (replay.hasImages) {
                             addContentItem(
                                 MessageRole.USER,
-                                buildList {
-                                    add(UIMessagePart.Text("[Tool ${tool.toolName} produced the image(s) below.]"))
-                                    addAll(toolImages)
-                                }
+                                replay.asMessageParts(),
                             )
                         }
                     }

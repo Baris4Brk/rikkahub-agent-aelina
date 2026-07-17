@@ -6,6 +6,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import me.rerere.ai.core.MessageRole
 import me.rerere.ai.provider.ClaudePromptCacheTtl
+import me.rerere.ai.provider.Modality
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
 import okhttp3.OkHttpClient
@@ -45,6 +46,27 @@ class ClaudeProviderMessageTest {
         )
         method.isAccessible = true
         return method.invoke(provider, messages, false, ClaudePromptCacheTtl.FIVE_MINUTES) as JsonArray
+    }
+
+    private fun invokeBuildMessagesWithToolModalities(
+        messages: List<UIMessage>,
+        modalities: Collection<Modality>,
+    ): JsonArray {
+        val method = ClaudeProvider::class.java.getDeclaredMethod(
+            "buildMessages",
+            List::class.java,
+            Boolean::class.javaPrimitiveType,
+            ClaudePromptCacheTtl::class.java,
+            Collection::class.java,
+        )
+        method.isAccessible = true
+        return method.invoke(
+            provider,
+            messages,
+            false,
+            ClaudePromptCacheTtl.FIVE_MINUTES,
+            modalities,
+        ) as JsonArray
     }
 
     @Test
@@ -350,6 +372,38 @@ class ClaudeProviderMessageTest {
             it.jsonObject["type"]?.jsonPrimitive?.content == "text"
         }?.jsonObject
         assertEquals("Hello, how are you?", textBlock?.get("text")?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun `claude tool result preserves text image text order for a vision model`() {
+        val tool = UIMessagePart.Tool(
+            toolCallId = "call_image",
+            toolName = "screenshot",
+            input = "{}",
+            output = listOf(
+                UIMessagePart.Text("before"),
+                UIMessagePart.Image("data:image/png;base64,AA=="),
+                UIMessagePart.Text("after"),
+            ),
+        )
+
+        val result = invokeBuildMessagesWithToolModalities(
+            messages = listOf(
+                UIMessage.user("inspect"),
+                UIMessage(role = MessageRole.ASSISTANT, parts = listOf(tool)),
+            ),
+            modalities = listOf(Modality.TEXT, Modality.IMAGE),
+        )
+        val content = result
+            .flatMap { (it.jsonObject["content"] as? JsonArray).orEmpty() }
+            .first { it.jsonObject["type"]?.jsonPrimitive?.content == "tool_result" }
+            .jsonObject["content"]!!.jsonArray
+
+        assertEquals(
+            listOf("text", "image", "text"),
+            content.map { it.jsonObject["type"]?.jsonPrimitive?.content },
+        )
+        assertEquals("AA==", content[1].jsonObject["source"]!!.jsonObject["data"]!!.jsonPrimitive.content)
     }
 
     // ==================== Helper Functions ====================

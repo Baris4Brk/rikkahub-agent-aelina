@@ -29,11 +29,14 @@ import me.rerere.ai.provider.ClaudePromptCacheTtl
 import me.rerere.ai.provider.ImageGenerationParams
 import me.rerere.ai.provider.Model
 import me.rerere.ai.provider.ModelAbility
+import me.rerere.ai.provider.Modality
 import me.rerere.ai.provider.Provider
 import me.rerere.ai.provider.ProviderSetting
 import me.rerere.ai.provider.ProviderLogPrivacy
 import me.rerere.ai.provider.TextGenerationParams
 import me.rerere.ai.provider.ToolReplayArguments
+import me.rerere.ai.provider.ToolResultReplayItem
+import me.rerere.ai.provider.ToolResultReplayPlan
 import me.rerere.ai.provider.bufferProviderStream
 import me.rerere.ai.provider.deliverProviderChunk
 import me.rerere.ai.ui.ImageGenerationItem
@@ -339,7 +342,12 @@ class ClaudeProvider(private val client: OkHttpClient, context: Context? = null)
             put("model", params.model.modelId)
             put(
                 "messages",
-                buildMessages(messages, providerSetting.promptCaching, providerSetting.promptCacheTtl)
+                buildMessages(
+                    messages = messages,
+                    promptCaching = providerSetting.promptCaching,
+                    promptCacheTtl = providerSetting.promptCacheTtl,
+                    toolResultInputModalities = params.model.inputModalities,
+                )
             )
             put("max_tokens", params.maxTokens ?: 64_000)
 
@@ -428,12 +436,24 @@ class ClaudeProvider(private val client: OkHttpClient, context: Context? = null)
         messages: List<UIMessage>,
         promptCaching: Boolean,
         promptCacheTtl: ClaudePromptCacheTtl
+    ): JsonArray = buildMessages(
+        messages = messages,
+        promptCaching = promptCaching,
+        promptCacheTtl = promptCacheTtl,
+        toolResultInputModalities = listOf(Modality.TEXT),
+    )
+
+    private fun buildMessages(
+        messages: List<UIMessage>,
+        promptCaching: Boolean,
+        promptCacheTtl: ClaudePromptCacheTtl,
+        toolResultInputModalities: Collection<Modality>,
     ) = buildJsonArray {
         messages
             .filter { it.isValidToUpload() && it.role != MessageRole.SYSTEM }
             .forEach { message ->
                 if (message.role == MessageRole.ASSISTANT) {
-                    addAssistantMessage(message)
+                    addAssistantMessage(message, toolResultInputModalities)
                 } else {
                     addUserMessage(message)
                 }
@@ -484,7 +504,10 @@ class ClaudeProvider(private val client: OkHttpClient, context: Context? = null)
         })
     }
 
-    private fun JsonArrayBuilder.addAssistantMessage(message: UIMessage) {
+    private fun JsonArrayBuilder.addAssistantMessage(
+        message: UIMessage,
+        toolResultInputModalities: Collection<Modality>,
+    ) {
         val groups = groupPartsByToolBoundary(message.parts)
         val contentBuffer = mutableListOf<JsonObject>()
 
@@ -509,7 +532,9 @@ class ClaudeProvider(private val client: OkHttpClient, context: Context? = null)
                     add(buildJsonObject {
                         put("role", "user")
                         putJsonArray("content") {
-                            group.tools.forEach { add(it.toToolResultBlock()) }
+                            group.tools.forEach {
+                                add(it.toToolResultBlock(toolResultInputModalities))
+                            }
                         }
                     })
                 }
@@ -571,11 +596,43 @@ class ClaudeProvider(private val client: OkHttpClient, context: Context? = null)
         put("input", ToolReplayArguments.from(input).json)
     }
 
-    private fun UIMessagePart.Tool.toToolResultBlock() = buildJsonObject {
+    private fun UIMessagePart.Tool.toToolResultBlock(
+        toolResultInputModalities: Collection<Modality>,
+    ) = buildJsonObject {
+        val replay = ToolResultReplayPlan.create(
+            output = output,
+            inputModalities = toolResultInputModalities,
+        )
         put("type", "tool_result")
         put("tool_use_id", toolCallId)
         putJsonArray("content") {
-            output.mapNotNull { it.toContentBlock() }.forEach { add(it) }
+            replay.items.forEach { item ->
+                when (item) {
+                    is ToolResultReplayItem.Text -> add(buildJsonObject {
+                        put("type", "text")
+                        put("text", item.value)
+                    })
+
+                    is ToolResultReplayItem.Image -> {
+                        val payload = item.base64Payload
+                        if (payload == null) {
+                            add(buildJsonObject {
+                                put("type", "text")
+                                put("text", ToolResultReplayPlan.IMAGE_ENCODING_FAILED_TEXT)
+                            })
+                        } else {
+                            add(buildJsonObject {
+                                put("type", "image")
+                                put("source", buildJsonObject {
+                                    put("type", "base64")
+                                    put("media_type", item.mimeType)
+                                    put("data", payload)
+                                })
+                            })
+                        }
+                    }
+                }
+            }
         }
     }
 
