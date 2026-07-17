@@ -1,5 +1,7 @@
 package me.rerere.rikkahub.assistant
 
+import android.content.Intent
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -19,6 +21,16 @@ class SystemAssistantLocalInvocationPolicyTest {
                 "me.rerere.rikkahub.action.OPEN_SECOND_USER_ASSISTANT",
             ),
         )
+    }
+
+    @Test
+    fun `hardware entry forwards inside its isolated task without resurrecting the main task`() {
+        val flags = systemAssistantHardwareOverlayLaunchFlags()
+
+        assertEquals(0, flags and Intent.FLAG_ACTIVITY_NEW_TASK)
+        assertTrue(flags and Intent.FLAG_ACTIVITY_CLEAR_TOP != 0)
+        assertTrue(flags and Intent.FLAG_ACTIVITY_SINGLE_TOP != 0)
+        assertTrue(flags and Intent.FLAG_ACTIVITY_NO_ANIMATION != 0)
     }
 
     @Test

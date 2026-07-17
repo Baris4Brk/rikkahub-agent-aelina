@@ -115,6 +115,7 @@ class DefaultSystemAssistantSessionController(
 
     private var boundTarget: SecondUserTargetResolution.Resolved? = null
     private var bindingJob: Job? = null
+    private var hydrationJob: Job? = null
 
     init {
         require(recentMessageLimit > 0) { "recentMessageLimit must be positive" }
@@ -363,6 +364,8 @@ class DefaultSystemAssistantSessionController(
 
         bindingJob?.cancel()
         bindingJob = null
+        hydrationJob?.cancel()
+        hydrationJob = null
         boundTarget = null
         invocationToken.unbindConversation()
 
@@ -395,6 +398,7 @@ class DefaultSystemAssistantSessionController(
                 runtimeState = flows.runtime.value,
                 queueStatus = flows.queue.value,
                 answer = initialPresentation.answer,
+                history = SystemAssistantHistoryUiState.Loading,
             )
         }
         invocationToken.bindConversation(target.conversationId)
@@ -421,6 +425,24 @@ class DefaultSystemAssistantSessionController(
                 }
             }
         }
+        hydrationJob = controllerScope.launch {
+            try {
+                chatBackend.hydrateConversation(target.conversationId)
+                if (!closed.get() && boundTarget == target) {
+                    _state.update { state ->
+                        state.copy(history = SystemAssistantHistoryUiState.Ready)
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                if (!closed.get() && boundTarget == target) {
+                    _state.update { state ->
+                        state.copy(history = SystemAssistantHistoryUiState.Failed)
+                    }
+                }
+            }
+        }
         return TargetBindingResult.Bound(target)
     }
 
@@ -428,6 +450,8 @@ class DefaultSystemAssistantSessionController(
         invocationToken.unbindConversation()
         bindingJob?.cancel()
         bindingJob = null
+        hydrationJob?.cancel()
+        hydrationJob = null
         boundTarget = null
         _state.update { state ->
             state.copy(
@@ -436,6 +460,7 @@ class DefaultSystemAssistantSessionController(
                 runtimeState = null,
                 queueStatus = null,
                 answer = SystemAssistantAnswerUiState.Ready,
+                history = SystemAssistantHistoryUiState.NotLoaded,
             )
         }
     }

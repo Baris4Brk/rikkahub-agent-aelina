@@ -31,6 +31,10 @@ class ChatServiceSystemAssistantBackend(
             queue = chatService.getQueueStatusFlow(conversationId),
         )
 
+    override suspend fun hydrateConversation(conversationId: kotlin.uuid.Uuid) {
+        chatService.ensureHydrated(conversationId)
+    }
+
     override suspend fun submit(
         submission: SystemAssistantChatSubmission,
     ): SystemAssistantChatSubmissionReceipt {

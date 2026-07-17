@@ -1,5 +1,6 @@
 package me.rerere.rikkahub.di
 
+import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.Json
 import me.rerere.highlight.Highlighter
 import me.rerere.rikkahub.AppScope
@@ -193,10 +194,10 @@ val appModule = module {
         val conversationRepository = get<me.rerere.rikkahub.data.repository.ConversationRepository>()
         me.rerere.rikkahub.assistant.SecondUserTargetResolver(
             settingsReader = me.rerere.rikkahub.assistant.SecondUserTargetSettingsReader {
-                settingsStore.settingsFlow.value
+                settingsStore.settingsFlow.first { settings -> !settings.init }
             },
             conversationReader = me.rerere.rikkahub.assistant.SecondUserTargetConversationReader { conversationId ->
-                conversationRepository.getConversationById(conversationId)
+                conversationRepository.getAssistantIdOfConversation(conversationId)
             },
         )
     }

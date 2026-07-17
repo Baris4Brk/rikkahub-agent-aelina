@@ -324,6 +324,7 @@
       android:exported="true"
       android:noHistory="true"
       android:process=":voice_interactor"
+      android:taskAffinity=""
       android:theme="@android:style/Theme.Translucent.NoTitleBar">
       <intent-filter>
         <action android:name="me.rerere.rikkahub.action.SHOW_SYSTEM_ASSISTANT_HARDWARE" />
@@ -336,7 +337,9 @@
       android:name=".assistant.SystemAssistantHardwareOverlayActivity"
       android:excludeFromRecents="true"
       android:exported="false"
+      android:launchMode="singleTask"
       android:noHistory="true"
+      android:taskAffinity=""
       android:theme="@android:style/Theme.Translucent.NoTitleBar"
       android:windowSoftInputMode="adjustResize" />
 

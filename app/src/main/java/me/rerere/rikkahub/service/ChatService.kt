@@ -1265,12 +1265,16 @@ class ChatService(
                 else -> {
                     saveConversation(conversationId, withUser)
                     if (content.answer) {
+                        // Must surface generation failures as RunOutcome.Failed. Swallowing them
+                        // (propagateFailure=false) marks the durable command COMPLETED after only
+                        // the user message is saved — UI shows loading then silence with no reply.
                         handleMessageComplete(
                             conversationId,
                             origin = origin,
                             runControl = control,
                             activeCommandId = commandId,
                             acceptedAssistantSnapshot = acceptedSystemAssistantTarget?.assistant,
+                            propagateFailure = true,
                         )
                     }
                 }

@@ -242,6 +242,9 @@ class AndroidSystemAssistantSessionAdapter(
         state.inputAvailability == SystemAssistantInputAvailability.Closed ->
             appContext.getString(R.string.system_assistant_close)
         deviceLocked -> appContext.getString(R.string.system_assistant_unlock_required)
+        state.target == SystemAssistantTargetUiState.NotResolved ||
+            state.target == SystemAssistantTargetUiState.Resolving ->
+            appContext.getString(R.string.system_assistant_loading)
         state.answer is SystemAssistantAnswerUiState.Recovering -> {
             val recovery = state.answer
             appContext.getString(
@@ -269,6 +272,10 @@ class AndroidSystemAssistantSessionAdapter(
             appContext.getString(R.string.system_assistant_generating)
         state.submission is SystemAssistantSubmissionUiState.Submitting ->
             appContext.getString(R.string.system_assistant_submitting)
+        state.history == SystemAssistantHistoryUiState.Loading ->
+            appContext.getString(R.string.workspace_detail_loading)
+        state.history == SystemAssistantHistoryUiState.Failed ->
+            appContext.getString(R.string.system_assistant_error_request_failed)
         else -> appContext.getString(R.string.system_assistant_ready)
     }
 
@@ -406,8 +413,9 @@ class AndroidSystemAssistantSessionAdapter(
             minLines = 2
             maxLines = 5
             filters = arrayOf(InputFilter.LengthFilter(SYSTEM_ASSISTANT_MAX_TEXT_LENGTH))
-            setTextColor(Color.WHITE)
-            setHintTextColor(Color.GRAY)
+            setBackgroundColor(Color.WHITE)
+            setTextColor(Color.BLACK)
+            setHintTextColor(Color.rgb(105, 105, 110))
         }
         val send = Button(context).apply { text = context.getString(R.string.system_assistant_send) }
         val close = Button(context).apply { text = context.getString(R.string.system_assistant_close) }

@@ -69,6 +69,14 @@ data class SystemAssistantChatSubmissionReceipt(
 interface SystemAssistantChatBackend {
     fun flows(conversationId: Uuid): SystemAssistantChatFlows
 
+    /**
+     * Loads the persisted conversation into the live ChatService session.
+     *
+     * Controllers invoke this after the target is already usable, so a long history never blocks
+     * the input surface. The work belongs to the invocation scope and must be cancellable.
+     */
+    suspend fun hydrateConversation(conversationId: Uuid)
+
     suspend fun submit(submission: SystemAssistantChatSubmission): SystemAssistantChatSubmissionReceipt
 }
 
@@ -125,6 +133,14 @@ sealed interface SystemAssistantAnswerUiState {
         val attempt: Int?,
         val maxAttempts: Int = SYSTEM_ASSISTANT_FINAL_ANSWER_RECOVERY_MAX_ATTEMPTS,
     ) : SystemAssistantAnswerUiState
+}
+
+/** Loading the optional recent-history preview must never gate target selection or submission. */
+sealed interface SystemAssistantHistoryUiState {
+    data object NotLoaded : SystemAssistantHistoryUiState
+    data object Loading : SystemAssistantHistoryUiState
+    data object Ready : SystemAssistantHistoryUiState
+    data object Failed : SystemAssistantHistoryUiState
 }
 
 enum class SystemAssistantSubmissionErrorCode {
@@ -195,6 +211,7 @@ data class SystemAssistantUiState(
     val queueStatus: QueueStatus? = null,
     val submission: SystemAssistantSubmissionUiState = SystemAssistantSubmissionUiState.Idle,
     val answer: SystemAssistantAnswerUiState = SystemAssistantAnswerUiState.Ready,
+    val history: SystemAssistantHistoryUiState = SystemAssistantHistoryUiState.NotLoaded,
 ) {
     val canSubmit: Boolean
         get() = inputAvailability == SystemAssistantInputAvailability.Available &&

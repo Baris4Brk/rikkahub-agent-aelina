@@ -7,9 +7,12 @@ import androidx.paging.PagingData
 import androidx.paging.PagingSource
 import androidx.paging.map
 import androidx.room.withTransaction
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.withContext
 import me.rerere.ai.ui.UIMessage
 import me.rerere.rikkahub.data.db.AppDatabase
 import me.rerere.rikkahub.data.db.fts.MessageFtsManager
@@ -203,6 +206,11 @@ class ConversationRepository(
         return conversationDAO.existsById(uuid.toString())
     }
 
+    /** Lightweight ownership lookup; never loads or deserializes message nodes. */
+    suspend fun getAssistantIdOfConversation(uuid: Uuid): Uuid? =
+        conversationDAO.getAssistantIdByConversationId(uuid.toString())
+            ?.let { raw -> runCatching { Uuid.parse(raw) }.getOrNull() }
+
     suspend fun countConversations(): Int {
         return conversationDAO.countAll()
     }
@@ -375,8 +383,8 @@ class ConversationRepository(
             .mapNotNull { runCatching { Uuid.parse(it) }.getOrNull() }
             .toSet()
 
-        return database.withTransaction {
-            val nodes = mutableListOf<MessageNode>()
+        val entities = database.withTransaction {
+            val rows = mutableListOf<MessageNodeEntity>()
             var offset = 0
             val pageSize = 64
             while (true) {
@@ -392,21 +400,27 @@ class ConversationRepository(
                     continue
                 }
                 if (page.isEmpty()) break
-                page.forEach { entity ->
-                    val messages = JsonInstant.decodeFromString<List<UIMessage>>(entity.messages)
-                    val nodeId = Uuid.parse(entity.id)
-                    nodes.add(
-                        MessageNode(
-                            id = nodeId,
-                            messages = messages,
-                            selectIndex = entity.selectIndex,
-                            isFavorite = favoriteNodeIds.contains(nodeId)
-                        )
-                    )
-                }
+                rows += page
                 offset += page.size
             }
-            nodes
+            rows
+        }
+        // JSON decoding is CPU work and must not hold Room's transaction executor. Long agent
+        // conversations can contain hundreds of nodes; keeping the transaction open here made
+        // unrelated Paging loads appear empty while the system-assistant overlay was opening.
+        return withContext(Dispatchers.Default) {
+            entities.map { entity ->
+                // Long agent histories can contain hundreds of JSON blobs. Keep this CPU work
+                // off AppScope's main dispatcher and honour an overlay close between nodes.
+                ensureActive()
+                val nodeId = Uuid.parse(entity.id)
+                MessageNode(
+                    id = nodeId,
+                    messages = JsonInstant.decodeFromString<List<UIMessage>>(entity.messages),
+                    selectIndex = entity.selectIndex,
+                    isFavorite = favoriteNodeIds.contains(nodeId),
+                )
+            }
         }
     }
 

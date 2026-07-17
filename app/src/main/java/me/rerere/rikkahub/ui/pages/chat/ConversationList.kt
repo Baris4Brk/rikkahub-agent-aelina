@@ -25,10 +25,12 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.surfaceColorAtElevation
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -48,6 +50,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.paging.compose.LazyPagingItems
 import androidx.paging.compose.itemKey
+import androidx.paging.LoadState
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.data.model.Conversation
 import me.rerere.rikkahub.ui.theme.extendColors
@@ -70,6 +73,31 @@ sealed class ConversationListItem {
     ) : ConversationListItem()
 }
 
+internal enum class ConversationListPresentation {
+    Loading,
+    Error,
+    Empty,
+    Content,
+}
+
+internal fun conversationListPresentation(
+    itemCount: Int,
+    refresh: LoadState,
+): ConversationListPresentation {
+    if (itemCount > 0) return ConversationListPresentation.Content
+    return when (refresh) {
+        LoadState.Loading -> ConversationListPresentation.Loading
+        is LoadState.Error -> ConversationListPresentation.Error
+        is LoadState.NotLoading -> {
+            if (refresh.endOfPaginationReached) {
+                ConversationListPresentation.Empty
+            } else {
+                ConversationListPresentation.Loading
+            }
+        }
+    }
+}
+
 @Composable
 fun ColumnScope.ConversationList(
     current: Conversation,
@@ -84,6 +112,10 @@ fun ColumnScope.ConversationList(
     onMoveToAssistant: (Conversation) -> Unit = {}
 ) {
     var hasScrolledToCurrent by remember(current.id) { mutableStateOf(false) }
+    val presentation = conversationListPresentation(
+        itemCount = conversations.itemCount,
+        refresh = conversations.loadState.refresh,
+    )
 
     LaunchedEffect(current.id, conversations.itemCount, hasScrolledToCurrent) {
         if (hasScrolledToCurrent) return@LaunchedEffect
@@ -104,23 +136,62 @@ fun ColumnScope.ConversationList(
         modifier = modifier,
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        if (conversations.itemCount == 0) {
-            item {
+        when (presentation) {
+            ConversationListPresentation.Loading -> item {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(24.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    CircularProgressIndicator()
+                }
+            }
+
+            ConversationListPresentation.Error -> item {
                 Surface(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(16.dp),
                     shape = RoundedCornerShape(8.dp),
-                    color = MaterialTheme.colorScheme.surfaceContainerLow
+                    color = MaterialTheme.colorScheme.surfaceContainerLow,
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Text(
+                            text = stringResource(R.string.error_title_operation),
+                            style = MaterialTheme.typography.bodyLarge,
+                        )
+                        TextButton(onClick = conversations::retry) {
+                            Text(stringResource(R.string.local_llm_retry))
+                        }
+                    }
+                }
+            }
+
+            ConversationListPresentation.Empty -> item {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    shape = RoundedCornerShape(8.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerLow,
                 ) {
                     Text(
                         text = stringResource(id = R.string.chat_page_no_conversations),
                         style = MaterialTheme.typography.bodyLarge,
                         color = MaterialTheme.colorScheme.onSurface,
-                        modifier = Modifier.padding(16.dp)
+                        modifier = Modifier.padding(16.dp),
                     )
                 }
             }
+
+            ConversationListPresentation.Content -> Unit
         }
 
         items(

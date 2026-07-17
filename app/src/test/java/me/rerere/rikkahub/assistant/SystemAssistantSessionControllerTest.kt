@@ -2,6 +2,7 @@ package me.rerere.rikkahub.assistant
 
 import java.util.ArrayDeque
 import kotlin.coroutines.CoroutineContext
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -31,6 +32,30 @@ import org.junit.Test
 import kotlin.uuid.Uuid
 
 class SystemAssistantSessionControllerTest {
+    @Test
+    fun `resolved target becomes usable while cancellable history hydration continues`() {
+        val fixture = Fixture()
+        val hydrationGate = CompletableDeferred<Unit>()
+        fixture.backend.hydrationGate = hydrationGate
+        val controller = fixture.controller()
+
+        fixture.runCurrent()
+
+        assertEquals(fixture.assistant.id, controller.state.value.assistantId)
+        assertTrue(controller.state.value.canSubmit)
+        assertEquals(
+            SystemAssistantHistoryUiState.Loading,
+            controller.state.value.history,
+        )
+        assertEquals(listOf(fixture.conversationId), fixture.backend.hydrationCalls)
+
+        controller.close()
+        fixture.runCurrent()
+
+        assertTrue(fixture.backend.hydrationCancelled)
+        fixture.close()
+    }
+
     @Test
     fun `second user history is not presented as owner history in the overlay`() {
         val secondUserMessage = UIMessage.user("message from Seven").copy(
@@ -656,9 +681,22 @@ class SystemAssistantSessionControllerTest {
         var nextOutcome: CompletableDeferred<CommandOutcome>? = null
         var onSubmit: (SystemAssistantChatSubmission) -> Unit = {}
         var submitFailure: Throwable? = null
+        var hydrationGate: CompletableDeferred<Unit>? = null
+        val hydrationCalls = mutableListOf<Uuid>()
+        var hydrationCancelled = false
 
         override fun flows(conversationId: Uuid): SystemAssistantChatFlows =
             checkNotNull(chats[conversationId]) { "No fake chat for $conversationId" }.flows
+
+        override suspend fun hydrateConversation(conversationId: Uuid) {
+            hydrationCalls += conversationId
+            try {
+                hydrationGate?.await()
+            } catch (cancelled: CancellationException) {
+                hydrationCancelled = true
+                throw cancelled
+            }
+        }
 
         override suspend fun submit(
             submission: SystemAssistantChatSubmission,

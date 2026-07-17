@@ -1,7 +1,6 @@
 package me.rerere.rikkahub.assistant
 
 import me.rerere.rikkahub.data.datastore.Settings
-import me.rerere.rikkahub.data.model.Conversation
 import kotlin.uuid.Uuid
 
 const val DEFAULT_SYSTEM_ASSISTANT_OWNER_DISPLAY_NAME: String = "User"
@@ -11,9 +10,14 @@ fun interface SecondUserTargetSettingsReader {
     suspend fun read(): Settings
 }
 
-/** Read-only conversation seam. Deliberately exposes no create or update operation. */
+/**
+ * Read-only conversation-identity seam.
+ *
+ * The target resolver needs only ownership metadata. Returning a full Conversation here would
+ * make every overlay invocation deserialize the entire privileged history just to compare one ID.
+ */
 fun interface SecondUserTargetConversationReader {
-    suspend fun getById(id: Uuid): Conversation?
+    suspend fun findAssistantId(id: Uuid): Uuid?
 }
 
 sealed interface SecondUserTargetResolution {
@@ -64,16 +68,16 @@ class SecondUserTargetResolver(
             ?: return SecondUserTargetResolution.AssistantNotFound(assistantId)
         val conversationId = assistant.privilegedConversationId
             ?: return SecondUserTargetResolution.PrivilegedConversationNotConfigured(assistantId)
-        val conversation = conversationReader.getById(conversationId)
+        val actualAssistantId = conversationReader.findAssistantId(conversationId)
             ?: return SecondUserTargetResolution.ConversationNotFound(
                 assistantId = assistantId,
                 conversationId = conversationId,
             )
-        if (conversation.assistantId != assistantId) {
+        if (actualAssistantId != assistantId) {
             return SecondUserTargetResolution.ConversationAssistantMismatch(
                 assistantId = assistantId,
                 conversationId = conversationId,
-                actualAssistantId = conversation.assistantId,
+                actualAssistantId = actualAssistantId,
             )
         }
         return SecondUserTargetResolution.Resolved(

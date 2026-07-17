@@ -116,6 +116,12 @@ class SystemAssistantManifestTest {
         assertEquals("true", entry!!.androidExported)
         assertEquals(":voice_interactor", entry.androidProcess)
         assertEquals("true", entry.androidNoHistory)
+        assertEquals("true", entry.androidExcludeFromRecents)
+        assertTrue(
+            "The AI-key entry must explicitly opt out of the main RikkaHub task affinity",
+            entry.hasAttribute("android:taskAffinity"),
+        )
+        assertEquals("", entry.androidTaskAffinity)
         assertTrue(entry.hasAction(HARDWARE_OVERLAY_ACTION))
 
         val overlay = manifest
@@ -126,6 +132,13 @@ class SystemAssistantManifestTest {
         assertEquals("false", overlay!!.androidExported)
         assertEquals("", overlay.androidProcess)
         assertEquals("true", overlay.androidNoHistory)
+        assertEquals("true", overlay.androidExcludeFromRecents)
+        assertEquals("singleTask", overlay.androidLaunchMode)
+        assertTrue(
+            "The translucent surface must not resurrect the existing RikkaHub task",
+            overlay.hasAttribute("android:taskAffinity"),
+        )
+        assertEquals("", overlay.androidTaskAffinity)
     }
 
     @Test
@@ -160,6 +173,15 @@ class SystemAssistantManifestTest {
 
     private val Element.androidNoHistory: String
         get() = getAttribute("android:noHistory")
+
+    private val Element.androidExcludeFromRecents: String
+        get() = getAttribute("android:excludeFromRecents")
+
+    private val Element.androidTaskAffinity: String
+        get() = getAttribute("android:taskAffinity")
+
+    private val Element.androidLaunchMode: String
+        get() = getAttribute("android:launchMode")
 
     private val Element.androidLabel: String
         get() = getAttribute("android:label")

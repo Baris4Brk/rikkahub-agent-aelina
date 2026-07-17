@@ -14,6 +14,16 @@ internal fun isSystemAssistantHardwareInvocationAction(action: String?): Boolean
     action == SYSTEM_ASSISTANT_HARDWARE_INVOCATION_ACTION
 
 /**
+ * The exported entry already lives in an isolated task. Forwarding with NEW_TASK would make
+ * Android resolve the default RikkaHub affinity and resurrect RouteActivity behind the
+ * translucent surface whenever the main app had previously been opened.
+ */
+internal fun systemAssistantHardwareOverlayLaunchFlags(): Int =
+    Intent.FLAG_ACTIVITY_CLEAR_TOP or
+        Intent.FLAG_ACTIVITY_SINGLE_TOP or
+        Intent.FLAG_ACTIVITY_NO_ANIMATION
+
+/**
  * Minimal exported adapter for OEM hardware-key launchers that require an Activity target.
  *
  * It accepts no prompt or destination extras and opens the Activity-hosted overlay only for the
@@ -50,7 +60,7 @@ class SystemAssistantOverlayEntryActivity : Activity() {
         startActivity(
             Intent(this, SystemAssistantHardwareOverlayActivity::class.java).apply {
                 action = SYSTEM_ASSISTANT_HARDWARE_INVOCATION_ACTION
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                addFlags(systemAssistantHardwareOverlayLaunchFlags())
             },
         )
         finish()
