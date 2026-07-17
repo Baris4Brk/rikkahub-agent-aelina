@@ -1834,4 +1834,11 @@ mDNS 주소: .local 호스트네임을 사용하며, IP를 몰라도 같은 네�
   <string name="system_assistant_shortcut_desc">MagicOS에서 접근성 단축키로 시스템 어시스턴트를 선택하세요. 두 볼륨 키를 동시에 길게 누르면 RikkaHub 오버레이가 표시됩니다. 이 서비스는 창 내용을 읽거나 제스처를 수행하거나 스크린샷을 찍을 수 없습니다.</string>
   <string name="system_assistant_shortcut_service_declared">어시스턴트 단축키 서비스 선언됨</string>
   <string name="system_assistant_accessibility_settings_available">접근성 설정 사용 가능</string>
+  <string name="setting_files_page_cleanup_success">파일 %1$d개를 삭제했습니다.</string>
+  <string name="setting_files_page_cleanup_partial">파일 %1$d개를 삭제했으며 %2$d개는 삭제하지 못했습니다.</string>
+  <string name="setting_files_page_cleanup_confirm">파일 지우기</string>
+  <string name="setting_files_page_cleanup_content_description">업로드 파일 지우기</string>
+  <string name="setting_files_page_cleanup_message">업로드 폴더의 파일을 영구적으로 삭제합니다. 대화는 삭제되지 않습니다.</string>
+  <string name="setting_files_page_cleanup_title">모든 업로드 파일을 지울까요?</string>
+  <string name="setting_files_page_cleanup_failed">업로드 파일을 지우지 못했습니다. 아직 존재할 수 있는 파일의 기록은 유지했습니다.</string>
 </resources>

@@ -1854,4 +1854,11 @@ mDNS 地址：使用 .local 主机名，同一网络中的其他设备可通过�
   <string name="system_assistant_shortcut_desc">在 MagicOS 上，请将无障碍快捷方式选择为“系统助理”。同时长按两个音量键即可显示 RikkaHub 浮层。此快捷服务不能读取窗口、执行手势或截图。</string>
   <string name="system_assistant_shortcut_service_declared">助理快捷服务已声明</string>
   <string name="system_assistant_accessibility_settings_available">无障碍设置可用</string>
+  <string name="setting_files_page_cleanup_success">已删除 %1$d 个文件。</string>
+  <string name="setting_files_page_cleanup_partial">已删除 %1$d 个文件；有 %2$d 个文件无法删除。</string>
+  <string name="setting_files_page_cleanup_confirm">清理文件</string>
+  <string name="setting_files_page_cleanup_content_description">清理上传文件</string>
+  <string name="setting_files_page_cleanup_message">此操作会永久删除上传文件夹中的文件，但不会删除对话。</string>
+  <string name="setting_files_page_cleanup_title">清理所有上传文件？</string>
+  <string name="setting_files_page_cleanup_failed">无法清理上传文件。可能仍存在的文件所对应的记录已保留。</string>
 </resources>

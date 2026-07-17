@@ -40,6 +40,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.stringResource
@@ -50,6 +51,7 @@ import me.rerere.rikkahub.data.db.entity.ManagedFileEntity
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.data.files.FileFolders
 import me.rerere.rikkahub.data.files.FilesManager
+import me.rerere.rikkahub.data.files.ManagedFolder
 import me.rerere.rikkahub.ui.components.nav.BackButton
 import me.rerere.rikkahub.ui.context.LocalToaster
 import me.rerere.rikkahub.ui.theme.CustomColors
@@ -64,6 +66,7 @@ fun SettingFilesPage(
     val gridState = rememberLazyStaggeredGridState()
     val scope = rememberCoroutineScope()
     val toaster = LocalToaster.current
+    val context = LocalContext.current
     val folders = remember { listOf(FileFolders.UPLOAD) }
 
     // 预先获取字符串资源
@@ -72,6 +75,7 @@ fun SettingFilesPage(
 
     var selectedFolder by remember { mutableStateOf(FileFolders.UPLOAD) }
     var pendingDelete by remember { mutableStateOf<ManagedFileEntity?>(null) }
+    var showCleanupConfirmation by remember { mutableStateOf(false) }
     val files by filesManager.observe(selectedFolder).collectAsStateWithLifecycle(initialValue = emptyList())
 
     if (pendingDelete != null) {
@@ -105,11 +109,66 @@ fun SettingFilesPage(
         )
     }
 
+    if (showCleanupConfirmation) {
+        AlertDialog(
+            onDismissRequest = { showCleanupConfirmation = false },
+            title = { Text(stringResource(R.string.setting_files_page_cleanup_title)) },
+            text = { Text(stringResource(R.string.setting_files_page_cleanup_message)) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showCleanupConfirmation = false
+                        scope.launch {
+                            val result = runCatching {
+                                filesManager.cleanupFolder(ManagedFolder.Upload)
+                            }.getOrElse {
+                                toaster.show(
+                                    context.getString(R.string.setting_files_page_cleanup_failed),
+                                )
+                                return@launch
+                            }
+                            val message = when {
+                                result.complete -> context.getString(
+                                    R.string.setting_files_page_cleanup_success,
+                                    result.deletedFiles,
+                                )
+                                result.deletedFiles > 0 || result.removedRecords > 0 -> context.getString(
+                                    R.string.setting_files_page_cleanup_partial,
+                                    result.deletedFiles,
+                                    result.retainedFiles,
+                                )
+                                else -> context.getString(R.string.setting_files_page_cleanup_failed)
+                            }
+                            toaster.show(message)
+                        }
+                    },
+                ) {
+                    Text(stringResource(R.string.setting_files_page_cleanup_confirm))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showCleanupConfirmation = false }) {
+                    Text(stringResource(R.string.setting_files_page_cancel_action))
+                }
+            },
+        )
+    }
+
     Scaffold(
         topBar = {
             LargeFlexibleTopAppBar(
                 title = { Text(stringResource(R.string.setting_files_page_title)) },
                 navigationIcon = { BackButton() },
+                actions = {
+                    IconButton(onClick = { showCleanupConfirmation = true }) {
+                        Icon(
+                            imageVector = HugeIcons.Delete01,
+                            contentDescription = stringResource(
+                                R.string.setting_files_page_cleanup_content_description,
+                            ),
+                        )
+                    }
+                },
                 scrollBehavior = scrollBehavior,
                 colors = CustomColors.topBarColors
             )

@@ -1832,4 +1832,11 @@
   <string name="system_assistant_shortcut_desc">在 MagicOS 上，請將無障礙快捷方式選為「系統助理」。同時長按兩個音量鍵即可顯示 RikkaHub 浮層。此快捷服務無法讀取視窗、執行手勢或截圖。</string>
   <string name="system_assistant_shortcut_service_declared">助理快捷服務已宣告</string>
   <string name="system_assistant_accessibility_settings_available">無障礙設定可用</string>
+  <string name="setting_files_page_cleanup_success">已刪除 %1$d 個檔案。</string>
+  <string name="setting_files_page_cleanup_partial">已刪除 %1$d 個檔案；有 %2$d 個檔案無法刪除。</string>
+  <string name="setting_files_page_cleanup_confirm">清除檔案</string>
+  <string name="setting_files_page_cleanup_content_description">清除上傳檔案</string>
+  <string name="setting_files_page_cleanup_message">此操作會永久刪除上傳資料夾中的檔案，但不會刪除對話。</string>
+  <string name="setting_files_page_cleanup_title">清除所有上傳檔案？</string>
+  <string name="setting_files_page_cleanup_failed">無法清除上傳檔案。可能仍存在的檔案所對應的記錄已保留。</string>
 </resources>

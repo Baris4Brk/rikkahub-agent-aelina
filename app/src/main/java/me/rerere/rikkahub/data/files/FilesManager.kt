@@ -35,6 +35,25 @@ class FilesManager(
         private const val TAG = "FilesManager"
     }
 
+    private val managedFileIndex = object : ManagedFileIndex {
+        override suspend fun list(folder: String): List<ManagedFileEntity> =
+            repository.listByFolder(folder).first()
+
+        override suspend fun get(id: Long): ManagedFileEntity? = repository.getById(id)
+
+        override suspend fun insert(entity: ManagedFileEntity): ManagedFileEntity =
+            repository.insert(entity)
+
+        override suspend fun delete(id: Long): Int = repository.deleteById(id)
+    }
+
+    private val managedFolderCoordinator = ManagedFolderCoordinator(
+        disk = FileManagedFolderDisk(context.filesDir) { file ->
+            guessMimeType(file, file.name)
+        },
+        index = managedFileIndex,
+    )
+
     suspend fun saveManagedFromUri(
         folder: String,
         uri: Uri,
@@ -205,9 +224,10 @@ class FilesManager(
         val relativePaths = mutableSetOf<String>()
         uris.filter { it.toString().startsWith("file:") }.forEach { uri ->
             val file = uri.toFile()
-            getRelativePathInFilesDir(file)?.let { relativePaths.add(it) }
-            if (file.exists()) {
-                file.delete()
+            val relativePath = getRelativePathInFilesDir(file)
+            val absentAfterDelete = !file.exists() || runCatching { file.delete() }.getOrDefault(false)
+            if (absentAfterDelete && relativePath != null) {
+                relativePaths.add(relativePath)
             }
         }
         if (relativePaths.isNotEmpty()) {
@@ -323,41 +343,20 @@ class FilesManager(
         }
     }
 
-    suspend fun syncFolder(folder: String = FileFolders.UPLOAD): Int = withContext(Dispatchers.IO) {
-        val dir = File(context.filesDir, folder)
-        if (!dir.exists()) return@withContext 0
-        val files = dir.listFiles()?.filter { it.isFile } ?: return@withContext 0
-        var inserted = 0
-        files.forEach { file ->
-            val relativePath = "${folder}/${file.name}"
-            val existing = repository.getByPath(relativePath)
-            if (existing == null) {
-                val now = System.currentTimeMillis()
-                val displayName = file.name
-                val mimeType = guessMimeType(file, displayName)
-                repository.insert(
-                    ManagedFileEntity(
-                        folder = folder,
-                        relativePath = relativePath,
-                        displayName = displayName,
-                        mimeType = mimeType,
-                        sizeBytes = file.length(),
-                        createdAt = file.lastModified().takeIf { it > 0 } ?: now,
-                        updatedAt = now,
-                    )
-                )
-                inserted += 1
-            }
-        }
-        inserted
+    suspend fun syncFolder(
+        folder: ManagedFolder = ManagedFolder.Upload,
+    ): FolderSyncResult = withContext(Dispatchers.IO) {
+        managedFolderCoordinator.sync(folder)
+    }
+
+    suspend fun cleanupFolder(
+        folder: ManagedFolder = ManagedFolder.Upload,
+    ): FolderCleanupResult = withContext(Dispatchers.IO) {
+        managedFolderCoordinator.cleanup(folder)
     }
 
     suspend fun delete(id: Long, deleteFromDisk: Boolean = true): Boolean = withContext(Dispatchers.IO) {
-        val entity = repository.getById(id) ?: return@withContext false
-        if (deleteFromDisk) {
-            runCatching { getFile(entity).delete() }
-        }
-        repository.deleteById(id) > 0
+        managedFolderCoordinator.delete(id, deleteFromDisk)
     }
 
     private fun createTargetFile(folder: String, displayName: String, mimeType: String?): File {

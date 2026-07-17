@@ -1834,4 +1834,11 @@
   <string name="system_assistant_shortcut_desc">В MagicOS выберите «Системный ассистент» для ярлыка специальных возможностей. Удерживайте обе клавиши громкости, чтобы показать панель RikkaHub. Эта служба не может читать окна, выполнять жесты или делать снимки экрана.</string>
   <string name="system_assistant_shortcut_service_declared">Служба быстрого вызова ассистента объявлена</string>
   <string name="system_assistant_accessibility_settings_available">Настройки специальных возможностей доступны</string>
+  <string name="setting_files_page_cleanup_success">Удалено файлов: %1$d.</string>
+  <string name="setting_files_page_cleanup_partial">Удалено файлов: %1$d; не удалось удалить: %2$d.</string>
+  <string name="setting_files_page_cleanup_confirm">Удалить файлы</string>
+  <string name="setting_files_page_cleanup_content_description">Очистить загруженные файлы</string>
+  <string name="setting_files_page_cleanup_message">Файлы в папке загрузок будут удалены безвозвратно. Диалоги не будут удалены.</string>
+  <string name="setting_files_page_cleanup_title">Удалить все загруженные файлы?</string>
+  <string name="setting_files_page_cleanup_failed">Не удалось очистить загруженные файлы. Записи о файлах, которые могут всё ещё существовать, сохранены.</string>
 </resources>

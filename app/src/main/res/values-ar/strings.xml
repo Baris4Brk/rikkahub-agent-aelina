@@ -1563,4 +1563,11 @@
   <string name="system_assistant_shortcut_desc">في MagicOS، اختر مساعد النظام كاختصار لتسهيل الاستخدام. يؤدي الضغط المطول على زري مستوى الصوت معًا إلى إظهار لوحة RikkaHub. لا يمكن لهذه الخدمة قراءة النوافذ أو تنفيذ الإيماءات أو التقاط لقطات شاشة.</string>
   <string name="system_assistant_shortcut_service_declared">خدمة اختصار المساعد مُعلنة</string>
   <string name="system_assistant_accessibility_settings_available">إعدادات تسهيل الاستخدام متاحة</string>
+  <string name="setting_files_page_cleanup_success">تم حذف %1$d من الملفات.</string>
+  <string name="setting_files_page_cleanup_partial">تم حذف %1$d من الملفات؛ وتعذر حذف %2$d.</string>
+  <string name="setting_files_page_cleanup_confirm">مسح الملفات</string>
+  <string name="setting_files_page_cleanup_content_description">مسح الملفات المرفوعة</string>
+  <string name="setting_files_page_cleanup_message">سيؤدي هذا إلى حذف الملفات في مجلد الرفع نهائيًا. لن تُحذف المحادثات.</string>
+  <string name="setting_files_page_cleanup_title">هل تريد مسح كل الملفات المرفوعة؟</string>
+  <string name="setting_files_page_cleanup_failed">تعذر مسح الملفات المرفوعة. تم الاحتفاظ بسجلات الملفات التي قد تظل موجودة.</string>
 </resources>

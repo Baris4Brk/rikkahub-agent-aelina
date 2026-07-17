@@ -1835,5 +1835,11 @@ mDNSアドレス: .localホスト名を使用し、IPを知らなくても同じ
   <string name="system_assistant_shortcut_desc">MagicOS では、ユーザー補助ショートカットに「システムアシスタント」を選択してください。両方の音量キーを長押しすると RikkaHub オーバーレイが表示されます。このサービスは画面内容の取得、ジェスチャー操作、スクリーンショットを行えません。</string>
   <string name="system_assistant_shortcut_service_declared">アシスタントのショートカットサービスが宣言済み</string>
   <string name="system_assistant_accessibility_settings_available">ユーザー補助設定を開ける</string>
+  <string name="setting_files_page_cleanup_success">%1$d 件のファイルを削除しました。</string>
+  <string name="setting_files_page_cleanup_partial">%1$d 件のファイルを削除しました。%2$d 件は削除できませんでした。</string>
+  <string name="setting_files_page_cleanup_confirm">ファイルを消去</string>
+  <string name="setting_files_page_cleanup_content_description">アップロードファイルを消去</string>
+  <string name="setting_files_page_cleanup_message">アップロードフォルダー内のファイルを完全に削除します。会話は削除されません。</string>
+  <string name="setting_files_page_cleanup_title">すべてのアップロードファイルを消去しますか？</string>
+  <string name="setting_files_page_cleanup_failed">アップロードファイルを消去できませんでした。まだ存在する可能性があるファイルの記録は保持されました。</string>
 </resources>
-
