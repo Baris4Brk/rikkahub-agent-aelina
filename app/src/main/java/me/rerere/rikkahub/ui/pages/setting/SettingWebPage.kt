@@ -112,9 +112,17 @@ fun SettingWebPage() {
             putExtra(WebServerService.EXTRA_PORT, settings.webServerPort)
             putExtra(WebServerService.EXTRA_LOCALHOST_ONLY, settings.webServerLocalhostOnly)
         }
-        context.startForegroundService(intent)
-        scope.launch {
-            settingsStore.update { it.copy(webServerEnabled = true) }
+        runCatching {
+            context.startForegroundService(intent)
+        }.onSuccess {
+            scope.launch {
+                settingsStore.update { it.copy(webServerEnabled = true) }
+            }
+        }.onFailure { error ->
+            webServerManager.reportStartFailure(error)
+            scope.launch {
+                settingsStore.update { it.copy(webServerEnabled = false) }
+            }
         }
     }
 
@@ -355,17 +363,11 @@ fun SettingWebPage() {
                             )
                         },
                     )
-                    if (serverState.error != null) {
+                    if (serverState.failure != null) {
                         item(
                             headlineContent = {
                                 Text(
                                     text = stringResource(R.string.setting_page_web_server_error),
-                                    color = MaterialTheme.colorScheme.error
-                                )
-                            },
-                            supportingContent = {
-                                Text(
-                                    text = serverState.error ?: "",
                                     color = MaterialTheme.colorScheme.error
                                 )
                             },

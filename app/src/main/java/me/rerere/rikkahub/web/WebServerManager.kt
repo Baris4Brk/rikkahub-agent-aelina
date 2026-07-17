@@ -31,8 +31,35 @@ data class WebServerState(
     val localhostOnly: Boolean = false,
     val hostname: String? = null,
     val address: String? = null,
-    val error: String? = null
+    val failure: WebServerFailure? = null
 )
+
+enum class WebServerFailure {
+    StartFailed,
+    StopFailed,
+}
+
+internal fun WebServerState.beginStart(): WebServerState = copy(
+    isRunning = false,
+    isLoading = true,
+    hostname = null,
+    address = null,
+    failure = null,
+)
+
+internal fun WebServerState.startFailed(): WebServerState = copy(
+    isRunning = false,
+    isLoading = false,
+    hostname = null,
+    address = null,
+    failure = WebServerFailure.StartFailed,
+)
+
+internal fun shouldStopWebServerService(
+    state: WebServerState,
+    wasRunning: Boolean,
+): Boolean = !state.isRunning && !state.isLoading &&
+    (wasRunning || state.failure != null)
 
 class WebServerManager(
     private val context: Context,
@@ -67,11 +94,11 @@ class WebServerManager(
                 localhostOnly = localhostOnly
             )
             try {
-                _state.value = _state.value.copy(isLoading = true)
+                _state.value = baseState.beginStart()
                 Log.i(TAG, "Starting web server on $host:$port")
                 if (!isPortAvailable(port)) {
                     Log.w(TAG, "Port $port is already in use")
-                    _state.value = baseState.copy(error = "Port $port is already in use")
+                    _state.value = baseState.startFailed()
                     return@launch
                 }
                 server = startWebServer(port = port, host = host) {
@@ -100,14 +127,27 @@ class WebServerManager(
                 Log.i(TAG, "Web server started successfully on $host:$port")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to start web server", e)
-                _state.value = baseState.copy(error = e.message)
+                server = null
+                _state.value = baseState.startFailed()
             }
         }
     }
 
+    fun reportStartFailure(cause: Throwable) {
+        Log.e(TAG, "Web server foreground service could not start", cause)
+        server = null
+        _state.value = _state.value.startFailed()
+    }
+
     fun stop() {
         _state.value =
-            _state.value.copy(isRunning = false, isLoading = true, hostname = null, address = null, error = null)
+            _state.value.copy(
+                isRunning = false,
+                isLoading = true,
+                hostname = null,
+                address = null,
+                failure = null,
+            )
         appScope.launch {
             try {
                 Log.i(TAG, "Stopping web server")
@@ -122,7 +162,12 @@ class WebServerManager(
                 Log.i(TAG, "Web server stopped")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to stop web server", e)
-                _state.value = _state.value.copy(isLoading = false, error = e.message)
+                server = null
+                _state.value = _state.value.copy(
+                    isRunning = false,
+                    isLoading = false,
+                    failure = WebServerFailure.StopFailed,
+                )
             }
         }
     }

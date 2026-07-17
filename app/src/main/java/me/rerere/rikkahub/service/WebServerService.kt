@@ -20,6 +20,7 @@ import me.rerere.rikkahub.R
 import me.rerere.rikkahub.WEB_SERVER_NOTIFICATION_CHANNEL_ID
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.web.WebServerManager
+import me.rerere.rikkahub.web.shouldStopWebServerService
 import org.koin.android.ext.android.inject
 
 private const val TAG = "WebServerService"
@@ -47,7 +48,7 @@ class WebServerService : Service() {
             ACTION_START -> {
                 val port = intent.getIntExtra(EXTRA_PORT, 8080)
                 val localhostOnly = intent.getBooleanExtra(EXTRA_LOCALHOST_ONLY, false)
-                startForegroundCompat()
+                if (!startForegroundCompat()) return START_NOT_STICKY
                 startObservingState()
                 webServerManager.start(port = port, localhostOnly = localhostOnly)
             }
@@ -62,7 +63,7 @@ class WebServerService : Service() {
 
             null -> {
                 // 兜底：intent 为 null 时根据设置决定是否启动
-                startForegroundCompat()
+                if (!startForegroundCompat()) return START_NOT_STICKY
                 serviceScope.launch {
                     val settings = settingsStore.settingsFlowRaw.first()
                     if (settings.webServerEnabled) {
@@ -85,18 +86,29 @@ class WebServerService : Service() {
         serviceScope.cancel()
     }
 
-    private fun startForegroundCompat() {
+    private fun startForegroundCompat(): Boolean = runCatching {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             ServiceCompat.startForeground(
                 this,
                 NOTIFICATION_ID,
                 buildStartingNotification(),
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
             )
         } else {
             startForeground(NOTIFICATION_ID, buildStartingNotification())
         }
-    }
+    }.fold(
+        onSuccess = { true },
+        onFailure = { error ->
+            webServerManager.reportStartFailure(error)
+            runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
+            serviceScope.launch {
+                settingsStore.update { it.copy(webServerEnabled = false) }
+                stopSelf()
+            }
+            false
+        },
+    )
 
     private fun startObservingState() {
         // Check `isActive`, not just non-null: after a previous observer finishes (server
@@ -116,7 +128,8 @@ class WebServerService : Service() {
                         updateNotification(buildRunningNotification(url))
                     }
 
-                    wasRunning && !state.isRunning && !state.isLoading -> {
+                    shouldStopWebServerService(state, wasRunning) -> {
+                        settingsStore.update { it.copy(webServerEnabled = false) }
                         stopForeground(STOP_FOREGROUND_REMOVE)
                         stopSelf()
                     }
