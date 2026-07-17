@@ -66,4 +66,37 @@ class RegexOutputTransformerTest {
         // to an already persisted history item.
         assertEquals("aaaa", once.replaceRegexes(assistant, AssistantAffectScope.ASSISTANT, visual = false))
     }
+
+    @Test
+    fun `invalid pattern and missing replacement group preserve the current text`() {
+        val invalidPattern = Assistant(
+            regexes = listOf(
+                AssistantRegex(
+                    id = kotlin.uuid.Uuid.random(),
+                    findRegex = "[",
+                    replaceString = "hidden",
+                    affectingScope = setOf(AssistantAffectScope.ASSISTANT),
+                ),
+            ),
+        )
+        val invalidGroup = Assistant(
+            regexes = listOf(
+                AssistantRegex(
+                    id = kotlin.uuid.Uuid.random(),
+                    findRegex = "(answer)",
+                    replaceString = "\$2",
+                    affectingScope = setOf(AssistantAffectScope.ASSISTANT),
+                ),
+            ),
+        )
+
+        assertEquals(
+            "answer",
+            "answer".replaceRegexes(invalidPattern, AssistantAffectScope.ASSISTANT),
+        )
+        assertEquals(
+            "answer",
+            "answer".replaceRegexes(invalidGroup, AssistantAffectScope.ASSISTANT),
+        )
+    }
 }
