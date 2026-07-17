@@ -1,6 +1,7 @@
 package me.rerere.rikkahub.assistant
 
 import android.app.KeyguardManager
+import android.app.Activity
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -41,7 +42,7 @@ class AndroidSystemAssistantSessionAdapter(
     private val controllerFactory: SystemAssistantSessionControllerFactory,
 ) : SystemAssistantSessionAdapter {
     private val appContext = context.applicationContext
-    private val entries = WeakHashMap<RikkaVoiceInteractionSession, SessionEntry>()
+    private val entries = WeakHashMap<Any, SessionEntry>()
 
     override fun createContentView(session: RikkaVoiceInteractionSession): View = synchronized(entries) {
         entries.getOrPut(session) { SessionEntry(createViews(session.context)) }.views.root
@@ -51,9 +52,39 @@ class AndroidSystemAssistantSessionAdapter(
         session: RikkaVoiceInteractionSession,
         args: android.os.Bundle?,
         showFlags: Int,
+    ) = bindSurface(session, session.context, session::finish)
+
+    override fun onHide(session: RikkaVoiceInteractionSession) {
+        unbindSurface(session)
+    }
+
+    override fun onDestroy(session: RikkaVoiceInteractionSession) {
+        destroySurface(session)
+    }
+
+    fun createActivityContentView(activity: Activity): View = synchronized(entries) {
+        entries.getOrPut(activity) { SessionEntry(createViews(activity)) }.views.root
+    }
+
+    fun onActivityShow(activity: Activity) {
+        bindSurface(activity, activity, activity::finish)
+    }
+
+    fun onActivityHide(activity: Activity) {
+        unbindSurface(activity)
+    }
+
+    fun onActivityDestroy(activity: Activity) {
+        destroySurface(activity)
+    }
+
+    private fun bindSurface(
+        surface: Any,
+        viewContext: Context,
+        finishSurface: () -> Unit,
     ) {
         val entry = synchronized(entries) {
-            entries.getOrPut(session) { SessionEntry(createViews(session.context)) }
+            entries.getOrPut(surface) { SessionEntry(createViews(viewContext)) }
         }
         entry.closeBinding(appContext)
         val invokedFromKeyguard = isDeviceLocked()
@@ -63,7 +94,7 @@ class AndroidSystemAssistantSessionAdapter(
         entry.scope = scope
         entry.submitJob = null
         entry.deviceLocked = invokedFromKeyguard
-        entry.lockReceiver = createLockReceiver(session, entry)
+        entry.lockReceiver = createLockReceiver(entry, finishSurface)
         registerLockReceiver(entry.lockReceiver!!)
         entry.views.input.setText("")
         entry.views.send.setOnClickListener {
@@ -76,7 +107,7 @@ class AndroidSystemAssistantSessionAdapter(
                 }
             }
         }
-        entry.views.close.setOnClickListener { session.finish() }
+        entry.views.close.setOnClickListener { finishSurface() }
         entry.views.openChat.setOnClickListener {
             if (entry.deviceLocked ||
                 controller.state.value.inputAvailability ==
@@ -84,7 +115,7 @@ class AndroidSystemAssistantSessionAdapter(
             ) return@setOnClickListener
             controller.state.value.conversationId?.let { conversationId ->
                 openMainApp(RouteActivity.EXTRA_CONVERSATION_ID, conversationId.toString())
-                session.finish()
+                finishSurface()
             }
         }
         entry.views.configure.setOnClickListener {
@@ -93,7 +124,7 @@ class AndroidSystemAssistantSessionAdapter(
                 SystemAssistantInputAvailability.InvokedFromKeyguard
             ) return@setOnClickListener
             openMainApp(RouteActivity.EXTRA_OPEN_SYSTEM_ASSISTANT_SETTINGS, true)
-            session.finish()
+            finishSurface()
         }
         scope.launch {
             controller.state.collectLatest { state ->
@@ -104,12 +135,12 @@ class AndroidSystemAssistantSessionAdapter(
         }
     }
 
-    override fun onHide(session: RikkaVoiceInteractionSession) {
-        synchronized(entries) { entries[session] }?.closeBinding(appContext)
+    private fun unbindSurface(surface: Any) {
+        synchronized(entries) { entries[surface] }?.closeBinding(appContext)
     }
 
-    override fun onDestroy(session: RikkaVoiceInteractionSession) {
-        synchronized(entries) { entries.remove(session) }?.closeBinding(appContext)
+    private fun destroySurface(surface: Any) {
+        synchronized(entries) { entries.remove(surface) }?.closeBinding(appContext)
     }
 
     private fun openMainApp(extra: String, value: Any) {
@@ -258,14 +289,14 @@ class AndroidSystemAssistantSessionAdapter(
         }
 
     private fun createLockReceiver(
-        session: RikkaVoiceInteractionSession,
         entry: SessionEntry,
+        finishSurface: () -> Unit,
     ): BroadcastReceiver =
         object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
                 if (shouldTerminateSystemAssistantInvocation(intent?.action)) {
                     entry.closeBinding(appContext)
-                    session.finish()
+                    finishSurface()
                     return
                 }
                 entry.deviceLocked = isDeviceLocked()

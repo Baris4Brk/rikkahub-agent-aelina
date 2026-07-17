@@ -117,6 +117,15 @@ class SystemAssistantManifestTest {
         assertEquals(":voice_interactor", entry.androidProcess)
         assertEquals("true", entry.androidNoHistory)
         assertTrue(entry.hasAction(HARDWARE_OVERLAY_ACTION))
+
+        val overlay = manifest
+            .getElementsByTagName("activity")
+            .asElements()
+            .singleOrNull { it.androidName == HARDWARE_OVERLAY_ACTIVITY }
+        assertNotNull("The Honor hardware key needs a main-process surface fallback", overlay)
+        assertEquals("false", overlay!!.androidExported)
+        assertEquals("", overlay.androidProcess)
+        assertEquals("true", overlay.androidNoHistory)
     }
 
     @Test
@@ -182,6 +191,8 @@ class SystemAssistantManifestTest {
             ".assistant.SystemAssistantAccessibilityButtonService"
         const val HARDWARE_OVERLAY_ENTRY_ACTIVITY =
             ".assistant.SystemAssistantOverlayEntryActivity"
+        const val HARDWARE_OVERLAY_ACTIVITY =
+            ".assistant.SystemAssistantHardwareOverlayActivity"
         const val TEST_INVOCATION_ACTION =
             "me.rerere.rikkahub.action.SHOW_SYSTEM_ASSISTANT_TEST"
         const val ACCESSIBILITY_INVOCATION_ACTION =

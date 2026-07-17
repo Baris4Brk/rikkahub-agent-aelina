@@ -332,6 +332,14 @@
       </intent-filter>
     </activity>
 
+    <activity
+      android:name=".assistant.SystemAssistantHardwareOverlayActivity"
+      android:excludeFromRecents="true"
+      android:exported="false"
+      android:noHistory="true"
+      android:theme="@android:style/Theme.Translucent.NoTitleBar"
+      android:windowSoftInputMode="adjustResize" />
+
     <!-- In-app Browser Activity. Hosts the WebView the LLM drives via the browser_*
          tools. INTERNET is already declared at the top of this manifest; nothing else
          needed at install time. configChanges keeps the WebView alive across rotation
