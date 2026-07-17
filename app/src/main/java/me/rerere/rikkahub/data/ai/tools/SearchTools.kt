@@ -3,15 +3,18 @@ package me.rerere.rikkahub.data.ai.tools
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.put
 import me.rerere.ai.core.Tool
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.utils.JsonInstantPretty
 import me.rerere.rikkahub.utils.toLocalString
 import me.rerere.search.SearchService
+import me.rerere.search.SearchServiceFailureException
 import me.rerere.search.SearchServiceOptions
 import java.time.LocalDate
 import kotlin.uuid.Uuid
@@ -42,8 +45,8 @@ fun createSearchTools(settings: Settings): Set<Tool> {
                         commonOptions = settings.searchCommonOptions,
                         serviceOptions = options,
                     )
-                    val results =
-                        JsonInstantPretty.encodeToJsonElement(result.getOrThrow()).jsonObject.let { json ->
+                    val results = result.toSearchToolPayload { searchResult ->
+                        JsonInstantPretty.encodeToJsonElement(searchResult).jsonObject.let { json ->
                             val map = json.toMutableMap()
                             map["items"] =
                                 JsonArray(map["items"]!!.jsonArray.mapIndexed { index, item ->
@@ -54,6 +57,7 @@ fun createSearchTools(settings: Settings): Set<Tool> {
                                 })
                             JsonObject(map)
                         }
+                    }
                     listOf(UIMessagePart.Text(results.toString()))
                 }
             )
@@ -89,10 +93,25 @@ fun createSearchTools(settings: Settings): Set<Tool> {
                             commonOptions = settings.searchCommonOptions,
                             serviceOptions = options,
                         )
-                        val payload = JsonInstantPretty.encodeToJsonElement(result.getOrThrow()).jsonObject
+                        val payload = result.toSearchToolPayload { scrapedResult ->
+                            JsonInstantPretty.encodeToJsonElement(scrapedResult).jsonObject
+                        }
                         listOf(UIMessagePart.Text(payload.toString()))
                     }
                 ))
         }
     }
 }
+
+internal fun <T> Result<T>.toSearchToolPayload(
+    successMapper: (T) -> JsonObject,
+): JsonObject = fold(
+    onSuccess = successMapper,
+    onFailure = { error ->
+        val knownFailure = error as? SearchServiceFailureException ?: throw error
+        buildJsonObject {
+            put("success", false)
+            put("error", JsonInstantPretty.encodeToJsonElement(knownFailure.failure))
+        }
+    },
+)
