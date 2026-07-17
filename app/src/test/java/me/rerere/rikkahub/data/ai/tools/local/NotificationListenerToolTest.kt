@@ -57,6 +57,24 @@ class NotificationListenerToolTest {
     }
 
     @Test
+    fun `notification action schema has no sensitive-action bypass`() {
+        val schema = notificationActionClickTool().parameters()?.toString().orEmpty()
+
+        assertTrue(!schema.contains("allow_sensitive", ignoreCase = true))
+        assertTrue(!schema.contains("override", ignoreCase = true))
+    }
+
+    @Test
+    fun `notification action description distinguishes dispatch from observed effect`() {
+        val description = notificationActionClickTool().description
+
+        assertTrue(description.contains("ACTION_EXPIRED"))
+        assertTrue(description.contains("DISPATCHED"))
+        assertTrue(description.contains("EFFECT_OBSERVED"))
+        assertTrue(description.contains("Never retry", ignoreCase = true))
+    }
+
+    @Test
     fun `notification_reply rejects missing key`() {
         val tool = notificationReplyTool()
         val result = execTool(tool, """{"text":"hi"}""")

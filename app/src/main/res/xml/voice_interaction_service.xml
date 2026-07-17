@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<voice-interaction-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:recognitionService="me.rerere.rikkahub.assistant.RikkaNoOpRecognitionService"
+    android:sessionService="me.rerere.rikkahub.assistant.RikkaVoiceSessionService"
+    android:supportsAssist="true"
+    android:supportsLaunchVoiceAssistFromKeyguard="false" />

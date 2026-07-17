@@ -109,6 +109,8 @@ import me.rerere.rikkahub.ui.pages.setting.SettingAboutPage
 import me.rerere.rikkahub.ui.pages.setting.SettingAccessibilityPage
 import me.rerere.rikkahub.ui.pages.setting.SettingNotificationsPage
 import me.rerere.rikkahub.ui.pages.setting.SettingPermissionsPage
+import me.rerere.rikkahub.ui.pages.setting.CapabilityDiagnosticsPage
+import me.rerere.rikkahub.ui.pages.setting.EmergencyStopPage
 import me.rerere.rikkahub.ui.pages.setting.SettingPreferencesPage
 import me.rerere.rikkahub.ui.pages.setting.SettingPreferencesThemePage
 import me.rerere.rikkahub.ui.pages.setting.SettingPreferencesNotificationPage
@@ -119,6 +121,7 @@ import me.rerere.rikkahub.ui.pages.setting.SettingDonatePage
 import me.rerere.rikkahub.ui.pages.setting.SettingFilesPage
 import me.rerere.rikkahub.ui.pages.setting.SettingMcpPage
 import me.rerere.rikkahub.ui.pages.setting.SettingModelPage
+import me.rerere.rikkahub.ui.pages.setting.AlarmSettingsPage
 import me.rerere.rikkahub.ui.pages.setting.SettingPage
 import me.rerere.rikkahub.ui.pages.setting.SettingProviderDetailPage
 import me.rerere.rikkahub.ui.pages.setting.SettingProviderPage
@@ -126,6 +129,7 @@ import me.rerere.rikkahub.ui.pages.setting.SettingSearchDetailPage
 import me.rerere.rikkahub.ui.pages.setting.SettingSearchPage
 import me.rerere.rikkahub.ui.pages.setting.SettingTTSPage
 import me.rerere.rikkahub.ui.pages.setting.SettingSpeechPage
+import me.rerere.rikkahub.ui.pages.setting.SettingSystemAssistantPage
 import me.rerere.rikkahub.ui.pages.setting.SettingTelegramPage
 import me.rerere.rikkahub.ui.pages.setting.SettingWebPage
 import me.rerere.rikkahub.ui.pages.share.handler.ShareHandlerPage
@@ -145,6 +149,8 @@ private const val TAG = "RouteActivity"
 class RouteActivity : ComponentActivity() {
     companion object {
         const val EXTRA_OPEN_CODEX_SETTINGS = "open_codex_settings"
+        const val EXTRA_OPEN_SYSTEM_ASSISTANT_SETTINGS = "open_system_assistant_settings"
+        const val EXTRA_CONVERSATION_ID = "conversationId"
     }
 
     private val highlighter by inject<Highlighter>()
@@ -238,17 +244,32 @@ class RouteActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        if (intent.getBooleanExtra(EXTRA_OPEN_CODEX_SETTINGS, false)) {
-            val destination = Screen.SettingProviderDetail(DEFAULT_CODEX_PROVIDER_ID.toString())
+        consumeNavigationDestination(intent)?.let { destination ->
             navStack?.let { stack ->
                 if (stack.lastOrNull() != destination) stack.add(destination)
             }
-            intent.removeExtra(EXTRA_OPEN_CODEX_SETTINGS)
         }
-        // Navigate to the chat screen if a conversation ID is provided
-        intent.getStringExtra("conversationId")?.let { text ->
-            navStack?.add(Screen.Chat(text))
+    }
+
+    private fun consumeNavigationDestination(source: Intent): Screen? {
+        val destination = when {
+            source.getBooleanExtra(EXTRA_OPEN_SYSTEM_ASSISTANT_SETTINGS, false) -> {
+                Screen.SettingSystemAssistant
+            }
+            source.getBooleanExtra(EXTRA_OPEN_CODEX_SETTINGS, false) -> {
+                Screen.SettingProviderDetail(DEFAULT_CODEX_PROVIDER_ID.toString())
+            }
+            source.hasExtra(EXTRA_CONVERSATION_ID) -> {
+                source.getStringExtra(EXTRA_CONVERSATION_ID)?.let { conversationId ->
+                    Screen.Chat(conversationId)
+                }
+            }
+            else -> null
         }
+        source.removeExtra(EXTRA_OPEN_SYSTEM_ASSISTANT_SETTINGS)
+        source.removeExtra(EXTRA_OPEN_CODEX_SETTINGS)
+        source.removeExtra(EXTRA_CONVERSATION_ID)
+        return destination
     }
 
     @OptIn(ExperimentalComposeUiApi::class)
@@ -263,12 +284,19 @@ class RouteActivity : ComponentActivity() {
             eventBus.events.collect { event ->
                 when (event) {
                     is AppEvent.Speak -> tts.speak(event.text)
+                    AppEvent.OpenUsageAccessSettings -> {
+                        val intent = android.content.Intent(android.provider.Settings.ACTION_USAGE_ACCESS_SETTINGS).apply {
+                            addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                        startActivity(intent)
+                    }
                 }
             }
         }
         val migrationState by DatabaseMigrationTracker.state.collectAsStateWithLifecycle()
 
-        val startScreen = Screen.Chat(
+        val requestedStartScreen = remember { consumeNavigationDestination(intent) }
+        val startScreen = requestedStartScreen ?: Screen.Chat(
             id = if (readBooleanPreference("create_new_conversation_on_start", true)) {
                 Uuid.random().toString()
             } else {
@@ -281,14 +309,6 @@ class RouteActivity : ComponentActivity() {
 
         val backStack = rememberNavBackStack(startScreen)
         SideEffect { this@RouteActivity.navStack = backStack }
-
-        LaunchedEffect(backStack) {
-            if (intent.getBooleanExtra(EXTRA_OPEN_CODEX_SETTINGS, false)) {
-                val destination = Screen.SettingProviderDetail(DEFAULT_CODEX_PROVIDER_ID.toString())
-                if (backStack.lastOrNull() != destination) backStack.add(destination)
-                intent.removeExtra(EXTRA_OPEN_CODEX_SETTINGS)
-            }
-        }
 
         ShareHandler(backStack)
 
@@ -540,8 +560,28 @@ class RouteActivity : ComponentActivity() {
                                 SettingNotificationsPage()
                             }
 
+                            entry<Screen.SettingAlarm> {
+                                AlarmSettingsPage()
+                            }
+
                             entry<Screen.SettingPermissions> {
                                 SettingPermissionsPage()
+                            }
+
+                            entry<Screen.SettingEmergencyStop> {
+                                EmergencyStopPage()
+                            }
+
+                            entry<Screen.SettingDiagnostics> {
+                                CapabilityDiagnosticsPage()
+                            }
+
+                            entry<Screen.SettingDiagnosticsForConversation> { key ->
+                                CapabilityDiagnosticsPage(conversationId = key.conversationId)
+                            }
+
+                            entry<Screen.SettingSystemAssistant> {
+                                SettingSystemAssistantPage()
                             }
 
                             entry<Screen.Developer> {
@@ -792,6 +832,21 @@ sealed interface Screen : NavKey {
 
     @Serializable
     data object SettingNotifications : Screen
+
+    @Serializable
+    data object SettingAlarm : Screen
+
+    @Serializable
+    data object SettingEmergencyStop : Screen
+
+    @Serializable
+    data object SettingDiagnostics : Screen
+
+    @Serializable
+    data class SettingDiagnosticsForConversation(val conversationId: String) : Screen
+
+    @Serializable
+    data object SettingSystemAssistant : Screen
 
     @Serializable
     data object SettingPermissions : Screen

@@ -16,7 +16,7 @@ android {
     compileSdk = 37
 
     defaultConfig {
-        applicationId = "excp.rikkahub"
+        applicationId = "me.rerere.rikkahub"
         minSdk = 26
         targetSdk = 37
         versionCode = 164
@@ -41,27 +41,42 @@ android {
         }
     }
 
+    val localProperties = Properties().apply {
+        val localPropertiesFile = rootProject.file("local.properties")
+        if (localPropertiesFile.exists()) {
+            load(FileInputStream(localPropertiesFile))
+        }
+    }
+
     signingConfigs {
+        val configuredDebugStore = localProperties.getProperty("debugStoreFile")
+            ?: System.getenv("RIKKAHUB_DEBUG_KEYSTORE")
+        val debugStoreFile = configuredDebugStore?.let(::file)
+            ?: file("${System.getProperty("user.home")}/.android/debug.keystore")
+        if (debugStoreFile.isFile) {
+            create("legacyDebug") {
+                // Keep updates installable over an existing personal build while allowing a
+                // clean workstation to fall back to AGP's generated debug signing config.
+                storeFile = debugStoreFile
+                storePassword = localProperties.getProperty("debugStorePassword", "android")
+                keyAlias = localProperties.getProperty("debugKeyAlias", "androiddebugkey")
+                keyPassword = localProperties.getProperty("debugKeyPassword", "android")
+            }
+        }
+
         create("release") {
-            val localProperties = Properties()
-            val localPropertiesFile = rootProject.file("local.properties")
+            val storeFilePath = localProperties.getProperty("storeFile")
+            val storePasswordValue = localProperties.getProperty("storePassword")
+            val keyAliasValue = localProperties.getProperty("keyAlias")
+            val keyPasswordValue = localProperties.getProperty("keyPassword")
 
-            if (localPropertiesFile.exists()) {
-                localProperties.load(FileInputStream(localPropertiesFile))
-
-                val storeFilePath = localProperties.getProperty("storeFile")
-                val storePasswordValue = localProperties.getProperty("storePassword")
-                val keyAliasValue = localProperties.getProperty("keyAlias")
-                val keyPasswordValue = localProperties.getProperty("keyPassword")
-
-                if (storeFilePath != null && storePasswordValue != null &&
-                    keyAliasValue != null && keyPasswordValue != null
-                ) {
-                    storeFile = file(storeFilePath)
-                    storePassword = storePasswordValue
-                    keyAlias = keyAliasValue
-                    keyPassword = keyPasswordValue
-                }
+            if (storeFilePath != null && storePasswordValue != null &&
+                keyAliasValue != null && keyPasswordValue != null
+            ) {
+                storeFile = file(storeFilePath)
+                storePassword = storePasswordValue
+                keyAlias = keyAliasValue
+                keyPassword = keyPasswordValue
             }
         }
     }
@@ -80,7 +95,8 @@ android {
             buildConfigField("String", "UPDATE_API_URL", "\"\"")
         }
         debug {
-            applicationIdSuffix = ".debug"
+            signingConfig = signingConfigs.findByName("legacyDebug")
+                ?: signingConfigs.getByName("debug")
             buildConfigField("String", "VERSION_NAME", "\"${android.defaultConfig.versionName}\"")
             buildConfigField("String", "VERSION_CODE", "\"${android.defaultConfig.versionCode}\"")
             buildConfigField("String", "UPDATE_API_URL", "\"\"")
@@ -276,6 +292,10 @@ dependencies {
     implementation(libs.jlatexmath)
     implementation(libs.jlatexmath.font.greek)
     implementation(libs.jlatexmath.font.cyrillic)
+
+    // Structured shell/root bridge through Shizuku or Sui.
+    implementation(libs.shizuku.api)
+    implementation(libs.shizuku.provider)
 
     // mcp
     implementation(libs.modelcontextprotocol.kotlin.sdk)

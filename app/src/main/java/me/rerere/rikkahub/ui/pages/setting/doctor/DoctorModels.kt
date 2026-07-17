@@ -73,6 +73,7 @@ enum class AppRouteKey {
     SettingScheduledJobs,
     SettingWorkflows,
     SettingPermissions,
+    SettingDiagnostics,
     SettingProvider,
     Assistant,
 }

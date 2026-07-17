@@ -38,6 +38,7 @@ import me.rerere.ai.provider.ModelType
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.data.db.entity.WorkspaceEntity
 import me.rerere.rikkahub.data.model.Assistant
+import me.rerere.rikkahub.data.model.Conversation
 import me.rerere.rikkahub.ui.components.ai.ModelSelector
 import me.rerere.rikkahub.ui.components.ai.ReasoningButton
 import me.rerere.rikkahub.ui.components.nav.BackButton
@@ -65,6 +66,7 @@ fun AssistantBasicPage(id: String) {
     val providers by vm.providers.collectAsStateWithLifecycle()
     val tags by vm.tags.collectAsStateWithLifecycle()
     val workspaces by vm.workspaces.collectAsStateWithLifecycle()
+    val conversations by vm.conversations.collectAsStateWithLifecycle()
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
 
     Scaffold(
@@ -89,6 +91,7 @@ fun AssistantBasicPage(id: String) {
             providers = providers,
             tags = tags,
             workspaces = workspaces,
+            conversations = conversations,
             onUpdate = { vm.update(it) },
             vm = vm
         )
@@ -102,6 +105,7 @@ internal fun AssistantBasicContent(
     providers: List<me.rerere.ai.provider.ProviderSetting>,
     tags: List<DataTag>,
     workspaces: List<WorkspaceEntity>,
+    conversations: List<Conversation>,
     onUpdate: (Assistant) -> Unit,
     vm: AssistantDetailVM
 ) {
@@ -156,6 +160,52 @@ internal fun AssistantBasicContent(
                         )
                     },
                     modifier = Modifier.fillMaxWidth()
+                )
+            }
+
+            HorizontalDivider()
+
+            FormItem(
+                label = { Text(stringResource(R.string.assistant_privileged_conversation)) },
+                description = { Text(stringResource(R.string.assistant_privileged_conversation_desc)) },
+                modifier = Modifier.padding(8.dp),
+            ) {
+                val selectedConversation = conversations.firstOrNull {
+                    it.id == assistant.privilegedConversationId
+                }
+                Select(
+                    options = listOf<Conversation?>(null) + conversations,
+                    selectedOption = selectedConversation,
+                    onOptionSelected = { conversation ->
+                        vm.updateAssistant { current ->
+                            current.copy(privilegedConversationId = conversation?.id)
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    optionToString = { conversation ->
+                        conversation?.let {
+                            "${it.title.ifBlank { stringResource(R.string.assistant_privileged_untitled_conversation) }} · ${it.id.toString().take(8)}"
+                        } ?: stringResource(R.string.assistant_privileged_conversation_none)
+                    },
+                )
+            }
+
+            HorizontalDivider()
+
+            FormItem(
+                label = { Text(stringResource(R.string.assistant_privileged_identity_name)) },
+                description = { Text(stringResource(R.string.assistant_privileged_identity_name_desc)) },
+                modifier = Modifier.padding(8.dp),
+            ) {
+                OutlinedTextField(
+                    value = assistant.privilegedIdentityName,
+                    onValueChange = { value ->
+                        vm.updateAssistant { current ->
+                            current.copy(privilegedIdentityName = value.take(64))
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
                 )
             }
 
@@ -433,6 +483,24 @@ internal fun AssistantBasicContent(
                         checked = assistant.fastPathRouterEnabled,
                         onCheckedChange = {
                             onUpdate(assistant.copy(fastPathRouterEnabled = it))
+                        }
+                    )
+                }
+            )
+            HorizontalDivider()
+            FormItem(
+                modifier = Modifier.padding(8.dp),
+                label = {
+                    Text("不受限模式")
+                },
+                description = {
+                    Text("开启后跳过所有安全门（高风险、远程、后台、锁屏、来源检查），只有紧急停止仍有效。请慎重使用。")
+                },
+                tail = {
+                    Switch(
+                        checked = assistant.unrestricted,
+                        onCheckedChange = {
+                            onUpdate(assistant.copy(unrestricted = it))
                         }
                     )
                 }

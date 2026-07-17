@@ -24,6 +24,8 @@ import me.rerere.rikkahub.service.TelegramBotService.Companion.PARSE_MODE_HTML
 import me.rerere.rikkahub.service.TelegramBotService.Companion.SlashCommandLog
 import me.rerere.rikkahub.service.TelegramBotService.Companion.TAG
 import me.rerere.rikkahub.service.TelegramBotService.Companion.isRunning
+import me.rerere.rikkahub.service.chat.CommandOrigin
+import me.rerere.rikkahub.service.chat.SubmitResult
 import kotlin.uuid.Uuid
 
 /**
@@ -62,6 +64,8 @@ internal suspend fun TelegramBotService.handleBuiltInCommand(
         "/help", "/?" -> { sendHelp(m.chatId); true }
         "/new", "/reset", "/clear" -> { handleResetCommand(m.chatId); true }
         "/stop", "/cancel" -> { handleStopCommand(m.chatId); true }
+        "/interrupt" -> { handleInterruptCommand(m.chatId, arg); true }
+        "/steer" -> { handleSteerCommand(m.chatId, arg); true }
         "/status" -> { handleStatusCommand(m.chatId); true }
         "/model" -> { handleModelCommand(m.chatId, arg); true }
         "/ratelimit" -> { handleRateLimitCommand(m.chatId, arg); true }
@@ -94,6 +98,51 @@ internal suspend fun TelegramBotService.sendStart(chatId: Long) {
         ❓ /help — full command reference
     """.trimIndent()
     try { client.sendMessage(chatId, msg) } catch (_: Throwable) {}
+}
+
+internal suspend fun TelegramBotService.handleSteerCommand(chatId: Long, text: String) {
+    if (text.isBlank()) {
+        client.sendMessage(chatId, "用法：/steer 你的引导内容")
+        return
+    }
+    val mapping = chatRepo.getByChatId(chatId)
+    val conversationId = mapping?.conversationId?.let { runCatching { Uuid.parse(it) }.getOrNull() }
+    if (conversationId == null) {
+        client.sendMessage(chatId, "当前没有可引导的会话。")
+        return
+    }
+    when (val result = chatService.submitSteer(conversationId, text, origin = CommandOrigin.TELEGRAM)) {
+        is SubmitResult.Accepted -> client.sendMessage(
+            chatId,
+            "补充收到了。我会先把手上的这一步做完，再参考它继续，不会打断当前操作。",
+        )
+        is SubmitResult.QueueFull -> client.sendMessage(chatId, "现在收到的补充有点多，请稍后再发一次。")
+        is SubmitResult.Rejected -> client.sendMessage(chatId, "这条补充暂时没能加入：${result.reason}")
+        is SubmitResult.RuntimeUnavailable -> client.sendMessage(chatId, "当前对话暂时没有准备好：${result.reason}")
+    }
+}
+
+internal suspend fun TelegramBotService.handleInterruptCommand(chatId: Long, text: String) {
+    if (text.isBlank()) {
+        client.sendMessage(chatId, "用法：/interrupt 新的替代消息")
+        return
+    }
+    val mapping = chatRepo.getByChatId(chatId)
+    val conversationId = mapping?.conversationId?.let { runCatching { Uuid.parse(it) }.getOrNull() }
+    if (conversationId == null) {
+        client.sendMessage(chatId, "当前没有可打断的会话。")
+        return
+    }
+    when (val result = chatService.submitInterrupt(
+        conversationId,
+        listOf(UIMessagePart.Text(text)),
+        origin = CommandOrigin.TELEGRAM,
+    )) {
+        is SubmitResult.Accepted -> client.sendMessage(chatId, "我会先停下手头的任务，收好已经完成的部分，再按这条新消息继续。")
+        is SubmitResult.QueueFull -> client.sendMessage(chatId, "现在暂时停不下来，请稍后再试一次。")
+        is SubmitResult.Rejected -> client.sendMessage(chatId, "这条替代消息暂时没能接收：${result.reason}")
+        is SubmitResult.RuntimeUnavailable -> client.sendMessage(chatId, "这次对话暂时无法继续：${result.reason}")
+    }
 }
 
 internal suspend fun TelegramBotService.sendHelp(chatId: Long) {
@@ -479,41 +528,6 @@ internal fun TelegramBotService.recentFailedRunsOf(
         if (isError) failures++
     }
     return failures
-}
-
-/**
- * True if this chat's conversation has any Tool part that's been approved (or auto-
- * approved) but hasn't finished executing yet — typically a tool that backgrounded the
- * app to another activity (take_photo to camera, launch_app, system intents). The
- * tryLock-fail path treats this the same as a parked approval keyboard: a fresh user
- * message means abandon the in-flight tool, not bounce.
- */
-internal suspend fun TelegramBotService.hasInFlightApprovedTool(chatId: Long): Boolean {
-    val mapping = runCatching { chatRepo.getByChatId(chatId) }.getOrNull() ?: return false
-    val convId = runCatching { Uuid.parse(mapping.conversationId) }.getOrNull() ?: return false
-    val conv = runCatching { chatService.getConversationFlow(convId).value }.getOrNull() ?: return false
-    return conv.currentMessages
-        .flatMap { it.parts.filterIsInstance<UIMessagePart.Tool>() }
-        .any { !it.isPending && !it.isExecuted }
-}
-
-/**
- * Quietly cancel the prior turn for [chatId] without sending a "🛑 Cancelled" message.
- * Used by the auto-/stop path when the user sends a new text message while a Pending
- * tool approval is parked — they're implicitly asking us to drop the stuck turn and
- * answer the new question instead, so we cancel without noise.
- */
-internal suspend fun TelegramBotService.autoCancelStuckTurn(chatId: Long) {
-    val mapping = chatRepo.getByChatId(chatId) ?: return
-    val convId = runCatching { Uuid.parse(mapping.conversationId) }.getOrNull() ?: return
-    chatService.stopGeneration(convId)
-    turnJobs.remove(chatId)?.let { runCatching { it.cancelAndJoin() } }
-    cancelStaleApprovalKeyboards(chatId, reason = "auto-cancelled by new message")
-    runCatching {
-        org.koin.java.KoinJavaComponent.getKoin()
-            .get<me.rerere.rikkahub.subagent.SubAgentRegistry>()
-            .cancelAllForParent(convId.toString())
-    }
 }
 
 /**

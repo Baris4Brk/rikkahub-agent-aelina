@@ -34,15 +34,75 @@ class ChatCompletionsAPIMessageTest {
     private fun invokeBuildMessages(
         messages: List<UIMessage>,
         includeHistoryReasoning: Boolean = true,
+        requireToolReasoningContent: Boolean = false,
     ): JsonArray {
         val method = ChatCompletionsAPI::class.java.getDeclaredMethod(
             "buildMessages",
             List::class.java,
             Boolean::class.javaPrimitiveType,
             Boolean::class.javaPrimitiveType,
+            Boolean::class.javaPrimitiveType,
         )
         method.isAccessible = true
-        return method.invoke(api, messages, includeHistoryReasoning, false) as JsonArray
+        return method.invoke(
+            api,
+            messages,
+            includeHistoryReasoning,
+            false,
+            requireToolReasoningContent,
+        ) as JsonArray
+    }
+
+    @Test
+    fun `deepseek v4 tool turn keeps empty reasoning content field`() {
+        val messages = listOf(
+            UIMessage.user("List running processes"),
+            UIMessage(
+                role = MessageRole.ASSISTANT,
+                parts = listOf(
+                    createExecutedTool("call-1", "workspace_process_list", "{}", "[]"),
+                ),
+            ),
+        )
+
+        val result = invokeBuildMessages(
+            messages = messages,
+            requireToolReasoningContent = true,
+        )
+        val assistantToolTurn = result.first {
+            it.jsonObject["role"]?.jsonPrimitive?.content == "assistant"
+        }.jsonObject
+
+        assertTrue(assistantToolTurn.containsKey("reasoning_content"))
+        assertEquals("", assistantToolTurn["reasoning_content"]?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun `deepseek v4 keeps active tool reasoning when historical reasoning is disabled`() {
+        val messages = listOf(
+            UIMessage.user("Inspect the current state"),
+            UIMessage(
+                role = MessageRole.ASSISTANT,
+                parts = listOf(
+                    UIMessagePart.Reasoning("required active chain reasoning"),
+                    createExecutedTool("call-active", "read_status", "{}", "ok"),
+                ),
+            ),
+        )
+
+        val result = invokeBuildMessages(
+            messages = messages,
+            includeHistoryReasoning = false,
+            requireToolReasoningContent = true,
+        )
+        val assistantToolTurn = result.first {
+            it.jsonObject["role"]?.jsonPrimitive?.content == "assistant"
+        }.jsonObject
+
+        assertEquals(
+            "required active chain reasoning",
+            assistantToolTurn["reasoning_content"]?.jsonPrimitive?.content,
+        )
     }
 
     @Test

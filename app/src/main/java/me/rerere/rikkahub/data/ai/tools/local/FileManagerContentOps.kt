@@ -34,6 +34,13 @@ private fun guardOrNull(raw: String): List<UIMessagePart>? {
     return null
 }
 
+private fun guardMutationOrNull(raw: String): List<UIMessagePart>? {
+    ContentUriSafetyGuard.checkMutation(raw)?.let { v ->
+        return fmTextPart(fmErrEnvelope(v.code, v.detail))
+    }
+    return null
+}
+
 // ---------- list_files ----------
 
 internal fun listFilesContent(context: Context, raw: String, obj: JsonObject): List<UIMessagePart> {
@@ -116,7 +123,7 @@ internal fun readFileContent(context: Context, raw: String, obj: JsonObject): Li
 // ---------- write_binary_file ----------
 
 internal fun writeBinaryFileContent(context: Context, raw: String, obj: JsonObject): List<UIMessagePart> {
-    guardOrNull(raw)?.let { return it }
+    guardMutationOrNull(raw)?.let { return it }
     val b64 = obj["base64_content"]?.jsonPrimitive?.contentOrNull
         ?: return fmTextPart(fmErrEnvelope("missing_content", "base64_content is required"))
     val bytes = try {
@@ -143,7 +150,7 @@ internal fun writeBinaryFileContent(context: Context, raw: String, obj: JsonObje
 // ---------- delete_file ----------
 
 internal fun deleteFileContent(context: Context, raw: String, obj: JsonObject): List<UIMessagePart> {
-    guardOrNull(raw)?.let { return it }
+    guardMutationOrNull(raw)?.let { return it }
     val doc = ContentUriResolver.resolve(context, raw)
         ?: return fmTextPart(ContentUriResolver.notGrantedEnvelope(raw))
     val recursive = obj["recursive"]?.jsonPrimitive?.booleanOrNull ?: false
@@ -169,7 +176,7 @@ internal fun deleteFileContent(context: Context, raw: String, obj: JsonObject): 
 // ---------- create_directory ----------
 
 internal fun createDirectoryContent(context: Context, raw: String, obj: JsonObject): List<UIMessagePart> {
-    guardOrNull(raw)?.let { return it }
+    guardMutationOrNull(raw)?.let { return it }
     val name = obj["name"]?.jsonPrimitive?.contentOrNull
         ?: return fmTextPart(fmErrEnvelope(
             "missing_name",
@@ -270,7 +277,12 @@ internal fun moveOrCopyContent(
     // Open the source stream (file:// or content://).
     val srcStream = when {
         rawSrc.startsWith("content://") -> {
-            ContentUriSafetyGuard.check(rawSrc)?.let {
+            val violation = if (deleteSrc) {
+                ContentUriSafetyGuard.checkMutation(rawSrc)
+            } else {
+                ContentUriSafetyGuard.check(rawSrc)
+            }
+            violation?.let {
                 return fmTextPart(fmErrEnvelope(it.code, it.detail))
             }
             try {
@@ -282,7 +294,12 @@ internal fun moveOrCopyContent(
         }
         else -> {
             val expanded = AgentWorkspace.expand(rawSrc)
-            PathSafetyGuard.check(expanded)?.let {
+            val violation = if (deleteSrc) {
+                PathSafetyGuard.checkMutationTree(expanded)
+            } else {
+                PathSafetyGuard.check(expanded)
+            }
+            violation?.let {
                 return fmTextPart(fmErrEnvelope(it.code, it.detail))
             }
             val f = java.io.File(expanded)
@@ -296,7 +313,7 @@ internal fun moveOrCopyContent(
     // Open the destination stream (file:// or content://).
     val dstStream = when {
         rawDst.startsWith("content://") -> {
-            ContentUriSafetyGuard.check(rawDst)?.let {
+            ContentUriSafetyGuard.checkMutation(rawDst)?.let {
                 return fmTextPart(fmErrEnvelope(it.code, it.detail))
             }
             try {
@@ -308,7 +325,7 @@ internal fun moveOrCopyContent(
         }
         else -> {
             val expanded = AgentWorkspace.expand(rawDst)
-            PathSafetyGuard.check(expanded)?.let {
+            PathSafetyGuard.checkMutationTree(expanded)?.let {
                 return fmTextPart(fmErrEnvelope(it.code, it.detail))
             }
             val f = java.io.File(expanded)

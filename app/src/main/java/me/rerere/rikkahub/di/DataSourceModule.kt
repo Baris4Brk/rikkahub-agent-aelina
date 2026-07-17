@@ -36,6 +36,10 @@ import me.rerere.rikkahub.data.db.migrations.Migration_13_14
 import me.rerere.rikkahub.data.db.migrations.Migration_14_15
 import me.rerere.rikkahub.data.db.migrations.Migration_15_16
 import me.rerere.rikkahub.data.db.migrations.Migration_23_24
+import me.rerere.rikkahub.data.db.migrations.MIGRATION_26_27
+import me.rerere.rikkahub.data.db.migrations.MIGRATION_27_28
+import me.rerere.rikkahub.data.db.migrations.MIGRATION_28_29
+import me.rerere.rikkahub.service.chat.DurableCommandQueue
 import me.rerere.rikkahub.data.ai.mcp.McpManager
 import me.rerere.rikkahub.data.agentrun.AgentRunBootRecovery
 import me.rerere.rikkahub.data.agentrun.AgentRunRepository
@@ -47,6 +51,8 @@ import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
 import org.koin.dsl.module
 import org.koin.core.qualifier.named
+import me.rerere.rikkahub.data.alarm.AlarmRepository
+import me.rerere.rikkahub.data.alarm.AlarmScheduler
 import retrofit2.Retrofit
 import retrofit2.converter.kotlinx.serialization.asConverterFactory
 import java.util.Locale
@@ -61,7 +67,7 @@ val dataSourceModule = module {
         val context: Context = get()
         Room.databaseBuilder(context, AppDatabase::class.java, "rikka_hub")
             .setJournalMode(RoomDatabase.JournalMode.WRITE_AHEAD_LOGGING)
-            .addMigrations(Migration_6_7, Migration_11_12, Migration_13_14, Migration_14_15, Migration_15_16, Migration_23_24)
+            .addMigrations(Migration_6_7, Migration_11_12, Migration_13_14, Migration_14_15, Migration_15_16, Migration_23_24, MIGRATION_26_27, MIGRATION_27_28, MIGRATION_28_29)
             .addCallback(object : RoomDatabase.Callback() {
                 override fun onOpen(db: SupportSQLiteDatabase) {
                     val dictDir = SimpleDictManager.extractDict(context)
@@ -96,6 +102,8 @@ val dataSourceModule = module {
             )))
             .build()
     }
+
+    single { DurableCommandQueue(get<AppDatabase>().pendingChatCommandDao()) }
 
     single {
         AssistantTemplateLoader(settingsStore = get())
@@ -150,6 +158,11 @@ val dataSourceModule = module {
     single { AgentRunRepository(get()) }
     single { AgentRunBootRecovery(context = get(), repository = get()) }
 
+    // Alarm
+    single { get<AppDatabase>().alarmDao() }
+    single { AlarmRepository(get()) }
+    single { AlarmScheduler(context = get(), repository = get()) }
+
     single { McpManager(context = get(), settingsStore = get(), appScope = get(), filesManager = get()) }
 
     single {
@@ -161,6 +174,7 @@ val dataSourceModule = module {
             conversationRepo = get(),
             aiLoggingManager = get(),
             systemPromptBuilder = get(),
+            toolExecutionGate = get(),
         )
     }
 

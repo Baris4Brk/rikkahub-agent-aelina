@@ -1,6 +1,7 @@
 package me.rerere.ai.provider.providers.openai
 
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -11,6 +12,7 @@ import me.rerere.ai.provider.Model
 import me.rerere.ai.provider.ModelAbility
 import me.rerere.ai.provider.ProviderSetting
 import me.rerere.ai.provider.TextGenerationParams
+import me.rerere.ai.ui.FinishCategory
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
 import okhttp3.OkHttpClient
@@ -414,6 +416,59 @@ class ResponseAPIMessageTest {
                 requestBody["reasoning"]?.jsonObject?.get("effort")?.jsonPrimitive?.content,
             )
         }
+    }
+
+    @Test
+    fun `response api content filter terminal is safety not recoverable incomplete`() {
+        val response = Json.parseToJsonElement(
+            """
+            {
+              "id": "resp-filtered",
+              "model": "test-model",
+              "status": "incomplete",
+              "incomplete_details": {"reason": "content_filter"},
+              "output": [],
+              "usage": {"input_tokens": 10, "output_tokens": 0, "total_tokens": 10}
+            }
+            """.trimIndent(),
+        ).jsonObject
+
+        val chunk = api.parseResponseOutput(response)
+
+        assertEquals(FinishCategory.SAFETY, chunk.terminal?.category)
+        assertEquals("content_filter", chunk.terminal?.providerReason)
+    }
+
+    @Test
+    fun `response api refusal remains visible but terminal is safety`() {
+        val response = Json.parseToJsonElement(
+            """
+            {
+              "id": "resp-refusal",
+              "model": "test-model",
+              "status": "completed",
+              "output": [
+                {
+                  "type": "message",
+                  "content": [
+                    {"type": "refusal", "refusal": "I cannot help with that request."}
+                  ]
+                }
+              ],
+              "usage": {"input_tokens": 10, "output_tokens": 7, "total_tokens": 17}
+            }
+            """.trimIndent(),
+        ).jsonObject
+
+        val chunk = api.parseResponseOutput(response)
+        val text = chunk.choices.single().message?.parts
+            ?.filterIsInstance<UIMessagePart.Text>()
+            ?.singleOrNull()
+            ?.text
+
+        assertEquals(FinishCategory.SAFETY, chunk.terminal?.category)
+        assertEquals("refusal", chunk.terminal?.providerReason)
+        assertEquals("I cannot help with that request.", text)
     }
 
     // ==================== Helper Functions ====================

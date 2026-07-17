@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The compatibility recognizer is explicitly non-selectable; API 26+ can safely expose
+         the standard assistant components and use the system settings fallback. -->
+    <bool name="system_assistant_voice_service_enabled">true</bool>
+</resources>

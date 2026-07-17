@@ -96,6 +96,18 @@ class SubAgentRegistry {
         return count
     }
 
+    /** Cancel every active sub-agent regardless of its parent surface. */
+    fun cancelAllActive(): Int {
+        var count = 0
+        val toCancel = _runs.value.values
+            .filter { it.status == SubAgentStatus.RUNNING || it.status == SubAgentStatus.PENDING }
+            .map { it.id }
+        for (runId in toCancel) {
+            if (requestCancel(runId)) count++
+        }
+        return count
+    }
+
     fun clearJob(id: String) {
         activeJobs.remove(id)
     }

@@ -1,198 +1,195 @@
 package me.rerere.rikkahub.data.ai.tools.local
 
-import android.Manifest
 import android.content.Context
-import android.location.Location
-import android.location.LocationManager
-import android.util.Log
-import com.google.android.gms.common.ConnectionResult
-import com.google.android.gms.common.GoogleApiAvailability
-import com.google.android.gms.location.LocationServices
-import com.google.android.gms.location.Priority
-import kotlinx.coroutines.tasks.await
-import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonObjectBuilder
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.intOrNull
-import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 import me.rerere.ai.core.InputSchema
 import me.rerere.ai.core.Tool
 import me.rerere.ai.ui.UIMessagePart
 
-private const val TAG_LOC = "LocationTool"
+private const val MIN_LOCATION_TIMEOUT_MS = 5_000L
+private const val MAX_LOCATION_TIMEOUT_MS = 60_000L
 
-private fun errorPayload(message: String, recovery: String? = null): JsonObject =
-    buildJsonObject {
-        put("error", message)
-        if (recovery != null) put("recovery", recovery)
-    }
+fun locationTool(context: Context): Tool = createLocationTool { AndroidLocationSource(context) }
 
-private fun JsonObjectBuilder.putLocation(loc: Location, providerName: String) {
-    put("latitude", loc.latitude)
-    put("longitude", loc.longitude)
-    put("accuracy_m", loc.accuracy)
-    if (loc.hasAltitude()) put("altitude", loc.altitude)
-    if (loc.hasSpeed()) put("speed", loc.speed)
-    if (loc.hasBearing()) put("bearing", loc.bearing)
-    put("provider", providerName)
-    put("timestamp_ms", loc.time)
-}
+@Suppress("UNUSED_PARAMETER")
+internal fun locationTool(
+    context: Context,
+    resolver: LocationResolver,
+): Tool = createLocationTool { resolver }
 
-fun locationTool(context: Context): Tool = Tool(
+private fun createLocationTool(
+    resolverProvider: () -> LocationResolver,
+): Tool = Tool(
     name = "get_location",
-    description = """
-        Get the device's current location (latitude, longitude, accuracy).
-        Requires fine location permission and location services to be enabled.
-    """.trimIndent().replace("\n", " "),
+    description = "Get the device's current WGS84 location using Android native providers first. " +
+        "Works without Google Play Services and reports whether a result is fresh, cached, or precision-limited.",
     parameters = {
         InputSchema.Obj(
             properties = buildJsonObject {
                 put("accuracy", buildJsonObject {
                     put("type", "string")
-                    put(
-                        "description",
-                        "Location accuracy preference: high, balanced (default), or low"
-                    )
+                    put("enum", kotlinx.serialization.json.buildJsonArray {
+                        add(kotlinx.serialization.json.JsonPrimitive("high"))
+                        add(kotlinx.serialization.json.JsonPrimitive("balanced"))
+                        add(kotlinx.serialization.json.JsonPrimitive("low"))
+                    })
+                    put("description", "Accuracy preference. Defaults to balanced.")
                 })
                 put("timeout_ms", buildJsonObject {
                     put("type", "integer")
                     put(
                         "description",
-                        "Timeout in milliseconds (default 30000, min 1000, max 60000). After timeout, the tool falls back to the most recent cached fix instead of failing."
+                        "Total timeout in milliseconds, 5000..60000. Defaults: high=45000, balanced=30000, low=15000.",
                     )
+                })
+                put("allow_cached", buildJsonObject {
+                    put("type", "boolean")
+                    put("description", "Allow direct or fallback cached locations. Defaults to true.")
+                })
+                put("direct_cache_max_age_ms", buildJsonObject {
+                    put("type", "integer")
+                    put("description", "Maximum cache age that may skip a new request. High defaults to disabled.")
+                })
+                put("fallback_cache_max_age_ms", buildJsonObject {
+                    put("type", "integer")
+                    put("description", "Maximum cache age allowed only after fresh location attempts fail.")
                 })
             }
         )
     },
     execute = { input ->
-        val params = input.jsonObject
-        val accuracyStr = params["accuracy"]?.jsonPrimitive?.contentOrNull ?: "balanced"
-        val priority = when (accuracyStr) {
-            "high" -> Priority.PRIORITY_HIGH_ACCURACY
-            "balanced" -> Priority.PRIORITY_BALANCED_POWER_ACCURACY
-            "low" -> Priority.PRIORITY_LOW_POWER
+        val params = input as? JsonObject
+        val accuracyName = (params?.get("accuracy") as? JsonPrimitive)?.contentOrNull ?: "balanced"
+        val accuracy = RequestedAccuracy.fromWireName(accuracyName)
+        val invalid = when {
+            params == null -> invalidArgument("input must be a JSON object")
+            params["accuracy"] != null && params["accuracy"] !is JsonPrimitive ->
+                invalidArgument("accuracy must be a string")
+            accuracy == null -> invalidArgument("unknown accuracy: $accuracyName")
+            params["timeout_ms"] != null && (params["timeout_ms"] as? JsonPrimitive)?.longOrNull == null ->
+                invalidArgument("timeout_ms must be an integer")
+            params["allow_cached"] != null && (params["allow_cached"] as? JsonPrimitive)?.booleanOrNull == null ->
+                invalidArgument("allow_cached must be a boolean")
+            params["direct_cache_max_age_ms"] != null &&
+                (params["direct_cache_max_age_ms"] as? JsonPrimitive)?.longOrNull == null ->
+                invalidArgument("direct_cache_max_age_ms must be an integer")
+            params["fallback_cache_max_age_ms"] != null &&
+                (params["fallback_cache_max_age_ms"] as? JsonPrimitive)?.longOrNull == null ->
+                invalidArgument("fallback_cache_max_age_ms must be an integer")
             else -> null
         }
-        val timeoutMs = (params["timeout_ms"]?.jsonPrimitive?.intOrNull ?: 30000)
-            .coerceIn(1000, 60000)
-            .coerceIn(1000, 30000)
-
-        val payload: JsonObject = when {
-            priority == null -> errorPayload("unknown accuracy: $accuracyStr")
-
-            !PermissionHelper.hasRuntime(
-                context,
-                listOf(Manifest.permission.ACCESS_FINE_LOCATION)
-            ) -> errorPayload("permission ACCESS_FINE_LOCATION not granted")
-
-            else -> {
-                val lm = context.getSystemService(LocationManager::class.java)
-                if (lm == null) {
-                    errorPayload("location services disabled")
-                } else {
-                    val gpsEnabled = try {
-                        lm.isProviderEnabled(LocationManager.GPS_PROVIDER)
-                    } catch (_: Throwable) {
-                        false
-                    }
-                    val networkEnabled = try {
-                        lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER)
-                    } catch (_: Throwable) {
-                        false
-                    }
-                    if (!gpsEnabled && !networkEnabled) {
-                        errorPayload(
-                            "location services disabled",
-                            "Ask the user to enable Location in Settings → Location."
-                        )
-                    } else {
-                        val gmsAvailable = try {
-                            GoogleApiAvailability.getInstance()
-                                .isGooglePlayServicesAvailable(context) == ConnectionResult.SUCCESS
-                        } catch (t: Throwable) {
-                            Log.w(TAG_LOC, "GMS availability check failed", t)
-                            false
-                        }
-
-                        // Cheap path first: ask whichever cached fix the system already has.
-                        // On any phone that has used location at all today, this returns
-                        // instantly and we skip the slow getCurrentLocation flow entirely.
-                        val cachedNow: Location? = try {
-                            if (gmsAvailable) {
-                                val client = LocationServices.getFusedLocationProviderClient(context)
-                                client.lastLocation.await()
-                            } else null
-                        } catch (t: Throwable) {
-                            Log.w(TAG_LOC, "fused lastLocation failed", t)
-                            null
-                        }
-                            ?: try { lm.getLastKnownLocation(LocationManager.GPS_PROVIDER) } catch (_: SecurityException) { null }
-                            ?: try { lm.getLastKnownLocation(LocationManager.NETWORK_PROVIDER) } catch (_: SecurityException) { null }
-                            ?: try { lm.getLastKnownLocation(LocationManager.PASSIVE_PROVIDER) } catch (_: SecurityException) { null }
-
-                        // If we have a fresh cached fix (< 2 min) just return it. Saves the
-                        // 30s timeout dance for cases where the OS already knows where we are.
-                        val cachedAgeMs = cachedNow?.let { System.currentTimeMillis() - it.time }
-                        if (cachedNow != null && cachedAgeMs != null && cachedAgeMs < 120_000) {
-                            Log.i(TAG_LOC, "returning fresh cached fix age=${cachedAgeMs}ms provider=${cachedNow.provider}")
-                            buildJsonObject {
-                                putLocation(cachedNow, cachedNow.provider ?: "cached")
-                                put("cached", true)
-                                put("age_ms", cachedAgeMs)
-                            }
-                        } else if (gmsAvailable) {
-                            // No fresh cache — request a fresh fix via Fused. Bounded by
-                            // timeoutMs; on timeout, fall back to whatever (older) cached fix
-                            // we have rather than failing outright.
-                            val fresh: Location? = try {
-                                val client = LocationServices.getFusedLocationProviderClient(context)
-                                withTimeoutOrNull(timeoutMs.toLong()) {
-                                    client.getCurrentLocation(priority, null).await()
-                                }
-                            } catch (t: Throwable) {
-                                Log.w(TAG_LOC, "getCurrentLocation failed", t)
-                                null
-                            }
-                            when {
-                                fresh != null -> buildJsonObject { putLocation(fresh, "fused") }
-                                cachedNow != null -> buildJsonObject {
-                                    putLocation(cachedNow, cachedNow.provider ?: "cached")
-                                    put("cached", true)
-                                    put("age_ms", cachedAgeMs ?: -1L)
-                                    put("note", "fresh fix timed out after ${timeoutMs}ms; returning last known")
-                                }
-                                else -> {
-                                    Log.w(TAG_LOC, "no fix at all (gms): timeout=${timeoutMs}ms gps=$gpsEnabled net=$networkEnabled")
-                                    errorPayload(
-                                        "no fix yet",
-                                        "No location available. Try moving near a window / outdoors, or ask the user to open a maps app once to seed the location cache."
-                                    )
-                                }
-                            }
-                        } else {
-                            // No Google Play Services — direct LocationManager only.
-                            if (cachedNow != null) {
-                                buildJsonObject {
-                                    putLocation(cachedNow, cachedNow.provider ?: "lm")
-                                    put("cached", true)
-                                    if (cachedAgeMs != null) put("age_ms", cachedAgeMs)
-                                }
-                            } else {
-                                Log.w(TAG_LOC, "no fix at all (no gms): gps=$gpsEnabled net=$networkEnabled")
-                                errorPayload(
-                                    "no fix available",
-                                    "Google Play Services unavailable and no cached fix. Ask the user to open a maps app once, or enable Wi-Fi to allow network-based location."
-                                )
-                            }
-                        }
+        val payload = if (invalid != null || accuracy == null || params == null) {
+            invalid ?: invalidArgument("unknown accuracy: $accuracyName")
+        } else {
+            val timeoutMs = (params["timeout_ms"] as? JsonPrimitive)?.longOrNull ?: accuracy.defaultTimeoutMs
+            val allowCached = (params["allow_cached"] as? JsonPrimitive)?.booleanOrNull ?: true
+            val directCacheMaxAgeMs = (params["direct_cache_max_age_ms"] as? JsonPrimitive)?.longOrNull
+                ?: accuracy.defaultDirectCacheMaxAgeMs
+            val fallbackCacheMaxAgeMs = (params["fallback_cache_max_age_ms"] as? JsonPrimitive)?.longOrNull
+                ?: accuracy.defaultFallbackCacheMaxAgeMs
+            when {
+                timeoutMs !in MIN_LOCATION_TIMEOUT_MS..MAX_LOCATION_TIMEOUT_MS ->
+                    invalidArgument("timeout_ms must be between 5000 and 60000")
+                directCacheMaxAgeMs < 0L ->
+                    invalidArgument("direct_cache_max_age_ms must be non-negative")
+                fallbackCacheMaxAgeMs < 0L ->
+                    invalidArgument("fallback_cache_max_age_ms must be non-negative")
+                directCacheMaxAgeMs > fallbackCacheMaxAgeMs ->
+                    invalidArgument("direct_cache_max_age_ms must not exceed fallback_cache_max_age_ms")
+                else -> {
+                    try {
+                        resolverProvider().resolve(
+                            LocationRequest(
+                                accuracy = accuracy,
+                                timeoutMs = timeoutMs,
+                                allowCached = allowCached,
+                                directCacheMaxAgeMs = directCacheMaxAgeMs,
+                                fallbackCacheMaxAgeMs = fallbackCacheMaxAgeMs,
+                            )
+                        ).toJson()
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (failure: Throwable) {
+                        LocationResolution.Failure(
+                            code = "INTERNAL_ERROR",
+                            message = failure.message ?: "Unexpected location failure.",
+                            recovery = "Retry the location request.",
+                        ).toJson()
                     }
                 }
             }
         }
         listOf(UIMessagePart.Text(payload.toString()))
-    }
+    },
 )
+
+private fun invalidArgument(message: String): JsonObject = LocationResolution.Failure(
+    code = "INVALID_ARGUMENT",
+    message = message,
+    recovery = "Correct the input parameters and try again.",
+).toJson()
+
+private fun LocationResolution.toJson(): JsonObject = when (this) {
+    is LocationResolution.Success -> buildJsonObject {
+        put("ok", true)
+        put("latitude", fix.latitude)
+        put("longitude", fix.longitude)
+        put("accuracy_m", fix.accuracyM)
+        fix.altitudeM?.let {
+            put("altitude", it)
+            put("altitude_m", it)
+        }
+        fix.speedMps?.let {
+            put("speed", it)
+            put("speed_mps", it)
+        }
+        fix.bearingDegrees?.let {
+            put("bearing", it)
+            put("bearing_degrees", it)
+        }
+        put("provider", fix.provider)
+        put("source", source.wireName)
+        put("source_type", sourceType.wireName)
+        put("fresh", fresh)
+        put("cached", cached)
+        put("generated_after_request", generatedAfterRequest)
+        put("age_ms", ageMs.coerceAtLeast(0L))
+        put("permission_precision", permissionPrecision.wireName)
+        put("requested_accuracy", requestedAccuracy.wireName)
+        put("effective_precision", effectiveLocationPrecision(permissionPrecision, fix.accuracyM))
+        put("precision_limited_by_permission", permissionPrecision == PermissionPrecision.COARSE)
+        put("coordinate_system", "WGS84")
+        put("timestamp_ms", fix.timestampMs)
+        put("elapsed_realtime_nanos", fix.elapsedRealtimeNanos)
+        cacheStatus?.let { put("cache_status", it) }
+        warningCode?.let { put("warning_code", it) }
+        warning?.let { put("warning", it) }
+    }
+    is LocationResolution.Failure -> buildJsonObject {
+        put("ok", false)
+        put("code", code)
+        put("message", message)
+        put(
+            "recovery",
+            recovery ?: "Retry the location request or review the app and system location settings.",
+        )
+    }
+}
+
+internal fun effectiveLocationPrecision(
+    permissionPrecision: PermissionPrecision,
+    accuracyM: Float,
+): String = when {
+    permissionPrecision == PermissionPrecision.COARSE -> PermissionPrecision.COARSE.wireName
+    accuracyM <= 25f -> RequestedAccuracy.HIGH.wireName
+    accuracyM <= 100f -> RequestedAccuracy.BALANCED.wireName
+    else -> RequestedAccuracy.LOW.wireName
+}

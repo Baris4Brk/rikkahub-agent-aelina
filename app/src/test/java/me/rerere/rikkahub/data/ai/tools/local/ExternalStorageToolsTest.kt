@@ -1,5 +1,6 @@
 package me.rerere.rikkahub.data.ai.tools.local
 
+import me.rerere.rikkahub.BuildConfig
 import me.rerere.rikkahub.data.storage.StorageVolumeGrantStore
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -51,6 +52,43 @@ class ExternalStorageToolsTest {
         // The OS grant model is the gate, not an allowlist. A made-up authority still
         // passes the structural check.
         assertNull(ContentUriSafetyGuard.check("content://com.some.random.provider/tree/abc"))
+    }
+
+    @Test
+    fun `sensitive read guard blocks core data through own file provider`() {
+        val protectedPaths = listOf(
+            "datastore/settings.preferences_pb",
+            "upload/managed-attachment.jpg",
+            "browser-profile/Cookies",
+            "known_hosts",
+            "exports/conversation.json",
+        )
+
+        protectedPaths.forEach { path ->
+            assertNotNull(
+                "sensitive transfer must reject $path",
+                ContentUriSafetyGuard.checkSensitiveRead(
+                    "content://0@${BuildConfig.APPLICATION_ID}.fileprovider/upload/$path",
+                ),
+            )
+        }
+        assertNotNull(
+            ContentUriSafetyGuard.checkSensitiveRead(
+                "content://${BuildConfig.APPLICATION_ID}.fileprovider/" +
+                    "upload/workspace/%2e%2e/browser-profile/Cookies",
+            ),
+        )
+        assertNull(
+            ContentUriSafetyGuard.checkSensitiveRead(
+                "content://${BuildConfig.APPLICATION_ID}.fileprovider/upload/workspace/note.txt",
+            ),
+        )
+        assertNull(
+            ContentUriSafetyGuard.checkSensitiveRead(
+                "content://com.android.externalstorage.documents/" +
+                    "document/primary%3ADownload%2Fphoto.jpg",
+            ),
+        )
     }
 
     // ---------- classifyAuthority ----------

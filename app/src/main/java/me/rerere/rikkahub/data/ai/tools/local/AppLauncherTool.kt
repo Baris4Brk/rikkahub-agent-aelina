@@ -279,9 +279,13 @@ fun listInstalledAppsTool(context: Context): Tool = Tool(
     }
 )
 
+internal fun isTelephoneUrl(url: String): Boolean =
+    url.substringBefore(':', missingDelimiterValue = "").equals("tel", ignoreCase = true)
+
 /**
- * Hand a URL to whatever app is registered as the system handler for it (browsers for
- * http/https, the dialer for tel:, the maps app for geo:, etc.). Massively cheaper than
+ * Hand a non-telephone URL to whatever app is registered as the system handler for it
+ * (browsers for http/https, the maps app for geo:, etc.). Telephone URLs are rejected so
+ * direct call requests cannot accidentally degrade into merely opening the dialer. Massively cheaper than
  * driving Chrome's URL bar via accessibility set_text — for a "search hello in chrome"
  * request, just call open_url("https://www.google.com/search?q=hello") and the browser
  * lands directly on the results page.
@@ -296,21 +300,20 @@ fun openUrlTool(
 ): Tool = Tool(
     name = "open_url",
     description = """
-        Open a URL in the system's default handler app (browser for http/https, dialer for
-        tel:, maps for geo:, mailto: for email, etc.). Strongly preferred over
-        launch_app + screen automation when the user asks you to "search X in chrome",
-        "open google.com", "call this number", "show me this address on a map", or any
-        request that maps cleanly to a URL — typing into a browser URL bar via accessibility
-        is unreliable and slow. Optionally pass package_name to force a specific app
-        (e.g. com.android.chrome) when multiple handlers exist. Auto-wakes the screen if
-        it was off.
+        Open a non-telephone URL in the system's default handler app (browser for http/https,
+        maps for geo:, mail app for mailto:, etc.). Strongly preferred over launch_app plus
+        screen automation for requests such as "search X in chrome", "open google.com", or
+        "show me this address on a map". Telephone URLs are deliberately rejected. When the
+        user asks to call or dial someone, use call_phone instead; if only a contact name is
+        known, use search_contacts first. Optionally pass package_name to force a specific
+        handler app. Auto-wakes the screen if it was off.
     """.trimIndent().replace("\n", " "),
     parameters = {
         InputSchema.Obj(
             properties = buildJsonObject {
                 put("url", buildJsonObject {
                     put("type", "string")
-                    put("description", "Full URL with scheme. http(s):// for web, tel: for phone, geo:lat,lng for maps, mailto: for email.")
+                    put("description", "Full non-telephone URL with scheme. Use http(s):// for web, geo: for maps, or mailto: for email. Telephone tel: URLs are rejected; use call_phone.")
                 })
                 put("package_name", buildJsonObject {
                     put("type", "string")
@@ -326,6 +329,18 @@ fun openUrlTool(
             return@Tool listOf(
                 UIMessagePart.Text(
                     buildJsonObject { put("error", "url is required") }.toString()
+                )
+            )
+        }
+        if (isTelephoneUrl(url)) {
+            return@Tool listOf(
+                UIMessagePart.Text(
+                    buildJsonObject {
+                        put("error", "USE_CALL_PHONE")
+                        put("code", "USE_CALL_PHONE")
+                        put("message", "open_url does not handle telephone URLs.")
+                        put("recovery", "Use call_phone with phone_number. If only a contact name is known, use search_contacts first.")
+                    }.toString()
                 )
             )
         }

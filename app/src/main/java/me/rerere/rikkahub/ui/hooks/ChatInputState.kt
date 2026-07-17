@@ -13,6 +13,7 @@ class ChatInputState {
     val textContent = TextFieldState()
     var messageContent by mutableStateOf(listOf<UIMessagePart>())
     var editingMessage by mutableStateOf<Uuid?>(null)
+    var editingQueuedCommand by mutableStateOf<Uuid?>(null)
     private var editingParts: List<UIMessagePart>? = null
     private var editingAttachmentUrls: Set<String> = emptySet()
 
@@ -20,11 +21,14 @@ class ChatInputState {
         textContent.setTextAndPlaceCursorAtEnd("")
         messageContent = emptyList()
         editingMessage = null
+        editingQueuedCommand = null
         editingParts = null
         editingAttachmentUrls = emptySet()
     }
 
-    fun isEditing() = editingMessage != null
+    fun isEditing() = editingMessage != null || editingQueuedCommand != null
+
+    fun isEditingQueuedMessage() = editingQueuedCommand != null
 
     fun setMessageText(text: String) {
         textContent.setTextAndPlaceCursorAtEnd(text)

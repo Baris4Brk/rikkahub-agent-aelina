@@ -229,6 +229,17 @@ class ConversationRepository(
         messageFtsManager.indexConversation(conversation)
     }
 
+    suspend fun updateConversationTitle(conversationId: Uuid, title: String) {
+        conversationDAO.updateTitle(conversationId.toString(), title)
+    }
+
+    suspend fun updateConversationSuggestions(conversationId: Uuid, suggestions: List<String>) {
+        conversationDAO.updateSuggestions(
+            conversationId.toString(),
+            JsonInstant.encodeToString(suggestions),
+        )
+    }
+
     suspend fun deleteConversation(conversation: Conversation) {
         // 获取完整的 Conversation（包含 messageNodes）以正确清理文件
         val fullConversation = if (conversation.messageNodes.isEmpty()) {
@@ -305,6 +316,7 @@ class ConversationRepository(
             modeInjectionIds = JsonInstant.encodeToString(conversation.modeInjectionIds),
             lorebookIds = JsonInstant.encodeToString(conversation.lorebookIds),
             workspaceCwd = conversation.workspaceCwd ?: "",
+            folderId = conversation.folderId,
         )
     }
 
@@ -325,6 +337,7 @@ class ConversationRepository(
             modeInjectionIds = JsonInstant.decodeFromString(conversationEntity.modeInjectionIds),
             lorebookIds = JsonInstant.decodeFromString(conversationEntity.lorebookIds),
             workspaceCwd = conversationEntity.workspaceCwd.ifEmpty { null },
+            folderId = conversationEntity.folderId,
         )
     }
 

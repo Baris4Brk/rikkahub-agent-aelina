@@ -92,6 +92,20 @@ class SubAgentRegistryTest {
         assertEquals(3, r.cancelAllForParent("chat-X"))
     }
 
+    @Test fun `cancelAllActive cancels jobs from every parent without touching terminal runs`() {
+        val r = SubAgentRegistry()
+        val first = Job()
+        val second = Job()
+        r.addPending(makeRun("a", parentChat = "chat-A", status = SubAgentStatus.RUNNING), first)
+        r.addPending(makeRun("b", parentChat = "chat-B", status = SubAgentStatus.PENDING), second)
+        r.addPending(makeRun("done", status = SubAgentStatus.SUCCEEDED))
+
+        assertEquals(2, r.cancelAllActive())
+        assertTrue(first.isCancelled)
+        assertTrue(second.isCancelled)
+        assertEquals(0, r.cancelAllActive())
+    }
+
     @Test fun `unknown id returns null on get`() {
         val r = SubAgentRegistry()
         assertNull(r.get("nonexistent"))

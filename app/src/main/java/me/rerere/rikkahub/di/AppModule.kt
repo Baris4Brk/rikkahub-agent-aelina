@@ -3,7 +3,9 @@ package me.rerere.rikkahub.di
 import kotlinx.serialization.json.Json
 import me.rerere.highlight.Highlighter
 import me.rerere.rikkahub.AppScope
+import me.rerere.rikkahub.data.ai.AgentSafetySettings
 import me.rerere.rikkahub.data.ai.AILoggingManager
+import me.rerere.rikkahub.data.ai.ToolExecutionGate
 import me.rerere.rikkahub.data.ai.tools.LocalTools
 import me.rerere.rikkahub.data.ai.tools.local.BiometricResultBuffer
 import me.rerere.rikkahub.data.ai.tools.local.CameraResultBuffer
@@ -54,6 +56,21 @@ val appModule = module {
     single { TelegramBotPreferences(get()) }
     single { me.rerere.rikkahub.browser.BrowserPreferences(get()) }
     single { me.rerere.rikkahub.data.preferences.TermuxPreferences(get()) }
+    single<me.rerere.rikkahub.data.ai.tools.local.TermuxSessionEmergencyController> {
+        me.rerere.rikkahub.data.ai.tools.local.AndroidTermuxSessionEmergencyController(get())
+    }
+    single<me.rerere.rikkahub.data.phone.PhoneCallPreferences> {
+        me.rerere.rikkahub.data.phone.DataStorePhoneCallPreferences(get())
+    }
+    single<me.rerere.rikkahub.data.phone.PhoneCallPlatform> {
+        me.rerere.rikkahub.data.phone.AndroidPhoneCallPlatform(get())
+    }
+    single<me.rerere.rikkahub.data.phone.PhoneCallController> {
+        me.rerere.rikkahub.data.phone.DefaultPhoneCallController(get(), get())
+    }
+    single<me.rerere.rikkahub.data.packageinstaller.ApkInstallController> {
+        me.rerere.rikkahub.data.packageinstaller.AndroidApkInstallController(get())
+    }
     // Pass 3: Telegram-bound screenshot streamer for headless browser mode. Bound to the
     // [BrowserScreenshotStreamer] interface so [BrowserController.streamScreenshotIfHeadless]
     // can resolve it lazily via Koin without taking a constructor dep — avoids a cycle
@@ -134,6 +151,12 @@ val appModule = module {
 
     // Phase 12: Workflows
     single {
+        val safetySettings = get<AgentSafetySettings>()
+        me.rerere.rikkahub.workflow.execution.WorkflowEmergencyController(
+            persistedEmergencyStop = safetySettings::isEmergencyStop,
+        )
+    }
+    single {
         me.rerere.rikkahub.workflow.repository.WorkflowRepository(
             workflowDao = get<me.rerere.rikkahub.data.db.AppDatabase>().workflowDao(),
             workflowRunDao = get<me.rerere.rikkahub.data.db.AppDatabase>().workflowRunDao(),
@@ -147,6 +170,7 @@ val appModule = module {
             settingsStore = get(),
             contextProvider = get(),
             actionRunner = get(),
+            emergencyController = get(),
         ).also { engine ->
             // Bridge for the repo to notify the engine on delete so the engine's per-workflow
             // lock map doesn't leak. Lazy because both singletons have to exist first.
@@ -162,6 +186,83 @@ val appModule = module {
     }
 
     single { me.rerere.rikkahub.data.keyboard.KeyboardApiClient(get()) }
+
+    single { me.rerere.rikkahub.assistant.SystemAssistantRoleController(get()) }
+    single {
+        val settingsStore = get<me.rerere.rikkahub.data.datastore.SettingsStore>()
+        val conversationRepository = get<me.rerere.rikkahub.data.repository.ConversationRepository>()
+        me.rerere.rikkahub.assistant.SecondUserTargetResolver(
+            settingsReader = me.rerere.rikkahub.assistant.SecondUserTargetSettingsReader {
+                settingsStore.settingsFlow.value
+            },
+            conversationReader = me.rerere.rikkahub.assistant.SecondUserTargetConversationReader { conversationId ->
+                conversationRepository.getConversationById(conversationId)
+            },
+        )
+    }
+    single<me.rerere.rikkahub.assistant.SystemAssistantChatBackend> {
+        me.rerere.rikkahub.assistant.ChatServiceSystemAssistantBackend(get())
+    }
+    single<me.rerere.rikkahub.assistant.SystemAssistantAccessState> {
+        me.rerere.rikkahub.assistant.AndroidSystemAssistantAccessState(get())
+    }
+    single<me.rerere.rikkahub.assistant.SystemAssistantEmergencyStopState> {
+        me.rerere.rikkahub.assistant.AndroidSystemAssistantEmergencyStopState(get())
+    }
+    single<me.rerere.rikkahub.assistant.SystemAssistantSessionControllerFactory> {
+        me.rerere.rikkahub.assistant.DefaultSystemAssistantSessionControllerFactory(
+            targetResolver = get(),
+            chatBackend = get(),
+            accessState = get(),
+            emergencyStopState = get(),
+            parentScope = get<AppScope>(),
+        )
+    }
+    single {
+        me.rerere.rikkahub.assistant.AndroidSystemAssistantSessionAdapter(
+            context = get(),
+            controllerFactory = get(),
+        )
+    }
+
+    single { me.rerere.rikkahub.privilege.ShizukuBridgeManager(get()) }
+    single<me.rerere.rikkahub.privilege.PrivilegedPackageMetadataReader> {
+        me.rerere.rikkahub.privilege.AndroidPrivilegedPackageMetadataReader(get())
+    }
+    single<me.rerere.rikkahub.privilege.PrivilegedRuntimeStatusProvider> {
+        me.rerere.rikkahub.privilege.AndroidPrivilegedRuntimeStatusProvider(
+            context = get(),
+            bridge = get<me.rerere.rikkahub.privilege.ShizukuBridgeManager>(),
+            workspaceProcessManager = get(),
+        )
+    }
+    single {
+        val safetySettings = get<AgentSafetySettings>()
+        me.rerere.rikkahub.privilege.StructuredPrivilegedCommandExecutor(
+            bridge = get<me.rerere.rikkahub.privilege.ShizukuBridgeManager>(),
+            scope = get<AppScope>(),
+            packageMetadataReader = get(),
+            runtimeStatusProvider = get(),
+            protectedPackages = me.rerere.rikkahub.privilege.defaultStructuredProtectedPackages(get()),
+            criticalSystemPackages =
+                me.rerere.rikkahub.privilege.defaultStructuredCriticalSystemPackages(get()),
+            isEmergencyStopActive = safetySettings::isEmergencyStop,
+        )
+    }
+    single {
+        me.rerere.rikkahub.diagnostics.RuntimeDiagnosticsProvider(
+            context = get(),
+            settingsStore = get(),
+            conversationRepository = get(),
+            safetySettings = get(),
+            shizukuBridgeManager = get(),
+            workspaceProcessManager = get(),
+            keyboardApiClient = get(),
+        )
+    }
+    single {
+        me.rerere.rikkahub.data.ai.tools.local.AndroidGnssObservationSource(get())
+    }
 
     single {
         LocalTools(
@@ -198,6 +299,9 @@ val appModule = module {
             storageVolumeGrantStore = get(),
             okHttpClient = get(),
             keyboardApiClient = get(),
+            shizukuBridgeManager = get(),
+            phoneCallController = get(),
+            apkInstallController = get(),
         )
     }
 
@@ -225,6 +329,22 @@ val appModule = module {
         AILoggingManager(get(), get())
     }
 
+    // P0: Agent safety and security gate
+    single { AgentSafetySettings(context = get()) }
+    single { ToolExecutionGate(context = get(), safetySettings = get()) }
+    single {
+        me.rerere.rikkahub.data.ai.EmergencyStopCoordinator(
+            safetySettings = get(),
+            externalPrivilegeBridge = get<me.rerere.rikkahub.privilege.ShizukuBridgeManager>(),
+            workspaceProcessManager = get(),
+            workspaceRepository = get(),
+            chatService = get(),
+            termuxSessionController = get(),
+            subAgentRegistry = get(),
+            workflowEmergencyController = get(),
+        )
+    }
+
     // Phase 22A: Local-LLM on-device providers
     single { me.rerere.locallm.LocalRuntimePreferences(get()) }
     single { me.rerere.locallm.litert.LiteRtRuntime(get()) }
@@ -244,7 +364,14 @@ val appModule = module {
             filesManager = get(),
             skillManager = get(),
             toolApprovalPreferences = get(),
-            workspaceRepository = get()
+            workspaceRepository = get(),
+            workflowRepository = get(),
+            durableCommandQueue = get(),
+            toolExecutionGate = get(),
+            agentSafetySettings = get(),
+            shizukuBridgeManager = get(),
+            workspaceProcessManager = get(),
+            structuredPrivilegedCommandExecutor = get(),
         )
     }
 
@@ -276,6 +403,7 @@ val appModule = module {
             // LiteRT accelerator status row in the Doctor: shows the persisted backend
             // decision so a silent GPU -> CPU fallback is visible.
             localRuntimePreferences = get(),
+            runtimeDiagnosticsProvider = get(),
         )
     }
 }

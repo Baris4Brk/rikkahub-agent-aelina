@@ -1,5 +1,15 @@
 package me.rerere.rikkahub.data.ai.tools
 
+import android.util.Log
+import me.rerere.rikkahub.data.capability.ApprovalPolicy
+import me.rerere.rikkahub.data.capability.CapabilityCatalog
+import me.rerere.rikkahub.data.capability.ImplementationState
+import me.rerere.rikkahub.data.ai.tools.local.VERIFIED_ACCESSIBILITY_TOOL_NAMES
+import me.rerere.rikkahub.privilege.STRUCTURED_PRIVILEGED_TOOL_NAMES
+import me.rerere.rikkahub.privilege.STRUCTURED_PRIVILEGED_V2_TOOL_NAMES
+
+private const val TAG = "ToolApprovalDefaults"
+
 /**
  * Single source of truth for which tools require user approval before they execute.
  *
@@ -27,6 +37,35 @@ object ToolApprovalDefaults {
 
     /** Tool names that ALWAYS require approval unless the user has granted an exception. */
     val ALWAYS_ASK: Set<String> = setOf(
+        // Alarm — side-effecting
+        "alarm_create",
+        "alarm_delete",
+
+        // Media — reads sensitive user data
+        "media_list_images",
+        "media_list_audio",
+        "media_copy",
+        "media_move",
+
+        // Nearby devices — hardware identifiers and presence are privacy-sensitive reads
+        "bluetooth_scan",
+        "list_paired_bluetooth_devices",
+
+        // Health sensors — biometric readings are sensitive personal data
+        "list_health_sensors",
+        "read_health_sensor",
+
+        // GNSS status reveals precise location-adjacent satellite observations.
+        "get_gnss_status",
+
+        // Shizuku — privileged package inventory and mutations
+        "shizuku_status",
+        "list_packages",
+        "force_stop_app",
+        "clear_app_cache",
+
+        // Export — creates files
+        "export_conversation",
         // Shell / arbitrary code execution
         "termux_run_command",
         "termux_session_start",  // opens a persistent interactive shell; the meaningful consent moment
@@ -220,6 +259,15 @@ object ToolApprovalDefaults {
         // read-only tools (keystore_verify, keystore_list_keys, list_storage_volumes,
         // list_granted_directories, list_zip_contents) are deliberately NOT in this set.
         "send_sms",                 // sends a real SMS — costs money / leaves the device
+        "call_phone",               // directly dials a phone number
+        "install_apk",              // opens Android's installer for a validated APK
+        "external_bridge_run_command", // privileged-session-only Shizuku/Sui shell
+        "workspace_process_start",
+        "workspace_process_list",
+        "workspace_process_status",
+        "workspace_process_logs",
+        "workspace_process_stop",
+        "workspace_process_restart",
         "set_wallpaper",            // changes a visible device setting
         "keystore_generate_key",    // creates a hardware key (NO_ALWAYS_ALLOW below)
         "keystore_sign",            // signs arbitrary data with the user's key
@@ -243,7 +291,9 @@ object ToolApprovalDefaults {
         "keyboard_clear",
         "keyboard_set_cursor",
         "keyboard_select_range",
-    )
+    ) + STRUCTURED_PRIVILEGED_TOOL_NAMES +
+        STRUCTURED_PRIVILEGED_V2_TOOL_NAMES +
+        VERIFIED_ACCESSIBILITY_TOOL_NAMES
 
     /**
      * Tools whose approval prompt MUST drop the "Always Allow" button so the user has to
@@ -267,6 +317,16 @@ object ToolApprovalDefaults {
         // the user reviews the URL / source-label + skill name.
         "skill_install_from_url",
         "skill_install_from_text",
+        // call_phone — direct phone call. Never allow Always Allow.
+        "call_phone",
+        "install_apk",
+        "external_bridge_run_command",
+        "workspace_process_start",
+        "workspace_process_list",
+        "workspace_process_status",
+        "workspace_process_logs",
+        "workspace_process_stop",
+        "workspace_process_restart",
         // Phase 21 / Pass 2 — browser_eval_js runs arbitrary JavaScript in a real WebView
         // with the user's cookies, localStorage, and authenticated fetch surface. Even
         // after HARDLINE filters out shell-shaped strings + obvious dynamic-eval patterns,
@@ -283,7 +343,12 @@ object ToolApprovalDefaults {
         "keystore_decrypt",
         "nfc_write_tag",
         "grant_directory_access",
-    )
+        // Privileged package mutations must be confirmed for every invocation.
+        "force_stop_app",
+        "clear_app_cache",
+    ) + STRUCTURED_PRIVILEGED_TOOL_NAMES +
+        STRUCTURED_PRIVILEGED_V2_TOOL_NAMES +
+        VERIFIED_ACCESSIBILITY_TOOL_NAMES
 
     fun allowsAlwaysAllow(toolName: String): Boolean = toolName !in NO_ALWAYS_ALLOW
 
@@ -296,4 +361,50 @@ object ToolApprovalDefaults {
      */
     fun requiresApproval(toolName: String): Boolean =
         toolName in ALWAYS_ASK || toolName.startsWith("mcp__")
+
+    /**
+     * Verify that every [CapabilityCatalog] entry with [ApprovalPolicy.AlwaysAsk] is
+     * represented in [ALWAYS_ASK]. Logs warnings for mismatches.
+     *
+     * Call this on app start (debug builds only) to catch new capabilities that were
+     * registered in the catalog but forgot to appear in [ALWAYS_ASK].
+     *
+     * This is a BEST-EFFORT check: not every Catalog capability maps 1:1 to a tool name
+     * (some are UI-only, some are groups that contain multiple tool names). We match by
+     * the [CapabilityCatalog] entry's id.toSnakeCase() against tool names in ALWAYS_ASK.
+     * False positives (a catalog entry whose snake name doesn't match any tool) are
+     * expected and do NOT crash — they only log.
+     */
+    fun verifyCatalogConsistency() {
+        val missing = mutableListOf<String>()
+        for (cap in CapabilityCatalog.allCapabilities()) {
+            if (cap.implementationState != ImplementationState.Implemented) continue
+            if (cap.approvalPolicy != ApprovalPolicy.AlwaysAsk) continue
+            if (cap.toolNames.isNotEmpty()) {
+                cap.toolNames.filterNotTo(missing) { it in ALWAYS_ASK }
+                continue
+            }
+            // Derive a candidate tool name from the capability id for legacy descriptors.
+            val candidateName = cap.id.name
+                .replace(Regex("([A-Z])")) { "_${it.groupValues[1]}" }
+                .trimStart('_')
+                .lowercase()
+            // The candidate might match a specific tool name or part of it.
+            // We check if ANY tool name in ALWAYS_ASK starts with or contains the candidate.
+            val found = ALWAYS_ASK.any { toolName ->
+                toolName.contains(candidateName, ignoreCase = true) ||
+                    candidateName.contains(toolName, ignoreCase = true)
+            }
+            if (!found) {
+                // Some entries legitimately have no tool name (they're manual-only or
+                // reserved). Skip those.
+                if (cap.localToolOption != null) {
+                    missing.add("${cap.id.name} ($candidateName)")
+                }
+            }
+        }
+        if (missing.isNotEmpty()) {
+            Log.w(TAG, "verifyCatalogConsistency: Capabilities with AlwaysAsk not found in ALWAYS_ASK: $missing")
+        }
+    }
 }

@@ -18,6 +18,16 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import me.rerere.rikkahub.data.ai.SteeringState
+import me.rerere.rikkahub.service.chat.CommandOrigin
+import me.rerere.rikkahub.service.chat.QueueStatus
+import me.rerere.rikkahub.service.chat.QueuedMessageUiEntry
+import me.rerere.rikkahub.service.chat.RawUserContent
+import me.rerere.rikkahub.service.chat.RuntimeState
+import me.rerere.rikkahub.service.chat.SteeringHistoryMode
+import me.rerere.rikkahub.service.chat.SteeringScope
+import me.rerere.rikkahub.service.chat.SteeringUiEntry
+import me.rerere.rikkahub.service.chat.SubmitResult
 import me.rerere.ai.provider.Model
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
@@ -71,6 +81,26 @@ class ChatVM(
     val processingStatus: StateFlow<String?> =
         chatService
             .getProcessingStatusFlow(_conversationId)
+
+    val runtimeState: StateFlow<RuntimeState> =
+        chatService.getRuntimeStateFlow(_conversationId)
+            .stateIn(viewModelScope, SharingStarted.Eagerly, RuntimeState.Hydrating)
+
+    val queueStatus: StateFlow<QueueStatus> =
+        chatService.getQueueStatusFlow(_conversationId)
+            .stateIn(viewModelScope, SharingStarted.Eagerly, QueueStatus(false, 0, null))
+
+    val queuedMessages: StateFlow<List<QueuedMessageUiEntry>> =
+        chatService.getQueuedMessagesFlow(_conversationId)
+            .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    val steeringStatus: StateFlow<Map<Uuid, SteeringState>> =
+        chatService.getSteeringStatusFlow(_conversationId)
+            .stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
+
+    val steeringEntries: StateFlow<Map<Uuid, SteeringUiEntry>> =
+        chatService.getSteeringEntriesFlow(_conversationId)
+            .stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
 
     val conversationJobs = chatService
         .getConversationJobs()
@@ -170,10 +200,122 @@ class ChatVM(
      * @param content 消息内容
      * @param answer 是否触发消息生成，如果为false，则仅添加消息到消息列表中
      */
-    fun handleMessageSend(content: List<UIMessagePart>,answer: Boolean = true) {
+    fun handleMessageSend(content: List<UIMessagePart>, answer: Boolean = true) {
         if (content.isEmptyInputMessage()) return
 
-        chatService.sendMessage(_conversationId, content, answer)
+        viewModelScope.launch {
+            reportSubmitResult(
+                chatService.submitUserMessage(
+                    conversationId = _conversationId,
+                    content = content,
+                    answer = answer,
+                    origin = CommandOrigin.APP_UI,
+                )
+            )
+        }
+    }
+
+    fun handleSteer(
+        text: String,
+        scope: SteeringScope = SteeringScope.REMAINDER_OF_RUN,
+        historyMode: SteeringHistoryMode = SteeringHistoryMode.TRANSIENT,
+    ) {
+        viewModelScope.launch {
+            reportSubmitResult(
+                chatService.submitSteer(
+                    conversationId = _conversationId,
+                    text = text,
+                    scope = scope,
+                    origin = CommandOrigin.APP_UI,
+                    historyMode = historyMode,
+                )
+            )
+        }
+    }
+
+    fun toggleSteeringHistoryMode(commandId: Uuid) {
+        val entry = steeringEntries.value[commandId] ?: return
+        if (!entry.editable) return
+        val next = when (entry.historyMode) {
+            SteeringHistoryMode.TRANSIENT -> SteeringHistoryMode.PERSISTENT
+            SteeringHistoryMode.PERSISTENT -> SteeringHistoryMode.TRANSIENT
+        }
+        chatService.updateSteeringHistoryMode(_conversationId, commandId, next)
+    }
+
+    fun handleInterrupt(content: List<UIMessagePart>, answer: Boolean = true) {
+        if (content.isEmptyInputMessage()) return
+        reportSubmitResult(chatService.submitInterrupt(_conversationId, content, answer, CommandOrigin.APP_UI))
+    }
+
+    fun resumeQueue() {
+        viewModelScope.launch {
+            reportSubmitResult(chatService.resumeQueue(_conversationId, CommandOrigin.APP_UI))
+        }
+    }
+
+    fun clearQueue() {
+        viewModelScope.launch {
+            reportSubmitResult(chatService.clearPendingQueue(_conversationId))
+        }
+    }
+
+    fun beginEditQueuedMessage(entry: QueuedMessageUiEntry) {
+        inputState.editingMessage = null
+        inputState.editingQueuedCommand = entry.commandId
+        inputState.setContents(entry.content.parts)
+    }
+
+    fun updateQueuedMessage(commandId: Uuid, parts: List<UIMessagePart>) {
+        if (parts.isEmptyInputMessage()) return
+        viewModelScope.launch {
+            reportSubmitResult(
+                chatService.updateQueuedMessage(
+                    conversationId = _conversationId,
+                    commandId = commandId,
+                    content = RawUserContent(
+                        parts = parts,
+                        answer = queuedMessages.value
+                            .firstOrNull { it.commandId == commandId }
+                            ?.content
+                            ?.answer
+                            ?: true,
+                    ),
+                )
+            )
+        }
+    }
+
+    fun promoteQueuedMessage(commandId: Uuid) {
+        viewModelScope.launch {
+            reportSubmitResult(
+                chatService.promoteQueuedMessageToSteering(_conversationId, commandId)
+            )
+        }
+    }
+
+    fun cancelQueuedMessage(commandId: Uuid) {
+        viewModelScope.launch {
+            reportSubmitResult(chatService.cancelQueuedCommand(_conversationId, commandId))
+        }
+    }
+
+    private fun reportSubmitResult(result: SubmitResult) {
+        when (result) {
+            is SubmitResult.Accepted -> Unit
+            is SubmitResult.QueueFull -> chatService.addError(
+                IllegalStateException("现在等着处理的消息已满（最多 ${result.limit} 条），请稍后再发"),
+                conversationId = _conversationId,
+            )
+            is SubmitResult.RuntimeUnavailable -> chatService.addError(
+                IllegalStateException("这次对话暂时没有准备好：${result.reason}"),
+                conversationId = _conversationId,
+            )
+            is SubmitResult.Rejected -> chatService.addError(
+                IllegalStateException("这条消息暂时没能接收：${result.reason}"),
+                conversationId = _conversationId,
+            )
+        }
     }
 
     fun handleMessageEdit(parts: List<UIMessagePart>, messageId: Uuid) {

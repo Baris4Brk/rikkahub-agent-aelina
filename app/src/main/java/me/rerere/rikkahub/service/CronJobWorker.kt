@@ -10,8 +10,7 @@ import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.uuid.Uuid
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.buildJsonObject
@@ -30,6 +29,7 @@ import me.rerere.rikkahub.data.model.Conversation
 import me.rerere.rikkahub.data.repository.ConversationRepository
 import me.rerere.rikkahub.data.repository.ScheduledJobRepository
 import me.rerere.rikkahub.data.repository.ScheduledJobRunRepository
+import me.rerere.rikkahub.service.chat.CommandOutcome
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.inject
 
@@ -39,26 +39,13 @@ private const val TAG = "CronJobWorker"
 internal const val REPLAY_WINDOW_MS = 10L * 60_000L
 
 /**
- * Wait for the ChatService generation job on [flow] to terminate (transition to null)
- * within a wall-clock [timeoutMs] cap. Returns `true` on natural completion, `false` if
- * the cap fired first.
- *
- * The `Unit` sentinel is load-bearing: `.first { it == null }` returns the matched value
- * (null), and `withTimeoutOrNull` also returns null on timeout. Without the sentinel the
- * two outcomes are indistinguishable — every successful LLM-mode cron run was
- * misclassified as `timed_out` until this fix. (SubAgentEngine carries the same fix
- * inline; this helper exists so a JVM unit test can pin the contract.)
+ * Wait for the exact command submitted by the cron worker. A shared `Job?` state cannot
+ * distinguish an accepted command that has not started yet from one that has completed.
  */
-internal suspend fun awaitGenerationTerminal(
-    flow: Flow<Job?>,
+internal suspend fun awaitCommandTerminal(
+    outcome: Deferred<CommandOutcome>,
     timeoutMs: Long,
-): Boolean {
-    val completed: Unit? = withTimeoutOrNull(timeoutMs) {
-        flow.first { it == null }
-        Unit
-    }
-    return completed != null
-}
+): CommandOutcome? = withTimeoutOrNull(timeoutMs) { outcome.await() }
 
 /**
  * The slot to stamp into the run row. Manual fires (trigger_job_now) happen at nowMs and
@@ -270,31 +257,89 @@ class CronJobWorker(
 
     private suspend fun runLlm(job: ScheduledJobEntity): Triple<String, String?, Uuid?> {
         val prompt = job.prompt ?: return Triple("failed", "missing_prompt_for_llm_mode", null)
-        val assistantUuid = runCatching { Uuid.parse(job.assistantId) }.getOrNull()
-            ?: return Triple("failed", "bad_assistant_id:${job.assistantId}", null)
 
-        val conv = Conversation.ofId(
-            id = Uuid.random(),
-            assistantId = assistantUuid,
-            newConversation = true,
-        ).copy(title = "[Scheduled] ${job.name}")
-        conversationRepo.insertConversation(conv)
-        chatService.initializeConversation(conv.id)
-        HeadlessConversations.mark(conv.id)
+        var createdNewConversation = false
+        val targetRaw = job.targetConversationId?.takeIf { it.isNotBlank() }
+        val convId = if (targetRaw != null) {
+            val targetId = runCatching { Uuid.parse(targetRaw) }.getOrNull()
+                ?: return Triple("failed", "bad_target_conversation_id:$targetRaw", null)
+            val existing = conversationRepo.getConversationById(targetId)
+                ?: return Triple("failed", "target_conversation_not_found:$targetRaw", null)
+            existing.id
+        } else {
+            val assistantUuid = runCatching { Uuid.parse(job.assistantId) }.getOrNull()
+                ?: return Triple("failed", "bad_assistant_id:${job.assistantId}", null)
+            val conv = Conversation.ofId(
+                id = Uuid.random(),
+                assistantId = assistantUuid,
+                newConversation = true,
+            ).copy(title = "[Scheduled] ${job.name}")
+            conversationRepo.insertConversation(conv)
+            createdNewConversation = true
+            conv.id
+        }
+
+        chatService.ensureHydrated(convId)
+        if (createdNewConversation) {
+            HeadlessConversations.mark(convId)
+        }
         try {
-            chatService.sendMessage(conv.id, listOf(UIMessagePart.Text(prompt)))
-            // Wait for the generation job to clear, with a 15-min wall-clock cap.
-            // See awaitGenerationTerminal's KDoc for the Unit-sentinel rationale.
-            val completed = awaitGenerationTerminal(
-                flow = chatService.getGenerationJobStateFlow(conv.id),
+            val tracked = chatService.submitUserMessageTracked(
+                conversationId = convId,
+                content = listOf(UIMessagePart.Text(prompt)),
+                origin = me.rerere.rikkahub.service.chat.CommandOrigin.CRON,
+                dedupeKey = "cron:${job.id}",
+            )
+            when (val submission = tracked.submission) {
+                is me.rerere.rikkahub.service.chat.SubmitResult.Accepted -> Unit
+                is me.rerere.rikkahub.service.chat.SubmitResult.QueueFull ->
+                    return Triple("skipped", "conversation_queue_full", convId)
+                is me.rerere.rikkahub.service.chat.SubmitResult.Rejected ->
+                    return Triple("skipped", submission.reason, convId)
+                is me.rerere.rikkahub.service.chat.SubmitResult.RuntimeUnavailable ->
+                    return Triple("skipped", submission.reason, convId)
+            }
+            val outcome = awaitCommandTerminal(
+                outcome = tracked.outcome,
                 timeoutMs = 15L * 60_000L,
             )
-            return if (!completed) Triple("timed_out", "llm turn exceeded 15min", conv.id)
-                   else Triple("success", null, conv.id)
+            return when (outcome) {
+                null -> {
+                    chatService.submitEmergency(
+                        conversationId = convId,
+                        command = me.rerere.rikkahub.service.chat.StopCommand(pauseQueue = false),
+                        origin = me.rerere.rikkahub.service.chat.CommandOrigin.CRON,
+                    )
+                    awaitCommandTerminal(tracked.outcome, timeoutMs = 5_000L)
+                    Triple("timed_out", "llm turn exceeded 15min", convId)
+                }
+                CommandOutcome.Completed -> Triple("success", null, convId)
+                CommandOutcome.Cancelled -> Triple("failed", "llm command was cancelled", convId)
+                is CommandOutcome.Failed -> Triple(
+                    "failed",
+                    "${outcome.error::class.simpleName}: ${outcome.error.message.orEmpty()}",
+                    convId,
+                )
+                is CommandOutcome.Rejected -> Triple("failed", outcome.reason, convId)
+                is CommandOutcome.Conflict -> Triple("failed", outcome.reason, convId)
+                is CommandOutcome.NotApplied -> Triple("failed", outcome.reason, convId)
+                is CommandOutcome.SkippedDependencyFailed -> Triple(
+                    "failed",
+                    "dependency_failed:${outcome.dependencyId}",
+                    convId,
+                )
+                is CommandOutcome.Superseded -> Triple(
+                    "skipped",
+                    "superseded_by:${outcome.byCommandId}",
+                    convId,
+                )
+            }
         } catch (t: Throwable) {
-            return Triple("failed", "${t::class.simpleName}: ${t.message.orEmpty()}", conv.id)
+            return Triple("failed", "${t::class.simpleName}: ${t.message.orEmpty()}", convId)
         } finally {
-            HeadlessConversations.unmark(conv.id)
+            if (createdNewConversation) {
+                HeadlessConversations.unmark(convId)
+            }
         }
     }
 

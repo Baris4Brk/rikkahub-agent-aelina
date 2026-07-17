@@ -14,6 +14,11 @@ import me.rerere.workspace.ProotShellRunner
 import me.rerere.workspace.RootfsInstaller
 import me.rerere.workspace.WorkspaceBindMount
 import me.rerere.workspace.WorkspaceManager
+import me.rerere.workspace.WorkspaceProcessHost
+import me.rerere.workspace.WorkspaceProcessManager
+import me.rerere.workspace.WorkspaceProcessPersistence
+import me.rerere.rikkahub.service.AndroidWorkspaceProcessHost
+import me.rerere.rikkahub.AppScope
 import org.koin.dsl.module
 import java.io.File
 
@@ -40,21 +45,42 @@ val repositoryModule = module {
 
     single {
         val context: Context = get()
-        WorkspaceManager(
-            baseDir = File(context.filesDir, "workspaces"),
-            shellRunner = ProotShellRunner(
-                nativeLibraryDir = File(context.applicationInfo.nativeLibraryDir),
-                extraBindMounts = listOf(
-                    WorkspaceBindMount(
-                        source = File(context.filesDir, FileFolders.SKILLS).apply { mkdirs() },
-                        target = "/skills",
-                    ),
-                    WorkspaceBindMount(
-                        source = File(context.filesDir, FileFolders.TOOL_OUTPUTS).apply { mkdirs() },
-                        target = "/tool_outputs",
-                    ),
+        ProotShellRunner(
+            nativeLibraryDir = File(context.applicationInfo.nativeLibraryDir),
+            extraBindMounts = listOf(
+                WorkspaceBindMount(
+                    source = File(context.filesDir, FileFolders.SKILLS).apply { mkdirs() },
+                    target = "/skills",
+                ),
+                WorkspaceBindMount(
+                    source = android.os.Environment.getExternalStorageDirectory(),
+                    target = "/sdcard",
+                ),
+                WorkspaceBindMount(
+                    source = File(context.filesDir, FileFolders.TOOL_OUTPUTS).apply { mkdirs() },
+                    target = "/tool_outputs",
                 ),
             )
+        )
+    }
+
+    single {
+        val context: Context = get()
+        WorkspaceManager(
+            baseDir = File(context.filesDir, "workspaces"),
+            shellRunner = get<ProotShellRunner>(),
+        )
+    }
+
+    single { WorkspaceProcessPersistence(get()) }
+    single<WorkspaceProcessHost> { AndroidWorkspaceProcessHost(get()) }
+    single {
+        WorkspaceProcessManager(
+            workspaceManager = get(),
+            launcher = get<ProotShellRunner>(),
+            persistence = get(),
+            host = get(),
+            scope = get<AppScope>(),
         )
     }
 
@@ -63,7 +89,7 @@ val repositoryModule = module {
     }
 
     single {
-        WorkspaceRepository(get(), get(), get(), get())
+        WorkspaceRepository(get(), get(), get(), get(), get())
     }
 
     single {

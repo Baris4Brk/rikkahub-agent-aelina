@@ -18,6 +18,7 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.resume
 
 private const val TAG = "RikkaAccService"
@@ -29,6 +30,15 @@ data class ActionLogEntry(
     val paramsSummary: String,
     val success: Boolean,
     val timestampMs: Long,
+)
+
+/** Lightweight change signal only; AccessibilityNodeInfo must never be retained in a flow. */
+data class AccessibilityWindowState(
+    val version: Long = 0L,
+    val packageName: String? = null,
+    val className: String? = null,
+    val eventType: Int? = null,
+    val timestampMs: Long = 0L,
 )
 
 class RikkaAccessibilityService : AccessibilityService() {
@@ -45,6 +55,10 @@ class RikkaAccessibilityService : AccessibilityService() {
     private val _lastActions = MutableStateFlow<List<ActionLogEntry>>(emptyList())
     val lastActions = _lastActions.asStateFlow()
 
+    private val windowVersion = AtomicLong(0L)
+    private val _windowState = MutableStateFlow(AccessibilityWindowState())
+    val windowState = _windowState.asStateFlow()
+
     // Serialise overlapping gesture-dispatch callers. Each caller takes a ticket; the
     // shared current-counter advances when a caller's `finally` runs. Both fields are
     // INSTANCE-scoped (was a companion-static AtomicInteger pair previously) so a
@@ -57,10 +71,12 @@ class RikkaAccessibilityService : AccessibilityService() {
         super.onServiceConnected()
         instance = this
         _running.value = true
+        publishWindowState(event = null)
         Log.i(TAG, "AccessibilityService connected")
     }
 
     override fun onUnbind(intent: android.content.Intent?): Boolean {
+        publishWindowState(event = null)
         instance = null
         _running.value = false
         _lastActions.value = emptyList()
@@ -69,6 +85,7 @@ class RikkaAccessibilityService : AccessibilityService() {
     }
 
     override fun onDestroy() {
+        publishWindowState(event = null)
         instance = null
         _running.value = false
         gestureHandlerThread.quitSafely()
@@ -87,10 +104,23 @@ class RikkaAccessibilityService : AccessibilityService() {
                 me.rerere.rikkahub.workflow.trigger.AppForegroundDispatcher.onForegroundChange(pkg)
             }
         }
+        if (event != null && event.eventType in WINDOW_SIGNAL_EVENT_TYPES) {
+            publishWindowState(event)
+        }
     }
 
     override fun onInterrupt() {
         // Required override; no-op.
+    }
+
+    private fun publishWindowState(event: AccessibilityEvent?) {
+        _windowState.value = AccessibilityWindowState(
+            version = windowVersion.incrementAndGet(),
+            packageName = event?.packageName?.toString(),
+            className = event?.className?.toString(),
+            eventType = event?.eventType,
+            timestampMs = System.currentTimeMillis(),
+        )
     }
 
     fun appendLog(entry: ActionLogEntry) {
@@ -243,6 +273,14 @@ class RikkaAccessibilityService : AccessibilityService() {
     }
 
     companion object {
+        private val WINDOW_SIGNAL_EVENT_TYPES = setOf(
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
+            AccessibilityEvent.TYPE_WINDOWS_CHANGED,
+            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,
+            AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED,
+            AccessibilityEvent.TYPE_VIEW_SCROLLED,
+        )
+
         @Volatile
         var instance: RikkaAccessibilityService? = null
             private set

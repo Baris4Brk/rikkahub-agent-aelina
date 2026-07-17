@@ -134,6 +134,29 @@ class ExampleUnitTest {
     }
 
     @Test
+    fun cleanupKeepsManagedProcessDefinitionsAndLogs() {
+        val baseDir = Files.createTempDirectory("workspace-cleanup-test").toFile()
+        val manager = WorkspaceManager(baseDir)
+        val root = "test-workspace"
+        manager.ensureWorkspace(root)
+        val managedFile = File(manager.managedProcessesDir(root), "wp_12345678/definition.json")
+        managedFile.parentFile.mkdirs()
+        managedFile.writeText("persistent")
+        File(manager.tempDir(root), "short-command.tmp").writeText("temporary")
+        File(manager.linuxDir(root), "tmp/rootfs.tmp").apply {
+            parentFile.mkdirs()
+            writeText("temporary")
+        }
+
+        manager.cleanupAllTempDirs()
+
+        assertTrue(managedFile.isFile)
+        assertEquals("persistent", managedFile.readText())
+        assertFalse(manager.tempDir(root).exists())
+        assertFalse(File(manager.linuxDir(root), "tmp").exists())
+    }
+
+    @Test
     fun commandOutputIsTruncatedAtLimit() {
         val baseDir = Files.createTempDirectory("workspace-truncate-test").toFile()
         val manager = WorkspaceManager(baseDir)

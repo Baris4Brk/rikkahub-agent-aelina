@@ -13,6 +13,7 @@ import org.junit.rules.TemporaryFolder
 import java.io.File
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
+import me.rerere.rikkahub.BuildConfig
 
 /**
  * Phase 25 — Archive tools. file:// zip / unzip / list paths are fully JVM-testable
@@ -136,5 +137,20 @@ class ArchiveToolsTest {
             """{"sources":["/nonexistent/path/xyz"],"destination":"${tmp.root.absolutePath}/x.zip"}""",
         ))
         assertEquals("source_unreadable", result["error"]?.jsonPrimitive?.content)
+    }
+
+    @Test fun `archive destinations reject core second user data`() {
+        val appRoot = "/data/user/0/${BuildConfig.APPLICATION_ID}"
+        val zip = obj(execTool(
+            zipFilesTool(NULL_CONTEXT),
+            """{"sources":["/sdcard/Download/input.txt"],"destination":"$appRoot/files/upload/out.zip"}""",
+        ))
+        assertEquals("path_blocked", zip["error"]?.jsonPrimitive?.content)
+
+        val unzip = obj(execTool(
+            unzipFileTool(NULL_CONTEXT),
+            """{"source":"/sdcard/Download/input.zip","destination_dir":"$appRoot/databases"}""",
+        ))
+        assertEquals("path_blocked", unzip["error"]?.jsonPrimitive?.content)
     }
 }

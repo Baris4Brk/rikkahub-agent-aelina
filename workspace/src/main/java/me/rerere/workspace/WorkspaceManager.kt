@@ -36,6 +36,8 @@ class WorkspaceManager(
 
     fun tempDir(root: String): File = File(workspaceDir(root), TEMP_DIR)
 
+    fun managedProcessesDir(root: String): File = File(workspaceDir(root), MANAGED_PROCESSES_DIR)
+
     fun hasRootfs(root: String): Boolean = File(linuxDir(root), "bin/sh").isFile
 
     fun deleteWorkspace(root: String): Boolean = workspaceDir(root).deleteRecursively()
@@ -175,6 +177,7 @@ class WorkspaceManager(
         private const val FILES_DIR = "files"
         private const val LINUX_DIR = "linux"
         private const val TEMP_DIR = "tmp"
+        private const val MANAGED_PROCESSES_DIR = "managed-processes"
         const val DEFAULT_COMMAND_TIMEOUT_MS = 30_000L
         private val ROOT_NAME_REGEX = Regex("[A-Za-z0-9._-]+")
     }

@@ -338,6 +338,9 @@ fun telegramSendPhotoTool(prefs: TelegramBotPreferences, client: TelegramBotClie
     execute = { input ->
         val p = input.jsonObject
         val path = p["path"]?.jsonPrimitive?.contentOrNull ?: error("path is required")
+        PathSafetyGuard.checkSensitiveRead(path)?.let { violation ->
+            return@Tool fmTextPart(fmErrEnvelope(violation.code, violation.detail))
+        }
         val chatId = p["chat_id"]?.jsonPrimitive?.longOrNull ?: prefs.current().defaultChatId
             ?: return@Tool textPart(buildJsonObject { put("error", "no chat_id and no default_chat_id set") })
         val caption = p["caption"]?.jsonPrimitive?.contentOrNull
@@ -380,6 +383,9 @@ fun telegramSendDocumentTool(prefs: TelegramBotPreferences, client: TelegramBotC
     execute = { input ->
         val p = input.jsonObject
         val path = p["path"]?.jsonPrimitive?.contentOrNull ?: error("path is required")
+        PathSafetyGuard.checkSensitiveRead(path)?.let { violation ->
+            return@Tool fmTextPart(fmErrEnvelope(violation.code, violation.detail))
+        }
         val chatId = p["chat_id"]?.jsonPrimitive?.longOrNull ?: prefs.current().defaultChatId
             ?: return@Tool textPart(buildJsonObject { put("error", "no chat_id and no default_chat_id set") })
         val caption = p["caption"]?.jsonPrimitive?.contentOrNull

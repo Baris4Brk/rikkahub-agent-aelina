@@ -78,7 +78,7 @@ fun writeTextFileTool(context: Context): Tool = Tool(
         // content:// path — route through the SAF resolver. append is unsupported on
         // content:// (no universal seek-to-end), so append on a content:// URI is an error.
         if (ContentUriSafetyGuard.isContentUri(rawPath)) {
-            ContentUriSafetyGuard.check(rawPath)?.let { v ->
+            ContentUriSafetyGuard.checkMutation(rawPath)?.let { v ->
                 return@Tool errEnvelope(v.code, v.detail)
             }
             if (params["append"]?.jsonPrimitive?.booleanOrNull == true) {
@@ -107,7 +107,7 @@ fun writeTextFileTool(context: Context): Tool = Tool(
         val append = params["append"]?.jsonPrimitive?.booleanOrNull == true
         val overwrite = params["overwrite"]?.jsonPrimitive?.booleanOrNull == true
 
-        PathSafetyGuard.check(path)?.let { v ->
+        PathSafetyGuard.checkMutation(path)?.let { v ->
             return@Tool errEnvelope(v.code, v.detail)
         }
 

@@ -94,3 +94,7 @@
 -keep class * implements org.slf4j.spi.SLF4JServiceProvider
 -keepclassmembers class * implements org.slf4j.spi.SLF4JServiceProvider { <init>(); }
 -keep class uk.uuid.slf4j.android.** { *; }
+
+# Shizuku loads the UserService class and its constructors from the installed APK.
+-keep class me.rerere.rikkahub.privilege.ExternalPrivilegeUserService { public <init>(...); *; }
+-keep class me.rerere.rikkahub.privilege.IExternalPrivilegeBridgeService** { *; }

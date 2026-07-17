@@ -8,23 +8,27 @@ import androidx.room.TypeConverters
 import me.rerere.ai.core.TokenUsage
 import me.rerere.rikkahub.data.agentrun.AgentRun
 import me.rerere.rikkahub.data.agentrun.AgentRunDao
+import me.rerere.rikkahub.data.db.dao.AlarmDao
 import me.rerere.rikkahub.data.db.dao.ConversationDAO
 import me.rerere.rikkahub.data.db.dao.FavoriteDAO
 import me.rerere.rikkahub.data.db.dao.GenMediaDAO
 import me.rerere.rikkahub.data.db.dao.ManagedFileDAO
 import me.rerere.rikkahub.data.db.dao.MemoryDAO
 import me.rerere.rikkahub.data.db.dao.MessageNodeDAO
+import me.rerere.rikkahub.data.db.dao.PendingChatCommandDao
 import me.rerere.rikkahub.data.db.dao.ScheduledJobDao
 import me.rerere.rikkahub.data.db.dao.ScheduledJobRunDao
 import me.rerere.rikkahub.data.db.dao.SshHostDao
 import me.rerere.rikkahub.data.db.dao.TelegramChatDao
 import me.rerere.rikkahub.data.db.dao.WorkspaceDAO
+import me.rerere.rikkahub.data.db.entity.AlarmEntity
 import me.rerere.rikkahub.data.db.entity.ConversationEntity
 import me.rerere.rikkahub.data.db.entity.FavoriteEntity
 import me.rerere.rikkahub.data.db.entity.GenMediaEntity
 import me.rerere.rikkahub.data.db.entity.ManagedFileEntity
 import me.rerere.rikkahub.data.db.entity.MemoryEntity
 import me.rerere.rikkahub.data.db.entity.MessageNodeEntity
+import me.rerere.rikkahub.data.db.entity.PendingChatCommandEntity
 import me.rerere.rikkahub.data.db.entity.ScheduledJobEntity
 import me.rerere.rikkahub.data.db.entity.ScheduledJobRunEntity
 import me.rerere.rikkahub.data.db.entity.SshHostEntity
@@ -35,6 +39,8 @@ import me.rerere.rikkahub.data.db.migrations.Migration_20_21
 import me.rerere.rikkahub.data.db.migrations.Migration_21_22
 import me.rerere.rikkahub.data.db.migrations.Migration_22_23
 import me.rerere.rikkahub.data.db.migrations.Migration_8_9
+import me.rerere.rikkahub.data.db.migrations.MIGRATION_26_27
+import me.rerere.rikkahub.data.db.migrations.MIGRATION_27_28
 import me.rerere.rikkahub.utils.JsonInstant
 import me.rerere.rikkahub.workflow.db.WorkflowDao
 import me.rerere.rikkahub.workflow.db.WorkflowEntity
@@ -43,6 +49,7 @@ import me.rerere.rikkahub.workflow.db.WorkflowRunEntity
 
 @Database(
     entities = [
+        AlarmEntity::class,
         ConversationEntity::class,
         MemoryEntity::class,
         GenMediaEntity::class,
@@ -57,8 +64,9 @@ import me.rerere.rikkahub.workflow.db.WorkflowRunEntity
         WorkflowRunEntity::class,
         AgentRun::class,
         WorkspaceEntity::class,
+        PendingChatCommandEntity::class,
     ],
-    version = 26,
+    version = 29,
     autoMigrations = [
         AutoMigration(from = 1, to = 2),
         AutoMigration(from = 2, to = 3),
@@ -87,6 +95,8 @@ import me.rerere.rikkahub.workflow.db.WorkflowRunEntity
 )
 @TypeConverters(TokenUsageConverter::class)
 abstract class AppDatabase : RoomDatabase() {
+    abstract fun alarmDao(): AlarmDao
+
     abstract fun conversationDao(): ConversationDAO
 
     abstract fun memoryDao(): MemoryDAO
@@ -114,6 +124,8 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun agentRunDao(): AgentRunDao
 
     abstract fun workspaceDao(): WorkspaceDAO
+
+    abstract fun pendingChatCommandDao(): PendingChatCommandDao
 }
 
 object TokenUsageConverter {

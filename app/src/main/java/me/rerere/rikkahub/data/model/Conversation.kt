@@ -29,6 +29,8 @@ data class Conversation(
     val lorebookIds: Set<Uuid> = emptySet(),
     // Absolute path inside the workspace rootfs
     val workspaceCwd: String? = null,
+    // Upstream conversation folder identifier; retained for backup/schema compatibility.
+    val folderId: String = "",
     @Transient
     val newConversation: Boolean = false
 ) {

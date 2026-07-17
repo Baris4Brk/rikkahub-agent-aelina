@@ -12,4 +12,14 @@
             android:data="rikkahub://shortcut" />
         <categories android:name="android.shortcut.conversation" />
     </shortcut>
+    <shortcut
+        android:shortcutId="second_user_assistant"
+        android:enabled="true"
+        android:icon="@mipmap/ic_launcher"
+        android:shortcutShortLabel="@string/system_assistant_overlay_title"
+        android:shortcutLongLabel="@string/system_assistant_fixed_target_title">
+        <intent
+            android:action="me.rerere.rikkahub.action.OPEN_SECOND_USER_ASSISTANT"
+            android:targetClass="me.rerere.rikkahub.assistant.SystemAssistantFallbackActivity" />
+    </shortcut>
 </shortcuts>

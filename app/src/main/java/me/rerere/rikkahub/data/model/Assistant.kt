@@ -63,6 +63,13 @@ data class Assistant(
     val fastPathRouterEnabled: Boolean = false,
     val allowConversationSystemPrompt: Boolean = false, // 允许对话单独重写 system prompt
     val allowConversationPromptInjection: Boolean = false, // 允许对话单独绑定提示词注入
+    // P2: 不受限模式 — 开启后 ToolExecutionGate 只检查紧急停止，跳过所有其他安全门
+    val unrestricted: Boolean = false,
+    // A user-selected conversation that runs as the high-autonomy "second user". Keeping
+    // this on Assistant (DataStore JSON) avoids a Room migration and keeps old settings
+    // readable because both fields have defaults.
+    val privilegedConversationId: Uuid? = null,
+    val privilegedIdentityName: String = "第二用户",
 )
 
 @Serializable

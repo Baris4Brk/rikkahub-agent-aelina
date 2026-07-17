@@ -28,6 +28,7 @@ import me.rerere.hugeicons.HugeIcons
 import me.rerere.hugeicons.stroke.ArrowRight01
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.data.ai.prompts.DEFAULT_COMPRESS_PROMPT
+import me.rerere.rikkahub.data.ai.prompts.DEFAULT_FINAL_ANSWER_REMINDER_PROMPT
 import me.rerere.rikkahub.data.ai.prompts.DEFAULT_OCR_PROMPT
 import me.rerere.rikkahub.data.ai.prompts.DEFAULT_SUGGESTION_PROMPT
 import me.rerere.rikkahub.data.ai.prompts.DEFAULT_TITLE_PROMPT
@@ -44,6 +45,25 @@ internal fun PromptSettingsPage(settings: Settings, vm: SettingVM, contentPaddin
         contentPadding = contentPadding + PaddingValues(horizontal = 16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
+        item {
+            PromptSettingItem(
+                title = stringResource(R.string.setting_model_page_prompt_final_answer_reminder),
+                promptDescription = stringResource(
+                    R.string.setting_model_page_final_answer_reminder_prompt_description,
+                ),
+                promptValue = settings.finalAnswerReminderPrompt,
+                onPromptChange = {
+                    vm.updateSettings(settings.copy(finalAnswerReminderPrompt = it))
+                },
+                onResetPrompt = {
+                    vm.updateSettings(
+                        settings.copy(
+                            finalAnswerReminderPrompt = DEFAULT_FINAL_ANSWER_REMINDER_PROMPT,
+                        ),
+                    )
+                },
+            )
+        }
         item {
             PromptSettingItem(
                 title = stringResource(R.string.setting_model_page_prompt_translation),

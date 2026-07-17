@@ -2,12 +2,17 @@ package me.rerere.rikkahub.ui.pages.setting.doctor
 
 import android.Manifest
 import android.content.Context
+import android.content.Intent
+import android.location.LocationManager
 import android.os.Build
+import android.provider.Settings
+import androidx.core.location.LocationManagerCompat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import me.rerere.rikkahub.BuildConfig
+import me.rerere.rikkahub.R
 import me.rerere.rikkahub.data.ai.tools.LocalToolOption
 import me.rerere.rikkahub.data.ai.tools.local.AccessibilityServiceHandle
 import me.rerere.rikkahub.data.ai.tools.local.NotificationListenerHandle
@@ -19,6 +24,8 @@ import me.rerere.rikkahub.data.repository.ConversationRepository
 import me.rerere.rikkahub.data.repository.ScheduledJobRepository
 import me.rerere.rikkahub.data.repository.ScheduledJobRunRepository
 import me.rerere.rikkahub.data.telegram.TelegramBotPreferences
+import me.rerere.rikkahub.diagnostics.RuntimeDiagnosticStatus
+import me.rerere.rikkahub.diagnostics.RuntimeDiagnosticsProvider
 import me.rerere.rikkahub.service.TelegramBotService
 import me.rerere.rikkahub.workflow.repository.WorkflowRepository
 import me.rerere.rikkahub.browser.BrowserPreferences
@@ -44,9 +51,11 @@ private object Capability {
         LocalToolOption.Workflows,           // WorkflowTimeCronWorker FGS notification
     )
     val FineLocation: Set<LocalToolOption> = setOf(
-        LocalToolOption.Location,            // get_location, geocode tools
         LocalToolOption.WifiInfo,            // SSID/BSSID on Android 10+
         LocalToolOption.Workflows,           // geofence_enter / geofence_exit triggers
+    )
+    val ForegroundLocation: Set<LocalToolOption> = setOf(
+        LocalToolOption.Location,
     )
     val NotificationListener: Set<LocalToolOption> = setOf(
         LocalToolOption.NotificationListener,
@@ -155,6 +164,7 @@ class DoctorChecks(
     // local models actually engaged GPU/NPU or silently fell back to CPU.
     // Nullable + defaulted same as the others above for legacy test path compatibility.
     private val localRuntimePreferences: me.rerere.locallm.LocalRuntimePreferences? = null,
+    private val runtimeDiagnosticsProvider: RuntimeDiagnosticsProvider? = null,
 ) {
     suspend fun runAll(): List<DoctorCheck> = withContext(Dispatchers.IO) {
         // Aggregate enabled tools across every assistant. A tool is "in use" if at least
@@ -174,6 +184,57 @@ class DoctorChecks(
             addAll(browserChecks(enabled))
             addAll(maintenanceChecks())
             addAll(diagnosticsChecks(enabled))
+            addAll(runtimeDiagnosticsChecks())
+        }
+    }
+
+    private suspend fun runtimeDiagnosticsChecks(): List<DoctorCheck> {
+        val provider = runtimeDiagnosticsProvider ?: return emptyList()
+        val snapshot = runCatching { provider.refresh(conversationId = null) }.getOrElse { error ->
+            return listOf(
+                DoctorCheck(
+                    id = "runtime.provider",
+                    category = DoctorCategory.Services,
+                    label = "Runtime diagnostics provider",
+                    detail = error.message ?: error.javaClass.simpleName,
+                    severity = Severity.FAIL,
+                    fix = FixAction.OpenAppRoute(
+                        "Open runtime diagnostics",
+                        AppRouteKey.SettingDiagnostics,
+                    ),
+                )
+            )
+        }
+        val included = setOf(
+            "shizuku_bridge",
+            "user_service",
+            "workspace_processes",
+            "workspace_wake_lock",
+            "agent_keyboard",
+            "termux",
+            "emergency_stop",
+            "oem_background",
+        )
+        return snapshot.items.filter { it.id in included }.map { item ->
+            DoctorCheck(
+                id = "runtime.${item.id}",
+                category = DoctorCategory.Services,
+                label = item.title,
+                detail = item.detail,
+                severity = when (item.status) {
+                    RuntimeDiagnosticStatus.READY -> Severity.OK
+                    RuntimeDiagnosticStatus.SERVICE_OFFLINE -> Severity.FAIL
+                    RuntimeDiagnosticStatus.IMPLEMENTED_BUT_NOT_AUTHORIZED -> Severity.WARN
+                    RuntimeDiagnosticStatus.OEM_RESTRICTED -> Severity.WARN
+                    RuntimeDiagnosticStatus.NOT_SUPPORTED -> Severity.INFO
+                },
+                fix = if (item.status == RuntimeDiagnosticStatus.READY) null else {
+                    FixAction.OpenAppRoute(
+                        "Open runtime diagnostics",
+                        AppRouteKey.SettingDiagnostics,
+                    )
+                },
+            )
         }
     }
 
@@ -188,7 +249,124 @@ class DoctorChecks(
 
     // ----- Permissions ----------------------------------------------------------------
 
+    private fun locationPermissionChecks(enabled: Set<LocalToolOption>): List<DoctorCheck> {
+        val fineGranted = PermissionHelper.hasRuntime(
+            context,
+            listOf(Manifest.permission.ACCESS_FINE_LOCATION),
+        )
+        val coarseGranted = PermissionHelper.hasRuntime(
+            context,
+            listOf(Manifest.permission.ACCESS_COARSE_LOCATION),
+        )
+        val manager = context.getSystemService(LocationManager::class.java)
+        val servicesProbe = runCatching {
+            manager != null && LocationManagerCompat.isLocationEnabled(manager)
+        }
+        val providerExistsProbe = runCatching {
+            manager != null && LocationManagerCompat.hasProvider(manager, LocationManager.GPS_PROVIDER)
+        }
+        val providerEnabledProbe = runCatching {
+            manager != null && manager.isProviderEnabled(LocationManager.GPS_PROVIDER)
+        }
+        val states = resolveLocationDiagnosticStates(
+            LocationDiagnosticSnapshot(
+                fineGranted = fineGranted,
+                coarseGranted = coarseGranted,
+                locationServicesEnabled = servicesProbe.getOrDefault(false),
+                locationServicesProbeRestricted = servicesProbe.isFailure,
+                gpsProviderExists = providerExistsProbe.getOrDefault(false),
+                gpsProviderEnabled = providerEnabledProbe.getOrDefault(false),
+                providerProbeRestricted = providerExistsProbe.isFailure || providerEnabledProbe.isFailure,
+            )
+        )
+        val required = requirersOf(Capability.ForegroundLocation, enabled).isNotEmpty()
+        val permissionFix = FixAction.OpenAppRoute(
+            context.getString(R.string.doctor_location_action_open_permissions),
+            AppRouteKey.SettingPermissions,
+        )
+        val locationSettingsFix = FixAction.OpenIntent(
+            context.getString(R.string.doctor_location_action_open_settings),
+            Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS),
+        )
+        return listOf(
+            locationDiagnosticRow(
+                id = "location.permission",
+                label = context.getString(R.string.doctor_location_permission_title),
+                state = states.permission,
+                required = required,
+                fix = permissionFix,
+            ),
+            locationDiagnosticRow(
+                id = "location.precise",
+                label = context.getString(R.string.doctor_location_precise_title),
+                state = states.preciseLocation,
+                required = required,
+                fix = permissionFix,
+            ),
+            locationDiagnosticRow(
+                id = "location.services",
+                label = context.getString(R.string.doctor_location_services_title),
+                state = states.locationServices,
+                required = required,
+                fix = locationSettingsFix,
+            ),
+            locationDiagnosticRow(
+                id = "location.gnss_provider",
+                label = context.getString(R.string.doctor_location_gnss_provider_title),
+                state = states.gnssProvider,
+                required = required,
+                fix = locationSettingsFix,
+            ),
+        )
+    }
+
+    private fun locationDiagnosticRow(
+        id: String,
+        label: String,
+        state: LocationDiagnosticState,
+        required: Boolean,
+        fix: FixAction,
+    ): DoctorCheck = DoctorCheck(
+        id = id,
+        category = DoctorCategory.Permissions,
+        label = label,
+        detail = locationDiagnosticDetail(state),
+        severity = if (!required) {
+            Severity.INFO
+        } else {
+            when (state) {
+                LocationDiagnosticState.READY -> Severity.OK
+                LocationDiagnosticState.APPROXIMATE_ONLY,
+                LocationDiagnosticState.GPS_PROVIDER_DISABLED,
+                LocationDiagnosticState.OEM_RESTRICTED,
+                -> Severity.WARN
+                LocationDiagnosticState.PERMISSION_MISSING,
+                LocationDiagnosticState.LOCATION_DISABLED,
+                LocationDiagnosticState.PROVIDER_UNAVAILABLE,
+                -> Severity.FAIL
+            }
+        },
+        fix = fix.takeUnless { state == LocationDiagnosticState.READY },
+    )
+
+    private fun locationDiagnosticDetail(state: LocationDiagnosticState): String = when (state) {
+        LocationDiagnosticState.READY -> context.getString(R.string.doctor_location_detail_ready)
+        LocationDiagnosticState.APPROXIMATE_ONLY ->
+            context.getString(R.string.doctor_location_detail_approximate_only)
+        LocationDiagnosticState.PERMISSION_MISSING ->
+            context.getString(R.string.doctor_location_detail_permission_missing)
+        LocationDiagnosticState.LOCATION_DISABLED ->
+            context.getString(R.string.doctor_location_detail_location_disabled)
+        LocationDiagnosticState.GPS_PROVIDER_DISABLED ->
+            context.getString(R.string.doctor_location_detail_gps_provider_disabled)
+        LocationDiagnosticState.PROVIDER_UNAVAILABLE ->
+            context.getString(R.string.doctor_location_detail_provider_unavailable)
+        LocationDiagnosticState.OEM_RESTRICTED ->
+            context.getString(R.string.doctor_location_detail_oem_restricted)
+    }
+
     private fun permissionChecks(enabled: Set<LocalToolOption>): List<DoctorCheck> = buildList {
+        addAll(locationPermissionChecks(enabled))
         add(
             capabilityRow(
                 id = "perm.notifications",
@@ -205,13 +383,13 @@ class DoctorChecks(
         )
         add(
             capabilityRow(
-                id = "perm.location",
+                id = "perm.location.precise_dependencies",
                 category = DoctorCategory.Permissions,
-                label = "Fine location permission",
+                label = "Fine location for Wi-Fi and geofences",
                 cap = Capability.FineLocation,
                 enabled = enabled,
                 granted = PermissionHelper.hasRuntime(context, listOf(Manifest.permission.ACCESS_FINE_LOCATION)),
-                grantedDetail = "Granted.",
+                grantedDetail = "Precise location is granted for Wi-Fi and geofence features.",
                 missingDetail = "Needed for geofence triggers and reading WiFi SSID on Android 10+.",
                 fix = FixAction.OpenAppRoute("Open app permissions", AppRouteKey.SettingPermissions),
             )

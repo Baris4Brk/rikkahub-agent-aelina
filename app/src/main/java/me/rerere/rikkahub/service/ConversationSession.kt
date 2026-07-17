@@ -21,9 +21,36 @@ class ConversationSession(
     initial: Conversation,
     private val scope: CoroutineScope,
     private val onIdle: (Uuid) -> Unit,
+    private val canEvict: () -> Boolean = { true },
+    private val idleTimeoutMs: Long = IDLE_TIMEOUT_MS,
 ) {
     // 会话状态
     val state = MutableStateFlow(initial)
+    private val stateLock = Any()
+    @Volatile
+    private var hydrated = false
+
+    val isHydrated: Boolean get() = hydrated
+
+    fun hydrateIfNeeded(snapshot: Conversation): Boolean = synchronized(stateLock) {
+        if (hydrated) return@synchronized false
+        state.value = snapshot
+        hydrated = true
+        true
+    }
+
+    fun replaceState(snapshot: Conversation) {
+        synchronized(stateLock) {
+            state.value = snapshot
+            hydrated = true
+        }
+    }
+
+    fun updateState(transform: (Conversation) -> Conversation): Conversation = synchronized(stateLock) {
+        state.value = transform(state.value)
+        hydrated = true
+        state.value
+    }
 
     // 原子引用计数
     private val refCount = AtomicInteger(0)
@@ -35,7 +62,7 @@ class ConversationSession(
     private val _generationJob = MutableStateFlow<Job?>(null)
     val generationJob: StateFlow<Job?> = _generationJob.asStateFlow()
     val isGenerating: Boolean get() = _generationJob.value?.isActive == true
-    val isInUse: Boolean get() = refCount.get() > 0 || isGenerating
+    val isInUse: Boolean get() = refCount.get() > 0 || isGenerating || !canEvict()
 
     // 空闲检查任务
     private var idleCheckJob: Job? = null
@@ -70,14 +97,9 @@ class ConversationSession(
         }
     }
 
-    fun setJob(job: Job?) {
-        // Atomic swap so two concurrent setJob callers can't race-write a stale job.
-        // The previous code (cancel() then assign) had a window where two writers could
-        // each read the prior value, A cancels old, B reads old (already cancelled,
-        // no-op), A writes newA, B writes newB → A's job is untracked but still running;
-        // getJob() returns B; stopGeneration only cancels B; A leaks until completion.
-        val previous = _generationJob.getAndUpdate { job }
-        previous?.cancel()
+    /** Attach the current run without making the setter itself a cancellation authority. */
+    fun attachRunJob(job: Job?) {
+        _generationJob.getAndUpdate { job }
         // Identity-checked completion handler: only null the StateFlow if the value is
         // STILL the same job we just set. Without this an out-of-order setJob(B) →
         // A.invokeOnCompletion → clobber-B race could null out the live job.
@@ -91,11 +113,15 @@ class ConversationSession(
 
     fun getJob(): Job? = _generationJob.value
 
+    fun requestIdleCheck() {
+        if (refCount.get() <= 0) scheduleIdleCheck()
+    }
+
     private fun scheduleIdleCheck() {
         idleCheckJob?.cancel()
         idleCheckJob = scope.launch {
-            delay(IDLE_TIMEOUT_MS)
-            if (refCount.get() <= 0 && !isGenerating) {
+            delay(idleTimeoutMs)
+            if (refCount.get() <= 0 && !isGenerating && canEvict()) {
                 onIdle(id)
             }
         }

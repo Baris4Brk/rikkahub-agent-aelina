@@ -23,6 +23,7 @@ import me.rerere.rikkahub.data.ai.tools.HardlineCommandGuard
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.datastore.getCurrentAssistant
 import me.rerere.rikkahub.data.db.entity.ScheduledJobEntity
+import me.rerere.rikkahub.data.repository.ConversationRepository
 import me.rerere.rikkahub.data.repository.ScheduledJobRepository
 import me.rerere.rikkahub.data.repository.ScheduledJobRunRepository
 import me.rerere.rikkahub.service.CronExpressionParser
@@ -136,6 +137,24 @@ object ScheduleJobValidator {
         if (catchup != null && catchup !in setOf("skip", "fire_once", "fire_all"))
             return ValidationError("bad_catchup", "catchup must be 'skip', 'fire_once', or 'fire_all'")
 
+        val targetConversationId = (input["target_conversation_id"] as? JsonPrimitive)
+            ?.contentOrNull
+            ?.takeIf { it.isNotBlank() }
+        if (targetConversationId != null) {
+            if (mode == "direct") {
+                return ValidationError(
+                    "target_conversation_unsupported",
+                    "target_conversation_id is only supported for mode='llm'"
+                )
+            }
+            if (targetConversationId != "current" && runCatching { Uuid.parse(targetConversationId) }.isFailure) {
+                return ValidationError(
+                    "bad_target_conversation_id",
+                    "target_conversation_id must be a valid conversation UUID or 'current'"
+                )
+            }
+        }
+
         // Tags — comma-joined; reject anything that would break the LIKE query
         val tags = input["tags"] as? kotlinx.serialization.json.JsonArray
         tags?.forEach { tag ->
@@ -171,12 +190,15 @@ private fun jobToJson(j: ScheduledJobEntity): JsonObject = buildJsonObject {
     put("created_at_ms", j.createdAtMs)
     j.lastRunAtMs?.let { put("last_run_at_ms", it) }
     j.nextRunAtMs?.let { put("next_run_at_ms", it) }
+    j.targetConversationId?.let { put("target_conversation_id", it) }
 }
 
 fun scheduleJobTool(
     repo: ScheduledJobRepository,
     scheduler: CronJobScheduler,
     settingsStore: SettingsStore,
+    conversationRepo: ConversationRepository,
+    currentConversationId: String? = null,
     knownToolNamesProvider: () -> List<String>,
 ): Tool = Tool(
     name = "schedule_job",
@@ -227,6 +249,10 @@ fun scheduleJobTool(
                 put("end_at_unix_ms", buildJsonObject { put("type","integer") })
                 put("max_runs", buildJsonObject { put("type","integer"); put("minimum", 1) })
                 put("catchup", buildJsonObject { put("type","string"); put("enum", buildJsonArray { add("skip"); add("fire_once"); add("fire_all") }) })
+                put("target_conversation_id", buildJsonObject {
+                    put("type", "string")
+                    put("description", "Optional. LLM mode only. Pass a conversation UUID, or 'current' to reuse the chat where this tool is called. If set, every run appends the prompt to that existing conversation instead of creating a new one.")
+                })
             },
             required = listOf("name","mode","schedule_type"),
         )
@@ -238,8 +264,40 @@ fun scheduleJobTool(
         }
         val mode = obj["mode"]!!.jsonPrimitive.content
         val scheduleType = obj["schedule_type"]!!.jsonPrimitive.content
-        val assistantId = (obj["assistant_id"] as? JsonPrimitive)?.contentOrNull
+        val explicitAssistantId = (obj["assistant_id"] as? JsonPrimitive)?.contentOrNull
+            ?.takeIf { it.isNotBlank() }
+        var assistantId = explicitAssistantId
             ?: settingsStore.settingsFlow.value.getCurrentAssistant().id.toString()
+        val targetConversationIdInput = (obj["target_conversation_id"] as? JsonPrimitive)?.contentOrNull
+            ?.takeIf { it.isNotBlank() }
+        val targetConversationId = if (targetConversationIdInput == "current") {
+            currentConversationId ?: return@Tool textPart(errEnvelope(
+                "current_conversation_unavailable",
+                "target_conversation_id='current' is only available when the tool is called from a conversation"
+            ))
+        } else {
+            targetConversationIdInput
+        }
+        if (targetConversationId != null) {
+            val targetUuid = runCatching { Uuid.parse(targetConversationId) }.getOrNull()
+                ?: return@Tool textPart(errEnvelope(
+                    "bad_target_conversation_id",
+                    "target_conversation_id must be a valid conversation UUID or 'current'"
+                ))
+            val targetConversation = conversationRepo.getConversationById(targetUuid)
+                ?: return@Tool textPart(errEnvelope(
+                    "target_conversation_not_found",
+                    "no conversation with id '$targetConversationId'"
+                ))
+            val targetAssistantId = targetConversation.assistantId.toString()
+            if (explicitAssistantId != null && explicitAssistantId != targetAssistantId) {
+                return@Tool textPart(errEnvelope(
+                    "assistant_mismatch",
+                    "target conversation uses assistant '$targetAssistantId', but assistant_id was '$explicitAssistantId'"
+                ))
+            }
+            assistantId = targetAssistantId
+        }
         val tagsCsv = (obj["tags"] as? kotlinx.serialization.json.JsonArray)
             ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }?.joinToString(",")
         val nowMs = System.currentTimeMillis()
@@ -261,6 +319,7 @@ fun scheduleJobTool(
             prompt = (obj["prompt"] as? JsonPrimitive)?.contentOrNull,
             actionsJson = (obj["actions"] as? kotlinx.serialization.json.JsonArray)?.toString(),
             tags = tagsCsv,
+            targetConversationId = targetConversationId,
             enabled = true,
             createdAtMs = nowMs,
         )

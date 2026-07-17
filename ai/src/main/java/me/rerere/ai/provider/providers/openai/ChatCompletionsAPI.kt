@@ -30,11 +30,13 @@ import me.rerere.ai.provider.Modality
 import me.rerere.ai.provider.Model
 import me.rerere.ai.provider.ModelAbility
 import me.rerere.ai.provider.ProviderSetting
+import me.rerere.ai.provider.ProviderLogPrivacy
 import me.rerere.ai.provider.TextGenerationParams
 import me.rerere.ai.provider.providers.PartGroup
 import me.rerere.ai.provider.providers.groupPartsByToolBoundary
 import me.rerere.ai.registry.ModelRegistry
 import me.rerere.ai.ui.MessageChunk
+import me.rerere.ai.ui.GenerationTerminal
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessageAnnotation
 import me.rerere.ai.ui.UIMessageChoice
@@ -88,11 +90,17 @@ class ChatCompletionsAPI(
             .configureReferHeaders(providerSetting.baseUrl)
             .build()
 
-        Log.i(TAG, "generateText: ${json.encodeToString(requestBody)}")
+        Log.i(
+            TAG,
+            "generateText: model=${params.model.modelId}, messages=${messages.size}, " +
+                "tools=${params.tools.size}, requestChars=${requestBody.toString().length}",
+        )
 
         val response = client.newCall(request).await()
         if (!response.isSuccessful) {
-            throw Exception("Failed to get response: ${response.code} ${response.body.string()}")
+            val responseCode = response.code
+            response.body.close()
+            throw Exception("Failed to get response: $responseCode")
         }
 
         val bodyStr = response.body.string()
@@ -106,8 +114,7 @@ class ChatCompletionsAPI(
         val message = choice["message"]?.jsonObject ?: throw Exception("message is null")
         val finishReason = choice["finish_reason"]
             ?.jsonPrimitive
-            ?.content
-            ?: "unknown"
+            ?.contentOrNull
         val usage = parseTokenUsage(bodyJson["usage"] as? JsonObject)
 
         MessageChunk(
@@ -121,7 +128,8 @@ class ChatCompletionsAPI(
                     finishReason = finishReason
                 )
             ),
-            usage = usage
+            usage = usage,
+            terminal = finishReason?.let(GenerationTerminal::fromProviderReason),
         )
     }
 
@@ -146,7 +154,11 @@ class ChatCompletionsAPI(
             .configureReferHeaders(providerSetting.baseUrl)
             .build()
 
-        Log.i(TAG, "streamText: ${json.encodeToString(requestBody)}")
+        Log.i(
+            TAG,
+            "streamText: model=${params.model.modelId}, messages=${messages.size}, " +
+                "tools=${params.tools.size}, requestChars=${requestBody.toString().length}",
+        )
 
         // just for debugging response body
         // println(client.newCall(request).await().body.string())
@@ -158,12 +170,13 @@ class ChatCompletionsAPI(
                 type: String?,
                 data: String
             ) {
+                try {
                 if (data == "[DONE]") {
                     println("[onEvent] (done) 结束流: $data")
                     close()
                     return
                 }
-                Log.d(TAG, "onEvent: $data")
+                Log.d(TAG, "onEvent: chars=${data.length}, type=${type.orEmpty()}")
                 data
                     .trim()
                     .split("\n")
@@ -186,7 +199,6 @@ class ChatCompletionsAPI(
                                     ?: throw Exception("delta/message is null")
                                 val finishReason =
                                     choice["finish_reason"]?.jsonPrimitive?.contentOrNull
-                                        ?: "unknown"
                                 add(
                                     UIMessageChoice(
                                         index = 0,
@@ -203,28 +215,37 @@ class ChatCompletionsAPI(
                             id = id,
                             model = model,
                             choices = choiceList,
-                            usage = usage
+                            usage = usage,
+                            terminal = choiceList.firstNotNullOfOrNull { choice ->
+                                choice.finishReason?.let(GenerationTerminal::fromProviderReason)
+                            },
                         )
                         trySend(messageChunk)
                     }
+                } catch (error: Exception) {
+                    val sanitized = ProviderLogPrivacy.parseException(data.length, type, error)
+                    Log.w(TAG, sanitized.message.orEmpty())
+                    close(sanitized)
+                }
             }
 
             override fun onFailure(eventSource: EventSource, t: Throwable?, response: Response?) {
                 var exception = t
 
-                Log.w(TAG, "onFailure: ${t?.javaClass?.name} ${t?.message} / $response", t)
+                Log.w(TAG, ProviderLogPrivacy.transportFailure(response?.code, t))
 
                 val bodyRaw = response?.body?.stringSafe()
                 try {
                     if (!bodyRaw.isNullOrBlank()) {
                         val bodyElement = Json.parseToJsonElement(bodyRaw)
-                        Log.d(TAG, "onFailure: error body $bodyElement")
+                        Log.d(TAG, "onFailure: structured error body received")
                         exception = bodyElement.parseErrorDetail()
-                        Log.i(TAG, "onFailure: $exception")
+                        Log.i(TAG, "onFailure: parsed provider error (${exception?.javaClass?.simpleName})")
                     }
                 } catch (e: Throwable) {
-                    Log.w(TAG, "onFailure: failed to parse from $bodyRaw", e)
-                    exception = e
+                    val sanitized = ProviderLogPrivacy.errorBodyParseException(bodyRaw?.length ?: 0, e)
+                    Log.w(TAG, sanitized.message.orEmpty())
+                    exception = sanitized
                 } finally {
                     close(exception)
                 }
@@ -260,6 +281,7 @@ class ChatCompletionsAPI(
             messages,
             providerSetting.includeHistoryReasoning,
             openRouterCache = openRouterCache,
+            requireToolReasoningContent = requiresToolReasoningContent(params.model.modelId),
         ).let {
             if (openRouterCache) insertOpenRouterCacheControl(it) else it
         }
@@ -538,19 +560,32 @@ class ChatCompletionsAPI(
         messages: List<UIMessage>,
         includeHistoryReasoning: Boolean = true,
         openRouterCache: Boolean = false,
+        requireToolReasoningContent: Boolean = false,
     ) = buildJsonArray {
         val filteredMessages = messages.filter { it.isValidToUpload() }
+        val latestUserIndex = filteredMessages.indexOfLast { it.role == MessageRole.USER }
 
-        filteredMessages.forEach { message ->
+        filteredMessages.forEachIndexed { index, message ->
             if (message.role == MessageRole.ASSISTANT) {
-                addAssistantMessages(message, includeReasoning = includeHistoryReasoning)
+                val isActiveToolTurn = requireToolReasoningContent &&
+                    index > latestUserIndex &&
+                    message.getTools().isNotEmpty()
+                addAssistantMessages(
+                    message = message,
+                    includeReasoning = includeHistoryReasoning || isActiveToolTurn,
+                    requireToolReasoningContent = requireToolReasoningContent,
+                )
             } else {
                 addNonAssistantMessage(message, openRouterCache = openRouterCache)
             }
         }
     }
 
-    private fun JsonArrayBuilder.addAssistantMessages(message: UIMessage, includeReasoning: Boolean) {
+    private fun JsonArrayBuilder.addAssistantMessages(
+        message: UIMessage,
+        includeReasoning: Boolean,
+        requireToolReasoningContent: Boolean,
+    ) {
         val groups = groupPartsByToolBoundary(message.parts)
         val contentBuffer = mutableListOf<UIMessagePart>()
         var reasoningPart: UIMessagePart.Reasoning? = null
@@ -574,7 +609,8 @@ class ChatCompletionsAPI(
                     buildAssistantMessageJson(
                         contentParts = contentBuffer,
                         tools = group.tools,
-                        reasoningPart = reasoningPart
+                        reasoningPart = reasoningPart,
+                        requireToolReasoningContent = requireToolReasoningContent,
                     )?.let { assistantMessage ->
                         add(assistantMessage)
                     }
@@ -631,7 +667,8 @@ class ChatCompletionsAPI(
             buildAssistantMessageJson(
                 contentParts = contentBuffer,
                 tools = emptyList(),
-                reasoningPart = reasoningPart
+                reasoningPart = reasoningPart,
+                requireToolReasoningContent = false,
             )?.let { assistantMessage ->
                 add(assistantMessage)
             }
@@ -641,7 +678,8 @@ class ChatCompletionsAPI(
     private fun buildAssistantMessageJson(
         contentParts: List<UIMessagePart>,
         tools: List<UIMessagePart.Tool>,
-        reasoningPart: UIMessagePart.Reasoning?
+        reasoningPart: UIMessagePart.Reasoning?,
+        requireToolReasoningContent: Boolean,
     ): JsonObject? {
         val hasUsableContent = contentParts.any { part ->
             when (part) {
@@ -659,8 +697,8 @@ class ChatCompletionsAPI(
             put("role", "assistant")
 
             // reasoning_content
-            if (hasReasoning) {
-                put("reasoning_content", reasoningPart.reasoning)
+            if (hasReasoning || (requireToolReasoningContent && tools.isNotEmpty())) {
+                put("reasoning_content", reasoningPart?.reasoning.orEmpty())
             }
 
             // content
@@ -717,6 +755,9 @@ class ChatCompletionsAPI(
             }
         }
     }
+
+    private fun requiresToolReasoningContent(modelId: String): Boolean =
+        "deepseek-v4-" in modelId.lowercase()
 
     private fun JsonArrayBuilder.addNonAssistantMessage(message: UIMessage, openRouterCache: Boolean = false) {
         add(buildJsonObject {

@@ -50,6 +50,8 @@ import me.rerere.rikkahub.data.telegram.TelegramMyChatMember
 import me.rerere.rikkahub.data.telegram.parseCallbackQuery
 import me.rerere.rikkahub.data.telegram.parseIncoming
 import me.rerere.rikkahub.data.telegram.parseMyChatMember
+import me.rerere.rikkahub.service.chat.CommandOrigin
+import me.rerere.rikkahub.service.chat.SubmitResult
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -603,44 +605,24 @@ class TelegramBotService : Service() {
         // chat is abandoned — drop it so a stale entry doesn't linger.
         clearClarifyForChat(m.chatId)
 
-        // Non-built-in messages run the LLM and must be serialized per-chat so two model
-        // turns from the same chat don't interleave. Built-ins above ran without this lock
-        // by design — that's the whole point of the fix.
-        //
-        // tryLock-with-timeout (vs the earlier blocking withLock) is what keeps the user
-        // informed when a previous turn is paused on tool approval. Without this, sending
-        // a follow-up message to a chat with an outstanding approval prompt sits silently
-        // in the queue forever — the user has no idea their second message wasn't dropped
-        // and not received.
+        // Non-built-in messages are serialized per chat so their streaming replies never
+        // interleave. A busy chat is a queue, not an implicit interrupt: ordinary text must
+        // never cancel a provider, tool, or parked approval. Explicit /steer, /interrupt and
+        // /stop commands were handled above and remain available while this coroutine waits.
         val mutex = mutexFor(m.chatId)
-        var acquired = mutex.tryLock()
-        if (!acquired) {
-            // The prior turn is parked. Two cases where a fresh user message is the
-            // implicit "abandon that, do this instead" and we should auto-stop:
-            //   (1) Pending approval keyboard sitting unanswered.
-            //   (2) Tool already approved + currently RUNNING — typically a tool that
-            //       backgrounded the app (take_photo to the camera, launch_app, the 6
-            //       system intents) and is now waiting on an activity result. The user
-            //       came back to the chat and started typing instead of finishing the
-            //       activity → they changed their mind. Without this case the new
-            //       message bounces with "previous turn still generating", which is
-            //       confusing because no tokens are actually being generated.
-            val stuckOnApproval = ApprovalPromptRegistry.snapshotForChat(m.chatId).isNotEmpty()
-            val stuckOnRunningTool = !stuckOnApproval && hasInFlightApprovedTool(m.chatId)
-            if (stuckOnApproval || stuckOnRunningTool) {
-                autoCancelStuckTurn(m.chatId)
-                acquired = mutex.tryLock()
-            }
-            if (!acquired) {
-                try {
-                    client.sendMessage(
-                        chatId = m.chatId,
-                        text = "⏳ A previous turn is still generating. Send /stop to cancel it.",
-                        replyToMessageId = m.messageId,
-                    )
-                } catch (_: Throwable) {}
-                return
-            }
+        val acquiredImmediately = mutex.tryLock()
+        if (!acquiredImmediately) {
+            try {
+                client.sendMessage(
+                    chatId = m.chatId,
+                    text = "收到，我会先把手头这件事处理完，再接着看这条。想调整当前任务可以用 /steer，想立即改做这条可以用 /interrupt。",
+                    replyToMessageId = m.messageId,
+                )
+            } catch (_: Throwable) {}
+            // Mutex waiters are resumed in order. We intentionally wait before starting the
+            // Telegram streaming pump; submitting several turns at once would make multiple
+            // pumps observe the same generation and send the wrong assistant reply.
+            mutex.lock()
         }
         // Register THIS coroutine as the chat's active turn so /stop and /new can cancel
         // it. Capture the parent Job from the running coroutine context. On exit (normal,
@@ -730,7 +712,21 @@ class TelegramBotService : Service() {
         val baselineMessageCount = conversationRepo.getConversationById(convId)
             ?.currentMessages?.size ?: 0
 
-        chatService.sendMessage(convId, parts)
+        when (val submission = chatService.submitUserMessage(convId, parts, origin = CommandOrigin.TELEGRAM)) {
+            is SubmitResult.QueueFull -> {
+                client.sendMessage(m.chatId, "队列已满（上限 ${submission.limit}），请稍后再试。")
+                return
+            }
+            is SubmitResult.Rejected -> {
+                client.sendMessage(m.chatId, "消息未接受：${submission.reason}")
+                return
+            }
+            is SubmitResult.RuntimeUnavailable -> {
+                client.sendMessage(m.chatId, "会话暂不可用：${submission.reason}")
+                return
+            }
+            is SubmitResult.Accepted -> Unit
+        }
 
         // Phase 24 — open a cross-pillar ledger row for THIS Telegram turn. kind=telegram,
         // domain_id=conversation id; one row per turn (a fresh row each inbound message).
@@ -2145,7 +2141,9 @@ class TelegramBotService : Service() {
             "start" to "Show a quick welcome and the most useful commands",
             "help" to "List every built-in slash command",
             "new" to "Start a fresh conversation (clears history)",
-            "stop" to "Cancel the current generation immediately",
+            "stop" to "Stop the current task and pause anything waiting behind it",
+            "interrupt" to "Stop what is running and switch to a new request. Usage: /interrupt [message]",
+            "steer" to "Add guidance without stopping the current operation. Usage: /steer [text]",
             "status" to "Show service state, current model, assistant, and rate limit",
             "model" to "Show or switch the chat model. Usage: /model [name]",
             "ratelimit" to "Show or set the assistant's max output tokens. Usage: /ratelimit [number|clear]",

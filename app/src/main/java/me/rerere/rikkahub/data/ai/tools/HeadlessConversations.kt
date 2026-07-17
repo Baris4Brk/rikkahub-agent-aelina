@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.uuid.ExperimentalUuidApi
 import kotlin.uuid.Uuid
 
@@ -48,6 +49,10 @@ object HeadlessConversations {
 
     private val ids: MutableSet<Uuid> = ConcurrentHashMap.newKeySet()
     private val autoApproveIds: MutableSet<Uuid> = ConcurrentHashMap.newKeySet()
+    private val persistedIds: MutableSet<Uuid> = ConcurrentHashMap.newKeySet()
+    private val persistedAutoApproveIds: MutableSet<Uuid> = ConcurrentHashMap.newKeySet()
+    private val transientIds: MutableMap<Uuid, AtomicInteger> = ConcurrentHashMap()
+    private val transientAutoApproveIds: MutableMap<Uuid, AtomicInteger> = ConcurrentHashMap()
     @Volatile private var prefs: SharedPreferences? = null
 
     /**
@@ -60,13 +65,21 @@ object HeadlessConversations {
         prefs = p
         p.getString(PREFS_KEY, null)?.split(',')?.forEach { raw ->
             if (raw.isNotBlank()) {
-                runCatching { ids.add(Uuid.parse(raw.trim())) }
+                runCatching {
+                    val id = Uuid.parse(raw.trim())
+                    ids.add(id)
+                    persistedIds.add(id)
+                }
                     .onFailure { Log.w(TAG, "init: could not parse stored UUID '$raw'") }
             }
         }
         p.getString(PREFS_KEY_AUTO_APPROVE, null)?.split(',')?.forEach { raw ->
             if (raw.isNotBlank()) {
-                runCatching { autoApproveIds.add(Uuid.parse(raw.trim())) }
+                runCatching {
+                    val id = Uuid.parse(raw.trim())
+                    autoApproveIds.add(id)
+                    persistedAutoApproveIds.add(id)
+                }
                     .onFailure { Log.w(TAG, "init: could not parse stored auto-approve UUID '$raw'") }
             }
         }
@@ -81,7 +94,20 @@ object HeadlessConversations {
     fun mark(conversationId: Uuid) {
         ids.add(conversationId)
         autoApproveIds.add(conversationId)
+        persistedIds.add(conversationId)
+        persistedAutoApproveIds.add(conversationId)
         persistIds()
+    }
+
+    /**
+     * Mark fully headless for this process only. Use when the conversation is user-owned
+     * and must not be considered an orphan cleanup candidate after a process restart.
+     */
+    fun markTransient(conversationId: Uuid) {
+        ids.add(conversationId)
+        autoApproveIds.add(conversationId)
+        transientIds.increment(conversationId)
+        transientAutoApproveIds.increment(conversationId)
     }
 
     /**
@@ -93,14 +119,33 @@ object HeadlessConversations {
      */
     fun markBrowserHeadless(conversationId: Uuid) {
         ids.add(conversationId)
+        persistedIds.add(conversationId)
         // Deliberately NOT added to autoApproveIds.
         persistIds()
     }
 
     fun unmark(conversationId: Uuid) {
-        ids.remove(conversationId)
-        autoApproveIds.remove(conversationId)
+        persistedIds.remove(conversationId)
+        persistedAutoApproveIds.remove(conversationId)
+        if (conversationId !in transientIds) {
+            ids.remove(conversationId)
+        }
+        if (conversationId !in transientAutoApproveIds) {
+            autoApproveIds.remove(conversationId)
+        }
         persistIds()
+    }
+
+    fun unmarkTransient(conversationId: Uuid) {
+        if (transientIds.decrement(conversationId) == 0 && conversationId !in persistedIds) {
+            ids.remove(conversationId)
+        }
+        if (
+            transientAutoApproveIds.decrement(conversationId) == 0 &&
+            conversationId !in persistedAutoApproveIds
+        ) {
+            autoApproveIds.remove(conversationId)
+        }
     }
 
     /**
@@ -131,14 +176,33 @@ object HeadlessConversations {
     fun clearAll() {
         ids.clear()
         autoApproveIds.clear()
+        persistedIds.clear()
+        persistedAutoApproveIds.clear()
+        transientIds.clear()
+        transientAutoApproveIds.clear()
         persistIds()
+    }
+
+    private fun MutableMap<Uuid, AtomicInteger>.increment(conversationId: Uuid) {
+        compute(conversationId) { _, existing ->
+            (existing ?: AtomicInteger()).also { it.incrementAndGet() }
+        }
+    }
+
+    private fun MutableMap<Uuid, AtomicInteger>.decrement(conversationId: Uuid): Int {
+        var remaining = 0
+        computeIfPresent(conversationId) { _, existing ->
+            remaining = existing.decrementAndGet()
+            if (remaining <= 0) null else existing
+        }
+        return remaining
     }
 
     private fun persistIds() {
         val p = prefs ?: return
         p.edit()
-            .putString(PREFS_KEY, ids.joinToString(",") { it.toString() })
-            .putString(PREFS_KEY_AUTO_APPROVE, autoApproveIds.joinToString(",") { it.toString() })
+            .putString(PREFS_KEY, persistedIds.joinToString(",") { it.toString() })
+            .putString(PREFS_KEY_AUTO_APPROVE, persistedAutoApproveIds.joinToString(",") { it.toString() })
             .apply()
     }
 }

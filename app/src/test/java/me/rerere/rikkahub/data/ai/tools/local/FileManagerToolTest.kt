@@ -18,10 +18,12 @@ import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import kotlinx.coroutines.runBlocking
 import me.rerere.ai.core.Tool
+import me.rerere.rikkahub.BuildConfig
 
 private fun invokeTool(tool: Tool, args: String): JsonObject {
+    val portableArgs = if (File.separatorChar == '\\') args.replace('\\', '/') else args
     val text = runBlocking {
-        (tool.execute(Json.parseToJsonElement(args)) as? List<*>)
+        (tool.execute(Json.parseToJsonElement(portableArgs)) as? List<*>)
             ?.filterIsInstance<UIMessagePart.Text>()
             ?.first()?.text ?: "{}"
     }
@@ -81,6 +83,29 @@ class FileManagerToolTest {
     @Test fun `find_files blocks apex path`() {
         val result = invokeTool(findFilesTool(), """{"root":"/apex","query":"lib"}""")
         assertEquals("path_blocked", result["error"]?.jsonPrimitive?.content)
+    }
+
+    @Test fun `all file manager mutation paths reject core second user data`() {
+        val appRoot = "/data/user/0/${BuildConfig.APPLICATION_ID}"
+        val cases = listOf(
+            writeBinaryFileTool() to
+                """{"path":"$appRoot/databases/rikka_hub","base64_content":"dGVzdA=="}""",
+            writeTextFileTool(NULL_CONTEXT) to
+                """{"path":"$appRoot/files/datastore/settings.preferences_pb","content":"bad","overwrite":true}""",
+            deleteFileTool() to
+                """{"path":"$appRoot/files/upload","recursive":true}""",
+            moveFileTool() to
+                """{"src":"$appRoot/shared_prefs/rikkahub.preferences.xml","dst":"/sdcard/Download/prefs.xml"}""",
+            copyFileTool() to
+                """{"src":"/sdcard/Download/input.txt","dst":"$appRoot/no_backup/androidx.work.workdb"}""",
+            createDirectoryTool() to
+                """{"path":"$appRoot/files/upload/new-folder"}""",
+        )
+
+        cases.forEach { (tool, args) ->
+            val result = invokeTool(tool, args)
+            assertEquals(tool.name, "path_blocked", result["error"]?.jsonPrimitive?.content)
+        }
     }
 
     // ========== list_files ==========
@@ -405,6 +430,29 @@ class FileManagerToolTest {
         // Malformed ones are blocked.
         assertNotNull(ContentUriSafetyGuard.check("content:///tree/missing-authority"))
         assertNotNull(ContentUriSafetyGuard.check("notcontent://x/y"))
+    }
+
+    @Test fun `own file provider keeps managed attachments readable but immutable`() {
+        val attachment =
+            "content://${BuildConfig.APPLICATION_ID}.fileprovider/upload/upload/managed.txt"
+
+        assertNull(ContentUriSafetyGuard.check(attachment))
+        assertNotNull(ContentUriSafetyGuard.checkMutation(attachment))
+        assertNotNull(
+            ContentUriSafetyGuard.checkMutation(
+                "content://0@${BuildConfig.APPLICATION_ID}.fileprovider/upload/upload/managed.txt"
+            )
+        )
+        assertNotNull(
+            ContentUriSafetyGuard.checkMutation(
+                "content://${BuildConfig.APPLICATION_ID}.fileprovider/upload/workspace/%2e%2e/upload/managed.txt"
+            )
+        )
+        assertNull(
+            ContentUriSafetyGuard.checkMutation(
+                "content://${BuildConfig.APPLICATION_ID}.fileprovider/upload/workspace/note.txt"
+            )
+        )
     }
 
     @Test fun `not-granted envelope reports the authority`() {

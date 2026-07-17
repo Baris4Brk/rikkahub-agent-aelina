@@ -4,6 +4,7 @@ import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Environment
 import android.os.PowerManager
@@ -83,7 +84,105 @@ object PermissionHelper {
         }
 
     fun allFilesAccessIntent(ctx: Context): Intent =
-        Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
-            .setData("package:${ctx.packageName}".toUri())
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val appSpecific = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
+                .setData("package:${ctx.packageName}".toUri())
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            if (appSpecific.resolveActivity(ctx.packageManager) != null) {
+                appSpecific
+            } else {
+                val global = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                if (global.resolveActivity(ctx.packageManager) != null) {
+                    global
+                } else {
+                    Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+            }
+        } else {
+            Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+
+    /** Whether the app can schedule exact alarms (Android 12+). */
+    fun hasExactAlarmAccess(ctx: Context): Boolean =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val am = ctx.getSystemService(android.app.AlarmManager::class.java)
+            am?.canScheduleExactAlarms() ?: false
+        } else {
+            true
+        }
+
+    /** Intent to open the exact alarm permission page for this app (Android 12+). */
+    fun exactAlarmIntent(ctx: Context): Intent =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM)
+                .setData("package:${ctx.packageName}".toUri())
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        } else {
+            Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+
+    /** Whether the app has usage stats access granted. */
+    fun hasUsageStatsAccess(ctx: Context): Boolean {
+        val appOps = ctx.getSystemService(Context.APP_OPS_SERVICE) as android.app.AppOpsManager
+        val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            appOps.unsafeCheckOpNoThrow(android.app.AppOpsManager.OPSTR_GET_USAGE_STATS, android.os.Process.myUid(), ctx.packageName)
+        } else {
+            @Suppress("DEPRECATION")
+            appOps.checkOpNoThrow(android.app.AppOpsManager.OPSTR_GET_USAGE_STATS, android.os.Process.myUid(), ctx.packageName)
+        }
+        return mode == android.app.AppOpsManager.MODE_ALLOWED
+    }
+    fun usageAccessIntent(): Intent =
+        Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+
+    fun canRequestPackageInstalls(ctx: Context): Boolean =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            ctx.packageManager.canRequestPackageInstalls()
+        } else {
+            true
+        }
+
+    fun unknownAppSourcesIntent(ctx: Context): Intent =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES)
+                .setData("package:${ctx.packageName}".toUri())
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        } else {
+            Intent(Settings.ACTION_SECURITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+
+    /** Whether Android 14+ currently permits this app to use full-screen intents. */
+    fun canUseFullScreenIntent(ctx: Context): Boolean =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            ctx.getSystemService(NotificationManager::class.java)?.canUseFullScreenIntent() == true
+        } else {
+            true
+        }
+
+    /** Opens the Android 14+ per-app full-screen-intent access page. */
+    fun fullScreenIntentSettingsIntent(ctx: Context): Intent =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT)
+                .setData("package:${ctx.packageName}".toUri())
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        } else {
+            Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+
+    /** Opens Android's VPN management page; VPN consent itself is still per app/service. */
+    fun vpnSettingsIntent(): Intent =
+        Intent(Settings.ACTION_VPN_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+
+    /**
+     * Reports whether this device exposes MediaProjection. This is a capability check only:
+     * Android does not provide a durable "granted" state and requires user consent for each
+     * projection session.
+     */
+    fun hasMediaProjectionCapability(ctx: Context): Boolean =
+        ctx.getSystemService(MediaProjectionManager::class.java) != null
+
+    /** Creates the per-session system consent request used by a future projection host. */
+    fun mediaProjectionConsentIntent(ctx: Context): Intent? =
+        ctx.getSystemService(MediaProjectionManager::class.java)?.createScreenCaptureIntent()
 }

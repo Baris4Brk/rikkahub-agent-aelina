@@ -16,6 +16,7 @@ import me.rerere.workspace.RootfsInstaller
 import me.rerere.workspace.WorkspaceCommandResult
 import me.rerere.workspace.WorkspaceFileEntry
 import me.rerere.workspace.WorkspaceManager
+import me.rerere.workspace.WorkspaceProcessManager
 import me.rerere.workspace.WorkspaceShellStatus
 import me.rerere.workspace.WorkspaceStorageArea
 import java.io.InputStream
@@ -27,14 +28,26 @@ class WorkspaceRepository(
     private val manager: WorkspaceManager,
     private val rootfsInstaller: RootfsInstaller,
     private val settingsStore: SettingsStore,
+    private val processManager: WorkspaceProcessManager,
 ) {
     fun listFlow(): Flow<List<WorkspaceEntity>> = dao.listFlow()
+
+    suspend fun getAll(): List<WorkspaceEntity> = dao.getAll()
 
     suspend fun checkIntegrity() = withContext(Dispatchers.IO) {
         val workspaces = dao.getAll()
         for (workspace in workspaces) {
             val dir = manager.workspaceDir(workspace.root)
             if (!dir.exists()) {
+                val stopped = processManager.stopByWorkspace(workspace.id, force = true)
+                if (!stopped.ok) {
+                    Log.e(
+                        TAG,
+                        "Missing Workspace retained because managed processes did not stop: " +
+                            "id=${workspace.id}, processes=${stopped.failedProcessIds}",
+                    )
+                    continue
+                }
                 Log.w(TAG, "Workspace directory missing, removing record: id=${workspace.id}, root=${workspace.root}")
                 dao.deleteById(workspace.id)
                 cleanupAssistantReferences(workspace.id)
@@ -236,14 +249,35 @@ class WorkspaceRepository(
         }
     }
 
-    suspend fun delete(id: String): Boolean {
-        val workspace = dao.getById(id) ?: return false
-        dao.deleteById(id)
-        withContext(Dispatchers.IO) {
-            manager.deleteWorkspace(workspace.root)
+    suspend fun delete(id: String): Boolean = deleteDetailed(id).ok
+
+    suspend fun deleteDetailed(id: String): WorkspaceDeleteResult {
+        val workspace = dao.getById(id)
+            ?: return WorkspaceDeleteResult(ok = false, code = "WORKSPACE_NOT_FOUND")
+        val stopped = processManager.stopByWorkspace(id, force = true)
+        if (!stopped.ok) {
+            Log.e(TAG, "Workspace deletion blocked by managed processes: id=$id, processes=${stopped.failedProcessIds}")
+            return WorkspaceDeleteResult(
+                ok = false,
+                code = "WORKSPACE_PROCESS_STOP_FAILED",
+                failedProcessIds = stopped.failedProcessIds,
+            )
         }
+        val filesDeleted = try {
+            withContext(Dispatchers.IO) {
+                manager.deleteWorkspace(workspace.root)
+            }
+        } catch (error: Throwable) {
+            withContext(NonCancellable) { processManager.releaseWorkspaceDeletion(id) }
+            throw error
+        }
+        if (!filesDeleted) {
+            processManager.releaseWorkspaceDeletion(id)
+            return WorkspaceDeleteResult(ok = false, code = "WORKSPACE_DELETE_FAILED")
+        }
+        dao.deleteById(id)
         cleanupAssistantReferences(id)
-        return true
+        return WorkspaceDeleteResult(ok = true, code = "WORKSPACE_DELETED")
     }
 
     private suspend fun cleanupAssistantReferences(workspaceId: String) {
@@ -284,3 +318,9 @@ class WorkspaceRepository(
         private const val TAG = "WorkspaceRepository"
     }
 }
+
+data class WorkspaceDeleteResult(
+    val ok: Boolean,
+    val code: String,
+    val failedProcessIds: List<String> = emptyList(),
+)

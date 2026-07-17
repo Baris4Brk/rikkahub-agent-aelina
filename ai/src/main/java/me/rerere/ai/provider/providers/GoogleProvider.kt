@@ -35,6 +35,7 @@ import me.rerere.ai.provider.ModelAbility
 import me.rerere.ai.provider.ModelType
 import me.rerere.ai.provider.Provider
 import me.rerere.ai.provider.ProviderSetting
+import me.rerere.ai.provider.ProviderLogPrivacy
 import me.rerere.ai.provider.TextGenerationParams
 import me.rerere.ai.provider.providers.vertex.ServiceAccountTokenProvider
 import me.rerere.ai.registry.ModelRegistry
@@ -42,6 +43,7 @@ import me.rerere.ai.ui.GoogleThoughtMetadata
 import me.rerere.ai.ui.ImageAspectRatio
 import me.rerere.ai.ui.ImageGenerationItem
 import me.rerere.ai.ui.MessageChunk
+import me.rerere.ai.ui.GenerationTerminal
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessageAnnotation
 import me.rerere.ai.ui.UIMessageChoice
@@ -129,7 +131,7 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
             val response = client.newCall(request).await()
             if (response.isSuccessful) {
                 val body = response.body.string()
-                Log.d(TAG, "listModels: $body")
+                Log.d(TAG, "listModels: responseChars=${body.length}")
                 val bodyObject = json.parseToJsonElement(body).jsonObject
                 val models = bodyObject["models"]?.jsonArray ?: return@withContext emptyList()
 
@@ -185,14 +187,37 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
 
         val response = client.newCall(request).await()
         if (!response.isSuccessful) {
-            throw Exception("Failed to get response: ${response.code} ${response.body.string()}")
+            val responseCode = response.code
+            response.body.close()
+            throw Exception("Failed to get response: $responseCode")
         }
 
         val bodyStr = response.body.string()
         val bodyJson = json.parseToJsonElement(bodyStr).jsonObject
 
-        val candidates = bodyJson["candidates"]!!.jsonArray
-        val usage = bodyJson["usageMetadata"]!!.jsonObject
+        val promptBlockReason = bodyJson["promptFeedback"]
+            ?.jsonObject
+            ?.get("blockReason")
+            ?.jsonPrimitiveOrNull
+            ?.contentOrNull
+        if (promptBlockReason != null) {
+            return@withContext MessageChunk(
+                id = Uuid.random().toString(),
+                model = params.model.modelId,
+                choices = emptyList(),
+                terminal = GenerationTerminal.fromProviderReason(promptBlockReason),
+            )
+        }
+
+        val candidates = bodyJson["candidates"]?.jsonArray ?: JsonArray(emptyList())
+        val usage = bodyJson["usageMetadata"]?.jsonObject
+        val terminal = candidates.firstOrNull()
+            ?.jsonObject
+            ?.get("finishReason")
+            ?.jsonPrimitive
+            ?.contentOrNull
+            ?.let(GenerationTerminal::fromProviderReason)
+            ?: GenerationTerminal.fromProviderReason("missing_finish_reason")
 
         val messageChunk = MessageChunk(
             id = Uuid.random().toString(),
@@ -201,11 +226,13 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
                 UIMessageChoice(
                     message = parseMessage(candidate.jsonObject),
                     index = 0,
-                    finishReason = null,
+                    finishReason = candidate.jsonObject["finishReason"]
+                        ?.jsonPrimitive?.contentOrNull,
                     delta = null
                 )
             },
-            usage = parseUsageMeta(usage)
+            usage = parseUsageMeta(usage),
+            terminal = terminal,
         )
 
         messageChunk
@@ -239,7 +266,7 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
                 .build()
         )
 
-        Log.i(TAG, "streamText: ${json.encodeToString(requestBody)}")
+        Log.i(TAG, "streamText: model=${params.model.modelId}, messages=${messages.size}, tools=${params.tools.size}")
 
         val listener = object : EventSourceListener() {
             override fun onEvent(
@@ -248,14 +275,23 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
                 type: String?,
                 data: String
             ) {
-                Log.i(TAG, "onEvent: $data")
+                Log.d(TAG, "onEvent: chars=${data.length}, type=${type.orEmpty()}")
 
                 try {
                     val jsonData = json.parseToJsonElement(data).jsonObject
                     val reason =
                         jsonData["promptFeedback"]?.jsonObject?.get("blockReason")?.jsonPrimitiveOrNull?.contentOrNull
                     if (reason != null) {
-                        close(RuntimeException("Prompt feedback: $reason"))
+                        trySend(
+                            MessageChunk(
+                                id = Uuid.random().toString(),
+                                model = params.model.modelId,
+                                choices = emptyList(),
+                                terminal = GenerationTerminal.fromProviderReason(reason),
+                            ),
+                        )
+                        close()
+                        return
                     }
                     val candidates = jsonData["candidates"]?.jsonArray ?: return
                     if (candidates.isEmpty()) return
@@ -287,12 +323,20 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
                                 finishReason = finishReason
                             )
                         },
-                        usage = usage
+                        usage = usage,
+                        terminal = candidates.firstOrNull()
+                            ?.jsonObject
+                            ?.get("finishReason")
+                            ?.jsonPrimitive
+                            ?.contentOrNull
+                            ?.let(GenerationTerminal::fromProviderReason),
                     )
 
                     trySend(messageChunk)
                 } catch (e: Exception) {
-                    Log.w(TAG, "onEvent: failed to parse $data", e)
+                    val sanitized = ProviderLogPrivacy.parseException(data.length, type, e)
+                    Log.w(TAG, sanitized.message.orEmpty())
+                    close(sanitized)
                 }
             }
 
@@ -303,14 +347,15 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
             ) {
                 var exception = t
 
-                Log.w(TAG, "onFailure: ${t?.message}", t)
+                Log.w(TAG, ProviderLogPrivacy.transportFailure(response?.code, t))
 
+                var errorBodyChars = 0
                 try {
                     if (t == null && response != null) {
                         val bodyStr = response.body.stringSafe()
+                        errorBodyChars = bodyStr?.length ?: 0
                         if (!bodyStr.isNullOrEmpty()) {
                             val bodyElement = json.parseToJsonElement(bodyStr)
-                            Log.d(TAG, "onFailure: error body $bodyElement")
                             if (bodyElement is JsonObject) {
                                 exception = Exception(
                                     bodyElement["error"]?.jsonObject?.get("message")?.jsonPrimitive?.content
@@ -322,8 +367,9 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
                         }
                     }
                 } catch (e: Throwable) {
-                    Log.w(TAG, "onFailure: failed to parse error body", e)
-                    exception = e
+                    val sanitized = ProviderLogPrivacy.errorBodyParseException(errorBodyChars, e)
+                    Log.w(TAG, sanitized.message.orEmpty())
+                    exception = sanitized
                 } finally {
                     close(exception ?: Exception("Stream failed"))
                 }
@@ -521,7 +567,6 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
         } ?: emptyList()
 
         val groundingMetadata = message["groundingMetadata"]?.jsonObject
-        Log.i(TAG, "parseMessage: $groundingMetadata")
         val annotations = parseSearchGroundingMetadata(groundingMetadata)
 
         return UIMessage(
@@ -543,7 +588,6 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
                 url = uri
             )
         }
-        Log.i(TAG, "parseSearchGroundingMetadata: $chunks")
         return chunks
     }
 

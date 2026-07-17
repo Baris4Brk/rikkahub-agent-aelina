@@ -16,10 +16,11 @@ import me.rerere.ai.core.Tool
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.rikkahub.data.notifications.NotificationEntry
 import me.rerere.rikkahub.data.notifications.NotificationListenerPreferences
+import me.rerere.rikkahub.data.notifications.verificationCodeOrNull
 import me.rerere.rikkahub.data.telegram.TelegramBotPreferences
 import me.rerere.rikkahub.service.RikkaNotificationListenerService
 
-private fun NotificationEntry.toJson(): JsonObject = buildJsonObject {
+private fun NotificationEntry.toJson(nowMs: Long): JsonObject = buildJsonObject {
     put("key", key)
     put("package", packageName)
     put("label", label)
@@ -29,6 +30,16 @@ private fun NotificationEntry.toJson(): JsonObject = buildJsonObject {
     put("post_time_ms", postTimeMs)
     if (actionTitles.isNotEmpty()) {
         put("action_titles", buildJsonArray { actionTitles.forEach { add(it) } })
+    }
+    if (!category.isNullOrBlank()) put("category", category)
+    verificationCodeOrNull(nowMs)?.let { hint ->
+        put("verification_code", buildJsonObject {
+            put("code", hint.code)
+            put("source_package", hint.sourcePackage)
+            put("source_label", hint.sourceLabel)
+            put("observed_at_ms", hint.observedAtMs)
+            put("temporary", true)
+        })
     }
 }
 
@@ -65,6 +76,7 @@ fun listRecentNotificationsTool(): Tool = Tool(
         val sinceMs = input.jsonObject["since_unix_ms"]?.jsonPrimitive?.longOrNull ?: 0L
 
         val payload = NotificationListenerHandle.withListener { svc ->
+            val nowMs = System.currentTimeMillis()
             val all = svc.recent.value
             val filtered = all.asSequence()
                 .filter { it.postTimeMs >= sinceMs }
@@ -76,7 +88,7 @@ fun listRecentNotificationsTool(): Tool = Tool(
                 .toList()
                 .takeLast(limit)
             buildJsonObject {
-                put("notifications", buildJsonArray { filtered.forEach { add(it.toJson()) } })
+                put("notifications", buildJsonArray { filtered.forEach { add(it.toJson(nowMs)) } })
                 put("total_in_buffer", all.size)
             }
         }
@@ -110,6 +122,7 @@ fun listActiveNotificationsTool(): Tool = Tool(
         val pkgNeedle = input.jsonObject["package_name"]?.jsonPrimitive?.contentOrNull?.lowercase()
         val sinceMs = input.jsonObject["since_unix_ms"]?.jsonPrimitive?.longOrNull ?: 0L
         val payload = NotificationListenerHandle.withListener { svc ->
+            val nowMs = System.currentTimeMillis()
             val all = svc.listActive()
             val filtered = all.asSequence()
                 .filter { it.postTimeMs >= sinceMs }
@@ -121,7 +134,7 @@ fun listActiveNotificationsTool(): Tool = Tool(
                 .toList()
                 .take(limit)
             buildJsonObject {
-                put("notifications", buildJsonArray { filtered.forEach { add(it.toJson()) } })
+                put("notifications", buildJsonArray { filtered.forEach { add(it.toJson(nowMs)) } })
                 put("total_active", all.size)
             }
         }
@@ -173,8 +186,12 @@ fun notificationActionClickTool(): Tool = Tool(
         Fire one of a notification's action buttons (e.g. Reply, Mark as read). Pass either
         action_index (0-based) or action_title (case-insensitive exact match). If the action
         requires text input (e.g. WhatsApp Reply with RemoteInput), returns
-        {error: requires_input} - in that case fall back to launch_app + set_text via the
-        screen automation tools.
+        {error: requires_input}. ACTION_EXPIRED means the old key/action is no longer live.
+        A successful PendingIntent dispatch returns DISPATCHED; EFFECT_OBSERVED additionally
+        means the notification disappeared or changed during the short observation window.
+        DISPATCHED is not proof that the target app completed the operation. Never retry
+        DISPATCHED, EFFECT_OBSERVED, DUPLICATE_SUPPRESSED, or PENDING_INTENT_STATE_UNKNOWN.
+        Payment/bank/transfer confirmation actions are always blocked and have no override.
     """.trimIndent().replace("\n", " "),
     parameters = {
         InputSchema.Obj(
@@ -218,23 +235,59 @@ fun notificationActionClickTool(): Tool = Tool(
         val payload = NotificationListenerHandle.withListener { svc ->
             when (val res = svc.triggerAction(key, idx, title)) {
                 is RikkaNotificationListenerService.TriggerResult.Success -> buildJsonObject {
+                    put("ok", true)
                     put("success", true)
+                    put("code", res.status.name)
+                    put("status", res.status.name)
+                    put("dispatched", true)
+                    put("effect_observed", res.observedEffect != null)
+                    put("final_state_confirmed", false)
+                    put("retry_allowed", false)
                     put("action_used", res.actionTitle)
+                    res.observedEffect?.let { put("observed_effect", it.name) }
                 }
-                RikkaNotificationListenerService.TriggerResult.NotFound -> buildJsonObject {
-                    put("error", "not_found")
+                RikkaNotificationListenerService.TriggerResult.ActionExpired -> buildJsonObject {
+                    put("ok", false)
+                    put("code", "ACTION_EXPIRED")
+                    put("error", "action_expired")
+                    put("retry_allowed", false)
+                    put("recovery", "Re-list active notifications and make a new decision from the current actions.")
                 }
                 RikkaNotificationListenerService.TriggerResult.NoAction -> buildJsonObject {
+                    put("ok", false)
+                    put("code", "NO_ACTION")
                     put("error", "no_action")
                 }
                 is RikkaNotificationListenerService.TriggerResult.RequiresInput -> buildJsonObject {
+                    put("ok", false)
+                    put("code", "REQUIRES_INPUT")
                     put("error", "requires_input")
                     put("action_title", res.actionTitle)
                     put("recovery", "This action takes user input (e.g. typing a reply). Use launch_app + set_text + click_node from the screen automation tools to drive the input UI directly.")
                 }
-                is RikkaNotificationListenerService.TriggerResult.SendFailed -> buildJsonObject {
-                    put("error", "send_failed")
+                is RikkaNotificationListenerService.TriggerResult.DuplicateSuppressed -> buildJsonObject {
+                    put("ok", false)
+                    put("code", "DUPLICATE_SUPPRESSED")
+                    put("error", "duplicate_suppressed")
+                    put("action_used", res.actionTitle)
+                    put("retry_allowed", false)
+                    put("delivery_may_have_occurred", true)
+                }
+                is RikkaNotificationListenerService.TriggerResult.SensitiveActionBlocked -> buildJsonObject {
+                    put("ok", false)
+                    put("code", "SENSITIVE_ACTION_BLOCKED")
+                    put("error", "sensitive_action_blocked")
+                    put("action_used", res.actionTitle)
+                    put("retry_allowed", false)
+                    put("recovery", "A local user must review and confirm payment, banking, or transfer actions manually.")
+                }
+                is RikkaNotificationListenerService.TriggerResult.DeliveryUnknown -> buildJsonObject {
+                    put("ok", false)
+                    put("code", "PENDING_INTENT_STATE_UNKNOWN")
+                    put("error", "pending_intent_state_unknown")
                     put("reason", res.reason)
+                    put("delivery_state", "UNKNOWN")
+                    put("retry_allowed", false)
                 }
             }
         }
@@ -249,8 +302,10 @@ fun notificationReplyTool(): Tool = Tool(
         (RemoteInput) with text and fires it — works for WhatsApp / Messages / Telegram and
         any app exposing an inline reply. Pass notification_key (from a notifications list
         call) and text. Returns {error: no_action} if the notification has no reply action
-        (fall back to launch_app + set_text via screen automation), {error: not_found} if
-        the notification is no longer active.
+        (fall back to launch_app + set_text via screen automation), or ACTION_EXPIRED if
+        the notification is no longer active. DISPATCHED only proves request delivery;
+        EFFECT_OBSERVED means the notification then changed/disappeared. Never automatically
+        retry a dispatched, duplicate-suppressed, or unknown-delivery reply.
     """.trimIndent().replace("\n", " "),
     parameters = {
         InputSchema.Obj(
@@ -287,26 +342,61 @@ fun notificationReplyTool(): Tool = Tool(
         val payload = NotificationListenerHandle.withListener { svc ->
             when (val res = svc.triggerReplyAction(key, text)) {
                 is RikkaNotificationListenerService.TriggerResult.Success -> buildJsonObject {
+                    put("ok", true)
                     put("success", true)
+                    put("code", res.status.name)
+                    put("status", res.status.name)
+                    put("dispatched", true)
+                    put("effect_observed", res.observedEffect != null)
+                    put("final_state_confirmed", false)
+                    put("retry_allowed", false)
                     put("action_used", res.actionTitle)
+                    res.observedEffect?.let { put("observed_effect", it.name) }
                 }
-                RikkaNotificationListenerService.TriggerResult.NotFound -> buildJsonObject {
-                    put("error", "not_found")
+                RikkaNotificationListenerService.TriggerResult.ActionExpired -> buildJsonObject {
+                    put("ok", false)
+                    put("code", "ACTION_EXPIRED")
+                    put("error", "action_expired")
+                    put("retry_allowed", false)
                     put("recovery", "The notification is no longer in the status bar. Re-list active notifications.")
                 }
                 RikkaNotificationListenerService.TriggerResult.NoAction -> buildJsonObject {
+                    put("ok", false)
+                    put("code", "NO_ACTION")
                     put("error", "no_action")
                     put("recovery", "This notification has no direct-reply action. Use launch_app + set_text + click_node from the screen automation tools.")
                 }
                 is RikkaNotificationListenerService.TriggerResult.RequiresInput -> buildJsonObject {
                     // triggerReplyAction never returns RequiresInput, but the sealed class
                     // demands exhaustiveness — treat it as a no-action fallback.
+                    put("ok", false)
+                    put("code", "NO_ACTION")
                     put("error", "no_action")
                     put("recovery", "Use launch_app + set_text + click_node from the screen automation tools.")
                 }
-                is RikkaNotificationListenerService.TriggerResult.SendFailed -> buildJsonObject {
-                    put("error", "send_failed")
+                is RikkaNotificationListenerService.TriggerResult.DuplicateSuppressed -> buildJsonObject {
+                    put("ok", false)
+                    put("code", "DUPLICATE_SUPPRESSED")
+                    put("error", "duplicate_suppressed")
+                    put("action_used", res.actionTitle)
+                    put("retry_allowed", false)
+                    put("delivery_may_have_occurred", true)
+                }
+                is RikkaNotificationListenerService.TriggerResult.SensitiveActionBlocked -> buildJsonObject {
+                    // Reply actions are never classified as payment confirmation, but keep the
+                    // mapping exhaustive if the listener policy is tightened in the future.
+                    put("ok", false)
+                    put("code", "SENSITIVE_ACTION_BLOCKED")
+                    put("error", "sensitive_action_blocked")
+                    put("retry_allowed", false)
+                }
+                is RikkaNotificationListenerService.TriggerResult.DeliveryUnknown -> buildJsonObject {
+                    put("ok", false)
+                    put("code", "PENDING_INTENT_STATE_UNKNOWN")
+                    put("error", "pending_intent_state_unknown")
                     put("reason", res.reason)
+                    put("delivery_state", "UNKNOWN")
+                    put("retry_allowed", false)
                 }
             }
         }

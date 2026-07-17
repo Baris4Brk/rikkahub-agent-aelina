@@ -24,6 +24,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -43,7 +44,9 @@ import com.dokar.sonner.ToastType
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.data.ai.tools.LocalToolOption
 import me.rerere.rikkahub.data.ai.tools.local.PermissionHelper
+import me.rerere.rikkahub.data.ai.tools.local.PermissionPrecision
 import me.rerere.rikkahub.data.ai.tools.local.TermuxIntegration
+import me.rerere.rikkahub.data.ai.tools.local.locationPermissionPrecision
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.data.telegram.TelegramBotPreferences
 import me.rerere.rikkahub.ui.components.nav.BackButton
@@ -51,6 +54,7 @@ import me.rerere.rikkahub.ui.components.ui.CardGroup
 import me.rerere.rikkahub.ui.context.LocalToaster
 import me.rerere.rikkahub.ui.theme.CustomColors
 import me.rerere.rikkahub.utils.writeClipboardText
+import me.rerere.rikkahub.utils.hasUsageStatsPermission
 import org.koin.androidx.compose.koinViewModel
 import org.koin.compose.koinInject
 import org.koin.core.parameter.parametersOf
@@ -124,6 +128,70 @@ private fun AssistantLocalToolContent(
     val toaster = LocalToaster.current
     val scope = rememberCoroutineScope()
     val telegramBotPreferences = koinInject<TelegramBotPreferences>()
+    val shizukuBridgeManager = koinInject<me.rerere.rikkahub.privilege.ShizukuBridgeManager>()
+    val shizukuStatus by shizukuBridgeManager.statusFlow.collectAsStateWithLifecycle()
+    val phoneCallController = koinInject<me.rerere.rikkahub.data.phone.PhoneCallController>()
+    val phoneCallState by phoneCallController.state.collectAsStateWithLifecycle()
+    val phoneActionsEnabled = assistant.localTools.contains(LocalToolOption.PhoneActions)
+    var showPhoneAccountDialog by remember { mutableStateOf(false) }
+    var pendingShizukuEnable by remember { mutableStateOf(false) }
+
+    LaunchedEffect(phoneCallController, phoneActionsEnabled) {
+        if (phoneActionsEnabled) phoneCallController.refresh()
+    }
+    val phoneLifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(phoneLifecycleOwner, phoneCallController) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                scope.launch { phoneCallController.refresh() }
+            }
+        }
+        phoneLifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { phoneLifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    LaunchedEffect(shizukuStatus.permissionGranted, pendingShizukuEnable) {
+        if (pendingShizukuEnable && shizukuStatus.permissionGranted) {
+            pendingShizukuEnable = false
+            toggleLocalTool(LocalToolOption.ExternalPrivilegeBridge, true)
+        }
+    }
+
+    if (showPhoneAccountDialog) {
+        AlertDialog(
+            onDismissRequest = { showPhoneAccountDialog = false },
+            title = {
+                Text(stringResource(R.string.assistant_page_local_tools_phone_choose_sim_title))
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    phoneCallState.accounts.forEach { account ->
+                        TextButton(
+                            onClick = {
+                                scope.launch {
+                                    phoneCallController.selectAccount(account.key)
+                                    showPhoneAccountDialog = false
+                                }
+                            },
+                        ) {
+                            val selected = account.key == phoneCallState.selectedAccount
+                            Text(
+                                text = account.label,
+                                color = if (selected) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.onSurface,
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { showPhoneAccountDialog = false }) {
+                    Text(stringResource(R.string.assistant_page_local_tools_dialog_dismiss))
+                }
+            },
+        )
+    }
     // Hardware-availability gate for the NFC toggle: a device with no NFC chip can never
     // run the nfc tools, so the toggle is shown disabled with a "no NFC hardware" subtitle
     // rather than letting the user enable a tool that would only ever error.
@@ -392,6 +460,17 @@ private fun AssistantLocalToolContent(
                 }
             )
             item(
+                headlineContent = { Text("Health Sensors") },
+                supportingContent = { Text("Read heart-rate and heart-beat body sensors.") },
+                trailingContent = {
+                    PermissionedSwitch(
+                        checked = assistant.localTools.contains(LocalToolOption.HealthSensors),
+                        onCheckedChange = { toggleLocalTool(LocalToolOption.HealthSensors, it) },
+                        requiredRuntimePerms = listOf(android.Manifest.permission.BODY_SENSORS),
+                    )
+                }
+            )
+            item(
                 headlineContent = {
                     Text(stringResource(R.string.assistant_page_local_tools_storage_title))
                 },
@@ -538,7 +617,25 @@ private fun AssistantLocalToolContent(
                     Text(stringResource(R.string.assistant_page_local_tools_location_title))
                 },
                 supportingContent = {
-                    Text(stringResource(R.string.assistant_page_local_tools_location_desc))
+                    val precision = locationPermissionPrecision(
+                        fineGranted = PermissionHelper.hasRuntime(
+                            ctx,
+                            listOf(Manifest.permission.ACCESS_FINE_LOCATION),
+                        ),
+                        coarseGranted = PermissionHelper.hasRuntime(
+                            ctx,
+                            listOf(Manifest.permission.ACCESS_COARSE_LOCATION),
+                        ),
+                    )
+                    Text(
+                        stringResource(
+                            if (precision == PermissionPrecision.COARSE) {
+                                R.string.assistant_page_local_tools_location_approximate_desc
+                            } else {
+                                R.string.assistant_page_local_tools_location_desc
+                            }
+                        )
+                    )
                 },
                 trailingContent = {
                     PermissionedSwitch(
@@ -548,6 +645,7 @@ private fun AssistantLocalToolContent(
                             Manifest.permission.ACCESS_FINE_LOCATION,
                             Manifest.permission.ACCESS_COARSE_LOCATION,
                         ),
+                        runtimePermissionPolicy = RuntimePermissionPolicy.ANY,
                     )
                 }
             )
@@ -657,6 +755,39 @@ private fun AssistantLocalToolContent(
                 }
             )
             item(
+                headlineContent = { Text("Screen Time") },
+                supportingContent = { Text("Query app usage statistics and screen time. Enable in Settings → Usage access.") },
+                trailingContent = {
+                    Switch(
+                        checked = assistant.localTools.contains(LocalToolOption.ScreenTime),
+                        onCheckedChange = { enabled ->
+                            toggleLocalTool(LocalToolOption.ScreenTime, enabled)
+                            if (enabled && !ctx.hasUsageStatsPermission()) {
+                                ctx.startActivity(
+                                    android.content.Intent(android.provider.Settings.ACTION_USAGE_ACCESS_SETTINGS).apply {
+                                        addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    }
+                                )
+                            }
+                        }
+                    )
+                }
+            )
+            item(
+                headlineContent = { Text("Calendar") },
+                supportingContent = { Text("Query, create, delete, and update calendar events.") },
+                trailingContent = {
+                    PermissionedSwitch(
+                        checked = assistant.localTools.contains(LocalToolOption.Calendar),
+                        onCheckedChange = { toggleLocalTool(LocalToolOption.Calendar, it) },
+                        requiredRuntimePerms = listOf(
+                            Manifest.permission.READ_CALENDAR,
+                            Manifest.permission.WRITE_CALENDAR,
+                        ),
+                    )
+                }
+            )
+            item(
                 headlineContent = {
                     Text(stringResource(R.string.assistant_page_local_tools_notifications_title))
                 },
@@ -722,6 +853,171 @@ private fun AssistantLocalToolContent(
                     )
                 }
             )
+            item(
+                headlineContent = { Text("Media Library") },
+                supportingContent = { Text("List images and audio files on the device.") },
+                trailingContent = {
+                    PermissionedSwitch(
+                        checked = assistant.localTools.contains(LocalToolOption.MediaLibrary),
+                        onCheckedChange = { toggleLocalTool(LocalToolOption.MediaLibrary, it) },
+                        requiredRuntimePerms = if (android.os.Build.VERSION.SDK_INT >= 33) listOf(
+                            android.Manifest.permission.READ_MEDIA_IMAGES,
+                            android.Manifest.permission.READ_MEDIA_AUDIO,
+                        ) else listOf(android.Manifest.permission.READ_EXTERNAL_STORAGE),
+                    )
+                }
+            )
+            item(
+                headlineContent = { Text("Media Write") },
+                supportingContent = { Text("Copy files into MediaStore and organize media albums (Android 10+).") },
+                trailingContent = {
+                    PermissionedSwitch(
+                        checked = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q &&
+                            assistant.localTools.contains(LocalToolOption.MediaWrite),
+                        onCheckedChange = { toggleLocalTool(LocalToolOption.MediaWrite, it) },
+                        requiresAllFilesAccess = true,
+                        enabled = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q,
+                    )
+                }
+            )
+            item(
+                headlineContent = { Text("Nearby Devices") },
+                supportingContent = { Text("Scan for Bluetooth devices and list paired devices.") },
+                trailingContent = {
+                    PermissionedSwitch(
+                        checked = assistant.localTools.contains(LocalToolOption.NearbyDevices) ||
+                            assistant.localTools.contains(LocalToolOption.BluetoothDevices),
+                        onCheckedChange = { enabled ->
+                            onUpdateAssistant { current ->
+                                val withoutLegacy = current.localTools
+                                    .minus(LocalToolOption.BluetoothDevices)
+                                    .minus(LocalToolOption.NearbyDevices)
+                                current.copy(
+                                    localTools = if (enabled) {
+                                        withoutLegacy + LocalToolOption.NearbyDevices
+                                    } else {
+                                        withoutLegacy
+                                    }
+                                )
+                            }
+                        },
+                        requiredRuntimePerms = if (android.os.Build.VERSION.SDK_INT >= 31) {
+                            listOf(
+                                android.Manifest.permission.BLUETOOTH_CONNECT,
+                                android.Manifest.permission.BLUETOOTH_SCAN,
+                            )
+                        } else {
+                            listOf(android.Manifest.permission.ACCESS_FINE_LOCATION)
+                        },
+                    )
+                }
+            )
+            item(
+                headlineContent = { Text("Shizuku / External Privilege Bridge") },
+                supportingContent = {
+                    Text(when {
+                        !shizukuStatus.installed -> "Install Shizuku or Sui before enabling privileged tools."
+                        !shizukuStatus.binderAvailable -> "Shizuku is installed but its Binder service is not running."
+                        shizukuStatus.permissionPermanentlyDenied -> "Shizuku permission was denied; grant it from the Shizuku app."
+                        !shizukuStatus.permissionGranted -> "Tap the switch to request Shizuku permission locally."
+                        shizukuStatus.privilege == me.rerere.rikkahub.data.ai.tools.local.ExternalPrivilegeBridgePrivilege.Root -> "Ready with root identity."
+                        else -> "Ready with ADB shell identity."
+                    })
+                },
+                trailingContent = {
+                    val checked = assistant.localTools.contains(LocalToolOption.ExternalPrivilegeBridge)
+                    Switch(
+                        checked = checked,
+                        enabled = checked || (shizukuStatus.binderAvailable &&
+                            !shizukuStatus.permissionPermanentlyDenied),
+                        onCheckedChange = { enabled ->
+                            when {
+                                !enabled -> {
+                                    pendingShizukuEnable = false
+                                    toggleLocalTool(LocalToolOption.ExternalPrivilegeBridge, false)
+                                }
+                                shizukuStatus.permissionGranted ->
+                                    toggleLocalTool(LocalToolOption.ExternalPrivilegeBridge, true)
+                                else -> {
+                                    pendingShizukuEnable = true
+                                    shizukuBridgeManager.requestPermission()
+                                }
+                            }
+                        },
+                    )
+                },
+            )
+            item(
+                headlineContent = { Text("Step Counter") },
+                supportingContent = { Text("Read step count from the device sensor.") },
+                trailingContent = {
+                    PermissionedSwitch(
+                        checked = assistant.localTools.contains(LocalToolOption.StepCounter),
+                        onCheckedChange = { toggleLocalTool(LocalToolOption.StepCounter, it) },
+                        requiredRuntimePerms = if (android.os.Build.VERSION.SDK_INT >= 30) listOf(
+                            android.Manifest.permission.ACTIVITY_RECOGNITION
+                        ) else emptyList(),
+                    )
+                }
+            )
+            item(
+                headlineContent = { Text("Export Conversation") },
+                supportingContent = { Text("Export a conversation as a Markdown file.") },
+                trailingContent = {
+                    Switch(
+                        checked = assistant.localTools.contains(LocalToolOption.ExportConversation),
+                        onCheckedChange = { toggleLocalTool(LocalToolOption.ExportConversation, it) }
+                    )
+                }
+            )
+            item(
+                headlineContent = {
+                    Text(stringResource(R.string.assistant_page_local_tools_phone_actions_title))
+                },
+                supportingContent = {
+                    Text(stringResource(R.string.assistant_page_local_tools_phone_actions_desc))
+                },
+                trailingContent = {
+                    PermissionedSwitch(
+                        checked = phoneActionsEnabled,
+                        onCheckedChange = { toggleLocalTool(LocalToolOption.PhoneActions, it) },
+                        requiredRuntimePerms = listOf(
+                            Manifest.permission.CALL_PHONE,
+                            Manifest.permission.READ_PHONE_STATE,
+                        ),
+                    )
+                },
+            )
+            if (phoneActionsEnabled) {
+                val canChoosePhoneAccount = phoneCallState.hasCallPermission &&
+                    phoneCallState.hasPhoneStatePermission && phoneCallState.accounts.isNotEmpty()
+                item(
+                    onClick = if (canChoosePhoneAccount) {
+                        { showPhoneAccountDialog = true }
+                    } else null,
+                    headlineContent = {
+                        Text(stringResource(R.string.assistant_page_local_tools_phone_default_sim_title))
+                    },
+                    supportingContent = {
+                        Text(when {
+                            !phoneCallState.hasCallPermission || !phoneCallState.hasPhoneStatePermission ->
+                                stringResource(R.string.assistant_page_local_tools_phone_permission_missing)
+                            phoneCallState.accounts.isEmpty() ->
+                                stringResource(R.string.assistant_page_local_tools_phone_no_sim)
+                            phoneCallState.selectedAccountUnavailable ->
+                                stringResource(R.string.assistant_page_local_tools_phone_default_sim_unavailable)
+                            phoneCallState.effectiveOption != null ->
+                                stringResource(
+                                    R.string.assistant_page_local_tools_phone_default_sim_current,
+                                    phoneCallState.effectiveOption?.label.orEmpty(),
+                                )
+                            else -> stringResource(
+                                R.string.assistant_page_local_tools_phone_default_sim_select,
+                            )
+                        })
+                    },
+                )
+            }
         }
 
         Text(
@@ -750,8 +1046,18 @@ private fun AssistantLocalToolContent(
                     )
                 }
             )
+            item(
+                headlineContent = { Text("Alarm") },
+                supportingContent = { Text("Create, list, and delete app-owned alarms.") },
+                trailingContent = {
+                    PermissionedSwitch(
+                        checked = assistant.localTools.contains(LocalToolOption.Alarm),
+                        onCheckedChange = { toggleLocalTool(LocalToolOption.Alarm, it) },
+                        requiresExactAlarm = true,
+                    )
+                }
+            )
         }
-
         Text(
             text = stringResource(R.string.assistant_page_local_tools_section_files),
             style = MaterialTheme.typography.titleSmall,
@@ -1278,11 +1584,13 @@ private fun PermissionedSwitch(
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit,
     requiredRuntimePerms: List<String> = emptyList(),
+    runtimePermissionPolicy: RuntimePermissionPolicy = RuntimePermissionPolicy.ALL,
     requiresWriteSettings: Boolean = false,
     requiresDndAccess: Boolean = false,
     requiresAccessibilityService: Boolean = false,
     requiresNotificationListener: Boolean = false,
     requiresAllFilesAccess: Boolean = false,
+    requiresExactAlarm: Boolean = false,
     enabled: Boolean = true,
 ) {
     val ctx = LocalContext.current
@@ -1297,11 +1605,13 @@ private fun PermissionedSwitch(
     // Runtime permission launcher
     val runtimePermLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
-    ) { results ->
-        val denied = results.filter { !it.value }.keys
-        if (denied.isEmpty()) {
+    ) {
+        if (hasRequiredRuntimePermissions(ctx, requiredRuntimePerms, runtimePermissionPolicy)) {
             onCheckedChange(true)
         } else {
+            val denied = requiredRuntimePerms.filterNot { permission ->
+                PermissionHelper.hasRuntime(ctx, listOf(permission))
+            }
             toaster.show(
                 message = String.format(deniedToastFmt, denied.joinToString(", ")),
                 type = ToastType.Error,
@@ -1333,6 +1643,7 @@ private fun PermissionedSwitch(
                         requiresAccessibilityService -> PermissionHelper.hasAccessibilityService(ctx)
                         requiresNotificationListener -> PermissionHelper.hasNotificationListener(ctx)
                         requiresAllFilesAccess -> PermissionHelper.hasAllFilesAccess(ctx)
+                        requiresExactAlarm -> PermissionHelper.hasExactAlarmAccess(ctx)
                         else -> false
                     }
                     pendingSpecialResume = false
@@ -1345,6 +1656,7 @@ private fun PermissionedSwitch(
                             requiresAccessibilityService -> "Accessibility service"
                             requiresNotificationListener -> "Notification access"
                             requiresAllFilesAccess -> "All files access"
+                            requiresExactAlarm -> "Exact alarm"
                             else -> ""
                         }
                         toaster.show(
@@ -1403,8 +1715,16 @@ private fun PermissionedSwitch(
                 }
             }
 
+            requiresExactAlarm -> {
+                if (PermissionHelper.hasExactAlarmAccess(ctx)) {
+                    onCheckedChange(true)
+                } else {
+                    showDialog = true
+                }
+            }
+
             requiredRuntimePerms.isNotEmpty() -> {
-                if (PermissionHelper.hasRuntime(ctx, requiredRuntimePerms)) {
+                if (hasRequiredRuntimePermissions(ctx, requiredRuntimePerms, runtimePermissionPolicy)) {
                     onCheckedChange(true)
                 } else {
                     runtimePermLauncher.launch(requiredRuntimePerms.toTypedArray())
@@ -1421,14 +1741,27 @@ private fun PermissionedSwitch(
     // raw List<String> for structural equality across recomps, so passing the list
     // directly invalidated this remember on every parent recomp.
     val permsKey = remember(requiredRuntimePerms) { requiredRuntimePerms.joinToString(",") }
-    val permissionMissing = remember(checked, resumeTrigger, permsKey, requiresWriteSettings, requiresDndAccess, requiresAccessibilityService, requiresNotificationListener, requiresAllFilesAccess) {
+    val permissionMissing = remember(
+        checked,
+        resumeTrigger,
+        permsKey,
+        runtimePermissionPolicy,
+        requiresWriteSettings,
+        requiresDndAccess,
+        requiresAccessibilityService,
+        requiresNotificationListener,
+        requiresAllFilesAccess,
+        requiresExactAlarm,
+    ) {
         checked && when {
-            requiredRuntimePerms.isNotEmpty() -> !PermissionHelper.hasRuntime(ctx, requiredRuntimePerms)
+            requiredRuntimePerms.isNotEmpty() ->
+                !hasRequiredRuntimePermissions(ctx, requiredRuntimePerms, runtimePermissionPolicy)
             requiresWriteSettings -> !PermissionHelper.hasWriteSettings(ctx)
             requiresDndAccess -> !PermissionHelper.hasDndAccess(ctx)
             requiresAccessibilityService -> !PermissionHelper.hasAccessibilityService(ctx)
             requiresNotificationListener -> !PermissionHelper.hasNotificationListener(ctx)
             requiresAllFilesAccess -> !PermissionHelper.hasAllFilesAccess(ctx)
+            requiresExactAlarm -> !PermissionHelper.hasExactAlarmAccess(ctx)
             else -> false
         }
     }
@@ -1451,6 +1784,7 @@ private fun PermissionedSwitch(
                         requiresAccessibilityService -> PermissionHelper.accessibilitySettingsIntent()
                         requiresNotificationListener -> PermissionHelper.notificationListenerSettingsIntent()
                         requiresAllFilesAccess -> PermissionHelper.allFilesAccessIntent(ctx)
+                        requiresExactAlarm -> PermissionHelper.exactAlarmIntent(ctx)
                         else -> null
                     }
                     if (intent != null) {
@@ -1491,6 +1825,14 @@ private fun PermissionedSwitch(
             )
         }
     }
+}
+
+private fun hasRequiredRuntimePermissions(
+    context: android.content.Context,
+    required: List<String>,
+    policy: RuntimePermissionPolicy,
+): Boolean = runtimePermissionRequirementSatisfied(required, policy) { permission ->
+    PermissionHelper.hasRuntime(context, listOf(permission))
 }
 
 /**

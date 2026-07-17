@@ -36,8 +36,9 @@ import me.rerere.rikkahub.data.ai.tools.local.getVolumeTool
 import me.rerere.rikkahub.data.ai.tools.local.globalActionTool
 import me.rerere.rikkahub.data.ai.tools.local.listContactsTool
 import me.rerere.rikkahub.data.ai.tools.local.listSensorsTool
+import me.rerere.rikkahub.data.ai.tools.local.listHealthSensorsTool
 import me.rerere.rikkahub.data.ai.tools.local.listSmsInboxTool
-import me.rerere.rikkahub.data.ai.tools.local.locationTool
+import me.rerere.rikkahub.data.ai.tools.local.locationToolBundle
 import me.rerere.rikkahub.data.ai.tools.local.longPressTool
 import me.rerere.rikkahub.data.ai.tools.local.mediaScannerTool
 import me.rerere.rikkahub.data.ai.tools.local.micRecorderTool
@@ -48,6 +49,7 @@ import me.rerere.rikkahub.data.ai.tools.local.playMediaTool
 import me.rerere.rikkahub.data.ai.tools.local.resumeMediaTool
 import me.rerere.rikkahub.data.ai.tools.local.seekMediaTool
 import me.rerere.rikkahub.data.ai.tools.local.readSensorTool
+import me.rerere.rikkahub.data.ai.tools.local.readHealthSensorTool
 import me.rerere.rikkahub.data.ai.tools.local.readWindowTreeTool
 import me.rerere.rikkahub.data.ai.tools.local.scrollTool
 import me.rerere.rikkahub.data.ai.tools.local.searchContactsTool
@@ -98,6 +100,11 @@ import me.rerere.rikkahub.data.ai.tools.local.readFileTool
 import me.rerere.rikkahub.data.ai.tools.local.writeBinaryFileTool
 import me.rerere.rikkahub.data.ai.tools.local.deleteFileTool
 import me.rerere.rikkahub.data.ai.tools.local.moveFileTool
+import me.rerere.rikkahub.data.ai.tools.local.buildScreenTimeTool
+import me.rerere.rikkahub.data.ai.tools.local.buildCalendarQueryTool
+import me.rerere.rikkahub.data.ai.tools.local.buildCalendarCreateTool
+import me.rerere.rikkahub.data.ai.tools.local.buildCalendarDeleteTool
+import me.rerere.rikkahub.data.ai.tools.local.buildCalendarUpdateTool
 import me.rerere.rikkahub.data.ai.tools.local.copyFileTool
 import me.rerere.rikkahub.data.ai.tools.local.createDirectoryTool
 import me.rerere.rikkahub.data.ai.tools.local.fileInfoTool
@@ -108,10 +115,22 @@ import me.rerere.rikkahub.data.ai.tools.local.listRecentNotificationsTool
 import me.rerere.rikkahub.data.ai.tools.local.notificationActionClickTool
 import me.rerere.rikkahub.data.ai.tools.local.notificationReplyTool
 import me.rerere.rikkahub.data.ai.tools.local.notificationStatusTool
+import me.rerere.rikkahub.data.ai.tools.local.callPhoneTool
 import me.rerere.rikkahub.data.ai.tools.local.batchCopyTool
 import me.rerere.rikkahub.data.ai.tools.local.batchMoveTool
 import me.rerere.rikkahub.data.ai.tools.local.batchDeleteTool
 import me.rerere.rikkahub.data.ai.tools.local.webFetchTool
+import me.rerere.rikkahub.data.ai.tools.local.alarmCreateTool
+import me.rerere.rikkahub.data.ai.tools.local.alarmListTool
+import me.rerere.rikkahub.data.ai.tools.local.alarmDeleteTool
+import me.rerere.rikkahub.data.ai.tools.local.mediaListImagesTool
+import me.rerere.rikkahub.data.ai.tools.local.mediaListAudioTool
+import me.rerere.rikkahub.data.ai.tools.local.mediaCopyTool
+import me.rerere.rikkahub.data.ai.tools.local.mediaMoveTool
+import me.rerere.rikkahub.data.ai.tools.local.listPairedBluetoothDevicesTool
+import me.rerere.rikkahub.data.ai.tools.local.scanNearbyBluetoothDevicesTool
+import me.rerere.rikkahub.data.ai.tools.local.getStepCountTool
+import me.rerere.rikkahub.data.ai.tools.local.exportConversationTool
 import me.rerere.rikkahub.data.event.AppEvent
 import me.rerere.rikkahub.data.event.AppEventBus
 import me.rerere.rikkahub.utils.readClipboardText
@@ -142,11 +161,21 @@ sealed class LocalToolOption {
     @SerialName("ask_user")
     data object AskUser : LocalToolOption()
 
+    // Compatibility with official version backups
+    @Serializable
+    @SerialName("screen_time")
+    data object ScreenTime : LocalToolOption()
+
+    @Serializable
+    @SerialName("calendar")
+    data object Calendar : LocalToolOption()
+
     @Serializable @SerialName("battery")        data object Battery        : LocalToolOption()
     @Serializable @SerialName("audio_info")     data object AudioInfo      : LocalToolOption()
     @Serializable @SerialName("telephony_info") data object TelephonyInfo  : LocalToolOption()
     @Serializable @SerialName("wifi_info")      data object WifiInfo       : LocalToolOption()
     @Serializable @SerialName("sensors")        data object Sensors        : LocalToolOption()
+    @Serializable @SerialName("health_sensors") data object HealthSensors  : LocalToolOption()
     @Serializable @SerialName("storage_info")   data object StorageInfo    : LocalToolOption()
     @Serializable @SerialName("toast")          data object Toast          : LocalToolOption()
     @Serializable @SerialName("notification")   data object Notification   : LocalToolOption()
@@ -194,7 +223,39 @@ sealed class LocalToolOption {
     @Serializable @SerialName("nfc")                  data object Nfc                 : LocalToolOption()
     @Serializable @SerialName("external_storage")     data object ExternalStorage     : LocalToolOption()
     @Serializable @SerialName("archive")              data object Archive             : LocalToolOption()
+    @Serializable @SerialName("alarm")                 data object Alarm               : LocalToolOption()
+    @Serializable @SerialName("media_library")          data object MediaLibrary        : LocalToolOption()
+    @Serializable @SerialName("media_write")            data object MediaWrite          : LocalToolOption()
+    @Serializable @SerialName("bluetooth_devices")     data object BluetoothDevices    : LocalToolOption()
+    @Serializable @SerialName("nearby_devices")        data object NearbyDevices       : LocalToolOption()
+    @Serializable @SerialName("external_privilege_bridge") data object ExternalPrivilegeBridge : LocalToolOption()
+    @Serializable @SerialName("step_counter")           data object StepCounter         : LocalToolOption()
+    @Serializable @SerialName("export_conversation")    data object ExportConversation  : LocalToolOption()
+    @Serializable @SerialName("phone_actions")          data object PhoneActions         : LocalToolOption()
     @Serializable @SerialName("keyboard_control")     data object KeyboardControl     : LocalToolOption()
+    @Serializable @SerialName("package_management")  data object PackageManagement  : LocalToolOption()
+
+    companion object {
+        /**
+         * Canonical tool surface for a selected privileged conversation. Adding a new
+         * LocalToolOption must be an intentional privilege decision; the parity test fails
+         * until the option is classified here.
+         */
+        val PRIVILEGED_IMPLEMENTED: List<LocalToolOption>
+            get() = listOf(
+            JavascriptEngine, TimeInfo, Clipboard, Tts, AskUser, ScreenTime, Calendar,
+            Battery, AudioInfo, TelephonyInfo, WifiInfo, Sensors, HealthSensors, StorageInfo,
+            Toast, Notification, Share, Torch, Vibrate, Brightness, Volume, MediaPlayer,
+            MediaScanner, Download, Location, Contacts, CallLog, SmsInbox, CameraPhoto,
+            MicRecorder, SpeechToText, Fingerprint, CronJobs, Ssh, TelegramBot,
+            ScreenAutomation, AppLauncher, Termux, NotificationListener, Files, McpControl,
+            ExternalAutomation, Reliability, SubAgents, CostGuards, Workflows, SkillImport,
+            JsSkills, SystemIntents, Browser, WebFetch, SmsSend, Wallpaper, Keystore, Nfc,
+            ExternalStorage, Archive, Alarm, MediaLibrary, MediaWrite, BluetoothDevices,
+            NearbyDevices, ExternalPrivilegeBridge, StepCounter, ExportConversation,
+            PhoneActions, KeyboardControl, PackageManagement,
+            )
+    }
 }
 
 private val TOP_TOOL_EXAMPLES: Map<String, String> = mapOf(
@@ -218,6 +279,7 @@ private val TOP_TOOL_EXAMPLES: Map<String, String> = mapOf(
     "stop_media" to "stop_media()",
     "pause_media" to "pause_media()",
     "resume_media" to "resume_media()",
+    "call_phone" to "call_phone(phone_number=\"13800138000\")",
 )
 
 internal fun appendTopToolExample(tool: Tool): Tool {
@@ -329,6 +391,9 @@ class LocalTools(
     private val okHttpClient: okhttp3.OkHttpClient,
     // agent-keyboard IPC client — backs the keyboard_* tools (drives the active text field).
     private val keyboardApiClient: me.rerere.rikkahub.data.keyboard.KeyboardApiClient,
+    private val shizukuBridgeManager: me.rerere.rikkahub.privilege.ShizukuBridgeManager,
+    private val phoneCallController: me.rerere.rikkahub.data.phone.PhoneCallController,
+    private val apkInstallController: me.rerere.rikkahub.data.packageinstaller.ApkInstallController,
 ) {
     val javascriptTool by lazy {
         Tool(
@@ -671,6 +736,8 @@ class LocalTools(
         )
     }
 
+    val screenTimeTool by lazy { buildScreenTimeTool(context, eventBus) }
+
     fun getTools(
         options: List<LocalToolOption>,
         invocationContext: ToolInvocationContext = ToolInvocationContext.EMPTY,
@@ -691,6 +758,15 @@ class LocalTools(
         if (options.contains(LocalToolOption.AskUser)) {
             tools.add(askUserTool)
         }
+        if (options.contains(LocalToolOption.ScreenTime)) {
+            tools.add(screenTimeTool)
+        }
+        if (options.contains(LocalToolOption.Calendar)) {
+            tools.add(buildCalendarQueryTool(context))
+            tools.add(buildCalendarCreateTool(context))
+            tools.add(buildCalendarDeleteTool(context))
+            tools.add(buildCalendarUpdateTool(context))
+        }
         if (options.contains(LocalToolOption.Battery)) {
             tools.add(batteryTool(context))
         }
@@ -706,6 +782,10 @@ class LocalTools(
         if (options.contains(LocalToolOption.Sensors)) {
             tools.add(listSensorsTool(context))
             tools.add(readSensorTool(context))
+        }
+        if (options.contains(LocalToolOption.HealthSensors)) {
+            tools.add(listHealthSensorsTool(context))
+            tools.add(readHealthSensorTool(context))
         }
         if (options.contains(LocalToolOption.StorageInfo)) {
             tools.add(storageTool(context))
@@ -749,7 +829,7 @@ class LocalTools(
             tools.add(writeTextFileTool(context))
         }
         if (options.contains(LocalToolOption.Location)) {
-            tools.add(locationTool(context))
+            tools.addAll(locationToolBundle(context))
         }
         if (options.contains(LocalToolOption.Contacts)) {
             tools.add(searchContactsTool(context))
@@ -801,7 +881,12 @@ class LocalTools(
             tools.add(telegramDeleteCommandsTool(telegramBotPreferences, telegramBotClient))
         }
         if (options.contains(LocalToolOption.CronJobs)) {
-            tools.add(me.rerere.rikkahub.data.ai.tools.local.scheduleJobTool(scheduledJobRepository, cronJobScheduler, settingsStore,
+            tools.add(me.rerere.rikkahub.data.ai.tools.local.scheduleJobTool(
+                scheduledJobRepository,
+                cronJobScheduler,
+                settingsStore,
+                conversationRepo,
+                currentConversationId = invocationContext.callerConversationId,
                 knownToolNamesProvider = { tools.map { it.name } }))
             tools.add(me.rerere.rikkahub.data.ai.tools.local.listJobsTool(scheduledJobRepository))
             tools.add(me.rerere.rikkahub.data.ai.tools.local.deleteJobTool(scheduledJobRepository, scheduledJobRunRepository, cronJobScheduler))
@@ -995,6 +1080,45 @@ class LocalTools(
             tools.add(me.rerere.rikkahub.data.ai.tools.local.zipFilesTool(context))
             tools.add(me.rerere.rikkahub.data.ai.tools.local.unzipFileTool(context))
             tools.add(me.rerere.rikkahub.data.ai.tools.local.listZipContentsTool(context))
+        }
+        if (options.contains(LocalToolOption.Alarm)) {
+            tools.add(alarmCreateTool())
+            tools.add(alarmListTool())
+            tools.add(alarmDeleteTool())
+        }
+        if (options.contains(LocalToolOption.MediaLibrary)) {
+            tools.add(mediaListImagesTool(context))
+            tools.add(mediaListAudioTool(context))
+        }
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q &&
+            options.contains(LocalToolOption.MediaWrite)) {
+            tools.add(mediaCopyTool(context))
+            tools.add(mediaMoveTool(context))
+        }
+        if (options.contains(LocalToolOption.NearbyDevices) ||
+            options.contains(LocalToolOption.BluetoothDevices)) {
+            tools.add(listPairedBluetoothDevicesTool(context))
+            tools.add(scanNearbyBluetoothDevicesTool(context))
+        }
+        if (options.contains(LocalToolOption.ExternalPrivilegeBridge)) {
+            val bridge = shizukuBridgeManager
+            val policy = bridge.protectedPackagePolicy()
+            tools.add(me.rerere.rikkahub.data.ai.tools.local.shizukuStatusTool(bridge))
+            tools.add(me.rerere.rikkahub.data.ai.tools.local.listPackagesTool(bridge))
+            tools.add(me.rerere.rikkahub.data.ai.tools.local.forceStopAppTool(bridge, policy))
+            tools.add(me.rerere.rikkahub.data.ai.tools.local.clearAppCacheTool(bridge, policy))
+        }
+        if (options.contains(LocalToolOption.StepCounter)) {
+            tools.add(getStepCountTool(context))
+        }
+        if (options.contains(LocalToolOption.ExportConversation)) {
+            tools.add(exportConversationTool(invocationContext.callerConversationId))
+        }
+        if (options.contains(LocalToolOption.PhoneActions)) {
+            tools.add(callPhoneTool(phoneCallController))
+        }
+        if (options.contains(LocalToolOption.PackageManagement)) {
+            tools.add(createInstallApkTool(apkInstallController))
         }
         if (options.contains(LocalToolOption.KeyboardControl)) {
             // Drives the active text field through the co-signed agent-keyboard IME.

@@ -31,9 +31,11 @@ import me.rerere.ai.provider.Model
 import me.rerere.ai.provider.ModelAbility
 import me.rerere.ai.provider.Provider
 import me.rerere.ai.provider.ProviderSetting
+import me.rerere.ai.provider.ProviderLogPrivacy
 import me.rerere.ai.provider.TextGenerationParams
 import me.rerere.ai.ui.ImageGenerationItem
 import me.rerere.ai.ui.MessageChunk
+import me.rerere.ai.ui.GenerationTerminal
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessageChoice
 import me.rerere.ai.ui.ClaudeReasoningMetadata
@@ -161,11 +163,13 @@ class ClaudeProvider(private val client: OkHttpClient, context: Context? = null)
             .configureReferHeaders(providerSetting.baseUrl)
             .build()
 
-        Log.i(TAG, "generateText: ${json.encodeToString(requestBody)}")
+        Log.i(TAG, "generateText: model=${params.model.modelId}, messages=${messages.size}, tools=${params.tools.size}")
 
         val response = client.newCall(request).await()
         if (!response.isSuccessful) {
-            throw Exception("Failed to get response: ${response.code} ${response.body.string()}")
+            val responseCode = response.code
+            response.body.close()
+            throw Exception("Failed to get response: $responseCode")
         }
 
         val bodyStr = response.body.string()
@@ -175,7 +179,8 @@ class ClaudeProvider(private val client: OkHttpClient, context: Context? = null)
         val id = bodyJson["id"]?.jsonPrimitive?.contentOrNull ?: ""
         val model = bodyJson["model"]?.jsonPrimitive?.contentOrNull ?: ""
         val content = bodyJson["content"]?.jsonArray ?: JsonArray(emptyList())
-        val stopReason = bodyJson["stop_reason"]?.jsonPrimitive?.contentOrNull ?: "unknown"
+        val stopReason = bodyJson["stop_reason"]?.jsonPrimitive?.contentOrNull
+            ?: "missing_stop_reason"
         val usage = parseTokenUsage(bodyJson)
 
         MessageChunk(
@@ -189,7 +194,8 @@ class ClaudeProvider(private val client: OkHttpClient, context: Context? = null)
                     finishReason = stopReason
                 )
             ),
-            usage = usage
+            usage = usage,
+            terminal = GenerationTerminal.fromProviderReason(stopReason),
         )
     }
 
@@ -209,12 +215,9 @@ class ClaudeProvider(private val client: OkHttpClient, context: Context? = null)
             .configureReferHeaders(providerSetting.baseUrl)
             .build()
 
-        Log.i(TAG, "streamText: ${json.encodeToString(requestBody)}")
+        Log.i(TAG, "streamText: model=${params.model.modelId}, messages=${messages.size}, tools=${params.tools.size}")
 
-        requestBody["messages"]!!.jsonArray.forEach {
-            Log.i(TAG, "streamText: $it")
-        }
-
+        var pendingStopReason: String? = null
         val listener = object : EventSourceListener() {
             override fun onEvent(
                 eventSource: EventSource,
@@ -222,12 +225,15 @@ class ClaudeProvider(private val client: OkHttpClient, context: Context? = null)
                 type: String?,
                 data: String
             ) {
-                Log.d(TAG, "onEvent: type=$type, data=$data")
+                try {
+                Log.d(TAG, "onEvent: type=$type, chars=${data.length}")
                 if (data == "[DONE]") {
                     return
                 }
 
                 val dataJson = json.parseToJsonElement(data).jsonObject
+                dataJson["delta"]?.jsonObject?.get("stop_reason")
+                    ?.jsonPrimitive?.contentOrNull?.let { pendingStopReason = it }
                 val deltaMessage = parseMessage(buildJsonArray {
                     val contentBlockObj = dataJson["content_block"]?.jsonObject
                     val deltaObj = dataJson["delta"]?.jsonObject
@@ -247,12 +253,24 @@ class ClaudeProvider(private val client: OkHttpClient, context: Context? = null)
                             index = 0,
                             delta = deltaMessage,
                             message = null,
-                            finishReason = null
+                            finishReason = if (type == "message_stop") {
+                                pendingStopReason ?: "missing_stop_reason"
+                            } else {
+                                null
+                            },
                         )
                     ),
-                    usage = tokenUsage
+                    usage = tokenUsage,
+                    terminal = if (type == "message_stop") {
+                        GenerationTerminal.fromProviderReason(
+                            pendingStopReason ?: "missing_stop_reason",
+                        )
+                    } else {
+                        null
+                    },
                 )
 
+                trySend(messageChunk)
                 when (type) {
                     "message_stop" -> {
                         Log.d(TAG, "Stream ended")
@@ -265,24 +283,28 @@ class ClaudeProvider(private val client: OkHttpClient, context: Context? = null)
                         close(error)
                     }
                 }
-
-                trySend(messageChunk)
+                } catch (error: Exception) {
+                    val sanitized = ProviderLogPrivacy.parseException(data.length, type, error)
+                    Log.w(TAG, sanitized.message.orEmpty())
+                    close(sanitized)
+                }
             }
 
             override fun onFailure(eventSource: EventSource, t: Throwable?, response: Response?) {
                 var exception = t
 
-                Log.e(TAG, "onFailure: ${t?.javaClass?.name} ${t?.message} / $response", t)
+                Log.e(TAG, ProviderLogPrivacy.transportFailure(response?.code, t))
 
                 val bodyRaw = response?.body?.stringSafe()
                 try {
                     if (!bodyRaw.isNullOrBlank()) {
                         val bodyElement = Json.parseToJsonElement(bodyRaw)
-                        Log.i(TAG, "Error response: $bodyElement")
                         exception = bodyElement.parseErrorDetail()
                     }
                 } catch (e: Throwable) {
-                    Log.w(TAG, "onFailure: failed to parse from $bodyRaw", e)
+                    val sanitized = ProviderLogPrivacy.errorBodyParseException(bodyRaw?.length ?: 0, e)
+                    Log.w(TAG, sanitized.message.orEmpty())
+                    exception = sanitized
                 } finally {
                     close(exception)
                 }
@@ -522,7 +544,7 @@ class ClaudeProvider(private val client: OkHttpClient, context: Context? = null)
                     put("data", encoded.base64)
                 })
             }.onFailure {
-                Log.w(TAG, "encode image failed: $url", it)
+                Log.w(TAG, "encode image failed", it)
                 put("type", "text")
                 put("text", "")
             }
@@ -584,8 +606,7 @@ class ClaudeProvider(private val client: OkHttpClient, context: Context? = null)
                 }
 
                 "redacted_thinking" -> {
-                    val data = block["data"]?.jsonPrimitiveOrNull?.contentOrNull
-                    println(data)
+                    // Redacted thinking is intentionally not logged or rendered.
                 }
 
                 "tool_use" -> {

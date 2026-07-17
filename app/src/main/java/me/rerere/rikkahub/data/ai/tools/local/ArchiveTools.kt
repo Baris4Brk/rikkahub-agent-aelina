@@ -47,13 +47,23 @@ private const val UNZIP_MAX_ENTRY_BYTES = 1L * 1024 * 1024 * 1024
  * other path is `~`-expanded then run through [PathSafetyGuard] on its file:// -stripped
  * form. Returns null when safe, otherwise an [arcErr] envelope to return verbatim.
  */
-private fun guardArchivePath(raw: String): List<UIMessagePart>? {
+private fun guardArchivePath(raw: String, mutation: Boolean = false): List<UIMessagePart>? {
     if (isContent(raw)) {
-        ContentUriSafetyGuard.check(raw)?.let { return arcErr(it.code, "detail" to it.detail) }
+        val violation = if (mutation) {
+            ContentUriSafetyGuard.checkMutation(raw)
+        } else {
+            ContentUriSafetyGuard.check(raw)
+        }
+        violation?.let { return arcErr(it.code, "detail" to it.detail) }
         return null
     }
     val expanded = AgentWorkspace.expand(raw).removePrefix("file://")
-    PathSafetyGuard.check(expanded)?.let { return arcErr(it.code, "detail" to it.detail) }
+    val violation = if (mutation) {
+        PathSafetyGuard.checkMutationTree(expanded)
+    } else {
+        PathSafetyGuard.check(expanded)
+    }
+    violation?.let { return arcErr(it.code, "detail" to it.detail) }
     return null
 }
 
@@ -162,7 +172,7 @@ fun zipFilesTool(context: Context): Tool = Tool(
         // Path-safety: every source and the destination must clear the guard before any
         // stream is opened (file:// → PathSafetyGuard, content:// → ContentUriSafetyGuard).
         for (src in sources) guardArchivePath(src)?.let { return@Tool it }
-        guardArchivePath(destination)?.let { return@Tool it }
+        guardArchivePath(destination, mutation = true)?.let { return@Tool it }
 
         val archiveSources = mutableListOf<ArchiveSource>()
         for (src in sources) {
@@ -266,7 +276,7 @@ fun unzipFileTool(context: Context): Tool = Tool(
         // any stream, so a poisoned source path can't be read and entries can't be
         // written outside a safe destination.
         guardArchivePath(source)?.let { return@Tool it }
-        guardArchivePath(destDir)?.let { return@Tool it }
+        guardArchivePath(destDir, mutation = true)?.let { return@Tool it }
 
         val ins = openIn(context, source) ?: return@Tool arcErr("invalid_zip")
 

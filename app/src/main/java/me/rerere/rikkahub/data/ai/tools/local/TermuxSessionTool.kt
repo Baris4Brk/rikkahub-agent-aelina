@@ -152,7 +152,7 @@ internal fun isSessionNotFound(stderr: String): Boolean {
         s.contains("no current session")
 }
 
-private suspend fun tmux(context: Context, argv: Array<String>, timeoutMs: Long = TMUX_OP_TIMEOUT_MS): CaptureResult =
+internal suspend fun tmux(context: Context, argv: Array<String>, timeoutMs: Long = TMUX_OP_TIMEOUT_MS): CaptureResult =
     runCommandCapture(context, "$TERMUX_BIN/tmux", argv, TERMUX_HOME, timeoutMs)
 
 /** Ensure tmux is installed; auto-install on first use. Returns null on success, an error string otherwise. */
@@ -320,7 +320,7 @@ private suspend fun sessionNotFoundEnvelope(context: Context, session: String): 
 
 fun termuxSessionStartTool(context: Context): Tool = Tool(
     name = "termux_session_start",
-    description = "Open a persistent, interactive Termux terminal session (tmux-backed, real pty). Use for ssh into a saved host, anything that prompts for a password/sudo, REPLs, or stateful shells. Returns a session_id; drive it with termux_session_send / termux_session_read. Auto-installs tmux on first use.",
+    description = "Open a persistent, interactive Termux terminal session (tmux-backed, real pty). Use for ssh into a saved host, anything that prompts for a password/sudo, REPLs, or stateful shells. Returns a session_id; drive it with termux_session_send / termux_session_read. Auto-installs tmux on first use. Exchange files with RikkaHub through ~/storage/shared/RikkaHubExchange after termux-setup-storage.",
     parameters = {
         InputSchema.Obj(properties = buildJsonObject {
             put("name", buildJsonObject { put("type", "string"); put("description", "Optional friendly label for the session.") })

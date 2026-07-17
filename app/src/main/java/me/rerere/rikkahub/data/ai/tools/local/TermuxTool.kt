@@ -7,6 +7,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.os.Build
 import android.os.Bundle
+import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.add
@@ -225,7 +226,7 @@ internal suspend fun runCommandCapture(
     }
 
     return try {
-        ctx.startService(intent)
+        ContextCompat.startForegroundService(ctx, intent)
         val bundle = withTimeoutOrNull(timeoutMs) { resultDeferred.await() }
         if (bundle == null) {
             CaptureResult.Timeout
@@ -255,6 +256,13 @@ internal suspend fun runCommandCapture(
         }
     } catch (t: SecurityException) {
         CaptureResult.Denied
+    } catch (t: RuntimeException) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            t.javaClass.name.contains("ForegroundServiceStartNotAllowedException")) {
+            CaptureResult.OtherError("app is in background uid null — Android 12+ forbids starting Termux service from background. Keep RikkaHub in foreground, set Termux battery to unrestricted, or use termux-wake-lock.")
+        } else {
+            CaptureResult.OtherError(t.message ?: t::class.java.simpleName)
+        }
     } catch (t: Throwable) {
         CaptureResult.OtherError(t.message ?: t::class.java.simpleName)
     } finally {
@@ -281,6 +289,8 @@ fun termuxRunCommandTool(context: Context): Tool = Tool(
         ~/.termux/termux.properties (one-time setup). In command mode, apt/apt-get are
         automatically wrapped with DEBIAN_FRONTEND=noninteractive and safe dpkg defaults;
         do not add extra -y flags unless the user specifically asked for unattended upgrades.
+        Exchange files with RikkaHub or its proot workspace through
+        ~/storage/shared/RikkaHubExchange after the user has run termux-setup-storage once.
     """.trimIndent().replace("\n", " "),
     parameters = {
         InputSchema.Obj(
@@ -421,7 +431,7 @@ fun termuxRunCommandTool(context: Context): Tool = Tool(
                 putExtra("com.termux.RUN_COMMAND_SESSION_ACTION", "0")
             }
             return@Tool try {
-                context.startService(intent)
+                ContextCompat.startForegroundService(context, intent)
                 listOf(
                     UIMessagePart.Text(
                         buildJsonObject {
@@ -440,6 +450,28 @@ fun termuxRunCommandTool(context: Context): Tool = Tool(
                         }.toString()
                     )
                 )
+            } catch (t: RuntimeException) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                    t.javaClass.name.contains("ForegroundServiceStartNotAllowedException")) {
+                    listOf(
+                        UIMessagePart.Text(
+                            buildJsonObject {
+                                put("error", "termux_run_failed")
+                                put("detail", "Not allowed to start service Intent ... app is in background uid null")
+                                put("human_error", "Termux run failed: RikkaHub is in background. Android 12+ does not allow background apps to start Termux. Keep RikkaHub visible, set Termux battery to unrestricted, or run termux-wake-lock in Termux.")
+                            }.toString()
+                        )
+                    )
+                } else {
+                    listOf(
+                        UIMessagePart.Text(
+                            buildJsonObject {
+                                put("error", "dispatch_failed")
+                                put("reason", t.message ?: t::class.java.simpleName)
+                            }.toString()
+                        )
+                    )
+                }
             } catch (t: Throwable) {
                 listOf(
                     UIMessagePart.Text(

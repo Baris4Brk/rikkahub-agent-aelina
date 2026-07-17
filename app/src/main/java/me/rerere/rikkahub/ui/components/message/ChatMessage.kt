@@ -66,9 +66,11 @@ import kotlinx.serialization.json.jsonPrimitive
 import me.rerere.ai.core.MessageRole
 import me.rerere.ai.provider.Model
 import me.rerere.ai.ui.ToolApprovalState
+import me.rerere.ai.ui.FinalAnswerRecoveryStatus
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessageAnnotation
 import me.rerere.ai.ui.UIMessagePart
+import me.rerere.ai.ui.UIMessageState
 import me.rerere.ai.ui.isEmptyUIMessage
 import me.rerere.hugeicons.HugeIcons
 import me.rerere.hugeicons.stroke.File02
@@ -165,6 +167,7 @@ fun ChatMessage(
                 role = message.role,
                 parts = message.parts,
                 annotations = message.annotations,
+                messageState = message.state,
                 loading = loading,
                 model = model,
                 onToolApproval = onToolApproval,
@@ -269,6 +272,7 @@ private fun MessagePartsBlock(
     model: Model?,
     parts: List<UIMessagePart>,
     annotations: List<UIMessageAnnotation>,
+    messageState: UIMessageState,
     loading: Boolean,
     onToolApproval: ((toolCallId: String, approved: Boolean, reason: String, scope: me.rerere.rikkahub.service.ChatService.ApprovalScope, toolName: String) -> Unit)? = null,
     onToolAnswer: ((toolCallId: String, answer: String) -> Unit)? = null,
@@ -281,6 +285,9 @@ private fun MessagePartsBlock(
     val hapticFeedback = LocalHapticFeedback.current
     val settings = LocalSettings.current
     val partsState by rememberUpdatedState(parts)
+    val steeringAnnotation = annotations
+        .filterIsInstance<UIMessageAnnotation.Steering>()
+        .firstOrNull()
 
     val handleClickCitation: (String) -> Unit = remember {
         handler@{ citationId ->
@@ -384,7 +391,14 @@ private fun MessagePartsBlock(
                                 Surface(
                                     modifier = Modifier.animateContentSize(),
                                     shape = RoundedCornerShape(16.dp),
-                                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = settings.displaySetting.bubbleOpacity),
+                                    color = when (steeringAnnotation?.persistent) {
+                                        true -> Color(0xFFFFE39A)
+                                            .copy(alpha = settings.displaySetting.bubbleOpacity)
+                                        false -> Color(0xFFDCC8FF)
+                                            .copy(alpha = settings.displaySetting.bubbleOpacity)
+                                        null -> MaterialTheme.colorScheme.primaryContainer
+                                            .copy(alpha = settings.displaySetting.bubbleOpacity)
+                                    },
                                     onClick = { onUserMessageClick?.invoke() },
                                 ) {
                                     Column(modifier = Modifier.padding(8.dp)) {
@@ -594,8 +608,56 @@ private fun MessagePartsBlock(
         }
     }
 
-    // Annotations (always rendered at the end)
-    if (annotations.isNotEmpty()) {
+    val recovery = annotations.filterIsInstance<UIMessageAnnotation.FinalAnswerRecovery>()
+        .lastOrNull()
+    val referenceAnnotations = annotations.filterNot {
+        it is UIMessageAnnotation.FinalAnswerRecovery
+    }
+
+    if (recovery != null && recovery.status != FinalAnswerRecoveryStatus.SUCCEEDED) {
+        Surface(
+            shape = RoundedCornerShape(12.dp),
+            color = if (recovery.status == FinalAnswerRecoveryStatus.STARTED) {
+                MaterialTheme.colorScheme.secondaryContainer
+            } else {
+                MaterialTheme.colorScheme.errorContainer
+            },
+        ) {
+            Text(
+                text = if (recovery.status == FinalAnswerRecoveryStatus.STARTED) {
+                    stringResource(
+                        R.string.final_answer_recovery_in_progress,
+                        recovery.attempt,
+                        10,
+                    )
+                } else {
+                    stringResource(
+                        R.string.final_answer_recovery_failed,
+                        recovery.attempt,
+                    )
+                },
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                style = MaterialTheme.typography.labelMedium,
+            )
+        }
+    }
+
+    if (recovery == null && messageState == UIMessageState.INCOMPLETE_NO_VISIBLE_ANSWER) {
+        Surface(
+            shape = RoundedCornerShape(12.dp),
+            color = MaterialTheme.colorScheme.errorContainer,
+        ) {
+            Text(
+                text = stringResource(R.string.final_answer_missing),
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                style = MaterialTheme.typography.labelMedium,
+            )
+        }
+    }
+
+    // User-facing annotations (always rendered at the end). Internal recovery markers are
+    // rendered above and must not inflate citation counts or create an empty details panel.
+    if (referenceAnnotations.isNotEmpty()) {
         Column(
             modifier = Modifier.animateContentSize(),
         ) {
@@ -619,8 +681,17 @@ private fun MessagePartsBlock(
                             .padding(4.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        annotations.fastForEachIndexed { index, annotation ->
+                        referenceAnnotations.fastForEachIndexed { index, annotation ->
                             when (annotation) {
+                                is UIMessageAnnotation.Steering -> {
+                                    Text(
+                                        text = if (annotation.persistent) {
+                                            "以后也记着"
+                                        } else {
+                                            "只在这次任务里参考"
+                                        }
+                                    )
+                                }
                                 is UIMessageAnnotation.UrlCitation -> {
                                     Row(
                                         horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -636,6 +707,15 @@ private fun MessagePartsBlock(
                                         )
                                     }
                                 }
+                                is UIMessageAnnotation.SecondUser -> {
+                                    Text(
+                                        text = stringResource(
+                                            R.string.second_user_message_label,
+                                            annotation.displayName,
+                                        )
+                                    )
+                                }
+                                is UIMessageAnnotation.FinalAnswerRecovery -> Unit
                             }
                         }
                     }
@@ -646,7 +726,15 @@ private fun MessagePartsBlock(
                     expand = !expand
                 }
             ) {
-                Text(stringResource(R.string.citations_count, annotations.size))
+                Text(
+                    if (referenceAnnotations.any { it is UIMessageAnnotation.Steering }) {
+                        "任务补充说明"
+                    } else if (referenceAnnotations.any { it is UIMessageAnnotation.SecondUser }) {
+                        stringResource(R.string.second_user_message_button)
+                    } else {
+                        stringResource(R.string.citations_count, referenceAnnotations.size)
+                    }
+                )
             }
         }
     }

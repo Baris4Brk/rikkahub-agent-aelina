@@ -1,0 +1,130 @@
+package me.rerere.rikkahub.service.chat
+
+import kotlinx.serialization.Serializable
+import me.rerere.ai.ui.UIMessageAnnotation
+import me.rerere.ai.ui.UIMessagePart
+import kotlin.uuid.Uuid
+
+sealed interface ChatCommand
+sealed interface EmergencyCommand : ChatCommand
+sealed interface ControlCommand : ChatCommand
+sealed interface NormalCommand : ChatCommand
+
+data class CommandDependency(
+    val commandId: Uuid,
+    val requiredOutcome: RequiredOutcome = RequiredOutcome.COMPLETED,
+)
+
+enum class RequiredOutcome { COMPLETED, NOT_FAILED }
+
+enum class CommandOrigin {
+    APP_UI,
+    SYSTEM_ASSISTANT,
+    SYSTEM_ASSISTANT_KEYGUARD,
+    TELEGRAM,
+    WEB_API,
+    CRON,
+    INTERNAL,
+}
+
+@Serializable
+data class RawUserContent(
+    val parts: List<UIMessagePart>,
+    val answer: Boolean = true,
+    val annotations: List<UIMessageAnnotation> = emptyList(),
+)
+
+data class StopCommand(
+    val pauseQueue: Boolean = true,
+) : EmergencyCommand
+
+data class InterruptCommand(
+    val replacement: SendMessageCommand,
+) : EmergencyCommand
+
+data class InterruptRegenerateCommand(
+    val regeneration: RegenerateCommand,
+) : EmergencyCommand
+
+data class ToolApprovalCommand(
+    val toolCallId: String,
+    val decision: ToolDecision,
+    val toolName: String? = null,
+    val scope: String = "Once",
+) : ControlCommand
+
+data class SteerCommand(
+    val text: String,
+    val scope: SteeringScope = SteeringScope.REMAINDER_OF_RUN,
+    val applyPolicy: SteeringApplyPolicy = SteeringApplyPolicy.AFTER_CHECKPOINT,
+    val historyMode: SteeringHistoryMode = SteeringHistoryMode.TRANSIENT,
+) : ControlCommand
+
+data class CancelCurrentToolCommand(
+    val toolCallId: String,
+) : ControlCommand
+
+data class SendMessageCommand(
+    val content: RawUserContent,
+    val assistantIdSnapshot: Uuid? = null,
+    val modelIdSnapshot: String? = null,
+) : NormalCommand
+
+data class RegenerateCommand(
+    val targetMessageId: Uuid,
+    val expectedTargetVersion: Long,
+    val expectedBranchHeadMessageId: Uuid,
+    val policy: RegeneratePolicy = RegeneratePolicy.INTERRUPT_CURRENT,
+) : NormalCommand
+
+data class ResumeQueueCommand(
+    val startNextImmediately: Boolean = true,
+) : NormalCommand
+
+/** Internal continuation after the final pending tool approval is committed. */
+data object ResumeAfterApprovalCommand : ControlCommand
+
+data class ClearPendingQueueCommand(
+    val reason: String = "Cleared by user",
+) : NormalCommand
+
+data class CancelQueuedCommand(
+    val targetCommandId: Uuid,
+) : NormalCommand
+
+data class UpdateQueuedMessageCommand(
+    val targetCommandId: Uuid,
+    val content: RawUserContent,
+) : NormalCommand
+
+data class PromoteQueuedMessageToSteeringCommand(
+    val targetCommandId: Uuid,
+    val scope: SteeringScope = SteeringScope.REMAINDER_OF_RUN,
+    val historyMode: SteeringHistoryMode = SteeringHistoryMode.TRANSIENT,
+) : NormalCommand
+
+enum class RegeneratePolicy {
+    INTERRUPT_CURRENT,
+    REJECT_IF_BUSY,
+    QUEUE_WITH_BRANCH_CHECK,
+}
+
+enum class SteeringScope { NEXT_MODEL_CALL, REMAINDER_OF_RUN }
+enum class SteeringApplyPolicy { AFTER_CHECKPOINT, CANCEL_CURRENT_TOOL }
+enum class SteeringHistoryMode { TRANSIENT, PERSISTENT }
+
+/** UI-facing snapshot of guidance attached to the current active run. */
+data class SteeringUiEntry(
+    val commandId: Uuid,
+    val runId: Uuid,
+    val text: String,
+    val state: me.rerere.rikkahub.data.ai.SteeringState,
+    val historyMode: SteeringHistoryMode,
+    val editable: Boolean,
+)
+
+sealed interface ToolDecision {
+    data object Approved : ToolDecision
+    data class Denied(val reason: String) : ToolDecision
+    data class Answered(val answer: String) : ToolDecision
+}

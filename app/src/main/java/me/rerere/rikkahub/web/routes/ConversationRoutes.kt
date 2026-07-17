@@ -19,6 +19,8 @@ import kotlinx.coroutines.flow.merge
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.repository.ConversationRepository
 import me.rerere.rikkahub.service.ChatService
+import me.rerere.rikkahub.service.chat.CommandOrigin
+import me.rerere.rikkahub.service.chat.SubmitResult
 import me.rerere.rikkahub.web.BadRequestException
 import me.rerere.rikkahub.web.NotFoundException
 import me.rerere.rikkahub.web.dto.ConversationDto
@@ -34,6 +36,8 @@ import me.rerere.rikkahub.web.dto.PagedResult
 import me.rerere.rikkahub.web.dto.RegenerateRequest
 import me.rerere.rikkahub.web.dto.SelectMessageNodeRequest
 import me.rerere.rikkahub.web.dto.SendMessageRequest
+import me.rerere.rikkahub.web.dto.WebMessageMode
+import me.rerere.rikkahub.web.dto.parseWebMessageMode
 import me.rerere.rikkahub.web.dto.ToolApprovalRequest
 import me.rerere.rikkahub.web.dto.MessageSearchResultDto
 import me.rerere.rikkahub.web.dto.UpdateConversationInjectionsRequest
@@ -279,9 +283,47 @@ fun Route.conversationRoutes(
                 modeInjectionIds = request.modeInjectionIds,
                 lorebookIds = request.lorebookIds,
             )
-            chatService.sendMessage(uuid, request.parts, answer = true)
-
-            call.respond(HttpStatusCode.Accepted, mapOf("status" to "accepted"))
+            val mode = parseWebMessageMode(request.mode)
+                ?: throw BadRequestException("mode must be QUEUE, INTERRUPT, or STEER")
+            val submission = when (mode) {
+                WebMessageMode.QUEUE -> chatService.submitUserMessage(
+                    conversationId = uuid,
+                    content = request.parts,
+                    answer = true,
+                    origin = CommandOrigin.WEB_API,
+                )
+                WebMessageMode.INTERRUPT -> chatService.submitInterrupt(
+                    conversationId = uuid,
+                    replacement = request.parts,
+                    answer = true,
+                    origin = CommandOrigin.WEB_API,
+                )
+                WebMessageMode.STEER -> {
+                    val guidance = request.parts.filterIsInstance<me.rerere.ai.ui.UIMessagePart.Text>()
+                        .joinToString("\n") { it.text }
+                        .trim()
+                    if (guidance.isEmpty()) {
+                        throw BadRequestException("STEER mode needs some text to guide the current task")
+                    }
+                    chatService.submitSteer(
+                        conversationId = uuid,
+                        text = guidance,
+                        origin = CommandOrigin.WEB_API,
+                    )
+                }
+            }
+            when (submission) {
+                is SubmitResult.Accepted -> call.respond(
+                    HttpStatusCode.Accepted,
+                    mapOf("status" to "accepted", "commandId" to submission.commandId.toString()),
+                )
+                is SubmitResult.QueueFull -> call.respond(
+                    HttpStatusCode.TooManyRequests,
+                    mapOf("status" to "queue_full", "limit" to submission.limit),
+                )
+                is SubmitResult.Rejected -> throw BadRequestException(submission.reason)
+                is SubmitResult.RuntimeUnavailable -> throw BadRequestException(submission.reason)
+            }
         }
 
         // POST /api/conversations/{id}/messages/{messageId}/edit - Edit a message as a new branch version

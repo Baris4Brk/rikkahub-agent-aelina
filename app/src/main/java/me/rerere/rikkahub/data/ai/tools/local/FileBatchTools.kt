@@ -121,7 +121,7 @@ fun batchCopyTool(): Tool = Tool(
         val dstDir = obj["dst_dir"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
             ?.let(AgentWorkspace::expand)
             ?: return@Tool batchErr("dst_dir is required")
-        PathSafetyGuard.check(dstDir)?.let { v -> return@Tool batchErr(v.detail) }
+        PathSafetyGuard.checkMutationTree(dstDir)?.let { v -> return@Tool batchErr(v.detail) }
         val overwrite = obj["overwrite"]?.jsonPrimitive?.booleanOrNull ?: false
         val sources = resolveBatchSources(obj).getOrElse { return@Tool batchErr(it.message ?: "bad input") }
 
@@ -181,7 +181,7 @@ fun batchMoveTool(): Tool = Tool(
         val dstDir = obj["dst_dir"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
             ?.let(AgentWorkspace::expand)
             ?: return@Tool batchErr("dst_dir is required")
-        PathSafetyGuard.check(dstDir)?.let { v -> return@Tool batchErr(v.detail) }
+        PathSafetyGuard.checkMutationTree(dstDir)?.let { v -> return@Tool batchErr(v.detail) }
         val overwrite = obj["overwrite"]?.jsonPrimitive?.booleanOrNull ?: false
         val sources = resolveBatchSources(obj).getOrElse { return@Tool batchErr(it.message ?: "bad input") }
 
@@ -189,7 +189,7 @@ fun batchMoveTool(): Tool = Tool(
         var success = 0
         val failed = mutableListOf<Pair<String, String>>()
         for (path in sources) {
-            val v = PathSafetyGuard.check(path)
+            val v = PathSafetyGuard.checkMutationTree(path)
             if (v != null) { failed += path to v.detail; continue }
             val src = File(path)
             if (!src.exists()) { failed += path to "not_found"; continue }
@@ -284,7 +284,7 @@ fun batchDeleteTool(): Tool = Tool(
         var success = 0
         val failed = mutableListOf<Pair<String, String>>()
         for (path in sources) {
-            val v = PathSafetyGuard.check(path)
+            val v = PathSafetyGuard.checkMutationTree(path)
             if (v != null) { failed += path to v.detail; continue }
             val file = File(path)
             if (!file.exists()) { failed += path to "not_found"; continue }

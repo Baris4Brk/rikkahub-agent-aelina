@@ -222,3 +222,22 @@ fun Context.exportImageFile(
         outputStream?.close()
     }
 }
+
+/** 检查是否有使用情况访问权限。 */
+fun Context.hasUsageStatsPermission(): Boolean {
+    val appOps = getSystemService(Context.APP_OPS_SERVICE) as android.app.AppOpsManager
+    val mode = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+        appOps.unsafeCheckOpNoThrow(android.app.AppOpsManager.OPSTR_GET_USAGE_STATS, android.os.Process.myUid(), packageName)
+    } else {
+        @Suppress("DEPRECATION")
+        appOps.checkOpNoThrow(android.app.AppOpsManager.OPSTR_GET_USAGE_STATS, android.os.Process.myUid(), packageName)
+    }
+    return mode == android.app.AppOpsManager.MODE_ALLOWED
+}
+
+/** 打开使用情况访问权限设置页。 */
+fun Context.openUsageAccessSettings() {
+    startActivity(android.content.Intent(android.provider.Settings.ACTION_USAGE_ACCESS_SETTINGS).apply {
+        addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+    })
+}

@@ -142,13 +142,13 @@ fun ChatInput(
     fun sendMessage() {
         focusManager.clearFocus(force = true)
         keyboardController?.hide()
-        if (loading) onCancelClick() else onSendClick()
+        if (loading && !state.isEmpty()) onSendClick() else if (loading) onCancelClick() else onSendClick()
     }
 
     fun sendMessageWithoutAnswer() {
         focusManager.clearFocus(force = true)
         keyboardController?.hide()
-        if (loading) onCancelClick() else onLongSendClick()
+        if (loading && !state.isEmpty()) onLongSendClick() else if (loading) onCancelClick() else onLongSendClick()
     }
 
     val asr = LocalASRState.current
@@ -358,12 +358,21 @@ fun ChatInput(
                                     content = {})
                                 if (loading) {
                                     KeepScreenOn()
-                                    Icon(
-                                        imageVector = HugeIcons.Cancel01,
-                                        contentDescription = stringResource(R.string.stop),
-                                        tint = contentColor,
-                                        modifier = Modifier.size(18.dp)
-                                    )
+                                    if (state.isEmpty()) {
+                                        Icon(
+                                            imageVector = HugeIcons.Cancel01,
+                                            contentDescription = stringResource(R.string.stop),
+                                            tint = contentColor,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    } else {
+                                        Icon(
+                                            imageVector = HugeIcons.ArrowUp02,
+                                            contentDescription = "Send (interrupt)",
+                                            tint = contentColor,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
                                 } else {
                                     Icon(
                                         imageVector = HugeIcons.ArrowUp02,

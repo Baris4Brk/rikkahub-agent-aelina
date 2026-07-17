@@ -1,5 +1,6 @@
 package me.rerere.rikkahub.ui.pages.setting
 
+import android.Manifest
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -57,7 +58,7 @@ fun SettingPermissionsPage() {
     }
 
     val runtimeRequester = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission()
+        contract = ActivityResultContracts.RequestMultiplePermissions()
     ) {
         refreshNow()
     }
@@ -107,7 +108,7 @@ fun SettingPermissionsPage() {
                         val click: (() -> Unit)? = when {
                             grantAction is GrantAction.Runtime
                                 && row.status != Status.GRANTED -> {
-                                { runtimeRequester.launch(grantAction.permission) }
+                                { runtimeRequester.launch(runtimePermissionsForGrant(grantAction.permission)) }
                             }
                             grantAction is GrantAction.SystemSettings -> {
                                 { context.startActivity(grantAction.intent) }
@@ -119,7 +120,7 @@ fun SettingPermissionsPage() {
                             headlineContent = { Text(row.label) },
                             supportingContent = { Text(row.description) },
                             trailingContent = {
-                                val statusText = when (row.status) {
+                                val statusText = row.statusLabel ?: when (row.status) {
                                     Status.GRANTED -> stringResource(R.string.setting_page_permissions_status_granted)
                                     Status.AUTO_GRANTED -> stringResource(R.string.setting_page_permissions_status_auto_granted)
                                     Status.DENIED -> stringResource(R.string.setting_page_permissions_status_denied)
@@ -141,6 +142,16 @@ fun SettingPermissionsPage() {
             }
         }
     }
+}
+
+internal fun runtimePermissionsForGrant(permission: String): Array<String> = when (permission) {
+    Manifest.permission.ACCESS_FINE_LOCATION,
+    Manifest.permission.ACCESS_COARSE_LOCATION,
+    -> arrayOf(
+        Manifest.permission.ACCESS_FINE_LOCATION,
+        Manifest.permission.ACCESS_COARSE_LOCATION,
+    )
+    else -> arrayOf(permission)
 }
 
 @Composable

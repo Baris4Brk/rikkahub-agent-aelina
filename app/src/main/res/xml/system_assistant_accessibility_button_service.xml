@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<accessibility-service
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes=""
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagRequestAccessibilityButton"
+    android:canPerformGestures="false"
+    android:canRetrieveWindowContent="false"
+    android:canTakeScreenshot="false"
+    android:notificationTimeout="0"
+    android:summary="@string/system_assistant_shortcut_desc" />

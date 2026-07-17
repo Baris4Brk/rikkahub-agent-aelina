@@ -8,6 +8,11 @@ import android.util.Log
 import android.widget.Toast
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flow
@@ -22,14 +27,14 @@ import kotlinx.datetime.toInstant
 import kotlinx.datetime.toLocalDateTime
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import me.rerere.ai.core.MessageRole
+import me.rerere.ai.context.ProviderContextPlanner
+import me.rerere.ai.context.validateProviderContextPayload
 import me.rerere.ai.core.ReasoningLevel
 import me.rerere.ai.core.Tool
 import me.rerere.ai.core.merge
@@ -43,18 +48,31 @@ import me.rerere.ai.registry.ModelRegistry
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.ai.ui.ToolApprovalState
+import me.rerere.ai.ui.GenerationTerminal
+import me.rerere.ai.ui.GenerationTerminalTracker
+import me.rerere.ai.ui.GenerationCompletionPolicy
+import me.rerere.ai.ui.GenerationOutcome
+import me.rerere.ai.ui.FinalAnswerRecoveryDecision
+import me.rerere.ai.ui.FinalAnswerRecoveryPolicy
+import me.rerere.ai.ui.FinalAnswerRecoveryStatus
+import me.rerere.ai.ui.UIMessageAnnotation
+import me.rerere.ai.ui.UIMessageState
 import me.rerere.ai.ui.handleMessageChunk
 import me.rerere.ai.ui.limitContext
 import me.rerere.rikkahub.data.ai.transformers.InputMessageTransformer
 import me.rerere.rikkahub.data.ai.transformers.MessageTransformer
 import me.rerere.rikkahub.data.ai.transformers.OutputMessageTransformer
+import me.rerere.rikkahub.data.ai.prompts.DEFAULT_FINAL_ANSWER_REMINDER_PROMPT
 import me.rerere.rikkahub.data.files.FileFolders
+import me.rerere.rikkahub.diagnostics.RecentGenerationDiagnostics
+import me.rerere.rikkahub.diagnostics.GenerationDiagnosticHandle
 import java.io.File
 import me.rerere.rikkahub.data.ai.transformers.onGenerationFinish
 import me.rerere.rikkahub.data.ai.transformers.transforms
 import me.rerere.rikkahub.data.ai.transformers.visualTransforms
 import me.rerere.rikkahub.data.ai.limits.ToolRuntimeLimits
 import me.rerere.rikkahub.data.ai.tools.buildMemoryTools
+import me.rerere.rikkahub.data.ai.tools.LegacyToolExecutionHandle
 import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.datastore.findModelById
 import me.rerere.rikkahub.data.datastore.findProvider
@@ -70,32 +88,121 @@ import kotlin.uuid.Uuid
 private const val TAG = "GenerationHandler"
 private const val MAX_TOOL_OUTPUT_CHARS = 32 * 1024
 private const val TOOL_OUTPUT_PREVIEW_CHARS = 4 * 1024
+private const val FINAL_ANSWER_MAX_TOKENS = 4096
+private const val FINAL_ANSWER_MAX_ATTEMPTS = 10
+private const val FINAL_ANSWER_RESERVE_MS = 45_000L
+private val FINAL_ANSWER_RESERVED_CUSTOM_BODY_KEYS = setOf(
+    "tools",
+    "tool_choice",
+    "functions",
+    "function_call",
+    "parallel_tool_calls",
+    "stream",
+    "reasoning",
+    "reasoning_effort",
+    "thinking",
+    "enable_thinking",
+    "thinking_budget",
+    "max_tokens",
+    "max_completion_tokens",
+    "max_output_tokens",
+    "response_format",
+)
 
-/**
- * Keys whose string values are sensitive enough that the raw value MUST NOT land in
- * logcat. Tool args land in `Log.i` for debugging; without redaction, `save_ssh_host`'s
- * `private_key` / `password` and `telegram_set_token`'s `token` would print verbatim
- * — readable on debug builds, by other apps holding READ_LOGS on OEM-bugged ROMs, and
- * by `bugreport`/`dumpsys`. The match is case-insensitive against the key name and
- * applies regardless of nesting depth.
- */
-private val SECRET_KEY_PATTERN: Regex =
-    Regex("(?:^|_)(password|passphrase|secret|token|apikey|api[_-]?key|privatekey|private[_-]?key|key)$",
-        RegexOption.IGNORE_CASE)
+private enum class GenerationRequestPurpose {
+    NORMAL,
+    FINAL_ANSWER_RECOVERY,
+}
 
-/**
- * Walk [element] and replace any string primitive whose KEY matches [SECRET_KEY_PATTERN]
- * with the string `"***"`. Numbers, booleans, nulls, and non-secret strings pass through
- * unchanged. Used only for the per-step "executing tool with args" log line.
- */
-private fun redactSecrets(element: JsonElement, key: String? = null): JsonElement {
-    val isSecret = key != null && SECRET_KEY_PATTERN.containsMatchIn(key)
-    return when (element) {
-        is JsonPrimitive ->
-            if (isSecret && element.isString) JsonPrimitive("***") else element
-        is JsonObject -> JsonObject(element.mapValues { (k, v) -> redactSecrets(v, k) })
-        is JsonArray -> buildJsonArray { element.forEach { add(redactSecrets(it, key)) } }
+internal data class GenerationFinalizationStep(
+    val forceFinalization: Boolean,
+    val skipResumableTools: Boolean,
+)
+
+internal fun generationFinalizationStep(
+    stepIndex: Int,
+    maxSteps: Int,
+    wallClockNeedsFinalization: Boolean,
+    loopGuardNeedsFinalization: Boolean,
+): GenerationFinalizationStep {
+    val plannedSteps = maxSteps.coerceAtLeast(1)
+    val maxStepsNeedsFinalization = stepIndex >= plannedSteps - 1
+    return GenerationFinalizationStep(
+        forceFinalization = wallClockNeedsFinalization ||
+            loopGuardNeedsFinalization || maxStepsNeedsFinalization,
+        // The extra index exists only to summarize after a tool completed on the last planned
+        // step. It must never start another side effect, and budget/loop trips stop tools now.
+        skipResumableTools = wallClockNeedsFinalization ||
+            loopGuardNeedsFinalization || stepIndex >= plannedSteps,
+    )
+}
+
+private class ProviderContextPayloadTooLargeException(
+    estimatedInputTokens: Int,
+    maximumInputTokens: Int,
+) : IllegalStateException(
+    "Prepared provider context is too large ($estimatedInputTokens estimated input tokens; " +
+        "safe maximum is $maximumInputTokens). Shorten the current request or tool payload.",
+)
+
+private fun List<UIMessage>.replaceLastMessage(message: UIMessage): List<UIMessage> =
+    if (isEmpty()) this else dropLast(1) + message
+
+private fun List<UIMessage>.currentTurnForFinalAnswer(): List<UIMessage> {
+    val turnStart = indexOfLast { message ->
+        message.role == MessageRole.USER &&
+            message.annotations.none { it is UIMessageAnnotation.Steering }
     }
+    return if (turnStart >= 0) subList(turnStart, size) else takeLast(1)
+}
+
+private fun List<UIMessage>.redactedInputCharacterCount(): Int = sumOf { message ->
+    message.parts.sumOf { part ->
+        when (part) {
+            is UIMessagePart.Text -> part.text.length
+            is UIMessagePart.Reasoning -> part.reasoning.length
+            is UIMessagePart.Tool -> part.input.length + part.output.sumOf { output ->
+                when (output) {
+                    is UIMessagePart.Text -> output.text.length
+                    is UIMessagePart.Reasoning -> output.reasoning.length
+                    else -> 1
+                }
+            }
+            else -> 1
+        }
+    }
+}
+
+private fun UIMessage.withFinalAnswerRecovery(
+    commandId: String,
+    reason: String,
+    status: FinalAnswerRecoveryStatus,
+    attempt: Int,
+    state: UIMessageState,
+): UIMessage {
+    val marker = UIMessageAnnotation.FinalAnswerRecovery(
+        commandId = commandId,
+        reason = reason.take(200),
+        status = status,
+        attempt = attempt,
+    )
+    val updatedAnnotations = annotations.filterNot { annotation ->
+        annotation is UIMessageAnnotation.FinalAnswerRecovery &&
+            annotation.commandId == commandId
+    } + marker
+    val terminal = state == UIMessageState.COMPLETED ||
+        state == UIMessageState.INTERRUPTED ||
+        state == UIMessageState.INCOMPLETE_NO_VISIBLE_ANSWER ||
+        state == UIMessageState.FAILED
+    return copy(
+        annotations = updatedAnnotations,
+        state = state,
+        finishedAt = if (terminal) {
+            Clock.System.now().toLocalDateTime(TimeZone.currentSystemDefault())
+        } else {
+            null
+        },
+    )
 }
 
 /**
@@ -278,6 +385,7 @@ class GenerationHandler(
     private val conversationRepo: ConversationRepository,
     private val aiLoggingManager: AILoggingManager,
     private val systemPromptBuilder: SystemPromptBuilder,
+    private val toolExecutionGate: ToolExecutionGate,
 ) {
     fun generateText(
         settings: Settings,
@@ -286,8 +394,12 @@ class GenerationHandler(
         inputTransformers: List<InputMessageTransformer> = emptyList(),
         outputTransformers: List<OutputMessageTransformer> = emptyList(),
         assistant: Assistant,
+        // Privilege / surface overrides from ChatService (kept for API compatibility).
+        // Gate evaluation still prefers assistant.unrestricted when this is not used below.
+        unrestrictedOverride: Boolean = false,
         memories: List<AssistantMemory>? = null,
         tools: List<Tool> = emptyList(),
+        startableTools: Map<String, me.rerere.rikkahub.data.ai.tools.StartableTool> = emptyMap(),
         maxSteps: Int = 32,
         processingStatus: MutableStateFlow<String?> = MutableStateFlow(null),
         // Returns true when the user has pre-approved [toolName] for this turn (e.g.
@@ -305,7 +417,20 @@ class GenerationHandler(
         conversationModeInjectionIds: Set<Uuid> = emptySet(),
         conversationLorebookIds: Set<Uuid> = emptySet(),
         workspaceCwd: String? = null,
+        // P0: The origin of this tool call. Determines which security policies apply.
+        // LocalChat is the default (safe fallback). Remote callers MUST set this explicitly.
+        callOrigin: ToolCallOrigin = ToolCallOrigin.LocalChat,
+        conversationId: Uuid? = null,
+        commandId: Uuid? = null,
+        runControl: GenerationRunControl? = null,
+        isEmergencyStopActive: suspend () -> Boolean = { false },
     ): Flow<GenerationChunk> = flow {
+        // Suppress unused warnings for API-compat params restored for ChatService call sites.
+        // (No thinking/answer finalize experiment — intentionally not used here.)
+        @Suppress("UNUSED_EXPRESSION", "UNUSED_VARIABLE")
+        val _compat = Triple(unrestrictedOverride, startableTools, commandId)
+        @Suppress("UNUSED_VARIABLE")
+        val _emergency = isEmergencyStopActive
         val provider = model.findProvider(settings.providers) ?: error("Provider not found")
         val providerImpl = providerManager.getProviderByType(provider)
 
@@ -332,32 +457,114 @@ class GenerationHandler(
 
         val turnStartMs = android.os.SystemClock.elapsedRealtime()
         var loopGuardTripCount = 0
+        val recoveryCommandKey = commandId?.toString()
+            ?: "${conversationId ?: "unknown"}:${messages.lastOrNull { it.role == MessageRole.USER }?.id}"
+        val generationDiagnostics = RecentGenerationDiagnostics.begin(recoveryCommandKey)
+        var finalAnswerRecoveryAttempts = messages.asSequence()
+            .flatMap { it.annotations.asSequence() }
+            .filterIsInstance<UIMessageAnnotation.FinalAnswerRecovery>()
+            .filter { it.commandId == recoveryCommandKey }
+            .maxOfOrNull { it.attempt }
+            ?: 0
 
-        for (stepIndex in 0 until maxSteps) {
+        // One extra index is reserved solely for a tool-free summary after a tool that completed
+        // on the last planned step. [generationFinalizationStep] prevents that index from starting
+        // another side effect.
+        generationLoop@ for (stepIndex in 0..maxSteps.coerceAtLeast(1)) {
+            var stepTerminal: GenerationTerminal? = null
             // Wall-clock cap: any single user turn that has been running longer than the
             // budget is force-ended, regardless of whether the model wants more steps.
             // This is the second line of defence after maxSteps; without it a model that
             // discovers many distinct tool calls (each within the loop guard) can still
             // run for hours.
             val elapsedMs = android.os.SystemClock.elapsedRealtime() - turnStartMs
-            if (elapsedMs > ToolRuntimeLimits.turnBudgetMs) {
-                Log.w(TAG, "generateText: wall-clock cap (${ToolRuntimeLimits.turnBudgetMs}ms) hit at step #$stepIndex; force-ending turn")
-                break
-            }
+            val finalizationThresholdMs =
+                (ToolRuntimeLimits.turnBudgetMs - FINAL_ANSWER_RESERVE_MS).coerceAtLeast(0L)
+            val wallClockNeedsFinalization = elapsedMs >= finalizationThresholdMs
             // Repeated loop-guard trips mean the model is flailing: it bumps into the
             // guard, picks a different tool, that one also gets guarded, and so on. After
             // N trips we just stop — the model is not going to recover, and every extra
             // step is paid for in tokens.
-            if (loopGuardTripCount >= MAX_LOOP_GUARD_TRIPS_PER_TURN) {
-                Log.w(TAG, "generateText: loop-guard tripped $loopGuardTripCount times this turn; force-ending")
-                break
+            val loopGuardNeedsFinalization =
+                loopGuardTripCount >= MAX_LOOP_GUARD_TRIPS_PER_TURN
+            val finalizationStep = generationFinalizationStep(
+                stepIndex = stepIndex,
+                maxSteps = maxSteps,
+                wallClockNeedsFinalization = wallClockNeedsFinalization,
+                loopGuardNeedsFinalization = loopGuardNeedsFinalization,
+            )
+            val forceFinalization = finalizationStep.forceFinalization
+            if (forceFinalization) {
+                Log.w(
+                    TAG,
+                    "generateText: entering tool-free finalization at step #$stepIndex " +
+                        "(wallClock=$wallClockNeedsFinalization, loopGuard=$loopGuardNeedsFinalization, " +
+                        "maxSteps=${stepIndex >= maxSteps.coerceAtLeast(1) - 1})",
+                )
             }
 
             Log.i(TAG, "streamText: start step #$stepIndex (${model.id})")
 
+            var pendingTools = messages.lastOrNull()?.getTools()?.filter {
+                it.canResumeExecution
+            } ?: emptyList()
+            if (forceFinalization && finalizationStep.skipResumableTools && pendingTools.isNotEmpty()) {
+                val skippedIds = pendingTools.mapTo(hashSetOf()) { it.toolCallId }
+                val reason = when {
+                    wallClockNeedsFinalization -> "turn_time_budget_exhausted"
+                    loopGuardNeedsFinalization -> "turn_loop_guard_exhausted"
+                    else -> "turn_step_budget_exhausted"
+                }
+                val lastMessage = messages.last()
+                messages = messages.replaceLastMessage(
+                    lastMessage.copy(
+                        parts = lastMessage.parts.map { part ->
+                            if (part is UIMessagePart.Tool && part.toolCallId in skippedIds) {
+                                part.copy(
+                                    approvalState = ToolApprovalState.Denied(reason),
+                                    output = listOf(
+                                        UIMessagePart.Text(
+                                            json.encodeToString(buildJsonObject {
+                                                put("error", JsonPrimitive("tool_skipped_for_finalization"))
+                                                put("detail", JsonPrimitive(reason))
+                                            }),
+                                        ),
+                                    ),
+                                )
+                            } else {
+                                part
+                            }
+                        },
+                    ),
+                )
+                pendingTools = emptyList()
+                emit(GenerationChunk.Messages(messages))
+            }
+            val steeringDeliveries = runControl?.let { control ->
+                takeSteeringForProviderCheckpoint(
+                    runControl = control,
+                    modelCallIndex = stepIndex,
+                    hasResumableTools = pendingTools.isNotEmpty(),
+                )
+            }.orEmpty()
+            val steeringAddendum = buildSteeringSystemAddendum(steeringDeliveries).orEmpty()
+            val effectiveSystemAddendum = listOfNotNull(
+                systemAddendum,
+                steeringAddendum.takeIf { it.isNotBlank() },
+                if (forceFinalization) {
+                    settings.finalAnswerReminderPrompt.trim().ifBlank {
+                        DEFAULT_FINAL_ANSWER_REMINDER_PROMPT
+                    }
+                } else {
+                    null
+                },
+            ).joinToString("\n\n").ifBlank { null }
+
             val toolsInternal = buildList {
                 Log.i(TAG, "generateInternal: build tools($assistant)")
-                if (assistant.enableMemory) {
+                val completingAlreadyAcceptedTools = pendingTools.isNotEmpty() &&
+                    !finalizationStep.skipResumableTools
+                if ((!forceFinalization || completingAlreadyAcceptedTools) && assistant.enableMemory) {
                     val memoryAssistantId = if (assistant.useGlobalMemory) {
                         MemoryRepository.GLOBAL_MEMORY_ID
                     } else {
@@ -376,13 +583,8 @@ class GenerationHandler(
                         }
                     ).let(this::addAll)
                 }
-                addAll(tools)
+                if (!forceFinalization || completingAlreadyAcceptedTools) addAll(tools)
             }
-
-            // Check if we have tool calls ready to continue after user interaction.
-            val pendingTools = messages.lastOrNull()?.getTools()?.filter {
-                it.canResumeExecution
-            } ?: emptyList()
 
             // Mixed-state guard: if the last message has tools STILL in Pending (waiting
             // on user approval keyboard) but nothing canResumeExecution, the existing
@@ -404,10 +606,10 @@ class GenerationHandler(
             // Skip generation if we have approved/denied tool calls to handle
             if (pendingTools.isEmpty()) {
                 try {
-                    generateInternal(
+                    stepTerminal = generateInternal(
                         assistant = assistant,
                         settings = settings,
-                        systemAddendum = systemAddendum,
+                        systemAddendum = effectiveSystemAddendum,
                         messages = messages,
                         onUpdateMessages = {
                             messages = it.transforms(
@@ -435,12 +637,24 @@ class GenerationHandler(
                         provider = provider,
                         tools = toolsInternal,
                         memories = memories ?: emptyList(),
-                        stream = assistant.streamOutput,
+                        stream = if (forceFinalization) false else assistant.streamOutput,
                         processingStatus = processingStatus,
                         conversationSystemPrompt = conversationSystemPrompt,
                         conversationModeInjectionIds = conversationModeInjectionIds,
                         conversationLorebookIds = conversationLorebookIds,
                         workspaceCwd = workspaceCwd,
+                        runControl = runControl,
+                        contextMessages = if (forceFinalization) {
+                            messages.currentTurnForFinalAnswer()
+                        } else {
+                            null
+                        },
+                        requestPurpose = if (forceFinalization) {
+                            GenerationRequestPurpose.FINAL_ANSWER_RECOVERY
+                        } else {
+                            GenerationRequestPurpose.NORMAL
+                        },
+                        diagnosticHandle = generationDiagnostics,
                     )
                 } catch (t: Throwable) {
                     // CancellationException is honoured verbatim — stopGeneration has its
@@ -470,13 +684,6 @@ class GenerationHandler(
                     }
                     throw t
                 }
-                messages = messages.visualTransforms(
-                    transformers = outputTransformers,
-                    context = context,
-                    model = model,
-                    assistant = assistant,
-                    settings = settings
-                )
                 messages = messages.onGenerationFinish(
                     transformers = outputTransformers,
                     context = context,
@@ -490,9 +697,254 @@ class GenerationHandler(
                 )
                 emit(GenerationChunk.Messages(messages))
 
+                if (forceFinalization && messages.last().getTools().any { !it.isExecuted }) {
+                    val last = messages.last()
+                    messages = messages.replaceLastMessage(
+                        last.copy(
+                            parts = last.parts.map { part ->
+                                if (part is UIMessagePart.Tool && !part.isExecuted) {
+                                    part.copy(
+                                        approvalState = ToolApprovalState.Denied(
+                                            "finalization_tool_calls_disabled",
+                                        ),
+                                        output = listOf(
+                                            UIMessagePart.Text(
+                                                "Tool calls are disabled while generating the final answer.",
+                                            ),
+                                        ),
+                                    )
+                                } else {
+                                    part
+                                }
+                            },
+                        ),
+                    )
+                    emit(GenerationChunk.Messages(messages))
+                }
+
                 val tools = messages.last().getTools().filter { !it.isExecuted }
                 if (tools.isEmpty()) {
-                    // no tool calls, break
+                    val terminal = stepTerminal
+                        ?: GenerationTerminal.missingTransportTerminal("No provider terminal was captured.")
+                    val outcome = GenerationCompletionPolicy.evaluate(
+                        message = messages.last(),
+                        terminal = terminal,
+                    )
+                    generationDiagnostics.markOutcome(outcome)
+                    val cancelled = runControl?.isRunCancellationRequested() == true ||
+                        runControl?.isUpdateFenced() == true
+                    val emergencyStop = isEmergencyStopActive()
+                    val recoveryDecision = FinalAnswerRecoveryPolicy.decide(
+                        outcome = outcome,
+                        attempts = finalAnswerRecoveryAttempts,
+                        maxAttempts = FINAL_ANSWER_MAX_ATTEMPTS,
+                        cancelled = cancelled,
+                        emergencyStopActive = emergencyStop,
+                    )
+
+                    if (recoveryDecision == FinalAnswerRecoveryDecision.Attempt) {
+                        val recoveryReason = terminal.providerReason
+                            ?: terminal.category.name.lowercase()
+                        var recoveryComplete = false
+                        while (finalAnswerRecoveryAttempts < FINAL_ANSWER_MAX_ATTEMPTS) {
+                            currentCoroutineContext().ensureActive()
+                            finalAnswerRecoveryAttempts += 1
+                            val attempt = finalAnswerRecoveryAttempts
+                            generationDiagnostics.markRecovery(attempt, "STARTED")
+                            val recoveryBase = messages.replaceLastMessage(
+                                messages.last().withFinalAnswerRecovery(
+                                    commandId = recoveryCommandKey,
+                                    reason = recoveryReason,
+                                    status = FinalAnswerRecoveryStatus.STARTED,
+                                    attempt = attempt,
+                                    state = UIMessageState.STREAMING,
+                                ),
+                            )
+                            messages = recoveryBase
+                            emit(GenerationChunk.Messages(messages))
+                            processingStatus.value =
+                                "Generating final answer ($attempt/$FINAL_ANSWER_MAX_ATTEMPTS)"
+
+                            var recoveredMessages = recoveryBase
+                            var recoveryTimedOut = false
+                            val recoveryResult = try {
+                                val remainingRecoveryMs = ToolRuntimeLimits.turnBudgetMs -
+                                    (android.os.SystemClock.elapsedRealtime() - turnStartMs)
+                                val recoveryTerminal = if (remainingRecoveryMs > 0L) {
+                                    withTimeoutOrNull(remainingRecoveryMs) {
+                                        generateInternal(
+                                            assistant = assistant,
+                                            settings = settings,
+                                            systemAddendum = listOfNotNull(
+                                                effectiveSystemAddendum,
+                                                settings.finalAnswerReminderPrompt.trim().ifBlank {
+                                                    DEFAULT_FINAL_ANSWER_REMINDER_PROMPT
+                                                },
+                                            ).joinToString("\n\n"),
+                                            messages = recoveryBase,
+                                            onUpdateMessages = { recoveredMessages = it },
+                                            transformers = inputTransformers,
+                                            model = model,
+                                            providerImpl = providerImpl,
+                                            provider = provider,
+                                            tools = emptyList(),
+                                            memories = emptyList(),
+                                            stream = false,
+                                            processingStatus = processingStatus,
+                                            conversationSystemPrompt = conversationSystemPrompt,
+                                            conversationModeInjectionIds = conversationModeInjectionIds,
+                                            conversationLorebookIds = conversationLorebookIds,
+                                            workspaceCwd = workspaceCwd,
+                                            runControl = runControl,
+                                            contextMessages = recoveryBase.currentTurnForFinalAnswer(),
+                                            requestPurpose = GenerationRequestPurpose.FINAL_ANSWER_RECOVERY,
+                                            diagnosticHandle = generationDiagnostics,
+                                        )
+                                    }
+                                } else {
+                                    null
+                                }
+                                if (recoveryTerminal == null) {
+                                    recoveryTimedOut = true
+                                    Result.failure(IllegalStateException("recovery_time_budget_exhausted"))
+                                } else {
+                                    Result.success(recoveryTerminal)
+                                }
+                            } catch (t: Throwable) {
+                                if (t is CancellationException) throw t
+                                Result.failure(t)
+                            } finally {
+                                processingStatus.value = null
+                            }
+
+                            currentCoroutineContext().ensureActive()
+                            val recoveryInvalidated = isEmergencyStopActive() ||
+                                runControl?.isRunCancellationRequested() == true ||
+                                runControl?.isUpdateFenced() == true
+                            val recoveryTerminal = recoveryResult.getOrNull()
+                            if (recoveryInvalidated || recoveryTerminal == null) {
+                                messages = recoveryBase.replaceLastMessage(
+                                    recoveryBase.last().withFinalAnswerRecovery(
+                                        commandId = recoveryCommandKey,
+                                        reason = if (recoveryInvalidated) {
+                                            "recovery_cancelled_or_emergency_stopped"
+                                        } else {
+                                            if (recoveryTimedOut) {
+                                                "recovery_time_budget_exhausted"
+                                            } else {
+                                                recoveryResult.exceptionOrNull()?.javaClass?.simpleName
+                                                    ?: "recovery_provider_failed"
+                                            }
+                                        },
+                                        status = FinalAnswerRecoveryStatus.FAILED,
+                                        attempt = attempt,
+                                        state = UIMessageState.INCOMPLETE_NO_VISIBLE_ANSWER,
+                                    ),
+                                )
+                                emit(GenerationChunk.Messages(messages))
+                                generationDiagnostics.markRecovery(attempt, "FAILED")
+                                break
+                            }
+
+                            recoveredMessages = recoveredMessages.onGenerationFinish(
+                                transformers = outputTransformers,
+                                context = context,
+                                model = model,
+                                assistant = assistant,
+                                settings = settings,
+                            )
+                            val recoveryOutcome = GenerationCompletionPolicy.evaluate(
+                                message = recoveredMessages.last(),
+                                terminal = recoveryTerminal,
+                            )
+                            generationDiagnostics.markOutcome(recoveryOutcome)
+                            val recoveryAddedTool = recoveredMessages.last().parts
+                                .drop(recoveryBase.last().parts.size)
+                                .any { it is UIMessagePart.Tool }
+                            if (recoveryOutcome == GenerationOutcome.Completed && !recoveryAddedTool) {
+                                messages = recoveredMessages.replaceLastMessage(
+                                    recoveredMessages.last().withFinalAnswerRecovery(
+                                        commandId = recoveryCommandKey,
+                                        reason = recoveryReason,
+                                        status = FinalAnswerRecoveryStatus.SUCCEEDED,
+                                        attempt = attempt,
+                                        state = UIMessageState.COMPLETED,
+                                    ),
+                                )
+                                emit(GenerationChunk.Messages(messages))
+                                generationDiagnostics.markRecovery(attempt, "SUCCEEDED")
+                                recoveryComplete = true
+                                break
+                            }
+
+                            val nextDecision = if (recoveryAddedTool) {
+                                FinalAnswerRecoveryDecision.Fail
+                            } else {
+                                FinalAnswerRecoveryPolicy.decide(
+                                    outcome = recoveryOutcome,
+                                    attempts = attempt,
+                                    maxAttempts = FINAL_ANSWER_MAX_ATTEMPTS,
+                                    cancelled = false,
+                                    emergencyStopActive = false,
+                                )
+                            }
+                            val retry = nextDecision == FinalAnswerRecoveryDecision.Attempt
+                            messages = recoveryBase.replaceLastMessage(
+                                recoveryBase.last().withFinalAnswerRecovery(
+                                    commandId = recoveryCommandKey,
+                                    reason = when {
+                                        recoveryAddedTool -> "recovery_attempted_tool_call"
+                                        retry -> "recovery_returned_no_visible_answer"
+                                        attempt >= FINAL_ANSWER_MAX_ATTEMPTS ->
+                                            "recovery_attempts_exhausted"
+                                        else -> "recovery_failed"
+                                    },
+                                    status = FinalAnswerRecoveryStatus.FAILED,
+                                    attempt = attempt,
+                                    state = if (retry) {
+                                        UIMessageState.STREAMING
+                                    } else {
+                                        UIMessageState.INCOMPLETE_NO_VISIBLE_ANSWER
+                                    },
+                                ),
+                            )
+                            emit(GenerationChunk.Messages(messages))
+                            generationDiagnostics.markRecovery(
+                                attempt,
+                                if (retry) "RETRYING" else "FAILED",
+                            )
+                            if (!retry) break
+                        }
+
+                        if (!recoveryComplete &&
+                            messages.last().state != UIMessageState.INCOMPLETE_NO_VISIBLE_ANSWER
+                        ) {
+                            messages = messages.replaceLastMessage(
+                                messages.last().withFinalAnswerRecovery(
+                                    commandId = recoveryCommandKey,
+                                    reason = "recovery_attempts_exhausted",
+                                    status = FinalAnswerRecoveryStatus.FAILED,
+                                    attempt = finalAnswerRecoveryAttempts,
+                                    state = UIMessageState.INCOMPLETE_NO_VISIBLE_ANSWER,
+                                ),
+                            )
+                            emit(GenerationChunk.Messages(messages))
+                        }
+                        break@generationLoop
+                    }
+
+                    val terminalState = when (outcome) {
+                        GenerationOutcome.Completed -> UIMessageState.COMPLETED
+                        is GenerationOutcome.Interrupted -> UIMessageState.INTERRUPTED
+                        is GenerationOutcome.Failed -> UIMessageState.FAILED
+                        is GenerationOutcome.NeedsFinalAnswer ->
+                            UIMessageState.INCOMPLETE_NO_VISIBLE_ANSWER
+                        GenerationOutcome.AwaitingToolApproval -> UIMessageState.WAITING_TOOL
+                        GenerationOutcome.ContinueToolLoop ->
+                            UIMessageState.INCOMPLETE_NO_VISIBLE_ANSWER
+                    }
+                    messages = messages.replaceLastMessage(messages.last().copy(state = terminalState))
+                    emit(GenerationChunk.Messages(messages))
                     break
                 }
 
@@ -647,7 +1099,7 @@ class GenerationHandler(
                         // tool with the same args multiple times in this turn. Refuse a
                         // repeat run and inject a "loop_detected" envelope so the model has
                         // to pivot to a different approach. Cost safety net.
-                        val signature = tool.toolName + "::" + tool.input
+                        val signature = toolLoopSignature(tool.toolName, tool.input)
                         // "This turn" = since the most recent user message. Earlier
                         // identical calls in PREVIOUS turns aren't the model flailing
                         // now — they're history, and counting them produces a confusing
@@ -706,6 +1158,35 @@ class GenerationHandler(
                             // docs) will pivot to a different approach.
                             return@forEach
                         }
+                        // P0: ToolExecutionGate — check BEFORE any tool executes.
+                        // This runs on every tool regardless of approval state. The gate
+                        // checks emergency stop, high-risk tools flag, remote origin
+                        // restrictions, background automation policy, and lock screen state.
+                        val gateArgs = runCatching {
+                            json.parseToJsonElement(tool.input.ifBlank { "{}" })
+                        }.getOrNull() as? JsonObject
+                        val gateResult = toolExecutionGate.evaluate(
+                            toolName = tool.toolName,
+                            origin = callOrigin,
+                            conversationId = conversationId,
+                            commandId = commandId,
+                            arguments = gateArgs,
+                            unrestrictedOverride = unrestrictedOverride || assistant.unrestricted,
+                        )
+                        if (gateResult is ToolExecutionGate.GateResult.Denied) {
+                            Log.w(TAG, "generateText: gate blocked ${tool.toolName} from $callOrigin: ${gateResult.reason}")
+                            executedTools += tool.copy(
+                                output = listOf(
+                                    UIMessagePart.Text(
+                                        json.encodeToString(buildJsonObject {
+                                            put("error", JsonPrimitive("tool_blocked"))
+                                            put("detail", JsonPrimitive(gateResult.reason))
+                                        })
+                                    )
+                                )
+                            )
+                            return@forEach
+                        }
                         // Pre-parse args BEFORE the runCatching block so we can surface a
                         // clean structured envelope when the LLM provider truncates the
                         // streaming response mid-string (max_tokens hit, network drop, etc.).
@@ -718,18 +1199,19 @@ class GenerationHandler(
                         }
                         if (parsedArgs.isFailure) {
                             val cause = parsedArgs.exceptionOrNull()
-                            Log.w(TAG, "tool ${tool.toolName} args failed to parse (likely truncated stream)", cause)
+                            Log.w(
+                                TAG,
+                                "tool ${tool.toolName} args failed to parse " +
+                                    "(likely truncated stream, exception=${cause?.javaClass?.simpleName ?: "unknown"})",
+                            )
                             executedTools += tool.copy(
                                 output = listOf(
                                     UIMessagePart.Text(
                                         json.encodeToString(buildJsonObject {
                                             put("error", JsonPrimitive("invalid_tool_args"))
-                                            put(
-                                                "detail",
-                                                JsonPrimitive(
-                                                    (cause?.message ?: cause?.javaClass?.simpleName ?: "json_parse_failed")
-                                                        .take(200)
-                                                ),
+                                             put(
+                                                 "detail",
+                                                 JsonPrimitive("Tool arguments were not valid JSON."),
                                             )
                                             put(
                                                 "recovery",
@@ -751,11 +1233,23 @@ class GenerationHandler(
                             )
                             return@forEach
                         }
+                        var executionBoundaryStarted = false
                         runCatching {
                             val toolDef = toolsInternal.find { toolDef -> toolDef.name == tool.toolName }
                                 ?: error("Tool ${tool.toolName} not found")
                             val args = parsedArgs.getOrThrow()
-                            Log.i(TAG, "generateText: executing tool ${toolDef.name} with args: ${redactSecrets(args)}")
+                            Log.i(TAG, toolExecutionLogSummary(toolDef.name, args))
+                            when (runControl?.beginToolExecutionOrYieldToSteering(tool.toolCallId)) {
+                                ToolStartDecision.YieldToSteering -> {
+                                    executedTools += tool.skippedDueToGuidance()
+                                    return@forEach
+                                }
+                                ToolStartDecision.RunCancelled -> throw CancellationException(
+                                    "Run cancelled before tool execution",
+                                )
+                                ToolStartDecision.Proceed -> executionBoundaryStarted = true
+                                null -> Unit
+                            }
                             // Mark the tool as "execution started" BEFORE actually running.
                             // ChatService persists this when it sees the chunk so a process
                             // kill between mark-and-output leaves a clear breadcrumb on disk:
@@ -789,17 +1283,32 @@ class GenerationHandler(
                                     put("detail", JsonPrimitive("turn budget exceeded before tool started"))
                                 })))
                             } else {
-                                withTimeoutOrNull(remainingMs) { toolDef.execute(args) }
-                                    ?: run {
-                                        Log.w(TAG, "generateText: ${toolDef.name} cancelled — wall-clock budget exhausted mid-execution")
-                                        listOf(UIMessagePart.Text(json.encodeToString(buildJsonObject {
-                                            put("error", JsonPrimitive("tool_cancelled_wall_clock"))
-                                            put(
-                                                "detail",
-                                                JsonPrimitive("tool execution exceeded the ${ToolRuntimeLimits.turnBudgetMs / 1000}s turn budget")
-                                            )
-                                        })))
+                                coroutineScope {
+                                    val deferred = async(Dispatchers.IO) { toolDef.execute(args) }
+                                    val handle = LegacyToolExecutionHandle(result = deferred)
+                                    runControl?.registerTool(tool.toolCallId, handle)
+                                    try {
+                                        val awaited = withTimeoutOrNull(remainingMs) { deferred.await() }
+                                        if (awaited != null) {
+                                            awaited
+                                        } else {
+                                            // Timeout must cancel the actual child execution too;
+                                            // otherwise coroutineScope waits forever for a tool that
+                                            // has already been reported as timed out.
+                                            deferred.cancel(CancellationException("Tool wall-clock budget exhausted"))
+                                            Log.w(TAG, "generateText: ${toolDef.name} cancelled - wall-clock budget exhausted mid-execution")
+                                            listOf(UIMessagePart.Text(json.encodeToString(buildJsonObject {
+                                                put("error", JsonPrimitive("tool_cancelled_wall_clock"))
+                                                put(
+                                                    "detail",
+                                                    JsonPrimitive("tool execution exceeded the ${ToolRuntimeLimits.turnBudgetMs / 1000}s turn budget")
+                                                )
+                                            })))
+                                        }
+                                    } finally {
+                                        runControl?.unregisterTool(tool.toolCallId, handle)
                                     }
+                                }
                             }
                             // Upstream tool-output truncation: when the workspace shell is
                             // available, oversized text output is spilled to /tool_outputs/
@@ -810,7 +1319,12 @@ class GenerationHandler(
                             executedTools += markedTool.copy(
                                 output = maybeTruncateToolOutput(tool.toolCallId, result, hasShellAccess)
                             )
+                        }.also {
+                            if (executionBoundaryStarted) {
+                                runControl?.finishToolExecution(tool.toolCallId)
+                            }
                         }.onFailure {
+                            if (it is CancellationException) throw it
                             // Stack trace stays in logcat for debugging; the JSON envelope
                             // sent BACK to the LLM gets just the exception's message and a
                             // short class hint. Stuffing the full multi-frame R8-obfuscated
@@ -818,7 +1332,15 @@ class GenerationHandler(
                             // tokens per failure, confused the model, and surfaced
                             // user-visible "java.lang.IllegalStateException at ..." walls
                             // for what was usually a one-line "name is required" problem.
-                            Log.w(TAG, "tool ${tool.toolName} threw", it)
+                            if (isSensitivePrivilegedTool(tool.toolName)) {
+                                Log.w(
+                                    TAG,
+                                    "sensitive tool ${tool.toolName} failed " +
+                                        "(${it.javaClass.simpleName}); detail redacted",
+                                )
+                            } else {
+                                Log.w(TAG, "tool ${tool.toolName} threw", it)
+                            }
                             executedTools += tool.copy(
                                 output = listOf(
                                     UIMessagePart.Text(
@@ -831,7 +1353,13 @@ class GenerationHandler(
                                                     // a giant message (e.g. an OkHttp body dump or
                                                     // an echoed input arg) doesn't ship 8000+
                                                     // tokens back to the LLM on every failure.
-                                                    JsonPrimitive((it.message ?: it.javaClass.simpleName).take(500)),
+                                                    JsonPrimitive(
+                                                        if (isSensitivePrivilegedTool(tool.toolName)) {
+                                                            "Sensitive tool execution failed; detail redacted."
+                                                        } else {
+                                                            (it.message ?: it.javaClass.simpleName).take(500)
+                                                        },
+                                                    ),
                                                 )
                                                 // Class name as a separate hint so the LLM can
                                                 // distinguish validation (IllegalStateException /
@@ -953,8 +1481,21 @@ class GenerationHandler(
         conversationModeInjectionIds: Set<Uuid> = emptySet(),
         conversationLorebookIds: Set<Uuid> = emptySet(),
         workspaceCwd: String? = null,
-    ) {
-        val internalMessages = buildList {
+        runControl: GenerationRunControl? = null,
+        contextMessages: List<UIMessage>? = null,
+        requestPurpose: GenerationRequestPurpose = GenerationRequestPurpose.NORMAL,
+        diagnosticHandle: GenerationDiagnosticHandle,
+    ): GenerationTerminal {
+        val persistentSteeringContext = preparePersistentSteeringContext(
+            (contextMessages ?: messages)
+                .limitContext(assistant.contextMessageSize)
+                .ageOldToolImages(),
+        )
+        val providerSystemAddendum = listOfNotNull(
+            systemAddendum,
+            persistentSteeringContext.systemAddendum,
+        ).joinToString("\n\n").ifBlank { null }
+        val unplannedInternalMessages = buildList {
             // Conversation-level system prompt override (upstream): when the assistant
             // allows it and the conversation supplies one, it replaces the assistant prompt.
             val effectiveSystemPrompt =
@@ -963,10 +1504,14 @@ class GenerationHandler(
                 } else {
                     assistant.systemPrompt
                 }
-            val memoryPrompt = if (assistant.enableMemory) {
+            val memoryPrompt = if (
+                requestPurpose == GenerationRequestPurpose.NORMAL && assistant.enableMemory
+            ) {
                 buildMemoryPrompt(memories = memories)
             } else ""
-            val recentChatsPrompt = if (assistant.enableRecentChatsReference) {
+            val recentChatsPrompt = if (
+                requestPurpose == GenerationRequestPurpose.NORMAL && assistant.enableRecentChatsReference
+            ) {
                 buildRecentChatsPrompt(assistant, conversationRepo)
             } else ""
             val toolPrompts = tools.map { tool -> tool.systemPrompt(model, messages) }
@@ -978,7 +1523,7 @@ class GenerationHandler(
                 memoryPrompt = memoryPrompt,
                 recentChatsPrompt = recentChatsPrompt,
                 toolPrompts = toolPrompts,
-                systemAddendum = systemAddendum,
+                systemAddendum = providerSystemAddendum,
             )
             val systemParts = buildList {
                 if (stableSystem.isNotBlank()) add(UIMessagePart.Text(stableSystem))
@@ -987,8 +1532,19 @@ class GenerationHandler(
             if (systemParts.isNotEmpty()) {
                 add(UIMessage(role = MessageRole.SYSTEM, parts = systemParts))
             }
-            addAll(messages.limitContext(assistant.contextMessageSize).ageOldToolImages())
-        }.transforms(
+            addAll(persistentSteeringContext.messages)
+        }
+        val contextPlanner = ProviderContextPlanner()
+        val initialContextPlan = contextPlanner.plan(
+            messages = prepareSecondUserProviderMessages(unplannedInternalMessages),
+            declaredContextTokens = model.contextLength,
+        )
+        val providerContext = if (initialContextPlan.requiresSummary) {
+            initialContextPlan.assemble(initialContextPlan.buildTransientSummary())
+        } else {
+            initialContextPlan.assemble()
+        }
+        val transformedMessages = providerContext.transforms(
             transformers = transformers,
             context = context,
             model = model,
@@ -999,15 +1555,57 @@ class GenerationHandler(
             processingStatus = processingStatus,
             workspaceCwd = workspaceCwd,
         )
+        // Input transformers can expand documents, lorebooks and injected prompts after the first
+        // plan. Re-plan the actual payload, then reject an oversized protected current turn instead
+        // of knowingly sending a request that exceeds the provider context window.
+        val contextPlan = contextPlanner.plan(
+            messages = transformedMessages,
+            declaredContextTokens = model.contextLength,
+        )
+        val internalMessages = if (contextPlan.requiresSummary) {
+            contextPlan.assemble(contextPlan.buildTransientSummary())
+        } else {
+            contextPlan.assemble()
+        }
+        val requestedMaxTokens = if (requestPurpose == GenerationRequestPurpose.FINAL_ANSWER_RECOVERY) {
+            FINAL_ANSWER_MAX_TOKENS
+        } else {
+            assistant.maxTokens
+        }
+        val payloadValidation = validateProviderContextPayload(
+            messages = internalMessages,
+            contextWindowTokens = contextPlan.budget.contextWindowTokens,
+            requestedOutputTokens = requestedMaxTokens,
+        )
+        if (!payloadValidation.fits) {
+            throw ProviderContextPayloadTooLargeException(
+                estimatedInputTokens = payloadValidation.estimatedInputTokens,
+                maximumInputTokens = payloadValidation.maximumInputTokens,
+            )
+        }
+        Log.i(
+            TAG,
+            "contextPlan: compressed=${initialContextPlan.compressed || contextPlan.compressed}, " +
+                "originalTokens=${contextPlan.budget.originalTokens}, " +
+                "plannedTokens=${payloadValidation.estimatedInputTokens}, " +
+                "windowTokens=${contextPlan.budget.contextWindowTokens}, " +
+                "historicalReasoningRemoved=" +
+                "${initialContextPlan.strippedHistoricalReasoningParts + contextPlan.strippedHistoricalReasoningParts}",
+        )
 
         var messages: List<UIMessage> = messages
+        val terminalTracker = GenerationTerminalTracker()
         val params = TextGenerationParams(
             model = model,
             temperature = assistant.temperature,
             topP = assistant.topP,
-            maxTokens = assistant.maxTokens,
+            maxTokens = requestedMaxTokens,
             tools = tools,
-            reasoningLevel = assistant.reasoningLevel,
+            reasoningLevel = if (requestPurpose == GenerationRequestPurpose.FINAL_ANSWER_RECOVERY) {
+                ReasoningLevel.OFF
+            } else {
+                assistant.reasoningLevel
+            },
             customHeaders = buildList {
                 addAll(assistant.customHeaders)
                 addAll(model.customHeaders)
@@ -1015,14 +1613,28 @@ class GenerationHandler(
             customBody = buildList {
                 addAll(assistant.customBodies)
                 addAll(model.customBodies)
-            }
+            }.let { bodies ->
+                if (requestPurpose == GenerationRequestPurpose.FINAL_ANSWER_RECOVERY) {
+                    bodies.filterNot { it.key.lowercase() in FINAL_ANSWER_RESERVED_CUSTOM_BODY_KEYS }
+                } else {
+                    bodies
+                }
+            },
         )
+        val providerJob = currentCoroutineContext()[Job]
+        val providerRegistration = runControl?.registerProviderCancel {
+            providerJob?.cancel(CancellationException("Provider cancellation requested"))
+        }
+        try {
         if (stream) {
             aiLoggingManager.addLog(
                 AILogging.Generation(
-                    params = params,
-                    messages = messages,
-                    providerSetting = provider,
+                    modelId = model.modelId,
+                    providerType = provider::class.simpleName ?: "unknown",
+                    messageCount = internalMessages.size,
+                    inputCharacters = internalMessages.redactedInputCharacterCount(),
+                    toolCount = tools.size,
+                    requestPurpose = requestPurpose.name,
                     stream = true
                 )
             )
@@ -1031,6 +1643,7 @@ class GenerationHandler(
                 messages = internalMessages,
                 params = params
             ).collect {
+                terminalTracker.observe(it)
                 messages = messages.handleMessageChunk(chunk = it, model = model)
                 it.usage?.let { usage ->
                     messages = messages.mapIndexed { index, message ->
@@ -1046,9 +1659,12 @@ class GenerationHandler(
         } else {
             aiLoggingManager.addLog(
                 AILogging.Generation(
-                    params = params,
-                    messages = messages,
-                    providerSetting = provider,
+                    modelId = model.modelId,
+                    providerType = provider::class.simpleName ?: "unknown",
+                    messageCount = internalMessages.size,
+                    inputCharacters = internalMessages.redactedInputCharacterCount(),
+                    toolCount = tools.size,
+                    requestPurpose = requestPurpose.name,
                     stream = false
                 )
             )
@@ -1057,6 +1673,7 @@ class GenerationHandler(
                 messages = internalMessages,
                 params = params,
             )
+            terminalTracker.observe(chunk)
             messages = messages.handleMessageChunk(chunk = chunk, model = model)
             chunk.usage?.let { usage ->
                 messages = messages.mapIndexed { index, message ->
@@ -1071,6 +1688,28 @@ class GenerationHandler(
             }
             onUpdateMessages(messages)
         }
+        } finally {
+            providerRegistration?.close()
+        }
+        val trackedTerminal = terminalTracker.finish()
+        val terminal = messages.lastOrNull()?.let(trackedTerminal::withMessageStats)
+            ?: trackedTerminal
+        diagnosticHandle.record(
+            terminal = terminal,
+            modelId = model.modelId,
+            providerType = provider::class.simpleName ?: "unknown",
+            requestMode = "${requestPurpose.name.lowercase()}:${if (stream) "stream" else "single"}",
+            contextOriginalTokens = maxOf(
+                initialContextPlan.budget.originalTokens,
+                contextPlan.budget.originalTokens,
+            ),
+            contextPlannedTokens = payloadValidation.estimatedInputTokens,
+            contextWindowTokens = contextPlan.budget.contextWindowTokens,
+            contextCompressed = initialContextPlan.compressed || contextPlan.compressed,
+            historicalReasoningRemoved = initialContextPlan.strippedHistoricalReasoningParts +
+                contextPlan.strippedHistoricalReasoningParts,
+        )
+        return terminal
     }
 
     private fun maybeTruncateToolOutput(

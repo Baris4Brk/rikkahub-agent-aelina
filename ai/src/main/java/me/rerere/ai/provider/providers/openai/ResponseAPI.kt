@@ -5,6 +5,7 @@ import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonArrayBuilder
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -26,11 +27,14 @@ import me.rerere.ai.provider.BuiltInTools
 import me.rerere.ai.provider.Model
 import me.rerere.ai.provider.ModelAbility
 import me.rerere.ai.provider.ProviderSetting
+import me.rerere.ai.provider.ProviderLogPrivacy
 import me.rerere.ai.provider.TextGenerationParams
 import me.rerere.ai.provider.providers.PartGroup
 import me.rerere.ai.provider.providers.groupPartsByToolBoundary
 import me.rerere.ai.registry.ModelRegistry
 import me.rerere.ai.ui.MessageChunk
+import me.rerere.ai.ui.FinishCategory
+import me.rerere.ai.ui.GenerationTerminal
 import me.rerere.ai.ui.OpenAIReasoningMetadata
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessageChoice
@@ -88,15 +92,16 @@ class ResponseAPI(
             .configureReferHeaders(providerSetting.baseUrl)
             .build()
 
-        Log.i(TAG, "generateText: ${json.encodeToString(requestBody)}")
+        Log.i(TAG, "generateText: model=${params.model.modelId}, messages=${messages.size}, tools=${params.tools.size}")
 
         val response = client.newCall(request).await()
         if (!response.isSuccessful) {
-            throw Exception("Failed to get response: ${response.code} ${response.body.string()}")
+            val responseCode = response.code
+            response.body.close()
+            throw Exception("Failed to get response: $responseCode")
         }
 
         val bodyStr = response.body.string()
-        Log.i(TAG, "generateText: $bodyStr")
         val bodyJson = json.parseToJsonElement(bodyStr).jsonObject
         val output = parseResponseOutput(bodyJson)
 
@@ -125,7 +130,7 @@ class ResponseAPI(
             .configureReferHeaders(providerSetting.baseUrl)
             .build()
 
-        Log.i(TAG, "streamText: ${json.encodeToString(requestBody)}")
+        Log.i(TAG, "streamText: model=${params.model.modelId}, messages=${messages.size}, tools=${params.tools.size}")
 
         val listener = object : EventSourceListener() {
             override fun onEvent(
@@ -134,36 +139,44 @@ class ResponseAPI(
                 type: String?,
                 data: String
             ) {
+                try {
                 if (data == "[DONE]") {
                     close()
                     return
                 }
-                Log.d(TAG, "onEvent: $id/$type $data")
+                Log.d(TAG, "onEvent: id=${id.orEmpty()}, type=${type.orEmpty()}, chars=${data.length}")
                 val json = json.parseToJsonElement(data).jsonObject
                 val chunk = parseResponseDelta(json)
                 if (chunk != null) {
                     trySend(chunk)
                 }
-                if (type == "response.completed") {
+                if (chunk?.terminal != null) {
                     close()
+                }
+                } catch (error: Exception) {
+                    val sanitized = ProviderLogPrivacy.parseException(data.length, type, error)
+                    Log.w(TAG, sanitized.message.orEmpty())
+                    close(sanitized)
                 }
             }
 
             override fun onFailure(eventSource: EventSource, t: Throwable?, response: Response?) {
                 var exception = t
 
-                Log.w(TAG, "onFailure: ${t?.javaClass?.name} ${t?.message} / $response", t)
+                Log.w(TAG, ProviderLogPrivacy.transportFailure(response?.code, t))
 
                 val bodyRaw = response?.body?.stringSafe()
                 try {
                     if (!bodyRaw.isNullOrBlank()) {
                         val bodyElement = Json.parseToJsonElement(bodyRaw)
-                        Log.d(TAG, "onFailure: error body $bodyElement")
+                        Log.d(TAG, "onFailure: structured error body received")
                         exception = bodyElement.parseErrorDetail()
-                        Log.i(TAG, "onFailure: $exception")
+                        Log.i(TAG, "onFailure: parsed provider error (${exception?.javaClass?.simpleName})")
                     }
                 } catch (e: Throwable) {
-                    Log.w(TAG, "onFailure: failed to parse from $bodyRaw", e)
+                    val sanitized = ProviderLogPrivacy.errorBodyParseException(bodyRaw?.length ?: 0, e)
+                    Log.w(TAG, sanitized.message.orEmpty())
+                    exception = sanitized
                 } finally {
                     close(exception)
                 }
@@ -470,7 +483,7 @@ class ResponseAPI(
         val chunkType = jsonObject["type"]?.jsonPrimitive?.content ?: error("chunk type not found")
 
         when (chunkType) {
-            "response.output_text.delta" -> {
+            "response.output_text.delta", "response.refusal.delta" -> {
                 return MessageChunk(
                     id = jsonObject["item_id"]?.jsonPrimitive?.contentOrNull ?: "",
                     model = "",
@@ -668,12 +681,14 @@ class ResponseAPI(
                 )
             }
 
-            "response.completed" -> {
+            "response.completed", "response.incomplete", "response.failed" -> {
+                val response = jsonObject["response"]?.jsonObject
                 return MessageChunk(
                     id = jsonObject["item_id"]?.jsonPrimitive?.contentOrNull ?: "",
                     model = "",
                     choices = emptyList(),
-                    usage = parseTokenUsage(jsonObject["response"]?.jsonObject?.get("usage")?.jsonObject)
+                    usage = parseTokenUsage(response?.get("usage")?.jsonObject),
+                    terminal = parseResponseTerminal(chunkType, response),
                 )
             }
         }
@@ -682,8 +697,7 @@ class ResponseAPI(
     }
 
     fun parseResponseOutput(jsonObject: JsonObject): MessageChunk {
-        println(jsonObject)
-        val outputs = jsonObject["output"]?.jsonArray ?: error("output not found")
+        val outputs = jsonObject["output"]?.jsonArray ?: JsonArray(emptyList())
         val parts = arrayListOf<UIMessagePart>()
 
         outputs.forEach { outputItem ->
@@ -729,8 +743,12 @@ class ResponseAPI(
                     content.map { it.jsonObject }.forEach { part ->
                         val partType = part["type"]?.jsonPrimitive?.content ?: error("part type not found")
                         when (partType) {
-                            "output_text" -> {
-                                val text = part["text"]?.jsonPrimitive?.content ?: error("text not found")
+                            "output_text", "refusal" -> {
+                                val text = if (partType == "refusal") {
+                                    part["refusal"]?.jsonPrimitive?.content ?: error("refusal not found")
+                                } else {
+                                    part["text"]?.jsonPrimitive?.content ?: error("text not found")
+                                }
                                 parts.add(
                                     UIMessagePart.Text(
                                         text = text
@@ -755,11 +773,73 @@ class ResponseAPI(
                         role = MessageRole.ASSISTANT,
                         parts = parts,
                     ),
-                    finishReason = null,
+                    finishReason = parseResponseTerminal(
+                        eventType = "response.${jsonObject["status"]?.jsonPrimitive?.contentOrNull ?: "unknown"}",
+                        response = jsonObject,
+                    ).providerReason,
                     delta = null
                 )
             ),
-            usage = parseTokenUsage(jsonObject["usage"]?.jsonObject)
+            usage = parseTokenUsage(jsonObject["usage"]?.jsonObject),
+            terminal = parseResponseTerminal(
+                eventType = "response.${jsonObject["status"]?.jsonPrimitive?.contentOrNull ?: "unknown"}",
+                response = jsonObject,
+            ),
+        )
+    }
+
+    private fun parseResponseTerminal(
+        eventType: String,
+        response: JsonObject?,
+    ): GenerationTerminal {
+        val status = response?.get("status")?.jsonPrimitive?.contentOrNull
+            ?: eventType.substringAfter("response.")
+        val incompleteReason = response?.get("incomplete_details")
+            ?.jsonObjectOrNull
+            ?.get("reason")
+            ?.jsonPrimitive
+            ?.contentOrNull
+        val normalizedStatus = status.lowercase()
+        val normalizedIncompleteReason = incompleteReason?.lowercase()
+        val hasRefusal = response.hasResponseRefusal()
+        val category = when {
+            hasRefusal -> FinishCategory.SAFETY
+            normalizedIncompleteReason != null && normalizedIncompleteReason in RESPONSE_SAFETY_REASONS ->
+                FinishCategory.SAFETY
+            normalizedStatus == "completed" -> FinishCategory.STOP
+            normalizedStatus == "incomplete" && normalizedIncompleteReason == "max_output_tokens" ->
+                FinishCategory.LENGTH
+            normalizedStatus == "incomplete" -> FinishCategory.INCOMPLETE
+            normalizedStatus == "failed" -> FinishCategory.FAILED
+            else -> FinishCategory.UNKNOWN
+        }
+        return GenerationTerminal(
+            terminalSeen = normalizedStatus in setOf("completed", "incomplete", "failed"),
+            category = category,
+            providerReason = if (hasRefusal) "refusal" else incompleteReason ?: status,
+            incompleteDetail = incompleteReason,
+        )
+    }
+
+    private fun JsonObject?.hasResponseRefusal(): Boolean {
+        val outputs = this?.get("output") as? JsonArray ?: return false
+        return outputs.any { outputElement ->
+            val output = outputElement as? JsonObject ?: return@any false
+            val content = output["content"] as? JsonArray ?: return@any false
+            content.any { partElement ->
+                (partElement as? JsonObject)
+                    ?.get("type")
+                    ?.jsonPrimitive
+                    ?.contentOrNull == "refusal"
+            }
+        }
+    }
+
+    private companion object {
+        val RESPONSE_SAFETY_REASONS = setOf(
+            "content_filter",
+            "safety",
+            "refusal",
         )
     }
 

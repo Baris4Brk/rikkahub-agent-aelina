@@ -14,9 +14,25 @@ import me.rerere.rikkahub.data.model.MessageNode
 @Serializable
 data class SendMessageRequest(
     val parts: List<UIMessagePart>,
+    /** QUEUE by default; INTERRUPT and STEER are explicit control modes. */
+    val mode: String? = null,
     val modeInjectionIds: List<String>? = null,
     val lorebookIds: List<String>? = null,
 )
+
+internal enum class WebMessageMode {
+    QUEUE,
+    INTERRUPT,
+    STEER,
+}
+
+internal fun parseWebMessageMode(raw: String?): WebMessageMode? = when (raw?.trim()?.uppercase()) {
+    null, "" -> WebMessageMode.QUEUE
+    "QUEUE" -> WebMessageMode.QUEUE
+    "INTERRUPT" -> WebMessageMode.INTERRUPT
+    "STEER" -> WebMessageMode.STEER
+    else -> null
+}
 
 @Serializable
 data class RegenerateRequest(

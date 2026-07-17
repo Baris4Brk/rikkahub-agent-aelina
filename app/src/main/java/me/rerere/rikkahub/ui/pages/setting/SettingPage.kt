@@ -283,6 +283,12 @@ fun SettingPage(vm: SettingVM = koinViewModel()) {
                         headlineContent = { Text(stringResource(R.string.setting_page_scheduled_jobs)) },
                     )
                     item(
+                        onClick = { navController.navigate(Screen.SettingAlarm) },
+                        leadingContent = { Icon(HugeIcons.Alert01, null) },
+                        supportingContent = { Text("Manage app-owned alarms created by the AI.") },
+                        headlineContent = { Text("Alarm") },
+                    )
+                    item(
                         onClick = { navController.navigate(Screen.SettingBrowser) },
                         leadingContent = { Icon(HugeIcons.Earth, null) },
                         supportingContent = { Text(stringResource(R.string.setting_page_browser_desc)) },
@@ -323,6 +329,28 @@ fun SettingPage(vm: SettingVM = koinViewModel()) {
                         leadingContent = { Icon(HugeIcons.Shield01, null) },
                         supportingContent = { Text(stringResource(R.string.setting_page_permissions_desc)) },
                         headlineContent = { Text(stringResource(R.string.setting_page_permissions)) },
+                    )
+                    item(
+                        onClick = { navController.navigate(Screen.SettingSystemAssistant) },
+                        leadingContent = { Icon(HugeIcons.SmartPhone01, null) },
+                        supportingContent = {
+                            Text(stringResource(R.string.setting_page_system_assistant_desc))
+                        },
+                        headlineContent = {
+                            Text(stringResource(R.string.setting_page_system_assistant))
+                        },
+                    )
+                    item(
+                        onClick = { navController.navigate(Screen.SettingEmergencyStop) },
+                        leadingContent = { Icon(HugeIcons.Alert01, null) },
+                        supportingContent = { Text("Emergency stop, high-risk tool toggles, and remote call restrictions.") },
+                        headlineContent = { Text("Safety & Emergency Stop") },
+                    )
+                    item(
+                        onClick = { navController.navigate(Screen.SettingDiagnostics) },
+                        leadingContent = { Icon(HugeIcons.Shield01, null) },
+                        supportingContent = { Text("View detailed status of every capability, its permissions, and requirements.") },
+                        headlineContent = { Text("Capability Diagnostics") },
                     )
                 }
             }

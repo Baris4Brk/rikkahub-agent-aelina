@@ -1,9 +1,11 @@
 package me.rerere.rikkahub
 
 import android.app.Application
+import android.app.ActivityManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.Process
 import android.util.Log
 import androidx.compose.foundation.ComposeFoundationFlags
 import androidx.compose.runtime.Composer
@@ -11,11 +13,14 @@ import androidx.compose.runtime.tooling.ComposeStackTraceMode
 import androidx.core.app.NotificationChannelCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.ProcessLifecycleOwner
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import me.rerere.rikkahub.data.files.FileFolders
+import me.rerere.rikkahub.data.db.ImportedDatabaseReconciler
 import java.io.File
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
@@ -29,6 +34,7 @@ import me.rerere.rikkahub.di.dataSourceModule
 import me.rerere.rikkahub.di.repositoryModule
 import me.rerere.rikkahub.di.viewModelModule
 import me.rerere.rikkahub.data.files.FilesManager
+import me.rerere.rikkahub.data.files.FileFolders
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.ai.tools.HeadlessConversations
 import me.rerere.rikkahub.service.WebServerService
@@ -43,19 +49,41 @@ import org.koin.androidx.workmanager.koin.workManagerFactory
 import org.koin.core.context.startKoin
 
 private const val TAG = "RikkaHubApp"
+internal const val VOICE_INTERACTOR_PROCESS_SUFFIX = ":voice_interactor"
 
 const val CHAT_COMPLETED_NOTIFICATION_CHANNEL_ID = "chat_completed"
 const val CHAT_LIVE_UPDATE_NOTIFICATION_CHANNEL_ID = "chat_live_update"
 const val WEB_SERVER_NOTIFICATION_CHANNEL_ID = "web_server"
+const val WORKSPACE_PROCESS_NOTIFICATION_CHANNEL_ID = "workspace_process"
 
 class RikkaHubApp : Application() {
+    private var dependencyGraphStarted = false
+
     override fun onCreate() {
         super.onCreate()
+        if (isVoiceInteractorProcess()) {
+            Log.i(TAG, "Skipping full app initialization in the voice interactor process")
+            return
+        }
+        // Reconcile the database before Room or any DI/DB layer opens it.
+        // This creates fork-only tables and stamps the correct identity hash so
+        // a restored official RikkaHub backup (which lacks agent tables) can be
+        // opened by Room without crashing on "no such table" or hash mismatch.
+        ImportedDatabaseReconciler.reconcile(this)
+
         startKoin {
             androidLogger()
             androidContext(this@RikkaHubApp)
             workManagerFactory()
             modules(appModule, viewModelModule, dataSourceModule, repositoryModule)
+        }
+        dependencyGraphStarted = true
+        runCatching {
+            me.rerere.rikkahub.assistant.SystemAssistantSessionAdapterRegistry.install(
+                get<me.rerere.rikkahub.assistant.AndroidSystemAssistantSessionAdapter>()
+            )
+        }.onFailure { error ->
+            Log.e(TAG, "Unable to install the system-assistant session adapter", error)
         }
         this.createNotificationChannel()
 
@@ -87,6 +115,10 @@ class RikkaHubApp : Application() {
         // check workspace integrity (remove orphaned DB records after backup restore)
         checkWorkspaceIntegrity()
 
+        // Android 12+ only permits the first foreground-service launch while the app is
+        // user-visible. Existing START_STICKY services restore independently.
+        restoreWorkspaceProcessesWhenForegrounded()
+
         // sync upload files to DB
         syncManagedFiles()
 
@@ -110,6 +142,19 @@ class RikkaHubApp : Application() {
         // sandbox for `.learnings/`, scratch files, and skill state without scoped-
         // storage friction. Termux-style: private, persistent, OS-blessed.
         me.rerere.rikkahub.data.ai.tools.local.AgentWorkspace.init(this)
+
+        // Best-effort shared hand-off path for RikkaHub, Termux, and workspace proot.
+        // Android 11+ requires the existing All Files Access special permission; startup
+        // never prompts or crashes when it is absent, and the permission diagnostics page
+        // remains the user-controlled way to grant it.
+        when (val exchange = me.rerere.rikkahub.data.files.SharedExchangeDirectory.ensure(this)) {
+            is me.rerere.rikkahub.data.files.SharedExchangeDirectory.Status.Ready ->
+                Log.i(TAG, "Shared exchange directory ready: ${exchange.directory}")
+            is me.rerere.rikkahub.data.files.SharedExchangeDirectory.Status.PermissionRequired ->
+                Log.i(TAG, "Shared exchange directory awaits All Files Access")
+            is me.rerere.rikkahub.data.files.SharedExchangeDirectory.Status.Unavailable ->
+                Log.w(TAG, "Shared exchange directory unavailable: ${exchange.directory}")
+        }
 
         // Copy any default skills bundled in assets/default-skills/* into the user's skills
         // dir on first launch. SkillManager guards via a per-skill .seeded sentinel so this
@@ -374,6 +419,30 @@ class RikkaHubApp : Application() {
         }
     }
 
+    private fun restoreWorkspaceProcessesWhenForegrounded() {
+        ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
+            override fun onStart(owner: LifecycleOwner) {
+                get<AppScope>().launch(Dispatchers.IO) {
+                    runCatching {
+                        val repository = get<WorkspaceRepository>()
+                        repository.checkIntegrity()
+                        val validWorkspaces = repository.getAll().associate { it.id to it.root }
+                        val manager = get<me.rerere.workspace.WorkspaceProcessManager>()
+                        if (manager.hasDesiredProcesses(validWorkspaces)) {
+                            ContextCompat.startForegroundService(
+                                this@RikkaHubApp,
+                                me.rerere.rikkahub.service.WorkspaceProcessService
+                                    .startIntent(this@RikkaHubApp),
+                            )
+                        }
+                    }.onFailure {
+                        Log.w(TAG, "restoreWorkspaceProcessesWhenForegrounded failed", it)
+                    }
+                }
+            }
+        })
+    }
+
     private fun seedDefaultSkillsIfNeeded() {
         get<AppScope>().launch(Dispatchers.IO) {
             runCatching {
@@ -494,14 +563,60 @@ class RikkaHubApp : Application() {
             .setShowBadge(false)
             .build()
         notificationManager.createNotificationChannel(webServerChannel)
+
+        val workspaceProcessChannel = NotificationChannelCompat
+            .Builder(
+                WORKSPACE_PROCESS_NOTIFICATION_CHANNEL_ID,
+                NotificationManagerCompat.IMPORTANCE_LOW,
+            )
+            .setName(getString(R.string.notification_channel_workspace_process))
+            .setVibrationEnabled(false)
+            .setShowBadge(false)
+            .build()
+        notificationManager.createNotificationChannel(workspaceProcessChannel)
+
+        val alarmChannel = NotificationChannelCompat
+            .Builder("alarm", NotificationManagerCompat.IMPORTANCE_HIGH)
+            .setName("Alarm")
+            .setVibrationEnabled(true)
+            .setShowBadge(true)
+            .build()
+        notificationManager.createNotificationChannel(alarmChannel)
     }
 
     override fun onTerminate() {
+        me.rerere.rikkahub.assistant.SystemAssistantSessionAdapterRegistry.reset()
+        if (dependencyGraphStarted) {
+            get<AppScope>().cancel()
+            stopService(Intent(this, WebServerService::class.java))
+        }
         super.onTerminate()
-        get<AppScope>().cancel()
-        stopService(Intent(this, WebServerService::class.java))
+    }
+
+    private fun isVoiceInteractorProcess(): Boolean = isVoiceInteractorProcess(
+        packageName = packageName,
+        processName = currentProcessNameCompat(),
+    )
+
+    @Suppress("DEPRECATION")
+    private fun currentProcessNameCompat(): String? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        getProcessName()
+    } else {
+        val processId = Process.myPid()
+        getSystemService(ActivityManager::class.java)
+            ?.runningAppProcesses
+            ?.firstOrNull { it.pid == processId }
+            ?.processName
+            ?: runCatching {
+                File("/proc/self/cmdline").inputStream().bufferedReader().use { reader ->
+                    reader.readLine()?.trimEnd('\u0000')
+                }
+            }.getOrNull()
     }
 }
+
+internal fun isVoiceInteractorProcess(packageName: String, processName: String?): Boolean =
+    processName == packageName + VOICE_INTERACTOR_PROCESS_SUFFIX
 
 class AppScope : CoroutineScope by CoroutineScope(
     SupervisorJob()

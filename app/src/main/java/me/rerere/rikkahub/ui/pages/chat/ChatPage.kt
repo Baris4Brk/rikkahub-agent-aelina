@@ -5,9 +5,15 @@ import android.util.Log
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.AlertDialog
@@ -60,10 +66,12 @@ import me.rerere.ai.ui.UIMessagePart
 import me.rerere.common.android.appTempFolder
 import me.rerere.hugeicons.HugeIcons
 import me.rerere.hugeicons.stroke.Cancel01
+import me.rerere.hugeicons.stroke.Activity01
 import me.rerere.hugeicons.stroke.LeftToRightListBullet
 import me.rerere.hugeicons.stroke.Menu03
 import me.rerere.hugeicons.stroke.MessageAdd01
 import me.rerere.rikkahub.R
+import me.rerere.rikkahub.Screen
 import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.datastore.findProvider
 import me.rerere.rikkahub.data.datastore.getCurrentAssistant
@@ -73,6 +81,8 @@ import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.data.model.Conversation
 import me.rerere.rikkahub.data.repository.WorkspaceRepository
 import me.rerere.rikkahub.service.ChatError
+import me.rerere.rikkahub.service.chat.RuntimeState
+import me.rerere.rikkahub.service.chat.SteeringHistoryMode
 import me.rerere.rikkahub.ui.components.ai.ChatInput
 import me.rerere.rikkahub.ui.components.ai.FilesPicker
 import me.rerere.rikkahub.ui.components.ai.completion.WorkspaceCompletionProvider
@@ -270,12 +280,17 @@ private fun ChatPageContent(
 ) {
     val scope = rememberCoroutineScope()
     val toaster = LocalToaster.current
+    val runtimeState by vm.runtimeState.collectAsStateWithLifecycle()
+    val queueStatus by vm.queueStatus.collectAsStateWithLifecycle()
+    val queuedMessages by vm.queuedMessages.collectAsStateWithLifecycle()
+    val steeringEntries by vm.steeringEntries.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val workspaceRepository: WorkspaceRepository = koinInject()
     var previewMode by rememberSaveable { mutableStateOf(false) }
     val hazeState = rememberHazeState()
     val assistant = setting.getCurrentAssistant()
     var showFilesSheet by remember { mutableStateOf(false) }
+    var showSendModeDialog by remember { mutableStateOf(false) }
 
     val completionProviders = remember(assistant.workspaceId, conversation.workspaceCwd, workspaceRepository) {
         assistant.workspaceId?.let { workspaceId ->
@@ -287,6 +302,30 @@ private fun ChatPageContent(
                 )
             )
         }.orEmpty()
+    }
+
+    fun submitRunningChoice(choice: RunningSendChoice) {
+        val contents = inputState.getContents()
+        val text = contents.filterIsInstance<UIMessagePart.Text>()
+            .joinToString("\n") { it.text }
+        when (choice.toSendAction()) {
+            ChatSendAction.SOFT_STEER -> {
+                if (text.isBlank()) {
+                    toaster.show(
+                        "这类补充目前需要包含文字；附件可以选择稍后处理或立即改做。",
+                        type = ToastType.Warning,
+                    )
+                    return
+                }
+                vm.handleSteer(text)
+            }
+            ChatSendAction.QUEUE -> vm.handleMessageSend(contents)
+            ChatSendAction.INTERRUPT -> vm.handleInterrupt(contents)
+            ChatSendAction.STOP -> vm.stopGeneration()
+            ChatSendAction.SHOW_RUNNING_CHOICES -> return
+        }
+        inputState.clearInput()
+        showSendModeDialog = false
     }
 
     TTSAutoPlay(vm = vm, setting = setting, conversation = conversation)
@@ -310,15 +349,181 @@ private fun ChatPageContent(
                     onClickMenu = {
                         previewMode = !previewMode
                     },
+                    onOpenDiagnostics = {
+                        navController.navigate(
+                            Screen.SettingDiagnosticsForConversation(conversation.id.toString())
+                        )
+                    },
                     onUpdateTitle = {
                         vm.updateTitle(it)
                     }
                 )
             },
             bottomBar = {
-                ChatInput(
+                Column {
+                    val statusText = when (val state = runtimeState) {
+                        RuntimeState.Idle -> null
+                        RuntimeState.Hydrating -> "正在准备对话"
+                        RuntimeState.Running -> "正在处理，发来的补充会在下一步看"
+                        RuntimeState.Paused -> "当前任务已暂停"
+                        RuntimeState.WaitingApproval -> "正在等你确认工具操作"
+                        is RuntimeState.Cancelling -> "正在停止当前任务"
+                        is RuntimeState.HydrationFailed -> "对话恢复失败"
+                        is RuntimeState.Fatal -> "这次对话暂时无法继续"
+                    }
+                    val visibleSteering = selectVisibleSteeringEntries(steeringEntries.values)
+                    if (visibleSteering.isNotEmpty()) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 8.dp, vertical = 4.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Text(
+                                text = "我正在记着",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            visibleSteering.forEach { entry ->
+                                val persistent = entry.historyMode == SteeringHistoryMode.PERSISTENT
+                                val stateLabel = when (entry.state) {
+                                    me.rerere.rikkahub.data.ai.SteeringState.PENDING -> "等我做完这一步就看"
+                                    me.rerere.rikkahub.data.ai.SteeringState.APPLIED -> "已看见，可继续切换是否保留"
+                                    me.rerere.rikkahub.data.ai.SteeringState.FALLBACK_QUEUED -> "没赶上这一步，已经放到下一条"
+                                    me.rerere.rikkahub.data.ai.SteeringState.NOT_APPLIED_RUN_FINISHED -> "这次没来得及用上，请重新发一次"
+                                    me.rerere.rikkahub.data.ai.SteeringState.REJECTED_NOT_STEERABLE -> "这条补充没能接上，请重新发一次"
+                                }
+                                Surface(
+                                    onClick = { vm.toggleSteeringHistoryMode(entry.commandId) },
+                                    enabled = entry.editable,
+                                    color = if (persistent) Color(0xFFFFE39A) else Color(0xFFE4C7FF),
+                                    contentColor = Color(0xFF2B2033),
+                                    shape = MaterialTheme.shapes.medium,
+                                ) {
+                                    Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                                        Text(
+                                            text = entry.text,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis,
+                                            style = MaterialTheme.typography.bodySmall,
+                                        )
+                                        Text(
+                                            text = if (persistent) {
+                                                "$stateLabel · 黄色：以后聊天也会记得"
+                                            } else {
+                                                "$stateLabel · 紫色：只在这次任务里参考"
+                                            },
+                                            style = MaterialTheme.typography.labelSmall,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if (queuedMessages.isNotEmpty()) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 280.dp)
+                                .verticalScroll(rememberScrollState())
+                                .padding(horizontal = 8.dp, vertical = 4.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                            ) {
+                                Text(
+                                    text = if (queueStatus.paused) {
+                                        "等这件事做完再看 · 已暂停"
+                                    } else {
+                                        "等这件事做完再看"
+                                    },
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                                if (queueStatus.paused) {
+                                    TextButton(onClick = vm::resumeQueue) {
+                                        Text("恢复")
+                                    }
+                                }
+                            }
+                            queuedMessages.forEach { entry ->
+                                val text = entry.content.parts
+                                    .filterIsInstance<UIMessagePart.Text>()
+                                    .joinToString("\n") { it.text }
+                                    .trim()
+                                val attachmentLabel = entry.content.parts
+                                    .filterNot { it is UIMessagePart.Text }
+                                    .joinToString("、") { part ->
+                                        when (part) {
+                                            is UIMessagePart.Image -> "图片"
+                                            is UIMessagePart.Video -> "视频"
+                                            is UIMessagePart.Audio -> "音频"
+                                            is UIMessagePart.Document -> part.fileName.ifBlank { "文件" }
+                                            else -> "附件"
+                                        }
+                                    }
+                                Surface(
+                                    color = MaterialTheme.colorScheme.surfaceVariant,
+                                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    shape = MaterialTheme.shapes.medium,
+                                ) {
+                                    Column(
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                                    ) {
+                                        Text(
+                                            text = text.ifBlank { attachmentLabel.ifBlank { "空消息" } },
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis,
+                                            style = MaterialTheme.typography.bodySmall,
+                                        )
+                                        if (text.isNotBlank() && attachmentLabel.isNotBlank()) {
+                                            Text(
+                                                text = attachmentLabel,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                style = MaterialTheme.typography.labelSmall,
+                                            )
+                                        }
+                                        Text(
+                                            text = "第 ${entry.position} 条",
+                                            style = MaterialTheme.typography.labelSmall,
+                                        )
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.End,
+                                        ) {
+                                            TextButton(
+                                                enabled = text.isNotBlank(),
+                                                onClick = { vm.promoteQueuedMessage(entry.commandId) },
+                                            ) {
+                                                Text("现在提醒它")
+                                            }
+                                            TextButton(onClick = { vm.beginEditQueuedMessage(entry) }) {
+                                                Text("修改")
+                                            }
+                                            TextButton(onClick = { vm.cancelQueuedMessage(entry.commandId) }) {
+                                                Text("不发了")
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if (statusText != null) {
+                        Text(
+                            text = statusText,
+                            modifier = Modifier.fillMaxWidth(),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.labelSmall,
+                        )
+                    }
+                    ChatInput(
                     state = inputState,
-                    loading = loadingJob != null,
+                    loading = runtimeState == RuntimeState.Running,
                     settings = setting,
                     hazeState = hazeState,
                     completionProviders = completionProviders,
@@ -337,32 +542,81 @@ private fun ChatPageContent(
                             )
                             return@ChatInput
                         }
-                        if (inputState.isEditing()) {
+                        if (inputState.isEditingQueuedMessage()) {
+                            vm.updateQueuedMessage(
+                                commandId = inputState.editingQueuedCommand!!,
+                                parts = inputState.getContents(),
+                            )
+                        } else if (inputState.editingMessage != null) {
                             vm.handleMessageEdit(
                                 parts = inputState.getContents(),
                                 messageId = inputState.editingMessage!!,
                             )
                         } else {
-                            vm.handleMessageSend(inputState.getContents())
-                            scope.launch {
-                                chatListState.requestScrollToItem(conversation.currentMessages.size + 5)
+                            val contents = inputState.getContents()
+                            val text = contents.filterIsInstance<UIMessagePart.Text>()
+                                .joinToString("\n") { it.text }
+                            val action = resolveShortSendAction(
+                                runtimeState = runtimeState,
+                                hasInput = !inputState.isEmpty(),
+                                hasGuidanceText = text.isNotBlank(),
+                            )
+                            when (action) {
+                                ChatSendAction.SOFT_STEER -> vm.handleSteer(text)
+                                ChatSendAction.QUEUE -> vm.handleMessageSend(contents)
+                                ChatSendAction.INTERRUPT -> vm.handleInterrupt(contents)
+                                ChatSendAction.STOP -> vm.stopGeneration()
+                                ChatSendAction.SHOW_RUNNING_CHOICES -> showSendModeDialog = true
+                            }
+                            if (action != ChatSendAction.SHOW_RUNNING_CHOICES) {
+                                inputState.clearInput()
+                                scope.launch {
+                                    chatListState.requestScrollToItem(conversation.currentMessages.size + 5)
+                                }
                             }
                         }
-                        inputState.clearInput()
+                        if (inputState.isEditing()) {
+                            inputState.clearInput()
+                        }
                     },
                     onLongSendClick = {
-                        if (inputState.isEditing()) {
+                        if (inputState.isEditingQueuedMessage()) {
+                            vm.updateQueuedMessage(
+                                commandId = inputState.editingQueuedCommand!!,
+                                parts = inputState.getContents(),
+                            )
+                            inputState.clearInput()
+                        } else if (inputState.editingMessage != null) {
                             vm.handleMessageEdit(
                                 parts = inputState.getContents(),
                                 messageId = inputState.editingMessage!!,
                             )
+                            inputState.clearInput()
                         } else {
-                            vm.handleMessageSend(content = inputState.getContents(), answer = false)
-                            scope.launch {
-                                chatListState.requestScrollToItem(conversation.currentMessages.size + 5)
+                            val contents = inputState.getContents()
+                            when (
+                                resolveLongSendAction(
+                                    runtimeState = runtimeState,
+                                    hasInput = !inputState.isEmpty(),
+                                )
+                            ) {
+                                ChatSendAction.SHOW_RUNNING_CHOICES -> showSendModeDialog = true
+                                ChatSendAction.QUEUE -> {
+                                    vm.handleMessageSend(content = contents)
+                                    inputState.clearInput()
+                                    scope.launch {
+                                        chatListState.requestScrollToItem(conversation.currentMessages.size + 5)
+                                    }
+                                }
+                                ChatSendAction.STOP -> vm.stopGeneration()
+                                ChatSendAction.SOFT_STEER -> submitRunningChoice(
+                                    RunningSendChoice.CONTINUE_WITH_GUIDANCE
+                                )
+                                ChatSendAction.INTERRUPT -> submitRunningChoice(
+                                    RunningSendChoice.STOP_AND_REPLACE
+                                )
                             }
                         }
-                        inputState.clearInput()
                     },
                     onUpdateChatModel = {
                         vm.setChatModel(assistant = setting.getCurrentAssistant(), model = it)
@@ -391,6 +645,7 @@ private fun ChatPageContent(
                         showFilesSheet = true
                     },
                 )
+                }
             },
             containerColor = Color.Transparent,
         ) { innerPadding ->
@@ -410,6 +665,7 @@ private fun ChatPageContent(
                     vm.regenerateAtMessage(it)
                 },
                 onEdit = {
+                    inputState.editingQueuedCommand = null
                     inputState.editingMessage = it.id
                     inputState.setContents(it.parts)
                 },
@@ -441,6 +697,7 @@ private fun ChatPageContent(
                 },
                 onClickSuggestion = { suggestion ->
                     inputState.editingMessage = null
+                    inputState.editingQueuedCommand = null
                     inputState.setMessageText(suggestion)
                 },
                 onTranslate = { message, locale ->
@@ -471,6 +728,46 @@ private fun ChatPageContent(
             )
         }
 
+        if (showSendModeDialog) {
+            AlertDialog(
+                onDismissRequest = { showSendModeDialog = false },
+                title = { Text("这条消息怎么处理？") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        SendModeOption(
+                            title = "继续做，下一步参考这条",
+                            description = "不打断正在执行的工具；做完当前这一步后，AI 会按你的补充调整后续操作。",
+                            color = Color(0xFFE4C7FF),
+                            onClick = {
+                                submitRunningChoice(RunningSendChoice.CONTINUE_WITH_GUIDANCE)
+                            },
+                        )
+                        SendModeOption(
+                            title = "做完当前任务，再处理这条",
+                            description = "把它放到下一条，不改变现在这项任务。",
+                            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                            onClick = {
+                                submitRunningChoice(RunningSendChoice.HANDLE_AFTER_CURRENT_TASK)
+                            },
+                        )
+                        SendModeOption(
+                            title = "现在停下来，改做这条",
+                            description = "先停下手头这件事，收好已经做到的部分，再从这条消息重新开始。",
+                            color = MaterialTheme.colorScheme.errorContainer,
+                            onClick = {
+                                submitRunningChoice(RunningSendChoice.STOP_AND_REPLACE)
+                            },
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { showSendModeDialog = false }) {
+                        Text("先不发送")
+                    }
+                },
+            )
+        }
+
         if (showFilesSheet) {
             ChatFilesPickerSheet(
                 inputState = inputState,
@@ -479,6 +776,33 @@ private fun ChatPageContent(
                 assistant = assistant,
                 vm = vm,
                 onDismiss = { showFilesSheet = false },
+            )
+        }
+    }
+}
+
+@Composable
+private fun SendModeOption(
+    title: String,
+    description: String,
+    color: Color,
+    onClick: () -> Unit,
+) {
+    Surface(
+        onClick = onClick,
+        color = color,
+        shape = MaterialTheme.shapes.medium,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            Text(title, style = MaterialTheme.typography.titleSmall)
+            Text(
+                description,
+                style = MaterialTheme.typography.bodySmall,
+                color = LocalContentColor.current.copy(alpha = 0.72f),
             )
         }
     }
@@ -691,6 +1015,7 @@ private fun TopBar(
     bigScreen: Boolean,
     previewMode: Boolean,
     onClickMenu: () -> Unit,
+    onOpenDiagnostics: () -> Unit,
     onNewChat: () -> Unit,
     onUpdateTitle: (String) -> Unit
 ) {
@@ -750,6 +1075,10 @@ private fun TopBar(
             }
         },
         actions = {
+            IconButton(onClick = onOpenDiagnostics) {
+                Icon(HugeIcons.Activity01, "Runtime Diagnostics")
+            }
+
             IconButton(
                 onClick = {
                     onClickMenu()

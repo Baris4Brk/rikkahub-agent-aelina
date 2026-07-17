@@ -1,6 +1,7 @@
 package me.rerere.rikkahub.service
 
 import android.app.Notification
+import android.app.PendingIntent
 import android.content.pm.PackageManager
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
@@ -9,12 +10,18 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import me.rerere.rikkahub.BuildConfig
+import me.rerere.rikkahub.data.notifications.NotificationActionDeduplicator
+import me.rerere.rikkahub.data.notifications.NotificationEffectSnapshot
 import me.rerere.rikkahub.data.notifications.NotificationEntry
 import me.rerere.rikkahub.data.notifications.NotificationListenerPreferences
+import me.rerere.rikkahub.data.notifications.NotificationObservedEffect
+import me.rerere.rikkahub.data.notifications.detectNotificationEffect
+import me.rerere.rikkahub.data.notifications.shouldBlockSensitiveNotificationAction
 import me.rerere.rikkahub.data.telegram.TelegramBotClient
 import me.rerere.rikkahub.data.telegram.TelegramBotPreferences
 import org.koin.android.ext.android.inject
@@ -32,6 +39,8 @@ private const val MAX_TEXT_BYTES = 4096
 // list_active_notifications + dismiss_notification + list_active_notifications again
 // only pays the binder IPC + per-entry packageManager.getApplicationLabel() once.
 private const val ACTIVE_LIST_CACHE_TTL_MS = 1_000L
+private const val ACTION_EFFECT_OBSERVE_MS = 1_000L
+private const val ACTION_EFFECT_POLL_MS = 100L
 
 /**
  * Reads notifications from every app the user has granted us access to. Maintains an
@@ -54,6 +63,10 @@ class RikkaNotificationListenerService : NotificationListenerService() {
 
     private val _recent = MutableStateFlow<List<NotificationEntry>>(emptyList())
     val recent = _recent.asStateFlow()
+
+    // Reserved before PendingIntent dispatch so concurrent or model-driven retries cannot
+    // execute the same notification action twice while delivery is still uncertain.
+    private val actionDeduplicator = NotificationActionDeduplicator()
 
     // Tracks the last (key -> "title|text" hash) we forwarded so progressive updates of
     // the same notification don't spam Telegram. Mutated from per-notification IO
@@ -201,32 +214,60 @@ class RikkaNotificationListenerService : NotificationListenerService() {
      * 1. action_title (case-insensitive, exact match)
      * 2. action_index (0-based)
      */
-    fun triggerAction(key: String, actionIndex: Int?, actionTitle: String?): TriggerResult {
+    suspend fun triggerAction(key: String, actionIndex: Int?, actionTitle: String?): TriggerResult {
         val sbn = activeNotifications?.firstOrNull { it.key == key }
-            ?: return TriggerResult.NotFound
+            ?: return TriggerResult.ActionExpired
         val actions = sbn.notification.actions ?: emptyArray()
         if (actions.isEmpty()) return TriggerResult.NoAction
         val normalizedActionTitle = actionTitle?.trim()
 
-        val matched: Notification.Action = when {
+        val matchedIndex = when {
             !normalizedActionTitle.isNullOrBlank() ->
-                actions.firstOrNull { matchesNotificationActionTitle(it.title?.toString(), normalizedActionTitle) }
-            actionIndex != null -> actions.getOrNull(actionIndex)
-            else -> null
-        } ?: return TriggerResult.NoAction
+                actions.indexOfFirst { matchesNotificationActionTitle(it.title?.toString(), normalizedActionTitle) }
+            actionIndex != null && actionIndex in actions.indices -> actionIndex
+            else -> -1
+        }
+        if (matchedIndex < 0) return TriggerResult.NoAction
+        val matched = actions[matchedIndex]
+        val matchedTitle = matched.title?.toString().orEmpty()
 
         val remoteInputs = matched.remoteInputs
         if (remoteInputs != null && remoteInputs.isNotEmpty()) {
-            return TriggerResult.RequiresInput(matched.title?.toString().orEmpty())
+            return TriggerResult.RequiresInput(matchedTitle)
+        }
+
+        val entry = sbn.toEntry(packageManager)
+        if (entry != null && shouldBlockSensitiveNotificationAction(
+                category = entry.category,
+                title = entry.title,
+                text = entry.text,
+                subText = entry.subText,
+                actionTitle = matchedTitle,
+            )
+        ) {
+            return TriggerResult.SensitiveActionBlocked(matchedTitle)
         }
 
         val pi = matched.actionIntent ?: return TriggerResult.NoAction
-        return try {
-            pi.send()
-            TriggerResult.Success(matched.title?.toString().orEmpty())
-        } catch (t: Throwable) {
-            TriggerResult.SendFailed(t.message ?: t::class.java.simpleName)
+        val before = sbn.toActionSnapshot()
+        val signature = actionAttemptSignature(before, matchedIndex, matchedTitle)
+        if (!actionDeduplicator.reserve(signature)) {
+            return TriggerResult.DuplicateSuppressed(matchedTitle)
         }
+
+        try {
+            pi.send()
+        } catch (_: PendingIntent.CanceledException) {
+            return TriggerResult.ActionExpired
+        } catch (t: Throwable) {
+            return TriggerResult.DeliveryUnknown(t::class.java.simpleName)
+        }
+        val effect = observeActionEffect(before)
+        return TriggerResult.Success(
+            actionTitle = matchedTitle,
+            status = if (effect == null) DispatchStatus.DISPATCHED else DispatchStatus.EFFECT_OBSERVED,
+            observedEffect = effect,
+        )
     }
 
     /**
@@ -235,18 +276,25 @@ class RikkaNotificationListenerService : NotificationListenerService() {
      * apps that expose a direct-reply action (WhatsApp, Messages, Telegram, etc.).
      * Picks the first action that carries at least one RemoteInput.
      */
-    fun triggerReplyAction(key: String, text: String): TriggerResult {
+    suspend fun triggerReplyAction(key: String, text: String): TriggerResult {
         val sbn = activeNotifications?.firstOrNull { it.key == key }
-            ?: return TriggerResult.NotFound
+            ?: return TriggerResult.ActionExpired
         val actions = sbn.notification.actions ?: emptyArray()
         if (actions.isEmpty()) return TriggerResult.NoAction
 
-        val matched = actions.firstOrNull { !it.remoteInputs.isNullOrEmpty() }
-            ?: return TriggerResult.NoAction
+        val matchedIndex = actions.indexOfFirst { !it.remoteInputs.isNullOrEmpty() }
+        if (matchedIndex < 0) return TriggerResult.NoAction
+        val matched = actions[matchedIndex]
         val remoteInputs = matched.remoteInputs ?: return TriggerResult.NoAction
         val pi = matched.actionIntent ?: return TriggerResult.NoAction
+        val matchedTitle = matched.title?.toString().orEmpty()
+        val before = sbn.toActionSnapshot()
+        val signature = actionAttemptSignature(before, matchedIndex, matchedTitle)
+        if (!actionDeduplicator.reserve(signature)) {
+            return TriggerResult.DuplicateSuppressed(matchedTitle)
+        }
 
-        return try {
+        try {
             val intent = android.content.Intent()
             val bundle = android.os.Bundle()
             for (ri in remoteInputs) {
@@ -254,10 +302,32 @@ class RikkaNotificationListenerService : NotificationListenerService() {
             }
             android.app.RemoteInput.addResultsToIntent(remoteInputs, intent, bundle)
             pi.send(this, 0, intent)
-            TriggerResult.Success(matched.title?.toString().orEmpty())
+        } catch (_: PendingIntent.CanceledException) {
+            return TriggerResult.ActionExpired
         } catch (t: Throwable) {
-            TriggerResult.SendFailed(t.message ?: t::class.java.simpleName)
+            return TriggerResult.DeliveryUnknown(t::class.java.simpleName)
         }
+        val effect = observeActionEffect(before)
+        return TriggerResult.Success(
+            actionTitle = matchedTitle,
+            status = if (effect == null) DispatchStatus.DISPATCHED else DispatchStatus.EFFECT_OBSERVED,
+            observedEffect = effect,
+        )
+    }
+
+    private suspend fun observeActionEffect(before: NotificationEffectSnapshot): NotificationObservedEffect? {
+        val deadline = android.os.SystemClock.elapsedRealtime() + ACTION_EFFECT_OBSERVE_MS
+        do {
+            delay(ACTION_EFFECT_POLL_MS)
+            val active = activeNotifications ?: return null
+            val current = active.firstOrNull { it.key == before.key }?.toActionSnapshot()
+            val effect = detectNotificationEffect(before, current)
+            if (effect != null) {
+                invalidateActiveCache()
+                return effect
+            }
+        } while (android.os.SystemClock.elapsedRealtime() < deadline)
+        return null
     }
 
     fun listActive(): List<NotificationEntry> {
@@ -286,12 +356,20 @@ class RikkaNotificationListenerService : NotificationListenerService() {
     private data class ActiveListCacheEntry(val cachedAtMs: Long, val entries: List<NotificationEntry>)
     @Volatile private var activeListCache: ActiveListCacheEntry? = null
 
+    enum class DispatchStatus { DISPATCHED, EFFECT_OBSERVED }
+
     sealed class TriggerResult {
-        data class Success(val actionTitle: String) : TriggerResult()
-        data object NotFound : TriggerResult()
+        data class Success(
+            val actionTitle: String,
+            val status: DispatchStatus,
+            val observedEffect: NotificationObservedEffect?,
+        ) : TriggerResult()
+        data object ActionExpired : TriggerResult()
         data object NoAction : TriggerResult()
         data class RequiresInput(val actionTitle: String) : TriggerResult()
-        data class SendFailed(val reason: String) : TriggerResult()
+        data class DuplicateSuppressed(val actionTitle: String) : TriggerResult()
+        data class SensitiveActionBlocked(val actionTitle: String) : TriggerResult()
+        data class DeliveryUnknown(val reason: String) : TriggerResult()
     }
 
     private fun shouldDrop(entry: NotificationEntry): Boolean {
@@ -350,5 +428,39 @@ private fun StatusBarNotification.toEntry(pm: PackageManager): NotificationEntry
         postTimeMs = postTime,
         actionTitles = actionTitles,
         ongoing = ongoing,
+        category = n.category,
     )
+}
+
+private fun StatusBarNotification.toActionSnapshot(): NotificationEffectSnapshot {
+    val n = notification
+    val extras = n.extras
+    val signature = listOf(
+        extras?.getCharSequence(Notification.EXTRA_TITLE)?.toString(),
+        extras?.getCharSequence(Notification.EXTRA_TEXT)?.toString(),
+        extras?.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString(),
+        extras?.getCharSequence(Notification.EXTRA_SUB_TEXT)?.toString(),
+        extras?.getCharSequenceArray(Notification.EXTRA_TEXT_LINES)?.joinToString("\n"),
+        n.category,
+        n.number,
+        n.flags,
+        n.actions?.map { it.title?.toString().orEmpty() },
+    ).hashCode()
+    return NotificationEffectSnapshot(
+        key = key,
+        postTimeMs = postTime,
+        contentSignature = signature,
+    )
+}
+
+private fun actionAttemptSignature(
+    notification: NotificationEffectSnapshot,
+    actionIndex: Int,
+    actionTitle: String,
+): String = buildString {
+    append(notification.key).append('\u0000')
+    append(notification.postTimeMs).append('\u0000')
+    append(notification.contentSignature).append('\u0000')
+    append(actionIndex).append('\u0000')
+    append(actionTitle.trim().lowercase())
 }

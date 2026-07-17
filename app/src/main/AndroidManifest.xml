@@ -39,6 +39,11 @@
   <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
   <uses-permission android:name="android.permission.WRITE_SETTINGS"
       tools:ignore="ProtectedPermissions" />
+  <!-- ADB-granted only on the owner's Honor AAK-AN00. The lightweight active-assistant
+       guard uses this solely to restore the three fixed ai_key_* Global rows when
+       MagicKey overwrites them; the app exposes no arbitrary settings-write interface. -->
+  <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS"
+      tools:ignore="ProtectedPermissions" />
   <uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" />
 
   <uses-permission android:name="android.permission.READ_CONTACTS" />
@@ -56,11 +61,18 @@
       android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
       tools:ignore="ScopedStorage" />
   <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+  <uses-permission android:name="android.permission.READ_CALENDAR" />
+  <uses-permission android:name="android.permission.WRITE_CALENDAR" />
+  <uses-permission
+    android:name="android.permission.PACKAGE_USAGE_STATS"
+    tools:ignore="ProtectedPermissions" />
   <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
   <uses-permission
       android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"
       tools:ignore="BatteryLife" />
   <uses-permission android:name="android.permission.WAKE_LOCK" />
+  <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"
+      tools:ignore="ProtectedPermissions" />
   <uses-permission
       android:name="android.permission.QUERY_ALL_PACKAGES"
       tools:ignore="QueryAllPackagesPermission" />
@@ -82,6 +94,63 @@
        agent-keyboard's KeyboardApiService and drive the active text field over AIDL. -->
   <uses-permission android:name="dev.patrickgold.florisboard.permission.AGENT_KEYBOARD_API" />
 
+  <!-- Personal sideload permission pool: media and storage. -->
+  <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+  <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+  <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+  <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
+  <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+      android:maxSdkVersion="32" />
+  <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+      android:maxSdkVersion="28" />
+
+  <!-- Personal sideload permission pool: contacts, calls, and messaging. -->
+  <uses-permission android:name="android.permission.WRITE_CONTACTS" />
+  <uses-permission android:name="android.permission.GET_ACCOUNTS" />
+  <uses-permission android:name="android.permission.CALL_PHONE" />
+  <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />
+  <uses-permission android:name="android.permission.READ_PHONE_NUMBERS" />
+  <uses-permission android:name="android.permission.RECEIVE_SMS" />
+  <uses-permission android:name="android.permission.RECEIVE_MMS" />
+  <uses-permission android:name="android.permission.RECEIVE_WAP_PUSH" />
+  <uses-permission android:name="com.android.voicemail.permission.ADD_VOICEMAIL" />
+
+  <!-- Personal sideload permission pool: nearby devices and Wi-Fi. -->
+  <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+  <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
+  <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" />
+  <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+  <uses-permission android:name="android.permission.BLUETOOTH"
+      android:maxSdkVersion="30" />
+  <uses-permission android:name="android.permission.BLUETOOTH_ADMIN"
+      android:maxSdkVersion="30" />
+
+  <!-- Personal sideload permission pool: activity and body sensors. -->
+  <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
+  <uses-permission android:name="android.permission.BODY_SENSORS" />
+  <uses-permission android:name="android.permission.BODY_SENSORS_BACKGROUND" />
+  <uses-permission android:name="android.permission.HIGH_SAMPLING_RATE_SENSORS" />
+
+  <!-- Personal sideload permission pool: package and system interactions. -->
+  <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+  <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
+  <uses-permission android:name="android.permission.EXPAND_STATUS_BAR" />
+  <uses-permission android:name="android.permission.DISABLE_KEYGUARD" />
+  <uses-permission android:name="android.permission.SET_ALARM" />
+  <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+
+  <!-- Only foreground-service permissions already backed by concrete app behavior live
+       here. MediaProjection, VPN, health, phone-call, and other service types are added
+       with their actual Service component, not as inert manifest reservations. -->
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA"
+      tools:ignore="ForegroundServicePermission" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"
+      tools:ignore="ForegroundServicePermission" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"
+      tools:ignore="ForegroundServicePermission" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE"
+      tools:ignore="ForegroundServicePermission" />
+
   <uses-feature
     android:name="android.hardware.nfc"
     android:required="false" />
@@ -98,6 +167,11 @@
   <uses-feature android:name="android.hardware.camera.flash" android:required="false" />
   <uses-feature android:name="android.hardware.fingerprint" android:required="false" />
   <uses-feature android:name="android.hardware.microphone" android:required="false" />
+  <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
+  <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
+  <uses-feature android:name="android.hardware.sensor.stepcounter" android:required="false" />
+  <uses-feature android:name="android.hardware.sensor.heartrate" android:required="false" />
+  <uses-feature android:name="android.hardware.telephony.calling" android:required="false" />
 
   <queries>
     <intent>
@@ -113,6 +187,8 @@
     <!-- Android 11+ package visibility: required so KeyboardApiClient can bindService into
          the agent-keyboard package. Without this the bind silently fails on API 30+. -->
     <package android:name="dev.patrickgold.florisboard" />
+    <package android:name="moe.shizuku.privileged.api" />
+    <package android:name="rikka.sui" />
   </queries>
 
   <application
@@ -129,6 +205,13 @@
     android:theme="@style/Theme.Rikkahub"
     android:usesCleartextTraffic="true"
     tools:targetApi="33">
+    <provider
+      android:name="rikka.shizuku.ShizukuProvider"
+      android:authorities="${applicationId}.shizuku"
+      android:enabled="true"
+      android:exported="true"
+      android:multiprocess="false"
+      android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
     <!--
       Game Mode preferences. Declares to the OEM Game Mode framework (Pixel, Samsung,
       Asus, Nothing, Xiaomi, etc.) that this app accepts PERFORMANCE and BATTERY mode
@@ -215,6 +298,40 @@
       android:excludeFromRecents="true"
       android:theme="@style/Theme.Rikkahub.ToolHost" />
 
+    <!-- OEM-safe fallback when the selected assistant role does not become the active
+         VoiceInteractionService. It opens only the configured, revalidated second-user chat. -->
+    <activity
+      android:name=".assistant.SystemAssistantFallbackActivity"
+      android:excludeFromRecents="true"
+      android:exported="true"
+      android:noHistory="true"
+      android:theme="@android:style/Theme.Translucent.NoTitleBar">
+      <intent-filter>
+        <action android:name="android.intent.action.ASSIST" />
+        <action android:name="me.rerere.rikkahub.action.OPEN_SECOND_USER_ASSISTANT" />
+
+        <category android:name="android.intent.category.DEFAULT" />
+      </intent-filter>
+    </activity>
+
+    <!-- Honor's AI-key framework launches an explicit Activity rather than the active
+         VoiceInteractionService. This adapter stays in the lightweight voice process and may
+         only show the existing unlocked-owner assistant session; it accepts no prompt extras. -->
+    <activity
+      android:name=".assistant.SystemAssistantOverlayEntryActivity"
+      android:enabled="@bool/system_assistant_voice_service_enabled"
+      android:excludeFromRecents="true"
+      android:exported="true"
+      android:noHistory="true"
+      android:process=":voice_interactor"
+      android:theme="@android:style/Theme.Translucent.NoTitleBar">
+      <intent-filter>
+        <action android:name="me.rerere.rikkahub.action.SHOW_SYSTEM_ASSISTANT_HARDWARE" />
+
+        <category android:name="android.intent.category.DEFAULT" />
+      </intent-filter>
+    </activity>
+
     <!-- In-app Browser Activity. Hosts the WebView the LLM drives via the browser_*
          tools. INTERNET is already declared at the top of this manifest; nothing else
          needed at install time. configChanges keeps the WebView alive across rotation
@@ -256,6 +373,20 @@
       </intent-filter>
     </receiver>
 
+    <receiver
+      android:name=".service.AlarmReceiver"
+      android:exported="false" />
+    <receiver
+      android:name=".service.AlarmRescheduleReceiver"
+      android:exported="true">
+      <intent-filter>
+        <action android:name="android.intent.action.BOOT_COMPLETED" />
+        <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+        <action android:name="android.intent.action.TIME_SET" />
+        <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+      </intent-filter>
+    </receiver>
+
     <service
       android:name=".service.TelegramBotService"
       android:exported="false"
@@ -273,6 +404,57 @@
         <action android:name="android.intent.action.MEDIA_BUTTON" />
       </intent-filter>
     </service>
+
+    <!-- Android's persistent assistant entry point. It stays in a deliberately lightweight
+         process; RikkaHubApp skips database, DI, WorkManager, QuickJS and model startup there. -->
+        <service
+            android:name=".assistant.RikkaVoiceInteractionService"
+            android:enabled="@bool/system_assistant_voice_service_enabled"
+            android:exported="true"
+      android:label="@string/app_name"
+      android:permission="android.permission.BIND_VOICE_INTERACTION"
+      android:process=":voice_interactor">
+      <intent-filter>
+        <action android:name="android.service.voice.VoiceInteractionService" />
+      </intent-filter>
+      <meta-data
+        android:name="android.voice_interaction"
+        android:resource="@xml/voice_interaction_service" />
+    </service>
+
+    <!-- Sessions live in the main process so the later UI adapter can use the existing app
+         graph. The system is the only caller because BIND_VOICE_INTERACTION is signature-only. -->
+        <service
+            android:name=".assistant.RikkaVoiceSessionService"
+            android:enabled="@bool/system_assistant_voice_service_enabled"
+            android:exported="true"
+            android:permission="android.permission.BIND_VOICE_INTERACTION" />
+
+        <service
+            android:name=".assistant.RikkaNoOpRecognitionService"
+            android:enabled="@bool/system_assistant_voice_service_enabled"
+            android:exported="true"
+            android:permission="android.permission.BIND_SPEECH_RECOGNITION"
+            android:process=":voice_interactor">
+            <!-- Deliberately no android.speech.RecognitionService intent-filter. The
+                 VoiceInteractionService config binds this component explicitly, while
+                 omitting the filter keeps the phase-1 no-op implementation out of the
+                 system's default voice-input provider list (MagicOS ignores
+                 selectableAsDefault=false when enumerating that list). -->
+            <meta-data
+                android:name="android.speech"
+                android:resource="@xml/system_assistant_recognition_service" />
+        </service>
+
+        <receiver
+            android:name=".assistant.SystemAssistantInvocationReceiver"
+            android:exported="false"
+            android:process=":voice_interactor">
+            <intent-filter>
+                <action android:name="me.rerere.rikkahub.action.SHOW_SYSTEM_ASSISTANT_TEST" />
+                <action android:name="me.rerere.rikkahub.action.SHOW_SYSTEM_ASSISTANT_ACCESSIBILITY" />
+            </intent-filter>
+        </receiver>
 
     <!-- Handles hardware media-button broadcasts (headset, Bluetooth) and routes them
          to the active MediaSession via the AndroidX media-compat helper. -->
@@ -295,6 +477,21 @@
       <meta-data
         android:name="android.accessibilityservice"
         android:resource="@xml/accessibility_service_config" />
+    </service>
+
+    <service
+      android:name=".assistant.SystemAssistantAccessibilityButtonService"
+      android:description="@string/system_assistant_shortcut_desc"
+      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+      android:exported="true"
+      android:label="@string/system_assistant_shortcut_title"
+      android:process=":voice_interactor">
+      <intent-filter>
+        <action android:name="android.accessibilityservice.AccessibilityService" />
+      </intent-filter>
+      <meta-data
+        android:name="android.accessibilityservice"
+        android:resource="@xml/system_assistant_accessibility_button_service" />
     </service>
 
     <service
@@ -338,6 +535,15 @@
       <property
         android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
         android:value="local web server for LLM chat UI" />
+    </service>
+
+    <service
+      android:name=".service.WorkspaceProcessService"
+      android:exported="false"
+      android:foregroundServiceType="specialUse">
+      <property
+        android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+        android:value="managed long-running PRoot workspace processes" />
     </service>
 
     <provider

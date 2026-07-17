@@ -5,6 +5,7 @@ import android.net.Uri
 import androidx.documentfile.provider.DocumentFile
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import me.rerere.rikkahub.BuildConfig
 
 /**
  * Phase 25 — bridges the file-manager tools to `content://` URIs from any DocumentsProvider
@@ -48,6 +49,64 @@ object ContentUriSafetyGuard {
             return Violation("path_blocked", "content URI has no path.")
         }
         return null
+    }
+
+    /**
+     * Mutation-specific companion to [check]. RikkaHub's own FileProvider maps the root
+     * name `upload` to the whole files directory, so a model-supplied content URI could
+     * otherwise bypass [PathSafetyGuard] and overwrite managed attachments or DataStore.
+     */
+    fun checkMutation(raw: String?): Violation? {
+        check(raw)?.let { return it }
+        return checkOwnFileProviderPath(raw!!) { mappedPath, appDataRoots ->
+            PathSafetyGuard.checkMutation(mappedPath, appDataRoots)
+        }
+    }
+
+    /**
+     * Egress companion to [checkMutation]. External granted providers remain governed by
+     * Android's URI grants, while our own FileProvider is mapped back to its local path and
+     * checked by the same sensitive-read policy as file:// transfer sources.
+     */
+    fun checkSensitiveRead(raw: String?): Violation? {
+        check(raw)?.let { return it }
+        return checkOwnFileProviderPath(raw!!) { mappedPath, appDataRoots ->
+            PathSafetyGuard.checkSensitiveRead(mappedPath, appDataRoots)
+        }
+    }
+
+    private fun checkOwnFileProviderPath(
+        value: String,
+        pathCheck: (String, List<String>) -> PathSafetyGuard.Violation?,
+    ): Violation? {
+        val providerAuthority = "${BuildConfig.APPLICATION_ID}.fileprovider"
+        val authority = ContentUriResolver.authorityOf(value)?.substringAfterLast('@')
+        if (authority != providerAuthority) {
+            return null
+        }
+        val encodedPath = value.removePrefix("content://")
+            .substringAfter('/', missingDelimiterValue = "")
+            .substringBefore('?')
+            .substringBefore('#')
+        val decodedPath = runCatching {
+            java.net.URLDecoder.decode(
+                encodedPath.replace("+", "%2B"),
+                Charsets.UTF_8.name(),
+            ).replace('\\', '/').trimStart('/')
+        }.getOrNull() ?: return Violation("path_blocked", "content URI path could not be resolved.")
+        val rootName = decodedPath.substringBefore('/', missingDelimiterValue = decodedPath)
+        if (rootName != "upload") return null
+        val relative = runCatching {
+            java.nio.file.Paths.get(
+                "/${decodedPath.substringAfter('/', missingDelimiterValue = "").trim('/')}"
+            ).normalize().toString().replace('\\', '/').trim('/')
+        }.getOrNull() ?: return Violation("path_blocked", "content URI path could not be resolved.")
+        val appDataRoot = "/data/user/0/${BuildConfig.APPLICATION_ID}"
+        val mappedPath = "$appDataRoot/files" + relative.takeIf { it.isNotEmpty() }
+            ?.let { "/$it" }.orEmpty()
+        return pathCheck(mappedPath, listOf(appDataRoot))?.let { violation ->
+            Violation(violation.code, violation.detail)
+        }
     }
 }
 

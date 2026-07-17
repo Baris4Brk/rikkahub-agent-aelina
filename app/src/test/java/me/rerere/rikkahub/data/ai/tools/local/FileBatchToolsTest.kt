@@ -9,6 +9,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import me.rerere.ai.core.Tool
 import me.rerere.ai.ui.UIMessagePart
+import me.rerere.rikkahub.BuildConfig
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -23,8 +24,9 @@ class FileBatchToolsTest {
     val tmp = TemporaryFolder()
 
     private fun invoke(tool: Tool, args: String): JsonObject {
+        val portableArgs = if (File.separatorChar == '\\') args.replace('\\', '/') else args
         val text = runBlocking {
-            (tool.execute(Json.parseToJsonElement(args)) as List<*>)
+            (tool.execute(Json.parseToJsonElement(portableArgs)) as List<*>)
                 .filterIsInstance<UIMessagePart.Text>()
                 .first().text
         }
@@ -34,6 +36,7 @@ class FileBatchToolsTest {
     private fun JsonObject.success() = this["success"]?.jsonPrimitive?.intOrNull
     private fun JsonObject.failedPaths() =
         this["failed"]?.jsonArray?.map { it.jsonObject["path"]?.jsonPrimitive?.content }
+    private fun File.portablePath() = absolutePath.replace('\\', '/')
 
     // ---------- batch_copy ----------
 
@@ -73,7 +76,7 @@ class FileBatchToolsTest {
             """{"paths":["${a.absolutePath}","${tmp.root.absolutePath}/ghost.txt"],"dst_dir":"${dst.absolutePath}"}""",
         )
         assertEquals(1, res.success())
-        assertEquals(listOf("${tmp.root.absolutePath}/ghost.txt"), res.failedPaths())
+        assertEquals(listOf("${tmp.root.portablePath()}/ghost.txt"), res.failedPaths())
     }
 
     @Test fun `batch_copy blocks a system path inside the batch`() {
@@ -122,7 +125,7 @@ class FileBatchToolsTest {
             """{"paths":["${a.absolutePath}"],"dst_dir":"${dst.absolutePath}"}""",
         )
         assertEquals(0, res.success())
-        assertEquals(listOf(a.absolutePath), res.failedPaths())
+        assertEquals(listOf(a.portablePath()), res.failedPaths())
         assertEquals("old", File(dst, "dup.txt").readText())
     }
 
@@ -161,7 +164,7 @@ class FileBatchToolsTest {
         File(dir, "child.txt").writeText("c")
         val res = invoke(batchDeleteTool(), """{"paths":["${dir.absolutePath}"]}""")
         assertEquals(0, res.success())
-        assertEquals(listOf(dir.absolutePath), res.failedPaths())
+        assertEquals(listOf(dir.portablePath()), res.failedPaths())
         assertTrue(dir.exists())
     }
 
@@ -180,5 +183,30 @@ class FileBatchToolsTest {
         val res = invoke(batchDeleteTool(), """{"paths":["/system/x","/proc/1"]}""")
         assertEquals(0, res.success())
         assertEquals(2, res.failedPaths()!!.size)
+    }
+
+    @Test fun `batch mutation tools reject core second user data`() {
+        val appRoot = "/data/user/0/${BuildConfig.APPLICATION_ID}"
+        val copy = invoke(
+            batchCopyTool(),
+            """{"paths":["/sdcard/Download/input.txt"],"dst_dir":"$appRoot/files/upload"}""",
+        )
+        assertEquals("bad_request", copy["error"]?.jsonPrimitive?.content)
+
+        val movePath = "$appRoot/databases/rikka_hub"
+        val move = invoke(
+            batchMoveTool(),
+            """{"paths":["$movePath"],"dst_dir":"/sdcard/Download"}""",
+        )
+        assertEquals(0, move.success())
+        assertEquals(listOf(movePath), move.failedPaths())
+
+        val deletePath = "$appRoot/files/datastore"
+        val delete = invoke(
+            batchDeleteTool(),
+            """{"paths":["$deletePath"],"recursive":true}""",
+        )
+        assertEquals(0, delete.success())
+        assertEquals(listOf(deletePath), delete.failedPaths())
     }
 }

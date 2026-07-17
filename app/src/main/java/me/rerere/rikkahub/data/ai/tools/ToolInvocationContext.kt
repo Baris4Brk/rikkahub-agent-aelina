@@ -1,5 +1,7 @@
 package me.rerere.rikkahub.data.ai.tools
 
+import me.rerere.rikkahub.privilege.PrivilegedSessionContext
+
 /**
  * Phase 17 stability — context every tool factory in [LocalTools.getTools] sees about WHO
  * is invoking it. Until this layer existed, tools that needed to know the calling
@@ -33,6 +35,7 @@ data class ToolInvocationContext(
     val callerConversationId: String? = null,
     val isHeadless: Boolean = false,
     val modelCanSeeImages: Boolean = true,
+    val privilege: PrivilegedSessionContext? = null,
 ) {
     companion object {
         /** No-knowledge fallback. Factories that depend on context MUST handle this. */

@@ -38,7 +38,6 @@ import me.rerere.ai.core.InputSchema
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.rikkahub.AppScope
 import me.rerere.rikkahub.data.datastore.SettingsStore
-import me.rerere.rikkahub.data.datastore.getCurrentAssistant
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.data.files.FilesManager
 import me.rerere.rikkahub.data.files.saveUploadFromBytes
@@ -152,9 +151,9 @@ class McpManager(
         return clients.entries.find { it.key.id == config.id }?.value
     }
 
-    fun getAllAvailableTools(): List<Triple<Uuid, String, McpTool>> {
+    fun getAvailableToolsForAssistant(assistantId: Uuid): List<Triple<Uuid, String, McpTool>> {
         val settings = settingsStore.settingsFlow.value
-        val assistant = settings.getCurrentAssistant()
+        val assistant = settings.assistants.firstOrNull { it.id == assistantId } ?: return emptyList()
         return settings.mcpServers
             .filter {
                 it.commonOptions.enable && it.id in assistant.mcpServers
@@ -270,6 +269,7 @@ class McpManager(
 
         transport.onError { error ->
             Log.e(TAG, "Transport error for ${config.commonOptions.name}: ${error.message}")
+            if (isSseStreamGiveUpError(error)) return@onError
             val currentStatus = syncingStatus.value[config.id]
             // 只有在已连接状态下才触发重连
             if (currentStatus == McpStatus.Connected) {
@@ -487,6 +487,20 @@ class McpManager(
         // 指数退避: baseDelay * 2^(attempt-1)，最大不超过 maxDelay
         val exponentialDelay = BASE_RECONNECT_DELAY_MS * (1L shl (attempt - 1).coerceAtMost(10))
         return exponentialDelay.coerceAtMost(MAX_RECONNECT_DELAY_MS)
+    }
+
+    /**
+     * 是否为 Streamable HTTP 的 SSE 通知流重试耗尽错误。
+     * StreamableHttpClientTransport 除 POST 请求/响应外，还会额外开一条 GET 的 SSE 长连接
+     * 用于接收服务端主动推送。部分 server 不支持或会主动关闭该流，SDK 内部按退避重试若干次后
+     * 放弃，并向 onError emit "Maximum reconnection attempts exceeded"。
+     * 此时 POST 通道仍然健康，不应据此重建整个客户端。
+     */
+    private fun isSseStreamGiveUpError(error: Throwable): Boolean {
+        val message = generateSequence(error) { it.cause }
+            .mapNotNull { it.message }
+            .joinToString(" ")
+        return message.contains("Maximum reconnection attempts exceeded", ignoreCase = true)
     }
 
     private suspend fun reconnectClient(config: McpServerConfig) = withContext(Dispatchers.IO) {

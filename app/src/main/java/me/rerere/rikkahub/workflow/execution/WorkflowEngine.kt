@@ -57,6 +57,7 @@ class WorkflowEngine(
     private val settingsStore: SettingsStore,
     private val contextProvider: ContextProvider,
     private val actionRunner: WorkflowActionRunner,
+    private val emergencyController: WorkflowEmergencyController,
 ) {
 
     /**
@@ -111,8 +112,10 @@ class WorkflowEngine(
      * call, ignored by the trigger callback path.
      */
     suspend fun fire(workflowId: String): FireOutcome = withContext(Dispatchers.IO) {
-        val lock = lockFor(workflowId)
-        lock.withLock { fireLocked(workflowId) }
+        emergencyController.runTracked(workflowId) {
+            val lock = lockFor(workflowId)
+            lock.withLock { fireLocked(workflowId) }
+        } ?: FireOutcome(WorkflowRunStatus.FAILED, "emergency_stop", "")
     }
 
     private suspend fun fireLocked(workflowId: String): FireOutcome {

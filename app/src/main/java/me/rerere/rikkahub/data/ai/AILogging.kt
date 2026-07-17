@@ -8,15 +8,14 @@ import kotlinx.coroutines.launch
 import me.rerere.rikkahub.AppScope
 import me.rerere.rikkahub.data.datastore.AiLogLevel
 import me.rerere.rikkahub.data.datastore.SettingsStore
-import me.rerere.ai.provider.ProviderSetting
-import me.rerere.ai.provider.TextGenerationParams
-import me.rerere.ai.ui.UIMessage
-
 sealed class AILogging {
     data class Generation(
-        val params: TextGenerationParams,
-        val messages: List<UIMessage>,
-        val providerSetting: ProviderSetting,
+        val modelId: String,
+        val providerType: String,
+        val messageCount: Int,
+        val inputCharacters: Int,
+        val toolCount: Int,
+        val requestPurpose: String,
         val stream: Boolean,
     ) : AILogging()
 }

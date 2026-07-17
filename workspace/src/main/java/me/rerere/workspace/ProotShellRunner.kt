@@ -15,7 +15,9 @@ class ProotShellRunner(
     private val nativeLibraryDir: File,
     private val extraBindMounts: List<WorkspaceBindMount> = emptyList(),
     private val patcher: RootfsPatcher = RootfsPatcher(),
-) : WorkspaceShellRunner {
+) : WorkspaceShellRunner, ManagedWorkspaceProcessLauncher {
+    private val patchLock = Any()
+
     override fun execute(context: WorkspaceShellContext): WorkspaceCommandResult {
         if (!context.linuxDir.hasUsableRootfs()) {
             return WorkspaceCommandResult(
@@ -43,8 +45,16 @@ class ProotShellRunner(
         }
 
         context.tempDir.mkdirs()
-        patcher.patch(context.linuxDir)
-        val process = ProcessBuilder(buildCommand(context, proot))
+        synchronized(patchLock) { patcher.patch(context.linuxDir) }
+        val process = ProcessBuilder(
+            buildCommand(
+                proot = proot,
+                filesDir = context.filesDir,
+                linuxDir = context.linuxDir,
+                cwd = context.prootCwd(),
+                commandText = context.command,
+            ),
+        )
             .directory(context.filesDir)
             .redirectErrorStream(false)
             .apply {
@@ -57,9 +67,44 @@ class ProotShellRunner(
         return process.readResult(context.timeoutMillis, context.stdin)
     }
 
-    private fun buildCommand(
-        context: WorkspaceShellContext,
+    override fun startManagedProcess(context: ManagedWorkspaceProcessContext): Process {
+        require(context.command.isNotBlank()) { "Command is required" }
+        require('\u0000' !in context.command) { "Command contains NUL" }
+        require('\u0000' !in context.cwd) { "Working directory contains NUL" }
+        require(context.linuxDir.hasUsableRootfs()) { "Rootfs is not installed" }
+
+        val proot = File(nativeLibraryDir, PROOT_EXEC)
+        val loader = File(nativeLibraryDir, PROOT_LOADER)
+        require(proot.isFile) { "proot executable not found: ${proot.absolutePath}" }
+        require(loader.isFile) { "proot loader not found: ${loader.absolutePath}" }
+
+        context.tempDir.mkdirs()
+        synchronized(patchLock) { patcher.patch(context.linuxDir) }
+        return ProcessBuilder(
+            buildCommand(
+                proot = proot,
+                filesDir = context.filesDir,
+                linuxDir = context.linuxDir,
+                cwd = managedProotCwd(context.cwd),
+                commandText = context.command,
+            ),
+        )
+            .directory(context.filesDir)
+            .redirectErrorStream(false)
+            .apply {
+                environment()["PROOT_LOADER"] = loader.absolutePath
+                environment()["PROOT_TMP_DIR"] = context.tempDir.absolutePath
+                environment()["TMPDIR"] = context.tempDir.absolutePath
+            }
+            .start()
+    }
+
+    internal fun buildCommand(
         proot: File,
+        filesDir: File,
+        linuxDir: File,
+        cwd: String,
+        commandText: String,
     ): List<String> {
         val command = mutableListOf(
             proot.absolutePath,
@@ -67,11 +112,11 @@ class ProotShellRunner(
             "--link2symlink",
             "--kill-on-exit",
             "-r",
-            context.linuxDir.absolutePath,
+            linuxDir.absolutePath,
             "-w",
-            context.prootCwd(),
+            cwd,
             "-b",
-            "${context.filesDir.absolutePath}:$WORKSPACE_DIR",
+            "${filesDir.absolutePath}:$WORKSPACE_DIR",
         )
 
         extraBindMounts.forEach { mount ->
@@ -102,8 +147,8 @@ class ProotShellRunner(
             // 命令通过位置参数传入, 避免任何转义; eval "$2" 对命令文本只求值一次, 等价于 bash -c "$cmd"
             "cd -- \"\$1\" && eval \"\$2\"",
             "rikkahub",
-            context.prootCwd(),
-            context.command,
+            cwd,
+            commandText,
         )
         return command
     }
@@ -114,6 +159,16 @@ class ProotShellRunner(
             WORKSPACE_DIR
         } else {
             "$WORKSPACE_DIR/$normalized"
+        }
+    }
+
+    internal fun managedProotCwd(cwd: String): String {
+        val normalized = cwd.trim().replace('\\', '/')
+        if (normalized.isBlank()) return WORKSPACE_DIR
+        return if (normalized.startsWith('/')) {
+            "/" + normalized.trim('/')
+        } else {
+            "$WORKSPACE_DIR/${normalized.trim('/')}"
         }
     }
 

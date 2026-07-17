@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">RikkaHub bridge probe</string>
+    <string name="probe_title">RikkaHub bridge probe</string>
+    <string name="probe_unlock_required">Unlock the phone to continue.</string>
+    <string name="probe_data_isolated">Compatibility probe only. No RikkaHub data is connected.</string>
+    <string name="probe_close">Close</string>
+</resources>

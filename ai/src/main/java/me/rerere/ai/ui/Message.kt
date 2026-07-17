@@ -17,6 +17,31 @@ import kotlin.uuid.Uuid
 
 // 公共消息抽象, 具体的Provider实现会转换为API接口需要的DTO
 @Serializable
+enum class UIMessageState {
+    DRAFT,
+    STREAMING,
+    WAITING_TOOL,
+    COMPLETED,
+    INTERRUPTED,
+    INCOMPLETE_NO_VISIBLE_ANSWER,
+    FAILED,
+}
+
+@Serializable
+enum class FinalAnswerRecoveryStatus {
+    STARTED,
+    SUCCEEDED,
+    FAILED,
+}
+
+@Serializable
+enum class ReasoningSource {
+    PROVIDER_NATIVE,
+    THINK_TAG,
+    FINAL_ANSWER_RECOVERY,
+}
+
+@Serializable
 data class UIMessage(
     val id: Uuid = Uuid.random(),
     val role: MessageRole,
@@ -27,7 +52,8 @@ data class UIMessage(
     val finishedAt: LocalDateTime? = null,
     val modelId: Uuid? = null,
     val usage: TokenUsage? = null,
-    val translation: String? = null
+    val translation: String? = null,
+    val state: UIMessageState = UIMessageState.COMPLETED
 ) {
     private fun appendChunk(chunk: MessageChunk): UIMessage {
         val choice = chunk.choices.getOrNull(0)
@@ -70,23 +96,32 @@ data class UIMessage(
                     }
 
                     is UIMessagePart.Reasoning -> {
+                        val incomingReasoning = if (annotations.any { annotation ->
+                                annotation is UIMessageAnnotation.FinalAnswerRecovery &&
+                                    annotation.status == FinalAnswerRecoveryStatus.STARTED
+                            }
+                        ) {
+                            deltaPart.copy(source = ReasoningSource.FINAL_ANSWER_RECOVERY)
+                        } else {
+                            deltaPart
+                        }
                         // Skip empty reasoning deltas
-                        if (deltaPart.reasoning.isEmpty() && deltaPart.metadata == null) {
+                        if (incomingReasoning.reasoning.isEmpty() && incomingReasoning.metadata == null) {
                             acc
                         } else {
                             val lastPart = acc.lastOrNull()
-                            if (lastPart is UIMessagePart.Reasoning) {
+                            if (lastPart is UIMessagePart.Reasoning &&
+                                lastPart.source == incomingReasoning.source
+                            ) {
                                 // Append to the last Reasoning part
-                                acc.dropLast(1) + UIMessagePart.Reasoning(
-                                    reasoning = lastPart.reasoning + deltaPart.reasoning,
-                                    createdAt = lastPart.createdAt,
+                                acc.dropLast(1) + lastPart.copy(
+                                    reasoning = lastPart.reasoning + incomingReasoning.reasoning,
                                     finishedAt = null,
-                                ).also {
-                                    it.metadata = deltaPart.metadata ?: lastPart.metadata
-                                }
+                                    metadata = incomingReasoning.metadata ?: lastPart.metadata,
+                                )
                             } else {
                                 // Create new Reasoning part
-                                acc + deltaPart
+                                acc + incomingReasoning
                             }
                         }
                     }
@@ -395,6 +430,8 @@ sealed class UIMessagePart {
         val reasoning: String,
         val createdAt: Instant = Clock.System.now(),
         val finishedAt: Instant? = Clock.System.now(),
+        val source: ReasoningSource = ReasoningSource.PROVIDER_NATIVE,
+        val malformed: Boolean = false,
         override var metadata: JsonObject? = null
     ) : UIMessagePart()
 
@@ -807,6 +844,31 @@ sealed class UIMessageAnnotation {
         val title: String,
         val url: String
     ) : UIMessageAnnotation()
+
+    @Serializable
+    @SerialName("steering")
+    data class Steering(
+        val commandId: String,
+        val persistent: Boolean,
+    ) : UIMessageAnnotation()
+
+    /** Audit identity for a user message submitted by a privileged conversation. */
+    @Serializable
+    @SerialName("second_user")
+    data class SecondUser(
+        val sourceAssistantId: Uuid,
+        val sourceConversationId: Uuid,
+        val displayName: String,
+    ) : UIMessageAnnotation()
+
+    @Serializable
+    @SerialName("final_answer_recovery")
+    data class FinalAnswerRecovery(
+        val commandId: String,
+        val reason: String,
+        val status: FinalAnswerRecoveryStatus,
+        val attempt: Int = 1,
+    ) : UIMessageAnnotation()
 }
 
 @Serializable
@@ -815,7 +877,16 @@ data class MessageChunk(
     val model: String,
     val choices: List<UIMessageChoice>,
     val usage: TokenUsage? = null,
-)
+    val terminal: GenerationTerminal? = null,
+) {
+    fun resolvedTerminal(): GenerationTerminal? {
+        terminal?.let { return it }
+        val reason = choices.firstNotNullOfOrNull { it.finishReason }
+            ?.takeUnless { it.equals("unknown", ignoreCase = true) }
+            ?: return null
+        return GenerationTerminal.fromProviderReason(reason)
+    }
+}
 
 @Serializable
 data class UIMessageChoice(

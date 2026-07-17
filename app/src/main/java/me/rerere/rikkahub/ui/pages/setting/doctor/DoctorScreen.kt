@@ -269,6 +269,7 @@ private fun routeFor(key: AppRouteKey): Screen = when (key) {
     AppRouteKey.SettingScheduledJobs -> Screen.SettingScheduledJobs
     AppRouteKey.SettingWorkflows -> Screen.SettingWorkflows
     AppRouteKey.SettingPermissions -> Screen.SettingPermissions
+    AppRouteKey.SettingDiagnostics -> Screen.SettingDiagnostics
     AppRouteKey.SettingProvider -> Screen.SettingProvider
     AppRouteKey.Assistant -> Screen.Assistant
 }
