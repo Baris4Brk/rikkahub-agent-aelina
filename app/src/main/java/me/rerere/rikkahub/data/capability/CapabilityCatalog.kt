@@ -380,6 +380,8 @@ object CapabilityCatalog {
      * and cannot be injected into the privileged overlay.
      */
     private val backgroundToolNames: Set<String> = setOf(
+        "search_web",
+        "scrape_web",
         "get_time_info",
         "calendar_query",
         "get_battery_status",
@@ -1132,6 +1134,17 @@ object CapabilityCatalog {
             riskLevel = RiskLevel.High,
             approvalPolicy = ApprovalPolicy.AlwaysAsk,
             allowedOrigins = InvocationSurfacePolicy.LOCAL_UNLOCKED,
+        ))
+
+        reg(CapabilityDescriptor(
+            id = CapabilityId.WebSearch,
+            localToolOption = null,
+            toolNames = setOf("search_web", "scrape_web"),
+            requirements = emptyList(),
+            implementationState = ImplementationState.Implemented,
+            riskLevel = RiskLevel.Low,
+            approvalPolicy = ApprovalPolicy.Default,
+            allowedOrigins = InvocationSurfacePolicy.ALL_NON_KEYGUARD,
         ))
 
         reg(CapabilityDescriptor(

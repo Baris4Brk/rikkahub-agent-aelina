@@ -310,6 +310,21 @@ internal fun AssistantBasicContent(
             FormItem(
                 modifier = Modifier.padding(8.dp),
                 label = {
+                    Text(stringResource(R.string.use_web_search))
+                },
+                tail = {
+                    Switch(
+                        checked = assistant.enableWebSearch,
+                        onCheckedChange = {
+                            onUpdate(assistant.copy(enableWebSearch = it))
+                        },
+                    )
+                },
+            )
+            HorizontalDivider()
+            FormItem(
+                modifier = Modifier.padding(8.dp),
+                label = {
                     Text(stringResource(R.string.assistant_page_temperature))
                 },
                 description = {

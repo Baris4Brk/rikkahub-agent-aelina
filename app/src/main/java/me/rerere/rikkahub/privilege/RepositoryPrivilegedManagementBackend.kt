@@ -54,7 +54,7 @@ class RepositoryPrivilegedManagementBackend(
             is PrivilegedManagementRequest.LorebookUpdate -> lorebookUpdate(request)
             is PrivilegedManagementRequest.LorebookDelete -> lorebookDelete(request)
             is PrivilegedManagementRequest.ModeInjectionUpdate -> modeInjectionUpdate(request)
-            is PrivilegedManagementRequest.AppSettingsUpdate -> appSettingsUpdate(request)
+            is PrivilegedManagementRequest.AppSettingsUpdate -> appSettingsUpdate(request, context)
         }
     } catch (cancelled: CancellationException) {
         throw cancelled
@@ -94,6 +94,7 @@ class RepositoryPrivilegedManagementBackend(
                         put("tool_count", assistant.localTools.size)
                         put("skill_count", assistant.enabledSkills.size)
                         put("mcp_server_count", assistant.mcpServers.size)
+                        put("enable_web_search", assistant.enableWebSearch)
                         put("privileged_conversation_id", assistant.privilegedConversationId?.toString())
                     })
                 }
@@ -249,6 +250,7 @@ class RepositoryPrivilegedManagementBackend(
                     enableRecentChatsReference = request.enableRecentChatsReference ?: assistant.enableRecentChatsReference,
                     streamOutput = request.streamOutput ?: assistant.streamOutput,
                     fastPathRouterEnabled = request.fastPathRouterEnabled ?: assistant.fastPathRouterEnabled,
+                    enableWebSearch = request.enableWebSearch ?: assistant.enableWebSearch,
                 )
             })
         }
@@ -415,8 +417,17 @@ class RepositoryPrivilegedManagementBackend(
         }
     }
 
-    private suspend fun appSettingsUpdate(request: PrivilegedManagementRequest.AppSettingsUpdate): PrivilegedManagementResult {
+    private suspend fun appSettingsUpdate(
+        request: PrivilegedManagementRequest.AppSettingsUpdate,
+        context: PrivilegedSessionContext,
+    ): PrivilegedManagementResult {
         val before = settingsStore.settingsFlow.value
+        if (request.enableWebSearch != null && before.assistants.none { it.id == context.assistantId }) {
+            return PrivilegedManagementResult.failure(
+                "ASSISTANT_NOT_FOUND",
+                "The calling assistant does not exist.",
+            )
+        }
         listOfNotNull(request.chatModelId, request.fastModelId, request.titleModelId, request.suggestionModelId).forEach { id ->
             if (before.findModelById(id) == null) return PrivilegedManagementResult.failure("MODEL_NOT_FOUND", "Model $id does not exist.")
         }
@@ -431,11 +442,10 @@ class RepositoryPrivilegedManagementBackend(
         }
         val logLevel = request.aiLogLevel?.let(AiLogLevel::fromPreference)
         settingsStore.update { settings ->
-            settings.copy(
+            val updated = settings.copy(
                 dynamicColor = request.dynamicColor ?: settings.dynamicColor,
                 themeId = request.themeId ?: settings.themeId,
                 developerMode = request.developerMode ?: settings.developerMode,
-                enableWebSearch = request.enableWebSearch ?: settings.enableWebSearch,
                 chatModelId = request.chatModelId ?: settings.chatModelId,
                 fastModelId = request.fastModelId ?: settings.fastModelId,
                 titleModelId = when {
@@ -455,6 +465,9 @@ class RepositoryPrivilegedManagementBackend(
                 webServerLocalhostOnly = request.webServerLocalhostOnly ?: settings.webServerLocalhostOnly,
                 aiLogLevel = logLevel ?: settings.aiLogLevel,
             )
+            request.enableWebSearch?.let { enabled ->
+                updated.withAssistantWebSearch(context.assistantId, enabled)
+            } ?: updated
         }
         return PrivilegedManagementResult.success("APP_SETTINGS_UPDATED", "Allowed app settings updated.")
     }
@@ -506,7 +519,6 @@ class RepositoryPrivilegedManagementBackend(
         put("dynamic_color", settings.dynamicColor)
         put("theme_id", settings.themeId)
         put("developer_mode", settings.developerMode)
-        put("enable_web_search", settings.enableWebSearch)
         put("chat_model_id", settings.chatModelId.toString())
         put("fast_model_id", settings.fastModelId.toString())
         put("title_model_id", settings.titleModelId?.toString())

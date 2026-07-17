@@ -76,6 +76,7 @@ enum class CapabilityId {
     TelegramBot,
     McpControl,
     ExternalAutomation,
+    WebSearch,
     WebFetch,
     Browser,
 

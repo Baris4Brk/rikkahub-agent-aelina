@@ -49,12 +49,44 @@ class PrivilegedManagementToolsTest {
         assertFalse("privileged_conversation_id" in assistantSchema.properties)
         assertFalse("privileged_identity_name" in assistantSchema.properties)
         assertFalse("assistant_id_replacement" in assistantSchema.properties)
+        assertTrue("enable_web_search" in assistantSchema.properties)
 
         val appSchema = tools.single { it.name == "app_settings_update" }.parameters() as InputSchema.Obj
         assertFalse("agent_safety_settings" in appSchema.properties)
         assertFalse("emergency_stop" in appSchema.properties)
         assertFalse("database_version" in appSchema.properties)
         assertFalse("backup_internal_version" in appSchema.properties)
+    }
+
+    @Test
+    fun `assistant and legacy app search fields parse without changing their target semantics`() = runBlocking {
+        val context = context()
+        val captured = mutableListOf<PrivilegedManagementRequest>()
+        val tools = createPrivilegedManagementTools(
+            invocationContext = ToolInvocationContext(privilege = context),
+            guard = DefaultPrivilegedActionGuard("me.rerere.rikkahub"),
+            backend = PrivilegedManagementBackend { request, _ ->
+                captured += request
+                PrivilegedManagementResult.success("OK", "ok")
+            },
+        )
+
+        tools.single { it.name == "assistant_update" }.execute(buildJsonObject {
+            put("assistant_id", context.assistantId.toString())
+            put("enable_web_search", true)
+        })
+        tools.single { it.name == "app_settings_update" }.execute(buildJsonObject {
+            put("enable_web_search", false)
+        })
+
+        assertEquals(
+            true,
+            (captured[0] as PrivilegedManagementRequest.AssistantUpdate).enableWebSearch,
+        )
+        assertEquals(
+            false,
+            (captured[1] as PrivilegedManagementRequest.AppSettingsUpdate).enableWebSearch,
+        )
     }
 
     @Test

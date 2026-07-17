@@ -69,6 +69,7 @@ import me.rerere.rikkahub.data.ai.GenerationHandler
 import me.rerere.rikkahub.data.ai.ToolCallOrigin
 import me.rerere.rikkahub.data.ai.mcp.McpManager
 import me.rerere.rikkahub.data.ai.tools.LocalTools
+import me.rerere.rikkahub.data.ai.tools.WebSearchPolicy
 import me.rerere.rikkahub.data.ai.tools.createConversationTools
 import me.rerere.rikkahub.data.ai.tools.createSearchTools
 import me.rerere.rikkahub.data.ai.tools.createSkillTools
@@ -1686,7 +1687,7 @@ class ChatService(
 
             // memory tool
             if (!model.abilities.contains(ModelAbility.TOOL)) {
-                if (settings.enableWebSearch ||
+                if (assistant.enableWebSearch ||
                     mcpManager.getAvailableToolsForAssistant(assistant.id).isNotEmpty()
                 ) {
                     addError(
@@ -1727,6 +1728,11 @@ class ChatService(
                         .SystemAssistantInvocationRegistry
                         .hasAuthorizedUnlockedInvocation(conversationId, activeCommandId),
                 )
+            val webSearchToolsEnabled = WebSearchPolicy.canInject(
+                assistant = assistant,
+                origin = callOrigin,
+                toolSurfaceAvailable = invocationSurfaceCanExposeTools,
+            )
             fun canExposeTool(toolName: String): Boolean {
                 if (!invocationSurfaceCanExposeTools) return false
                 if (callOrigin != ToolCallOrigin.SystemAssistant) return true
@@ -1919,7 +1925,7 @@ class ChatService(
                 },
                 outputTransformers = outputTransformers,
                 tools = buildList {
-                    if (settings.enableWebSearch) {
+                    if (webSearchToolsEnabled) {
                         addAll(createSearchTools(settings))
                     }
                     addAll(createConversationTools(conversationRepo, assistant.id))

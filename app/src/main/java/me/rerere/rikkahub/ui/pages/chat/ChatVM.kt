@@ -15,6 +15,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -36,6 +37,8 @@ import me.rerere.rikkahub.R
 import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.datastore.getCurrentChatModel
+import me.rerere.rikkahub.data.datastore.getAssistantById
+import me.rerere.rikkahub.data.datastore.getCurrentAssistant
 import me.rerere.rikkahub.data.files.FilesManager
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.data.model.Avatar
@@ -130,8 +133,10 @@ class ChatVM(
         settingsStore.settingsFlow.stateIn(viewModelScope, SharingStarted.Eagerly, Settings.dummy())
 
     // 网络搜索
-    val enableWebSearch = settings.map {
-        it.enableWebSearch
+    val enableWebSearch = combine(settings, conversation) { settings, conversation ->
+        val assistant = settings.getAssistantById(conversation.assistantId)
+            ?: settings.getCurrentAssistant()
+        assistant.enableWebSearch
     }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
     // 当前模型
@@ -159,6 +164,15 @@ class ChatVM(
             // 检查用户头像是否有变化，如果有则删除旧头像
             checkUserAvatarDelete(oldSettings, newSettings)
             settingsStore.update(newSettings)
+        }
+    }
+
+    fun updateWebSearch(enabled: Boolean) {
+        val conversationAssistantId = conversation.value.assistantId
+        val assistantId = settings.value.getAssistantById(conversationAssistantId)?.id
+            ?: settings.value.getCurrentAssistant().id
+        viewModelScope.launch {
+            settingsStore.updateAssistantWebSearch(assistantId, enabled)
         }
     }
 

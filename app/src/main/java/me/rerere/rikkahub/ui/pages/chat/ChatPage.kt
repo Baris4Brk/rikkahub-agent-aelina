@@ -532,7 +532,7 @@ private fun ChatPageContent(
                     },
                     enableSearch = enableWebSearch,
                     onToggleSearch = {
-                        vm.updateSettings(setting.copy(enableWebSearch = !enableWebSearch))
+                        vm.updateWebSearch(!enableWebSearch)
                     },
                     onSendClick = {
                         if (currentChatModel == null) {

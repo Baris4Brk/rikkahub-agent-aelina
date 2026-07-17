@@ -131,6 +131,7 @@ private fun managementToolSpecs(): List<ManagementToolSpec> = listOf(
             "enable_recent_chats_reference" to booleanProperty("Allow recent-chat reference"),
             "stream_output" to booleanProperty("Stream output"),
             "fast_path_router_enabled" to booleanProperty("Enable the conservative fast-path router"),
+            "enable_web_search" to booleanProperty("Enable built-in web search for this assistant"),
         ),
         listOf("assistant_id"),
     ),
@@ -217,7 +218,9 @@ private fun managementToolSpecs(): List<ManagementToolSpec> = listOf(
             "dynamic_color" to booleanProperty("Dynamic color"),
             "theme_id" to stringProperty("Existing theme identifier"),
             "developer_mode" to booleanProperty("Developer mode"),
-            "enable_web_search" to booleanProperty("Web search"),
+            "enable_web_search" to booleanProperty(
+                "Compatibility alias: built-in web search for the calling assistant",
+            ),
             "chat_model_id" to stringProperty("Global chat model UUID"),
             "fast_model_id" to stringProperty("Fast model UUID"),
             "title_model_id" to stringProperty("Title model UUID; empty string clears it"),
@@ -281,6 +284,7 @@ private fun parseManagementRequest(name: String, obj: JsonObject): ParsedRequest
                     enableRecentChatsReference = obj.boolean("enable_recent_chats_reference"),
                     streamOutput = obj.boolean("stream_output"),
                     fastPathRouterEnabled = obj.boolean("fast_path_router_enabled"),
+                    enableWebSearch = obj.boolean("enable_web_search"),
                 )
             }
             "assistant_toggle_tool" -> PrivilegedManagementRequest.AssistantToggleTool(

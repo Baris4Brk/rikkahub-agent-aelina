@@ -3,6 +3,7 @@ package me.rerere.rikkahub.privilege
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import me.rerere.rikkahub.data.datastore.Settings
 import kotlin.uuid.Uuid
 
 sealed interface PrivilegedManagementRequest {
@@ -28,6 +29,7 @@ sealed interface PrivilegedManagementRequest {
         val enableRecentChatsReference: Boolean?,
         val streamOutput: Boolean?,
         val fastPathRouterEnabled: Boolean?,
+        val enableWebSearch: Boolean? = null,
     ) : PrivilegedManagementRequest
     data class AssistantToggleTool(
         val assistantId: Uuid,
@@ -116,3 +118,12 @@ fun interface PrivilegedManagementBackend {
         context: PrivilegedSessionContext,
     ): PrivilegedManagementResult
 }
+
+internal fun Settings.withAssistantWebSearch(
+    assistantId: Uuid,
+    enabled: Boolean,
+): Settings = copy(
+    assistants = assistants.map { assistant ->
+        if (assistant.id == assistantId) assistant.copy(enableWebSearch = enabled) else assistant
+    },
+)

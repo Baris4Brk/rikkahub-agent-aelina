@@ -121,6 +121,7 @@ data class UpdateAssistantInjectionsRequest(
 @Serializable
 data class UpdateSearchEnabledRequest(
     val enabled: Boolean,
+    val assistantId: String? = null,
 )
 
 @Serializable

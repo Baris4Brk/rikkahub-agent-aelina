@@ -3,6 +3,8 @@ package me.rerere.rikkahub.data.datastore.migration
 import android.util.Log
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.jsonObject
 import me.rerere.rikkahub.utils.JsonInstant
 
@@ -59,6 +61,18 @@ object SettingsJsonMigrator {
                     )
                     root["quickMessages"] = merged
                 }
+            }
+
+            // V4: legacy backups stored one global switch. Only assistants without an
+            // explicit value inherit it; newer backup values remain authoritative.
+            root["assistants"]?.let { element ->
+                val legacyEnabled = (root["enableWebSearch"] as? JsonPrimitive)
+                    ?.booleanOrNull == true
+                val migrated = migrateAssistantsWebSearch(
+                    assistantsJson = JsonInstant.encodeToString(element),
+                    legacyEnabled = legacyEnabled,
+                )
+                root["assistants"] = JsonInstant.parseToJsonElement(migrated)
             }
 
             JsonInstant.encodeToString(JsonObject(root))

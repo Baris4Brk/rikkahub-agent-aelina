@@ -131,10 +131,13 @@ fun Route.settingsRoutes(
 
         post("/search/enabled") {
             val request = call.receive<UpdateSearchEnabledRequest>()
-
-            settingsStore.update { settings ->
-                settings.copy(enableWebSearch = request.enabled)
+            val settings = settingsStore.settingsFlow.value
+            val assistantId = resolveSearchAssistantId(request.assistantId, settings.assistantId)
+            if (settings.assistants.none { it.id == assistantId }) {
+                throw NotFoundException("Assistant not found")
             }
+
+            settingsStore.updateAssistantWebSearch(assistantId, request.enabled)
             call.respond(HttpStatusCode.OK, mapOf("status" to "ok"))
         }
 
@@ -205,6 +208,11 @@ fun Route.settingsRoutes(
         }
     }
 }
+
+internal fun resolveSearchAssistantId(
+    requestedAssistantId: String?,
+    currentAssistantId: kotlin.uuid.Uuid,
+): kotlin.uuid.Uuid = requestedAssistantId?.toUuid("assistantId") ?: currentAssistantId
 
 private fun parseBuiltInTool(tool: String): BuiltInTools {
     return when (tool.trim().lowercase(Locale.ROOT)) {
