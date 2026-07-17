@@ -33,6 +33,8 @@ import me.rerere.ai.provider.Provider
 import me.rerere.ai.provider.ProviderSetting
 import me.rerere.ai.provider.ProviderLogPrivacy
 import me.rerere.ai.provider.TextGenerationParams
+import me.rerere.ai.provider.bufferProviderStream
+import me.rerere.ai.provider.deliverProviderChunk
 import me.rerere.ai.ui.ImageGenerationItem
 import me.rerere.ai.ui.MessageChunk
 import me.rerere.ai.ui.GenerationTerminal
@@ -270,11 +272,13 @@ class ClaudeProvider(private val client: OkHttpClient, context: Context? = null)
                     },
                 )
 
-                trySend(messageChunk)
+                val delivered = deliverProviderChunk(TAG, messageChunk) { summary ->
+                    Log.w(TAG, summary)
+                }
                 when (type) {
                     "message_stop" -> {
                         Log.d(TAG, "Stream ended")
-                        close()
+                        if (delivered) close()
                     }
 
                     "error" -> {
@@ -322,7 +326,7 @@ class ClaudeProvider(private val client: OkHttpClient, context: Context? = null)
             Log.d(TAG, "Closing eventSource")
             eventSource.cancel()
         }
-    }
+    }.bufferProviderStream()
 
     private fun buildMessageRequest(
         providerSetting: ProviderSetting.Claude,

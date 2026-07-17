@@ -32,6 +32,8 @@ import me.rerere.ai.provider.ModelAbility
 import me.rerere.ai.provider.ProviderSetting
 import me.rerere.ai.provider.ProviderLogPrivacy
 import me.rerere.ai.provider.TextGenerationParams
+import me.rerere.ai.provider.bufferProviderStream
+import me.rerere.ai.provider.deliverProviderChunk
 import me.rerere.ai.provider.providers.PartGroup
 import me.rerere.ai.provider.providers.groupPartsByToolBoundary
 import me.rerere.ai.registry.ModelRegistry
@@ -220,7 +222,9 @@ class ChatCompletionsAPI(
                                 choice.finishReason?.let(GenerationTerminal::fromProviderReason)
                             },
                         )
-                        trySend(messageChunk)
+                        deliverProviderChunk(TAG, messageChunk) { summary ->
+                            Log.w(TAG, summary)
+                        }
                     }
                 } catch (error: Exception) {
                     val sanitized = ProviderLogPrivacy.parseException(data.length, type, error)
@@ -262,7 +266,7 @@ class ChatCompletionsAPI(
             println("[awaitClose] 关闭eventSource ")
             eventSource.cancel()
         }
-    }
+    }.bufferProviderStream()
 
 
     private fun buildChatCompletionRequest(

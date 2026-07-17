@@ -37,6 +37,8 @@ import me.rerere.ai.provider.Provider
 import me.rerere.ai.provider.ProviderSetting
 import me.rerere.ai.provider.ProviderLogPrivacy
 import me.rerere.ai.provider.TextGenerationParams
+import me.rerere.ai.provider.bufferProviderStream
+import me.rerere.ai.provider.deliverProviderChunk
 import me.rerere.ai.provider.providers.vertex.ServiceAccountTokenProvider
 import me.rerere.ai.registry.ModelRegistry
 import me.rerere.ai.ui.GoogleThoughtMetadata
@@ -282,15 +284,18 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
                     val reason =
                         jsonData["promptFeedback"]?.jsonObject?.get("blockReason")?.jsonPrimitiveOrNull?.contentOrNull
                     if (reason != null) {
-                        trySend(
-                            MessageChunk(
+                        deliverProviderChunk(
+                            provider = TAG,
+                            value = MessageChunk(
                                 id = Uuid.random().toString(),
                                 model = params.model.modelId,
                                 choices = emptyList(),
                                 terminal = GenerationTerminal.fromProviderReason(reason),
                             ),
-                        )
-                        close()
+                            logFailure = { summary -> Log.w(TAG, summary) },
+                        ).also { delivered ->
+                            if (delivered) close()
+                        }
                         return
                     }
                     val candidates = jsonData["candidates"]?.jsonArray ?: return
@@ -332,7 +337,9 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
                             ?.let(GenerationTerminal::fromProviderReason),
                     )
 
-                    trySend(messageChunk)
+                    deliverProviderChunk(TAG, messageChunk) { summary ->
+                        Log.w(TAG, summary)
+                    }
                 } catch (e: Exception) {
                     val sanitized = ProviderLogPrivacy.parseException(data.length, type, e)
                     Log.w(TAG, sanitized.message.orEmpty())
@@ -388,7 +395,7 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
             println("[awaitClose] 关闭eventSource")
             eventSource.cancel()
         }
-    }
+    }.bufferProviderStream()
 
     private fun buildCompletionRequestBody(
         messages: List<UIMessage>,

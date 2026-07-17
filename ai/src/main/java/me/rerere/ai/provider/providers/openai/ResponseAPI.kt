@@ -29,6 +29,8 @@ import me.rerere.ai.provider.ModelAbility
 import me.rerere.ai.provider.ProviderSetting
 import me.rerere.ai.provider.ProviderLogPrivacy
 import me.rerere.ai.provider.TextGenerationParams
+import me.rerere.ai.provider.bufferProviderStream
+import me.rerere.ai.provider.deliverProviderChunk
 import me.rerere.ai.provider.providers.PartGroup
 import me.rerere.ai.provider.providers.groupPartsByToolBoundary
 import me.rerere.ai.registry.ModelRegistry
@@ -147,10 +149,14 @@ class ResponseAPI(
                 Log.d(TAG, "onEvent: id=${id.orEmpty()}, type=${type.orEmpty()}, chars=${data.length}")
                 val json = json.parseToJsonElement(data).jsonObject
                 val chunk = parseResponseDelta(json)
-                if (chunk != null) {
-                    trySend(chunk)
+                val delivered = if (chunk != null) {
+                    deliverProviderChunk(TAG, chunk) { summary ->
+                        Log.w(TAG, summary)
+                    }
+                } else {
+                    true
                 }
-                if (chunk?.terminal != null) {
+                if (chunk?.terminal != null && delivered) {
                     close()
                 }
                 } catch (error: Exception) {
@@ -194,7 +200,7 @@ class ResponseAPI(
             println("[awaitClose] 关闭eventSource ")
             eventSource.cancel()
         }
-    }
+    }.bufferProviderStream()
 
     fun createRequestBody(
         providerSetting: ProviderSetting.OpenAI,
