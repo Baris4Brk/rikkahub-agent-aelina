@@ -51,10 +51,20 @@ class SubAgentRegistry {
 
     fun get(id: String): SubAgentRun? = _runs.value[id]
 
+    fun getForAssistant(id: String, parentAssistantId: String): SubAgentRun? =
+        _runs.value[id]?.takeIf { it.parentAssistantId == parentAssistantId }
+
     fun list(activeOnly: Boolean): List<SubAgentRun> {
         val all = _runs.value.values
         return if (activeOnly) all.filter { it.status == SubAgentStatus.RUNNING || it.status == SubAgentStatus.PENDING }
         else all.toList()
+    }
+
+    fun listForAssistant(
+        parentAssistantId: String,
+        activeOnly: Boolean,
+    ): List<SubAgentRun> = list(activeOnly).filter {
+        it.parentAssistantId == parentAssistantId
     }
 
     fun activeCountForAssistant(parentAssistantId: String): Int =
@@ -78,6 +88,14 @@ class SubAgentRegistry {
         val job = activeJobs.remove(id) ?: return false
         job.cancel()
         return true
+    }
+
+    fun requestCancelForAssistant(id: String, parentAssistantId: String): Boolean {
+        val run = getForAssistant(id, parentAssistantId) ?: return false
+        if (run.status != SubAgentStatus.RUNNING && run.status != SubAgentStatus.PENDING) {
+            return false
+        }
+        return requestCancel(id)
     }
 
     /**

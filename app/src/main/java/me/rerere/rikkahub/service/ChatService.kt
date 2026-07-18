@@ -153,6 +153,8 @@ import me.rerere.rikkahub.service.chat.CancelQueuedCommand
 import me.rerere.rikkahub.service.chat.UpdateQueuedMessageCommand
 import me.rerere.rikkahub.service.chat.PromoteQueuedMessageToSteeringCommand
 import me.rerere.rikkahub.service.chat.QueuedMessageUiEntry
+import me.rerere.rikkahub.subagent.allowsTool
+import me.rerere.rikkahub.subagent.generationMaxSteps
 
 private const val TAG = "ChatService"
 
@@ -416,6 +418,10 @@ class ChatService(
     private val workspaceProcessManager: me.rerere.workspace.WorkspaceProcessManager,
     private val structuredPrivilegedCommandExecutor:
         me.rerere.rikkahub.privilege.StructuredPrivilegedCommandExecutor? = null,
+    private val subAgentExecutionProfileRegistry:
+        me.rerere.rikkahub.subagent.SubAgentExecutionProfileRegistry,
+    private val setupTransactionCoordinator:
+        me.rerere.rikkahub.setup.SetupTransactionCoordinator,
 ) {
     // workspace 系统提示注入 (依赖 workspaceRepository, 故在类内构�?
     private val workspaceReminderTransformer = WorkspaceReminderTransformer(workspaceRepository)
@@ -1648,7 +1654,7 @@ class ChatService(
         // this generation was queued (multi-assistant crosstalk). Everything downstream
         // (model, memories, tools, sender name) keys off this resolved assistant.
         val initialConversation = getConversationFlow(conversationId).value
-        val assistant = acceptedAssistantSnapshot
+        val baseAssistant = acceptedAssistantSnapshot
             ?: settings.getAssistantById(initialConversation.assistantId)
             ?: if (callOrigin == ToolCallOrigin.SystemAssistant) {
                 throw IllegalStateException(
@@ -1658,6 +1664,13 @@ class ChatService(
             } else {
                 settings.getCurrentAssistant()
             }
+        val subAgentProfile = subAgentExecutionProfileRegistry.get(conversationId)
+        val assistant = subAgentProfile?.let { profile ->
+            baseAssistant.copy(
+                chatModelId = profile.effectiveModelId,
+                systemPrompt = profile.effectiveSystemPrompt,
+            )
+        } ?: baseAssistant
         val privilegeContext = me.rerere.rikkahub.privilege.DefaultPrivilegedSessionResolver.resolve(
             assistant = assistant,
             conversation = initialConversation,
@@ -1714,12 +1727,15 @@ class ChatService(
             val conversation = getConversationFlow(conversationId).value
             val isHeadless = me.rerere.rikkahub.data.ai.tools.HeadlessConversations
                 .isHeadless(conversationId)
+            val toolNameSurface = me.rerere.rikkahub.data.ai.tools.ToolNameSurface()
             val invocationCtx = me.rerere.rikkahub.data.ai.tools.ToolInvocationContext(
                 callerAssistantId = assistant.id.toString(),
                 callerConversationId = conversationId.toString(),
+                callerModelId = model.id.toString(),
                 isHeadless = isHeadless,
                 modelCanSeeImages = Modality.IMAGE in model.inputModalities,
                 privilege = privilegeContext,
+                toolNameSurface = toolNameSurface,
             )
             val localToolOptions = if (privilegeContext.expandLocalTools) {
                 me.rerere.rikkahub.data.ai.tools.LocalToolOption.PRIVILEGED_IMPLEMENTED
@@ -1910,6 +1926,8 @@ class ChatService(
                 conversationId = conversationId,
                 commandId = activeCommandId,
                 runControl = runControl,
+                maxSteps = subAgentProfile?.generationMaxSteps() ?: 32,
+                memoryToolAllowed = subAgentProfile?.allowsTool("memory_tool") ?: true,
                 invocationSurfaceContextProvider =
                     me.rerere.rikkahub.assistant.SystemAssistantInvocationRegistry,
                 isEmergencyStopActive = {
@@ -1928,10 +1946,20 @@ class ChatService(
                         putAll(registration.startables.filterKeys(::canExposeTool))
                     }
                 },
-                memories = if (assistant.useGlobalMemory) {
-                    memoryRepository.getGlobalMemories()
+                memories = if (!assistant.enableMemory) {
+                    emptyList()
                 } else {
-                    memoryRepository.getMemoriesOfAssistant(assistant.id.toString())
+                    val query = conversation.currentMessages
+                        .lastOrNull { it.role == MessageRole.USER }
+                        ?.parts
+                        ?.filterIsInstance<UIMessagePart.Text>()
+                        ?.joinToString("\n") { it.text }
+                        .orEmpty()
+                    memoryRepository.queryRelevant(
+                        assistantId = assistant.id,
+                        query = query,
+                        includeGlobal = assistant.useGlobalMemory,
+                    ).map { it.memory }
                 },
                 inputTransformers = buildList {
                     addAll(inputTransformers)
@@ -1973,6 +2001,14 @@ class ChatService(
                                 backend = privilegedManagementBackend,
                             )
                         )
+                        if (me.rerere.rikkahub.setup.isSetupToolSurfaceAvailable(invocationCtx)) {
+                            addAll(
+                                me.rerere.rikkahub.setup.createSetupTools(
+                                    invocationContext = invocationCtx,
+                                    coordinator = setupTransactionCoordinator,
+                                ),
+                            )
+                        }
                         addAll(workspaceProcessTools)
                     }
                     addAll(createWorkspaceToolsIfReady(assistant.workspaceId?.toString(), conversation.workspaceCwd))
@@ -2043,7 +2079,29 @@ class ChatService(
                             )
                         )
                     }
-                }.filter { tool -> canExposeTool(tool.name) },
+                }
+                    .asSequence()
+                    .filter { tool -> canExposeTool(tool.name) }
+                    .filter { tool -> subAgentProfile?.allowsTool(tool.name) ?: true }
+                    .toList()
+                    .also { definitions ->
+                        val memoryToolAvailable = assistant.enableMemory &&
+                            (subAgentProfile?.allowsTool("memory_tool") ?: true)
+                        val availableNames = buildSet {
+                            definitions.mapTo(this) { it.name }
+                            if (memoryToolAvailable) add("memory_tool")
+                        }
+                        val knownNames = buildSet {
+                            me.rerere.rikkahub.data.capability.CapabilityCatalog
+                                .allCapabilities()
+                                .flatMapTo(this) { it.toolNames }
+                            add("memory_tool")
+                            addAll(availableNames)
+                        }
+                        check(toolNameSurface.publish(availableNames, knownNames)) {
+                            "tool surface was already published for conversation $conversationId"
+                        }
+                    },
             ).onCompletion {
                 if (runControl?.isUpdateFenced() == true) return@onCompletion
                 // 取消 Live Update 通知

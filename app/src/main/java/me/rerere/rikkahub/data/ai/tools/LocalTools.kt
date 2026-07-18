@@ -362,6 +362,7 @@ class LocalTools(
     private val bugReportBuilder: me.rerere.rikkahub.reliability.BugReportBuilder,
     private val subAgentEngine: me.rerere.rikkahub.subagent.SubAgentEngine,
     private val subAgentRegistry: me.rerere.rikkahub.subagent.SubAgentRegistry,
+    private val researchCoordinator: me.rerere.rikkahub.research.ResearchCoordinator,
     private val conversationRepo: me.rerere.rikkahub.data.repository.ConversationRepository,
     private val workflowRepository: me.rerere.rikkahub.workflow.repository.WorkflowRepository,
     private val workflowEngine: me.rerere.rikkahub.workflow.execution.WorkflowEngine,
@@ -977,15 +978,18 @@ class LocalTools(
             tools.add(me.rerere.rikkahub.reliability.checkAppUpdatesTool(gitHubReleaseChecker))
             tools.add(me.rerere.rikkahub.reliability.generateBugReportTool(context, bugReportBuilder))
         }
-        if (options.contains(LocalToolOption.SubAgents)) {
+        if (options.contains(LocalToolOption.SubAgents) && !invocationContext.isHeadless) {
             // Pass the caller context so the recursion guard inside SubAgentEngine.dispatch
             // can fire — the dispatch tool itself can't read its own coroutine context, but
             // ChatService / cron / workflow / external-automation know who's calling at the
             // moment they construct the tool list.
             tools.add(me.rerere.rikkahub.subagent.subagentDispatchTool(subAgentEngine, invocationContext))
-            tools.add(me.rerere.rikkahub.subagent.subagentListTool(subAgentRegistry))
-            tools.add(me.rerere.rikkahub.subagent.subagentGetTool(subAgentRegistry))
-            tools.add(me.rerere.rikkahub.subagent.subagentCancelTool(subAgentRegistry))
+            tools.add(me.rerere.rikkahub.subagent.subagentListTool(subAgentRegistry, invocationContext))
+            tools.add(me.rerere.rikkahub.subagent.subagentGetTool(subAgentRegistry, invocationContext))
+            tools.add(me.rerere.rikkahub.subagent.subagentCancelTool(subAgentRegistry, invocationContext))
+            tools.add(me.rerere.rikkahub.research.researchStartTool(researchCoordinator, invocationContext))
+            tools.add(me.rerere.rikkahub.research.researchStatusTool(researchCoordinator, invocationContext))
+            tools.add(me.rerere.rikkahub.research.researchCancelTool(researchCoordinator, invocationContext))
         }
         if (options.contains(LocalToolOption.CostGuards)) {
             tools.add(me.rerere.rikkahub.costguards.checkTokenUsageTool(settingsStore, conversationRepo))

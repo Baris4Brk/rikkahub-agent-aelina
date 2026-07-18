@@ -110,4 +110,25 @@ class SubAgentRegistryTest {
         val r = SubAgentRegistry()
         assertNull(r.get("nonexistent"))
     }
+
+    @Test fun `assistant scoped reads and cancellation cannot cross owners`() {
+        val r = SubAgentRegistry()
+        val firstJob = Job()
+        val secondJob = Job()
+        r.addPending(
+            makeRun("first", parentAssistant = "assistant-A", status = SubAgentStatus.RUNNING),
+            firstJob,
+        )
+        r.addPending(
+            makeRun("second", parentAssistant = "assistant-B", status = SubAgentStatus.RUNNING),
+            secondJob,
+        )
+
+        assertEquals(listOf("first"), r.listForAssistant("assistant-A", activeOnly = false).map { it.id })
+        assertNull(r.getForAssistant("second", "assistant-A"))
+        assertFalse(r.requestCancelForAssistant("second", "assistant-A"))
+        assertFalse(secondJob.isCancelled)
+        assertTrue(r.requestCancelForAssistant("first", "assistant-A"))
+        assertTrue(firstJob.isCancelled)
+    }
 }

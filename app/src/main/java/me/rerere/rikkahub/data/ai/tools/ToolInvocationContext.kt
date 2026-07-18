@@ -1,6 +1,52 @@
 package me.rerere.rikkahub.data.ai.tools
 
+import java.util.concurrent.atomic.AtomicReference
 import me.rerere.rikkahub.privilege.PrivilegedSessionContext
+
+data class ToolNameSnapshot(
+    val available: Set<String>,
+    val known: Set<String>,
+) {
+    companion object {
+        val EMPTY = ToolNameSnapshot(emptySet(), emptySet())
+    }
+}
+
+/**
+ * One-shot handoff of the exact model-facing tool names built for a parent turn.
+ *
+ * Tool factories need the invocation context before the complete local/search/MCP surface exists.
+ * Publishing once after that surface is assembled lets a deferred `subagent_dispatch` read the
+ * final allow-list without exposing mutable collections or guessing from Assistant settings.
+ */
+class ToolNameSurface private constructor(
+    private val writable: Boolean,
+) {
+    constructor() : this(writable = true)
+
+    private val snapshot = AtomicReference(ToolNameSnapshot.EMPTY)
+
+    fun publish(
+        available: Set<String>,
+        known: Set<String>,
+    ): Boolean {
+        if (!writable) return false
+        return snapshot.compareAndSet(
+            ToolNameSnapshot.EMPTY,
+            ToolNameSnapshot(
+                available = available.toSet(),
+                known = (known + available).toSet(),
+            ),
+        )
+    }
+
+    fun snapshot(): ToolNameSnapshot = snapshot.get()
+
+    companion object {
+        /** Shared, permanently empty fallback for legacy contexts that cannot publish a turn. */
+        val EMPTY = ToolNameSurface(writable = false)
+    }
+}
 
 /**
  * Phase 17 stability — context every tool factory in [LocalTools.getTools] sees about WHO
@@ -33,9 +79,11 @@ import me.rerere.rikkahub.privilege.PrivilegedSessionContext
 data class ToolInvocationContext(
     val callerAssistantId: String? = null,
     val callerConversationId: String? = null,
+    val callerModelId: String? = null,
     val isHeadless: Boolean = false,
     val modelCanSeeImages: Boolean = true,
     val privilege: PrivilegedSessionContext? = null,
+    val toolNameSurface: ToolNameSurface = ToolNameSurface.EMPTY,
 ) {
     companion object {
         /** No-knowledge fallback. Factories that depend on context MUST handle this. */

@@ -17,14 +17,14 @@ import android.util.Log
  *
  * This step runs once, right after the restore writes `rikka_hub.db`, on the raw file before
  * Room touches it:
- *  - It creates any of the fork-only tables that are missing, empty, with the exact v29
- *    schema Room expects (copied verbatim from app/schemas/.../29.json) — so the file looks
+ *  - It creates any of the fork-only tables that are missing, empty, with the exact current
+ *    schema Room expects (copied verbatim from the current exported schema) — so the file looks
  *    like a clean agent install for those tables.
  *  - If the file is already stamped at the current schema version (so Room would run no
  *    migration), it rewrites Room's identity row to the fork's expected hash. Without this,
  *    Room rejects the foreign hash even though every table is now present. The shared tables
  *    already match because the fork tracks upstream's schema, so trusting the hash is sound.
- *  - If the file is at an older version (upgrade scenario, e.g. official v24→agent v29),
+ *  - If the file is at an older version (upgrade scenario, e.g. official v24 to agent v30),
  *    it keeps the original user_version so Room runs every real migration, including the
  *    explicit 28→29 migration. The fork-only tables are pre-created only as compatibility
  *    scaffolding for upstream backups.
@@ -44,15 +44,15 @@ object ImportedDatabaseReconciler {
 
     /**
      * Room's schema version and identity hash for [AppDatabase]. Both are copied verbatim
-     * from app/schemas/me.rerere.rikkahub.data.db.AppDatabase/29.json. When the schema
+     * from app/schemas/me.rerere.rikkahub.data.db.AppDatabase/30.json. When the schema
      * version is bumped, update BOTH constants (and the table DDL below if the fork-only
      * tables changed) or this reconciliation will silently stop matching.
      */
-    private const val EXPECTED_VERSION = 29
-    private const val EXPECTED_IDENTITY_HASH = "f81c8788e40327589ad93784c2004d16"
+    private const val EXPECTED_VERSION = 30
+    private const val EXPECTED_IDENTITY_HASH = "7f3079f05b75920c987d5d2463382013"
 
     /**
-     * Fork-only tables absent from an upstream backup, with their exact v29 create + index
+     * Fork-only tables absent from an upstream backup, with their exact current create + index
      * statements. Every statement is IF NOT EXISTS so running it against a genuine agent
      * backup (where the tables already exist) is a no-op.
      */
@@ -136,6 +136,30 @@ object ImportedDatabaseReconciler {
         }
     }
 
+    private fun ensureMemoryV30Columns(db: SQLiteDatabase) {
+        val columns = db.rawQuery("PRAGMA table_info(`MemoryEntity`)", null).use { cursor ->
+            val nameIndex = cursor.getColumnIndex("name")
+            buildSet {
+                if (nameIndex >= 0) {
+                    while (cursor.moveToNext()) add(cursor.getString(nameIndex))
+                }
+            }
+        }
+        if ("title" !in columns) {
+            db.execSQL("ALTER TABLE `MemoryEntity` ADD COLUMN `title` TEXT")
+        }
+        if ("updated_at_ms" !in columns) {
+            db.execSQL(
+                "ALTER TABLE `MemoryEntity` ADD COLUMN `updated_at_ms` INTEGER NOT NULL DEFAULT 0",
+            )
+        }
+        if ("importance" !in columns) {
+            db.execSQL(
+                "ALTER TABLE `MemoryEntity` ADD COLUMN `importance` REAL NOT NULL DEFAULT 0.5",
+            )
+        }
+    }
+
     /**
      * Call after a restore has written the database file, and only when the restore actually
      * included the database. Safe to call when the file is a genuine agent backup (every
@@ -167,11 +191,12 @@ object ImportedDatabaseReconciler {
 
                     // Older backups must keep their original user_version so Room can run
                     // every real migration (including 28→29). Precreating fork-only tables
-                    // makes upstream backups compatible, but stamping v29 here would silently
-                    // skip migrations and risk losing schema changes. Only a genuine v29 file
+                    // makes upstream backups compatible, but stamping v30 here would silently
+                    // skip migrations and risk losing schema changes. Only a genuine v30 file
                     // is stamped with the fork identity hash because Room will not run a
                     // migration in that case.
                     if (version == EXPECTED_VERSION) {
+                        ensureMemoryV30Columns(db)
                         db.execSQL(
                             "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY, identity_hash TEXT)"
                         )

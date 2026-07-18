@@ -1,6 +1,11 @@
 package me.rerere.rikkahub.subagent
 
 import kotlinx.serialization.Serializable
+import me.rerere.rikkahub.browser.BrowserToolDefaults
+import me.rerere.rikkahub.data.ai.tools.ToolApprovalDefaults
+import me.rerere.rikkahub.data.ai.tools.ToolNameSnapshot
+import me.rerere.rikkahub.data.capability.CapabilityCatalog
+import me.rerere.rikkahub.data.capability.ToolInvocationSurface
 import kotlin.uuid.Uuid
 
 /**
@@ -82,6 +87,160 @@ data class SubAgentRequest(
     val maxTrips: Int = SubAgentDefaults.DEFAULT_MAX_TRIPS,
     val label: String? = null,
 )
+
+enum class SubAgentPromptSource {
+    REQUEST,
+    ASSISTANT,
+    DEFAULT,
+}
+
+/** Inputs available when a child run is dispatched from an already-authorized parent turn. */
+data class SubAgentExecutionInputs(
+    val parentEffectiveModelId: Uuid,
+    val assistantDefaultModelId: Uuid?,
+    val assistantSystemPrompt: String,
+    val availableModelIds: Set<Uuid>,
+    val callerToolNames: Set<String>,
+    val headlessToolNames: Set<String>,
+    val knownToolNames: Set<String> = callerToolNames + headlessToolNames,
+)
+
+/** Immutable execution contract consumed by the existing conversation generation pipeline. */
+data class SubAgentExecutionProfile(
+    val runId: String,
+    val effectiveModelId: Uuid,
+    val promptSource: SubAgentPromptSource,
+    val effectiveSystemPrompt: String,
+    val effectiveToolNames: Set<String>,
+    val maxToolTrips: Int,
+)
+
+internal fun SubAgentExecutionProfile.allowsTool(toolName: String): Boolean =
+    toolName in effectiveToolNames
+
+enum class SubAgentParentCompletionPolicy {
+    /** A standalone background child posts its terminal result back to the parent chat. */
+    NOTIFY_PARENT,
+
+    /** A coordinator owns aggregation and is the only layer allowed to wake the parent. */
+    COORDINATOR_ONLY,
+}
+
+/** Frozen caller identity and least-privilege surface captured at dispatch time. */
+data class SubAgentCallerContext(
+    val parentAssistantId: String,
+    val parentConversationId: String?,
+    val parentEffectiveModelId: Uuid?,
+    val toolNames: ToolNameSnapshot,
+    val completionPolicy: SubAgentParentCompletionPolicy =
+        SubAgentParentCompletionPolicy.NOTIFY_PARENT,
+)
+
+/** GenerationHandler reserves the final planned step plus one extra index for summarization. */
+internal fun SubAgentExecutionProfile.generationMaxSteps(): Int =
+    maxToolTrips.coerceIn(1, SubAgentDefaults.MAX_MAX_TRIPS) + 1
+
+sealed interface SubAgentExecutionProfileResolution {
+    data class Resolved(val profile: SubAgentExecutionProfile) : SubAgentExecutionProfileResolution
+    data class Rejected(val error: String, val detail: String) : SubAgentExecutionProfileResolution
+}
+
+/**
+ * Resolves request overrides into one frozen child-run profile without mutating the parent
+ * [me.rerere.rikkahub.data.model.Assistant]. Tool names are intersected with both the caller's
+ * actual tool surface and the tools that are safe in a headless conversation.
+ */
+fun resolveSubAgentExecutionProfile(
+    runId: String,
+    request: SubAgentRequest,
+    inputs: SubAgentExecutionInputs,
+): SubAgentExecutionProfileResolution {
+    val requestedModelId = request.modelId?.trim()?.takeIf(String::isNotEmpty)?.let { raw ->
+        runCatching { Uuid.parse(raw) }.getOrElse {
+            return SubAgentExecutionProfileResolution.Rejected(
+                error = "invalid_model_id",
+                detail = "model_id is not a valid UUID",
+            )
+        }
+    }
+    val effectiveModelId = requestedModelId
+        ?: inputs.assistantDefaultModelId
+        ?: inputs.parentEffectiveModelId
+    if (effectiveModelId !in inputs.availableModelIds) {
+        return SubAgentExecutionProfileResolution.Rejected(
+            error = "unknown_model",
+            detail = "the selected child model is not available",
+        )
+    }
+
+    val requestedPrompt = request.systemPrompt?.trim().orEmpty()
+    val assistantPrompt = inputs.assistantSystemPrompt.trim()
+    val (promptSource, prompt) = when {
+        requestedPrompt.isNotEmpty() -> SubAgentPromptSource.REQUEST to requestedPrompt
+        assistantPrompt.isNotEmpty() -> SubAgentPromptSource.ASSISTANT to assistantPrompt
+        else -> SubAgentPromptSource.DEFAULT to SubAgentDefaults.DEFAULT_SYSTEM_PROMPT
+    }
+    val requestedTools = request.tools?.map(String::trim)?.distinct()
+    requestedTools?.forEach { toolName ->
+        when {
+            toolName.isEmpty() || toolName !in inputs.knownToolNames ->
+                return SubAgentExecutionProfileResolution.Rejected(
+                    error = "unknown_tool",
+                    detail = "unknown child tool: ${toolName.ifEmpty { "<blank>" }}",
+                )
+
+            toolName !in inputs.callerToolNames ->
+                return SubAgentExecutionProfileResolution.Rejected(
+                    error = "tool_not_authorized",
+                    detail = "the parent turn did not expose tool: $toolName",
+                )
+
+            toolName !in inputs.headlessToolNames ->
+                return SubAgentExecutionProfileResolution.Rejected(
+                    error = "tool_unavailable_headless",
+                    detail = "tool requires an interactive surface: $toolName",
+                )
+        }
+    }
+    val effectiveTools = requestedTools?.toSet()
+        ?: inputs.callerToolNames.intersect(inputs.headlessToolNames)
+
+    return SubAgentExecutionProfileResolution.Resolved(
+        SubAgentExecutionProfile(
+            runId = runId,
+            effectiveModelId = effectiveModelId,
+            promptSource = promptSource,
+            effectiveSystemPrompt = prompt,
+            effectiveToolNames = effectiveTools,
+            maxToolTrips = request.maxTrips,
+        ),
+    )
+}
+
+/** Returns only tools that can run without an interactive approval or Activity surface. */
+internal fun subAgentHeadlessToolNames(callerToolNames: Set<String>): Set<String> =
+    callerToolNames.filterTo(linkedSetOf()) { toolName ->
+        val recursiveOrManagement = toolName.startsWith("subagent_") ||
+            toolName.startsWith("research_") ||
+            toolName.startsWith("setup_") ||
+            toolName.startsWith("assistant_") ||
+            toolName.startsWith("conversation_") ||
+            toolName.startsWith("lorebook_") ||
+            toolName.startsWith("mode_injection_") ||
+            toolName.startsWith("app_settings_") ||
+            toolName.startsWith("rikkahub_")
+        if (recursiveOrManagement || toolName == "ask_user") {
+            return@filterTo false
+        }
+        if (toolName in ToolApprovalDefaults.NO_ALWAYS_ALLOW) {
+            return@filterTo false
+        }
+        when (CapabilityCatalog.toolInvocationSurface(toolName)) {
+            ToolInvocationSurface.Activity -> toolName in BrowserToolDefaults.ALL_TOOLS
+            ToolInvocationSurface.SystemConsent -> false
+            else -> true
+        }
+    }
 
 object SubAgentRequestValidator {
 

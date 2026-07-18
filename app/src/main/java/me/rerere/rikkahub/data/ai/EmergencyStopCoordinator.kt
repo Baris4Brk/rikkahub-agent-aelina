@@ -9,6 +9,7 @@ import me.rerere.rikkahub.data.ai.tools.local.ExternalPrivilegeBridge
 import me.rerere.rikkahub.data.ai.tools.local.TermuxSessionEmergencyController
 import me.rerere.rikkahub.data.repository.WorkspaceRepository
 import me.rerere.rikkahub.privilege.PrivilegedCommandResult
+import me.rerere.rikkahub.research.ResearchCoordinator
 import me.rerere.rikkahub.service.ChatService
 import me.rerere.rikkahub.subagent.SubAgentRegistry
 import me.rerere.rikkahub.workflow.execution.WorkflowEmergencyController
@@ -63,11 +64,13 @@ class EmergencyStopCoordinator(
     private val chatService: ChatService,
     private val termuxSessionController: TermuxSessionEmergencyController,
     private val subAgentRegistry: SubAgentRegistry,
+    private val researchCoordinator: ResearchCoordinator,
     private val workflowEmergencyController: WorkflowEmergencyController,
 ) {
     suspend fun setStopped(stopped: Boolean): EmergencyStopResult? {
         if (!stopped) {
             safetySettings.setEmergencyStop(false)
+            researchCoordinator.resumeNewRuns()
             workflowEmergencyController.resumeNewRuns()
             return null
         }
@@ -111,6 +114,16 @@ class EmergencyStopCoordinator(
                         ok = true,
                         code = "CANCEL_REQUESTED",
                         message = "Cancellation requested for $affected active sub-agents.",
+                        affectedCount = affected,
+                    )
+                },
+                emergencyStopParticipant("research") {
+                    val affected = researchCoordinator.cancelAllActive()
+                    EmergencyStopParticipantResult(
+                        participantId = "research",
+                        ok = true,
+                        code = "CANCEL_REQUESTED",
+                        message = "Cancellation requested for $affected active research runs.",
                         affectedCount = affected,
                     )
                 },

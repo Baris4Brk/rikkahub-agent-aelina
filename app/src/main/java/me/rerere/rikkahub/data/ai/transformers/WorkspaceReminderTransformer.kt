@@ -15,6 +15,8 @@ import me.rerere.workspace.WorkspaceShellStatus
  */
 class WorkspaceReminderTransformer(
     private val workspaceRepository: WorkspaceRepository,
+    private val rulesResolver: WorkspaceRulesResolver =
+        WorkspaceRulesResolver(workspaceRepository),
 ) : InputMessageTransformer {
     override suspend fun transform(
         ctx: TransformerContext,
@@ -23,9 +25,16 @@ class WorkspaceReminderTransformer(
         val workspaceId = ctx.assistant.workspaceId?.toString() ?: return messages
         val workspace = workspaceRepository.getById(workspaceId) ?: return messages
         // 与 ChatService.createWorkspaceToolsIfReady 保持一致: 仅在 shell 就绪时注入
-        if (workspace.shellStatus != WorkspaceShellStatus.READY.name) return messages
-
-        val prompt = buildWorkspacePrompt(workspace, ctx.workspaceCwd)
+        val prompt = buildList {
+            if (workspace.shellStatus == WorkspaceShellStatus.READY.name) {
+                add(buildWorkspacePrompt(workspace, ctx.workspaceCwd))
+            }
+            rulesResolver.resolve(workspace.id, ctx.workspaceCwd)
+                .toPrompt()
+                .takeIf(String::isNotBlank)
+                ?.let(::add)
+        }.joinToString("\n\n")
+        if (prompt.isBlank()) return messages
 
         // 追加到第一条 system 消息; 若不存在则插入一条
         val systemIndex = messages.indexOfFirst { it.role == MessageRole.SYSTEM }
@@ -41,7 +50,10 @@ class WorkspaceReminderTransformer(
 
 private fun buildWorkspacePrompt(workspace: WorkspaceEntity, cwd: String? = null): String = buildString {
     appendLine("<workspace>")
-    appendLine("You have access to a persistent Linux workspace named \"${workspace.name}\", running in a sandboxed proot rootfs environment.")
+    appendLine(
+        "You have access to a persistent Linux workspace named " +
+            "\"${escapeXmlText(workspace.name)}\", running in a sandboxed proot rootfs environment.",
+    )
     appendLine("- The workspace files area is mounted at `/workspace`. Use it as your working directory; files written there persist across turns of this conversation.")
     appendLine("- All paths passed to workspace tools must be absolute and inside the Rootfs (for example `/workspace/notes.md`).")
     appendLine("- Available tools:")
@@ -52,7 +64,10 @@ private fun buildWorkspacePrompt(workspace: WorkspaceEntity, cwd: String? = null
     appendLine("- The skills directory is mounted at `/skills`. Each skill is a subdirectory `/skills/<skill-name>/` containing a `SKILL.md` (with `name` and `description` frontmatter) plus any supporting files. Read a skill's `SKILL.md` before using it, and follow its instructions.")
     appendLine("- Exchange files with RikkaHub or Termux through `/sdcard/RikkaHubExchange` when the shared-storage permission is available.")
     if (!cwd.isNullOrBlank()) {
-        appendLine("- Current working directory: `$cwd`. Use this as the default context for file operations and shell commands.")
+        appendLine(
+            "- Current working directory: `${escapeXmlText(cwd)}`. " +
+                "Use this as the default context for file operations and shell commands.",
+        )
     }
     append("</workspace>")
 }

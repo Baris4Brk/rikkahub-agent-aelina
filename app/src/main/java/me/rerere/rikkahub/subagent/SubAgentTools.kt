@@ -39,6 +39,18 @@ private fun encodeRun(run: SubAgentRun): kotlinx.serialization.json.JsonObject =
     put("trip_count", run.tripCount)
 }
 
+internal fun me.rerere.rikkahub.data.ai.tools.ToolInvocationContext.toSubAgentCallerContext(
+    completionPolicy: SubAgentParentCompletionPolicy =
+        SubAgentParentCompletionPolicy.NOTIFY_PARENT,
+): SubAgentCallerContext = SubAgentCallerContext(
+    parentAssistantId = callerAssistantId.orEmpty(),
+    parentConversationId = callerConversationId,
+    parentEffectiveModelId = callerModelId
+        ?.let { raw -> runCatching { kotlin.uuid.Uuid.parse(raw) }.getOrNull() },
+    toolNames = toolNameSurface.snapshot(),
+    completionPolicy = completionPolicy,
+)
+
 /**
  * Phase 11 — sub-agent dispatch + observation tools. The four register only when the
  * assistant has the `Sub-agents` Local Tools toggle on, AND the calling conversation is
@@ -123,9 +135,8 @@ fun subagentDispatchTool(
         // construction time. Empty fallback is a no-knowledge sentinel — engine treats it
         // as "not in a headless run" which is correct for the legacy registration paths
         // that don't yet wire context (one-off / test).
-        val parentAssistantId = callerContext.callerAssistantId.orEmpty()
-        val parentChatId: String? = callerContext.callerConversationId
-        when (val res = engine.dispatch(parentAssistantId, parentChatId, request)) {
+        val caller = callerContext.toSubAgentCallerContext()
+        when (val res = engine.dispatch(caller, request)) {
             is SubAgentEngine.DispatchResult.Reject ->
                 return@Tool errEnv(res.error, res.detail)
             is SubAgentEngine.DispatchResult.Ok ->
@@ -134,7 +145,10 @@ fun subagentDispatchTool(
     },
 )
 
-fun subagentListTool(registry: SubAgentRegistry): Tool = Tool(
+fun subagentListTool(
+    registry: SubAgentRegistry,
+    callerContext: me.rerere.rikkahub.data.ai.tools.ToolInvocationContext,
+): Tool = Tool(
     name = "subagent_list",
     description = """
         List sub-agent runs visible to this assistant. Set active_only=true to omit
@@ -150,7 +164,9 @@ fun subagentListTool(registry: SubAgentRegistry): Tool = Tool(
     },
     execute = { args ->
         val activeOnly = args.jsonObject["active_only"]?.jsonPrimitive?.booleanOrNull ?: false
-        val list = registry.list(activeOnly)
+        val assistantId = callerContext.callerAssistantId
+            ?: return@Tool errEnv("missing_caller", "caller assistant identity is required")
+        val list = registry.listForAssistant(assistantId, activeOnly)
         val arr = buildJsonArray {
             list.forEach { addJsonObject {
                 put("id", it.id)
@@ -167,7 +183,10 @@ fun subagentListTool(registry: SubAgentRegistry): Tool = Tool(
     },
 )
 
-fun subagentGetTool(registry: SubAgentRegistry): Tool = Tool(
+fun subagentGetTool(
+    registry: SubAgentRegistry,
+    callerContext: me.rerere.rikkahub.data.ai.tools.ToolInvocationContext,
+): Tool = Tool(
     name = "subagent_get",
     description = "Fetch the full run record for a sub-agent by id. Read-only.".trimIndent(),
     parameters = {
@@ -181,13 +200,18 @@ fun subagentGetTool(registry: SubAgentRegistry): Tool = Tool(
     execute = { args ->
         val id = args.jsonObject["id"]?.jsonPrimitive?.contentOrNull
             ?: return@Tool errEnv("invalid_id", "id is required")
-        val run = registry.get(id)
+        val assistantId = callerContext.callerAssistantId
+            ?: return@Tool errEnv("missing_caller", "caller assistant identity is required")
+        val run = registry.getForAssistant(id, assistantId)
             ?: return@Tool errEnv("unknown_id", "no sub-agent run with id $id")
         listOf(UIMessagePart.Text(encodeRun(run).toString()))
     },
 )
 
-fun subagentCancelTool(registry: SubAgentRegistry): Tool = Tool(
+fun subagentCancelTool(
+    registry: SubAgentRegistry,
+    callerContext: me.rerere.rikkahub.data.ai.tools.ToolInvocationContext,
+): Tool = Tool(
     name = "subagent_cancel",
     description = """
         Cancel a running sub-agent by id. Marks the run CANCELLED; safe to call on
@@ -205,10 +229,9 @@ fun subagentCancelTool(registry: SubAgentRegistry): Tool = Tool(
     execute = { args ->
         val id = args.jsonObject["id"]?.jsonPrimitive?.contentOrNull
             ?: return@Tool errEnv("invalid_id", "id is required")
-        val cancelled = registry.requestCancel(id)
-        if (cancelled) {
-            registry.update(id) { it.copy(status = SubAgentStatus.CANCELLED, finishedAtMs = System.currentTimeMillis()) }
-        }
+        val assistantId = callerContext.callerAssistantId
+            ?: return@Tool errEnv("missing_caller", "caller assistant identity is required")
+        val cancelled = registry.requestCancelForAssistant(id, assistantId)
         listOf(UIMessagePart.Text(buildJsonObject {
             put("ok", cancelled)
             put("id", id)

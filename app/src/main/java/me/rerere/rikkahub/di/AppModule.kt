@@ -114,9 +114,11 @@ val appModule = module {
 
     // Phase 11: Sub-agents
     single { me.rerere.rikkahub.subagent.SubAgentRegistry() }
+    single { me.rerere.rikkahub.subagent.SubAgentExecutionProfileRegistry() }
     single {
         me.rerere.rikkahub.subagent.SubAgentEngine(
             registry = get(),
+            executionProfileRegistry = get(),
             // chatService is resolved lazily inside SubAgentEngine to break the
             // ChatService→LocalTools→SubAgentEngine→ChatService cycle. See SubAgentEngine kdoc.
             conversationRepo = get(),
@@ -155,6 +157,43 @@ val appModule = module {
         val safetySettings = get<AgentSafetySettings>()
         me.rerere.rikkahub.workflow.execution.WorkflowEmergencyController(
             persistedEmergencyStop = safetySettings::isEmergencyStop,
+        )
+    }
+    single<me.rerere.rikkahub.research.ResearchChildGateway> {
+        me.rerere.rikkahub.research.SubAgentResearchChildGateway(get(), get())
+    }
+    single<me.rerere.rikkahub.research.ResearchCompletionNotifier> {
+        me.rerere.rikkahub.research.ChatResearchCompletionNotifier()
+    }
+    single {
+        me.rerere.rikkahub.research.ResearchCoordinator(
+            childGateway = get(),
+            scope = get<AppScope>(),
+            completionNotifier = get(),
+        )
+    }
+    single<me.rerere.rikkahub.setup.SetupConfigurationStore> {
+        me.rerere.rikkahub.setup.SettingsStoreSetupConfigurationStore(get())
+    }
+    single<me.rerere.rikkahub.setup.SetupResourceCatalog> {
+        me.rerere.rikkahub.setup.RepositorySetupResourceCatalog(
+            workspaceRepository = get(),
+            skillManager = get(),
+        )
+    }
+    single<me.rerere.rikkahub.setup.SetupTransactionBackend> {
+        me.rerere.rikkahub.setup.SettingsSetupTransactionBackend(
+            configurationStore = get(),
+            resources = get(),
+        )
+    }
+    single<me.rerere.rikkahub.setup.SetupAuditLedger> {
+        me.rerere.rikkahub.setup.AgentRunSetupAuditLedger(get())
+    }
+    single {
+        me.rerere.rikkahub.setup.SetupTransactionCoordinator(
+            backend = get(),
+            auditLedger = get(),
         )
     }
     single {
@@ -285,6 +324,7 @@ val appModule = module {
             bugReportBuilder = get(),
             subAgentEngine = get(),
             subAgentRegistry = get(),
+            researchCoordinator = get(),
             conversationRepo = get(),
             workflowRepository = get(),
             workflowEngine = get(),
@@ -342,6 +382,7 @@ val appModule = module {
             chatService = get(),
             termuxSessionController = get(),
             subAgentRegistry = get(),
+            researchCoordinator = get(),
             workflowEmergencyController = get(),
         )
     }
@@ -373,6 +414,8 @@ val appModule = module {
             shizukuBridgeManager = get(),
             workspaceProcessManager = get(),
             structuredPrivilegedCommandExecutor = get(),
+            subAgentExecutionProfileRegistry = get(),
+            setupTransactionCoordinator = get(),
         )
     }
 

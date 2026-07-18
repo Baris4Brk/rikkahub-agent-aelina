@@ -196,6 +196,8 @@ object ToolApprovalDefaults {
         // delegation happens. list / get / cancel are read-only or user-controlling and
         // have no entry here.
         "subagent_dispatch",
+        "research_start",
+        "setup_apply",
 
         // Workflows (Phase 12) — every mutator goes through the existing approval flow
         // with a human-readable summary rendered by WorkflowApprovalRenderer. workflow_run
@@ -344,6 +346,9 @@ object ToolApprovalDefaults {
         "keystore_decrypt",
         "nfc_write_tag",
         "grant_directory_access",
+        // P0 typed setup is transactional but still changes the agent's own authority surface.
+        // Require a fresh user decision for every transaction; no persistent blanket grant.
+        "setup_apply",
         // Privileged package mutations must be confirmed for every invocation.
         "force_stop_app",
         "clear_app_cache",

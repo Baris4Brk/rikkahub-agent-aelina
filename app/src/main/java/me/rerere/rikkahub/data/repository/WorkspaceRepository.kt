@@ -10,6 +10,8 @@ import kotlinx.coroutines.withContext
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.db.dao.WorkspaceDAO
 import me.rerere.rikkahub.data.db.entity.WorkspaceEntity
+import me.rerere.rikkahub.data.ai.transformers.WorkspaceRuleFileMetadata
+import me.rerere.rikkahub.data.ai.transformers.WorkspaceRulesFileSource
 import me.rerere.rikkahub.utils.JsonInstant
 import me.rerere.workspace.RootfsInstallProgress
 import me.rerere.workspace.RootfsInstaller
@@ -21,6 +23,8 @@ import me.rerere.workspace.WorkspaceShellStatus
 import me.rerere.workspace.WorkspaceStorageArea
 import java.io.InputStream
 import java.io.OutputStream
+import java.io.ByteArrayOutputStream
+import java.io.File
 import kotlin.uuid.Uuid
 
 class WorkspaceRepository(
@@ -29,7 +33,7 @@ class WorkspaceRepository(
     private val rootfsInstaller: RootfsInstaller,
     private val settingsStore: SettingsStore,
     private val processManager: WorkspaceProcessManager,
-) {
+) : WorkspaceRulesFileSource {
     fun listFlow(): Flow<List<WorkspaceEntity>> = dao.listFlow()
 
     suspend fun getAll(): List<WorkspaceEntity> = dao.getAll()
@@ -166,6 +170,39 @@ class WorkspaceRepository(
         val workspace = dao.getById(id) ?: error("Workspace not found: $id")
         manager.ensureWorkspace(workspace.root)
         manager.readText(workspace.root, path)
+    }
+
+    override suspend fun stat(
+        workspaceId: String,
+        path: String,
+    ): WorkspaceRuleFileMetadata? = withContext(Dispatchers.IO) {
+        val workspace = dao.getById(workspaceId) ?: return@withContext null
+        val file = resolveRuleFile(workspace, path) ?: return@withContext null
+        if (!file.isFile) return@withContext null
+        WorkspaceRuleFileMetadata(file.length(), file.lastModified())
+    }
+
+    override suspend fun read(
+        workspaceId: String,
+        path: String,
+        maxBytes: Int,
+    ): ByteArray? = withContext(Dispatchers.IO) {
+        if (maxBytes <= 0) return@withContext ByteArray(0)
+        val workspace = dao.getById(workspaceId) ?: return@withContext null
+        val file = resolveRuleFile(workspace, path) ?: return@withContext null
+        if (!file.isFile) return@withContext null
+        val output = ByteArrayOutputStream(minOf(maxBytes, 8 * 1024))
+        file.inputStream().use { input ->
+            val buffer = ByteArray(4 * 1024)
+            var remaining = maxBytes
+            while (remaining > 0) {
+                val count = input.read(buffer, 0, minOf(buffer.size, remaining))
+                if (count < 0) break
+                output.write(buffer, 0, count)
+                remaining -= count
+            }
+        }
+        output.toByteArray()
     }
 
     suspend fun writeText(
@@ -313,6 +350,25 @@ class WorkspaceRepository(
             updatedAt = System.currentTimeMillis(),
         )
     }
+
+    private fun resolveRuleFile(
+        workspace: WorkspaceEntity,
+        path: String,
+    ): File? = runCatching {
+        val normalized = path.trim().replace('\\', '/')
+        if (normalized != "/workspace" && !normalized.startsWith("/workspace/")) {
+            return@runCatching null
+        }
+        if (normalized.contains('\u0000')) return@runCatching null
+        val relative = normalized.removePrefix("/workspace").trimStart('/')
+        val root = manager.filesDir(workspace.root).canonicalFile
+        val target = if (relative.isEmpty()) root else File(root, relative).canonicalFile
+        if (target.path == root.path || target.path.startsWith(root.path + File.separator)) {
+            target
+        } else {
+            null
+        }
+    }.getOrNull()
 
     companion object {
         private const val TAG = "WorkspaceRepository"

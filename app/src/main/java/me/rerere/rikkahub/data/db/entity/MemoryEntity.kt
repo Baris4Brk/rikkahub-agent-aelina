@@ -12,4 +12,10 @@ data class MemoryEntity(
     val assistantId: String,
     @ColumnInfo("content")
     val content: String = "",
+    @ColumnInfo("title")
+    val title: String? = null,
+    @ColumnInfo(name = "updated_at_ms", defaultValue = "0")
+    val updatedAtMs: Long = 0L,
+    @ColumnInfo(name = "importance", defaultValue = "0.5")
+    val importance: Float = 0.5f,
 )

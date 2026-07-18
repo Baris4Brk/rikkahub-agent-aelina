@@ -6,7 +6,10 @@ import me.rerere.rikkahub.data.db.dao.MemoryDAO
 import me.rerere.rikkahub.data.db.entity.MemoryEntity
 import me.rerere.rikkahub.data.model.AssistantMemory
 
-class MemoryRepository(private val memoryDAO: MemoryDAO) {
+class MemoryRepository(
+    private val memoryDAO: MemoryDAO,
+    private val retriever: MemoryRetriever,
+) {
     companion object {
         const val GLOBAL_MEMORY_ID = "__global__"
     }
@@ -33,6 +36,20 @@ class MemoryRepository(private val memoryDAO: MemoryDAO) {
             .map { AssistantMemory(it.id, it.content) }
     }
 
+    suspend fun queryRelevant(
+        assistantId: kotlin.uuid.Uuid?,
+        query: String,
+        includeGlobal: Boolean,
+        limit: Int = DEFAULT_MEMORY_TOP_K,
+        maxChars: Int = DEFAULT_MEMORY_PROMPT_MAX_CHARS,
+    ): List<MemoryMatch> = retriever.queryRelevant(
+        assistantId = assistantId,
+        query = query,
+        includeGlobal = includeGlobal,
+        limit = limit,
+        maxChars = maxChars,
+    )
+
     suspend fun deleteMemoriesOfAssistant(assistantId: String) {
         memoryDAO.deleteMemoriesOfAssistant(assistantId)
     }
@@ -40,7 +57,8 @@ class MemoryRepository(private val memoryDAO: MemoryDAO) {
     suspend fun updateContent(id: Int, content: String): AssistantMemory {
         val old = memoryDAO.getMemoryById(id) ?: error("Memory record #$id not found")
         val newMemory = old.copy(
-            content = content
+            content = content,
+            updatedAtMs = System.currentTimeMillis(),
         )
         memoryDAO.updateMemory(newMemory)
         return AssistantMemory(
@@ -58,7 +76,8 @@ class MemoryRepository(private val memoryDAO: MemoryDAO) {
             id = memoryDAO.insertMemory(
                 MemoryEntity(
                     assistantId = assistantId,
-                    content = memory.content
+                    content = memory.content,
+                    updatedAtMs = System.currentTimeMillis(),
                 )
             ).toInt()
         )

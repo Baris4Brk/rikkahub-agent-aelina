@@ -172,6 +172,7 @@ object CapabilityCatalog {
         LocalToolOption.CostGuards to setOf("check_token_usage"),
         LocalToolOption.SubAgents to setOf(
             "subagent_dispatch", "subagent_list", "subagent_get", "subagent_cancel",
+            "research_start", "research_status", "research_cancel",
         ),
         LocalToolOption.Alarm to setOf("alarm_create", "alarm_list", "alarm_delete"),
         LocalToolOption.Keystore to setOf(
@@ -270,6 +271,9 @@ object CapabilityCatalog {
         "subagent_cancel",
         "subagent_get",
         "subagent_list",
+        "research_start",
+        "research_status",
+        "research_cancel",
         "workflow_get",
         "workflow_list",
         "workspace_process_start",

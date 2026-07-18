@@ -404,6 +404,8 @@ class GenerationHandler(
         unrestrictedOverride: Boolean = false,
         memories: List<AssistantMemory>? = null,
         tools: List<Tool> = emptyList(),
+        /** False for a restricted child profile that did not inherit `memory_tool`. */
+        memoryToolAllowed: Boolean = true,
         startableTools: Map<String, me.rerere.rikkahub.data.ai.tools.StartableTool> = emptyMap(),
         maxSteps: Int = 32,
         processingStatus: MutableStateFlow<String?> = MutableStateFlow(null),
@@ -570,7 +572,10 @@ class GenerationHandler(
                 Log.i(TAG, "generateInternal: build tools($assistant)")
                 val completingAlreadyAcceptedTools = pendingTools.isNotEmpty() &&
                     !finalizationStep.skipResumableTools
-                if ((!forceFinalization || completingAlreadyAcceptedTools) && assistant.enableMemory) {
+                if ((!forceFinalization || completingAlreadyAcceptedTools) &&
+                    assistant.enableMemory &&
+                    memoryToolAllowed
+                ) {
                     val memoryAssistantId = if (assistant.useGlobalMemory) {
                         MemoryRepository.GLOBAL_MEMORY_ID
                     } else {

@@ -29,7 +29,9 @@ import me.rerere.rikkahub.data.codex.CodexProvider
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.db.AppDatabase
 import me.rerere.rikkahub.data.db.fts.MessageFtsManager
+import me.rerere.rikkahub.data.db.fts.MemoryFtsManager
 import me.rerere.rikkahub.data.db.fts.SimpleDictManager
+import me.rerere.rikkahub.data.db.fts.ensureMemoryFtsSchema
 import me.rerere.rikkahub.data.db.migrations.Migration_6_7
 import me.rerere.rikkahub.data.db.migrations.Migration_11_12
 import me.rerere.rikkahub.data.db.migrations.Migration_13_14
@@ -39,6 +41,9 @@ import me.rerere.rikkahub.data.db.migrations.Migration_23_24
 import me.rerere.rikkahub.data.db.migrations.MIGRATION_26_27
 import me.rerere.rikkahub.data.db.migrations.MIGRATION_27_28
 import me.rerere.rikkahub.data.db.migrations.MIGRATION_28_29
+import me.rerere.rikkahub.data.db.migrations.MIGRATION_29_30
+import me.rerere.rikkahub.data.repository.MemorySearchIndex
+import me.rerere.rikkahub.data.repository.MemoryRetriever
 import me.rerere.rikkahub.service.chat.DurableCommandQueue
 import me.rerere.rikkahub.data.ai.mcp.McpManager
 import me.rerere.rikkahub.data.agentrun.AgentRunBootRecovery
@@ -67,7 +72,18 @@ val dataSourceModule = module {
         val context: Context = get()
         Room.databaseBuilder(context, AppDatabase::class.java, "rikka_hub")
             .setJournalMode(RoomDatabase.JournalMode.WRITE_AHEAD_LOGGING)
-            .addMigrations(Migration_6_7, Migration_11_12, Migration_13_14, Migration_14_15, Migration_15_16, Migration_23_24, MIGRATION_26_27, MIGRATION_27_28, MIGRATION_28_29)
+            .addMigrations(
+                Migration_6_7,
+                Migration_11_12,
+                Migration_13_14,
+                Migration_14_15,
+                Migration_15_16,
+                Migration_23_24,
+                MIGRATION_26_27,
+                MIGRATION_27_28,
+                MIGRATION_28_29,
+                MIGRATION_29_30,
+            )
             .addCallback(object : RoomDatabase.Callback() {
                 override fun onOpen(db: SupportSQLiteDatabase) {
                     val dictDir = SimpleDictManager.extractDict(context)
@@ -85,6 +101,7 @@ val dataSourceModule = module {
                         }
                     }
                     db.execSQL(me.rerere.rikkahub.data.db.fts.MESSAGE_FTS_CREATE_SQL.trimIndent())
+                    ensureMemoryFtsSchema(db)
                 }
             })
             .openHelperFactory(
@@ -150,6 +167,8 @@ val dataSourceModule = module {
     single {
         MessageFtsManager(get())
     }
+    single<MemorySearchIndex> { MemoryFtsManager(get()) }
+    single { MemoryRetriever(get()) }
 
     // Phase 24 — unified AgentRun ledger. DAO + the single shared writer/reader + the
     // boot-recovery sweep. AgentRunRepository has no cross-dependencies (only the DAO), so
