@@ -28,8 +28,8 @@ contracts only; its ToolPkg/ObjectBox/runtime implementations are not copied.
 | Step | Status | Verification |
 |---|---|---|
 | P0-1 sub-agent execution contract | IMPLEMENTED | Target tests passed; see `01-subagent-contract.md` |
-| P0-2 memory Top-K | IMPLEMENTED | JVM tests passed; device migration pending final pass |
+| P0-2 memory Top-K | IMPLEMENTED | JVM and HONOR migration tests passed; see `02-memory-retrieval.md` |
 | P0-3 workspace rules | IMPLEMENTED | Target tests passed; see `03-workspace-rules.md` |
 | P0-4 bounded deep research | IMPLEMENTED | Target tests passed; see `04-deep-research.md` |
 | P0-5 setup transaction | IMPLEMENTED | Target tests passed; see `05-setup-transaction.md` |
-| Release verification | OFFLINE COMPLETE; DEVICE PENDING | See `90-verification.md` |
+| Release verification | COMPLETE | 1,574 JVM tests, v170 APK, backup, migration, and safe model smoke passed; see `90-verification.md` |

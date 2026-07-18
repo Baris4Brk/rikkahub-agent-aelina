@@ -1,10 +1,10 @@
 package me.rerere.rikkahub.data.db.migrations
 
 import androidx.room.testing.MigrationTestHelper
-import androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import me.rerere.rikkahub.data.db.AppDatabase
+import me.rerere.rikkahub.data.db.createAppSQLiteOpenHelperFactory
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -20,7 +20,9 @@ class Migration_29_30_Test {
         InstrumentationRegistry.getInstrumentation(),
         AppDatabase::class.java,
         emptyList(),
-        FrameworkSQLiteOpenHelperFactory(),
+        createAppSQLiteOpenHelperFactory(
+            InstrumentationRegistry.getInstrumentation().targetContext,
+        ),
     )
 
     @Test
@@ -33,7 +35,8 @@ class Migration_29_30_Test {
             close()
         }
 
-        val db = helper.runMigrationsAndValidate(testDb, 30, true, MIGRATION_29_30)
+        // memory_fts is an intentionally unmanaged projection that is verified explicitly below.
+        val db = helper.runMigrationsAndValidate(testDb, 30, false, MIGRATION_29_30)
         db.query(
             "SELECT content, title, updated_at_ms, importance FROM MemoryEntity WHERE id=7",
         ).use { cursor ->

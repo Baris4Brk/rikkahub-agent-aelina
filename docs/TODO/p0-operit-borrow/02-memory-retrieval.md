@@ -3,7 +3,7 @@
 Goal: preserve the existing `__global__` versus Assistant-exclusive scope while replacing full
 prompt injection with bounded FTS retrieval.
 
-Status: IMPLEMENTED; DEVICE MIGRATION PENDING FINAL PASS
+Status: IMPLEMENTED; DEVICE MIGRATION VERIFIED
 
 Delivered:
 
@@ -15,7 +15,16 @@ Delivered:
   exclusive scope. The two scopes are not merged implicitly.
 - Prompt injection uses the current user query and degrades to an empty memory block if FTS is
   unavailable, rather than loading every stored memory.
+- Production Room startup and migration tests share `createAppSQLiteOpenHelperFactory`, so both
+  use the bundled SQLite FTS5 runtime and the `simple` tokenizer extension. This avoids testing
+  against the device-dependent Android framework SQLite implementation.
 
-Verification: `MemoryRetrieverTest` and `MemoryPromptTest` passed. Room schema `30.json` and
-`Migration_29_30_Test` are present; the instrumentation migration test is reserved for the backed-up
-device installation step.
+Verification:
+
+- `MemoryRetrieverTest` and `MemoryPromptTest` passed in the final 1,574-test JVM regression.
+- Room schema `30.json` is checked in.
+- The backed-up HONOR AAK-AN00 user-0 database migrated to `user_version=30`; the resulting
+  `MemoryEntity` columns, FTS5 table, `simple` tokenizer, three synchronization triggers, and Room
+  identity were inspected from the post-install snapshot.
+- Final v170 instrumentation ran only `Migration_29_30_Test` on the device and reported
+  `OK (1 test)`, proving v29 data preservation, metadata defaults, and FTS projection backfill.
