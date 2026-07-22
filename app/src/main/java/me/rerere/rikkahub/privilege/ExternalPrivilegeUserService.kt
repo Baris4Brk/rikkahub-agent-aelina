@@ -1,6 +1,10 @@
 package me.rerere.rikkahub.privilege
 
 import android.content.Context
+import android.graphics.PixelFormat
+import android.hardware.display.DisplayManager
+import android.hardware.display.VirtualDisplay
+import android.media.ImageReader
 import android.os.Parcel
 import android.os.Process as AndroidProcess
 import kotlinx.serialization.SerializationException
@@ -19,6 +23,7 @@ import java.util.concurrent.Future
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
 import kotlin.math.min
 import kotlin.system.exitProcess
@@ -30,6 +35,7 @@ import kotlin.system.exitProcess
  */
 class ExternalPrivilegeUserService() : IExternalPrivilegeBridgeService.Stub() {
     private var applicationPackageName: String = BuildConfig.APPLICATION_ID
+    private var serviceContext: Context? = null
     private val commandPermits = Semaphore(PrivilegedCommandLimits.MAX_CONCURRENT_COMMANDS, true)
     private val runningCommands = ConcurrentHashMap<String, RunningCommand>()
     private val cancellationBeforeStart = ConcurrentHashMap.newKeySet<String>()
@@ -38,10 +44,14 @@ class ExternalPrivilegeUserService() : IExternalPrivilegeBridgeService.Stub() {
     ) { runnable ->
         Thread(runnable, "privileged-command-stream").apply { isDaemon = true }
     }
+    private val managedDisplayBridge = ManagedDisplayBridge()
 
     constructor(context: Context) : this() {
         applicationPackageName = context.packageName
+        serviceContext = context.applicationContext
     }
+
+    override fun displayAutomationBridge(): IDisplayAutomationBridge = managedDisplayBridge
 
     override fun listPackages(userId: Int): String {
         invalidUser(userId)?.let { return encode(it) }
@@ -305,6 +315,7 @@ class ExternalPrivilegeUserService() : IExternalPrivilegeBridgeService.Stub() {
     }
 
     override fun destroy() {
+        managedDisplayBridge.releaseAll()
         cancelAllCommands()
         streamExecutor.shutdownNow()
         thread(name = "shizuku-user-service-exit", isDaemon = true) {
@@ -484,6 +495,181 @@ class ExternalPrivilegeUserService() : IExternalPrivilegeBridgeService.Stub() {
         put("data", buildJsonObject { put("output", result.output) })
     }.toString()
 
+    /**
+     * Fixed-operation bridge for one short-lived virtual display. It intentionally does not
+     * expose shell commands, display enumeration, or arbitrary input injection.
+     */
+    private inner class ManagedDisplayBridge : IDisplayAutomationBridge.Stub() {
+        private val lock = Any()
+        private val displays = linkedMapOf<Int, ManagedVirtualDisplay>()
+
+        override fun createDisplay(): String = synchronized(lock) {
+            if (displays.size >= MAX_MANAGED_DISPLAYS) {
+                return@synchronized ManagedDisplayBridgeWire.failure(
+                    "DISPLAY_CAPACITY_REACHED",
+                    "The managed virtual display capacity has been reached.",
+                )
+            }
+            val context = serviceContext ?: return@synchronized ManagedDisplayBridgeWire.failure(
+                "DISPLAY_CAPABILITY_UNAVAILABLE",
+                "The privileged display context is unavailable.",
+            )
+            val displayManager = context.getSystemService(DisplayManager::class.java)
+                ?: return@synchronized ManagedDisplayBridgeWire.failure(
+                    "DISPLAY_CAPABILITY_UNAVAILABLE",
+                    "The device does not expose DisplayManager.",
+                )
+            val imageReader = try {
+                ImageReader.newInstance(
+                    MANAGED_DISPLAY_WIDTH,
+                    MANAGED_DISPLAY_HEIGHT,
+                    PixelFormat.RGBA_8888,
+                    IMAGE_READER_MAX_IMAGES,
+                )
+            } catch (_: RuntimeException) {
+                return@synchronized ManagedDisplayBridgeWire.failure(
+                    "DISPLAY_CAPABILITY_UNAVAILABLE",
+                    "The managed display surface could not be created.",
+                )
+            }
+            val displayIdHolder = AtomicInteger(-1)
+            val callback = object : VirtualDisplay.Callback() {
+                override fun onStopped() {
+                    val displayId = displayIdHolder.get()
+                    if (displayId > 0) releaseDisplay(displayId)
+                }
+            }
+            val virtualDisplay = try {
+                displayManager.createVirtualDisplay(
+                    "RikkaHub Managed Display",
+                    MANAGED_DISPLAY_WIDTH,
+                    MANAGED_DISPLAY_HEIGHT,
+                    context.resources.displayMetrics.densityDpi.coerceAtLeast(1),
+                    imageReader.surface,
+                    MANAGED_DISPLAY_FLAGS,
+                    callback,
+                    null,
+                )
+            } catch (_: RuntimeException) {
+                imageReader.close()
+                return@synchronized ManagedDisplayBridgeWire.failure(
+                    "DISPLAY_CAPABILITY_UNAVAILABLE",
+                    "The system rejected managed virtual display creation.",
+                )
+            }
+            if (virtualDisplay == null) {
+                imageReader.close()
+                return@synchronized ManagedDisplayBridgeWire.failure(
+                    "DISPLAY_CAPABILITY_UNAVAILABLE",
+                    "The system did not create a managed virtual display.",
+                )
+            }
+            val displayId = virtualDisplay.display?.displayId ?: -1
+            if (displayId <= 0 || displays.containsKey(displayId)) {
+                virtualDisplay.release()
+                imageReader.close()
+                return@synchronized ManagedDisplayBridgeWire.failure(
+                    "DISPLAY_CAPABILITY_UNAVAILABLE",
+                    "The system returned an invalid managed virtual display.",
+                )
+            }
+            displayIdHolder.set(displayId)
+            displays[displayId] = ManagedVirtualDisplay(virtualDisplay, imageReader)
+            ManagedDisplayBridgeWire.success(
+                displayId = displayId,
+                capabilities = setOf(me.rerere.rikkahub.display.DisplayCapability.CREATE),
+                message = "Managed virtual display created.",
+            )
+        }
+
+        override fun displayStatus(displayId: Int): String = synchronized(lock) {
+            if (displayId <= 0) return@synchronized ManagedDisplayBridgeWire.failure(
+                "DISPLAY_PRIMARY_FORBIDDEN",
+                "The primary display is never managed by this bridge.",
+            )
+            if (displayId !in displays) return@synchronized ManagedDisplayBridgeWire.failure(
+                "DISPLAY_NOT_FOUND",
+                "The managed virtual display is no longer available.",
+            )
+            ManagedDisplayBridgeWire.success(
+                displayId = displayId,
+                capabilities = setOf(me.rerere.rikkahub.display.DisplayCapability.CREATE),
+                message = "Managed virtual display is active.",
+            )
+        }
+
+        override fun sendKey(displayId: Int, keyCode: Int): String = synchronized(lock) {
+            if (displayId <= 0) return@synchronized ManagedDisplayBridgeWire.failure(
+                "DISPLAY_PRIMARY_FORBIDDEN",
+                "The primary display is never managed by this bridge.",
+            )
+            if (displayId !in displays) return@synchronized ManagedDisplayBridgeWire.failure(
+                "DISPLAY_NOT_FOUND",
+                "The managed virtual display is no longer available.",
+            )
+            // Android's public SDK has no bounded, per-display key injection API. Do not turn
+            // this fixed endpoint into a hidden-API or shell escape hatch.
+            ManagedDisplayBridgeWire.failure(
+                "DISPLAY_CAPABILITY_UNAVAILABLE",
+                "Per-display key injection is unavailable on this device.",
+                displayId = displayId,
+            )
+        }
+
+        override fun closeDisplay(displayId: Int): String {
+            if (displayId <= 0) return ManagedDisplayBridgeWire.failure(
+                "DISPLAY_PRIMARY_FORBIDDEN",
+                "The primary display is never managed by this bridge.",
+            )
+            val managed = synchronized(lock) { displays.remove(displayId) }
+                ?: return ManagedDisplayBridgeWire.failure(
+                    "DISPLAY_NOT_FOUND",
+                    "The managed virtual display is no longer available.",
+                )
+            managed.close()
+            return ManagedDisplayBridgeWire.success(
+                displayId = displayId,
+                capabilities = setOf(me.rerere.rikkahub.display.DisplayCapability.CREATE),
+                message = "Managed virtual display closed.",
+            )
+        }
+
+        override fun closeAllDisplays(): String {
+            releaseAll()
+            return ManagedDisplayBridgeWire.success(
+                displayId = null,
+                capabilities = emptySet(),
+                message = "All managed virtual displays closed.",
+            )
+        }
+
+        fun releaseAll() {
+            val managed = synchronized(lock) {
+                displays.values.toList().also { displays.clear() }
+            }
+            managed.forEach(ManagedVirtualDisplay::close)
+        }
+
+        private fun releaseDisplay(displayId: Int) {
+            val managed = synchronized(lock) { displays.remove(displayId) }
+            managed?.close()
+        }
+    }
+
+    private class ManagedVirtualDisplay(
+        private val virtualDisplay: VirtualDisplay,
+        private val imageReader: ImageReader,
+    ) {
+        private val closed = AtomicBoolean(false)
+
+        fun close() {
+            if (closed.compareAndSet(false, true)) {
+                virtualDisplay.release()
+                imageReader.close()
+            }
+        }
+    }
+
     private inner class RunningCommand(
         val commandId: String,
         val input: PrivilegedCommandInput,
@@ -587,6 +773,13 @@ class ExternalPrivilegeUserService() : IExternalPrivilegeBridgeService.Stub() {
         private const val TERMINATION_GRACE_MS = 750L
         private const val TERMINATION_WAIT_MS = 2_000L
         private const val SIGNAL_TIMEOUT_MS = 1_000L
+        private const val MAX_MANAGED_DISPLAYS = 1
+        private const val MANAGED_DISPLAY_WIDTH = 1_280
+        private const val MANAGED_DISPLAY_HEIGHT = 720
+        private const val IMAGE_READER_MAX_IMAGES = 2
+        private const val MANAGED_DISPLAY_FLAGS =
+            DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC or
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION
 
         private val COMMAND_ID_PATTERN = Regex(
             "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$",

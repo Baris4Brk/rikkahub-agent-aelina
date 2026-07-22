@@ -6,12 +6,20 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.jsonObject
 import me.rerere.ai.core.Tool
+import me.rerere.rikkahub.data.ai.ToolCallOrigin
+import me.rerere.rikkahub.data.ai.execution.ToolExecutionPlanRequest
+import me.rerere.rikkahub.data.ai.execution.ToolExecutionPlanResult
+import me.rerere.rikkahub.data.ai.execution.ToolRunPreflight
+import me.rerere.rikkahub.data.ai.execution.ToolRuntime
+import me.rerere.rikkahub.data.ai.execution.ToolRuntimeInvocation
+import me.rerere.rikkahub.data.ai.execution.ToolStartableResolver
 import me.rerere.rikkahub.data.ai.tools.HardlineCommandGuard
 import me.rerere.rikkahub.data.ai.tools.LocalTools
+import me.rerere.rikkahub.data.ai.tools.ToolExecutionContext
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.workflow.condition.ConditionEvaluator
 import me.rerere.rikkahub.workflow.condition.ContextProvider
@@ -213,17 +221,35 @@ class WorkflowEngine(
         // Headless context — sub-agent recursion guard fires from workflow-action
         // dispatch so a workflow's actions can't spawn a sub-agent that re-fires another
         // workflow_run that re-spawns ad infinitum.
+        val executionContext = ToolExecutionContext(
+            runId = kotlin.uuid.Uuid.random(),
+            conversationId = kotlin.uuid.Uuid.random(),
+            assistantId = authoringAssistant.id.toString(),
+            callOrigin = ToolCallOrigin.TrustedWorkflow,
+        )
         val tools = localTools.getTools(
             authoringAssistant.localTools,
             me.rerere.rikkahub.data.ai.tools.ToolInvocationContext(
                 callerAssistantId = authoringAssistant.id.toString(),
                 callerConversationId = null,  // headless workflow fire — no conv
+                callerWorkspaceId = authoringAssistant.workspaceId?.toString(),
                 isHeadless = true,
+            ).copy(
+                callerConversationId = executionContext.conversationId.toString(),
+                callerRunId = executionContext.runId.toString(),
+                callOrigin = ToolCallOrigin.TrustedWorkflow,
             ),
         )
 
         // Execute the action sequence. ActionRunner enforces per-action timeout + HARDLINE.
-        val result = actionRunner.run(def.actions, tools)
+        val result = actionRunner.run(
+            actions = def.actions,
+            availableTools = tools,
+            invocation = ToolRuntimeInvocation(
+                executionContext = executionContext,
+                unrestrictedOverride = authoringAssistant.unrestricted,
+            ),
+        )
         val status = if (result.success) WorkflowRunStatus.SUCCESS else WorkflowRunStatus.FAILED
         return persistAndReturn(workflowId, firedAtMs, started, status, result.error, result.summary, ledgerId)
     }
@@ -349,11 +375,19 @@ internal object CooldownGate {
  *
  * Per-action timeout is the action's [WorkflowAction.timeoutSeconds] field; default 60s.
  */
-class WorkflowActionRunner {
+class WorkflowActionRunner(
+    private val toolRuntime: ToolRuntime,
+    private val toolStartableResolver: ToolStartableResolver,
+    private val preflight: ToolRunPreflight,
+) {
 
     data class RunResult(val success: Boolean, val error: String?, val summary: String)
 
-    suspend fun run(actions: List<WorkflowAction>, availableTools: List<Tool>): RunResult {
+    suspend fun run(
+        actions: List<WorkflowAction>,
+        availableTools: List<Tool>,
+        invocation: ToolRuntimeInvocation,
+    ): RunResult {
         val outputs = mutableListOf<String>()
         for ((idx, action) in actions.withIndex()) {
             val argsJson = action.args.toString()
@@ -366,8 +400,31 @@ class WorkflowActionRunner {
             }
             val tool = availableTools.find { it.name == action.tool }
                 ?: return RunResult(false, "action $idx: unknown_tool:${action.tool}", outputs.joinToString("\n"))
-            val out = try {
-                withTimeoutOrNull(action.timeoutSeconds * 1000L) { tool.execute(action.args) }
+            val runtimeResult = try {
+                toolRuntime.execute(
+                    ToolExecutionPlanRequest(
+                        toolCallId = "workflow-${invocation.executionContext.runId}-$idx",
+                        toolName = tool.name,
+                        args = action.args,
+                        executionContext = invocation.executionContext,
+                        startableTool = toolStartableResolver.resolve(
+                            tool,
+                            invocation.executionContext,
+                        ),
+                        legacyExecute = { input -> tool.execute(input.jsonObject) },
+                        runControl = null,
+                        wallClockBudgetMs = action.timeoutSeconds.toLong()
+                            .coerceAtLeast(0L) * 1_000L,
+                        preExecutionGate = {
+                            preflight.authorize(
+                                toolName = tool.name,
+                                args = action.args,
+                                context = invocation.executionContext,
+                                unrestrictedOverride = invocation.unrestrictedOverride,
+                            )
+                        },
+                    ),
+                )
             } catch (c: kotlinx.coroutines.CancellationException) {
                 // Don't swallow cancellation — re-throw so structured concurrency can
                 // unwind the fire (e.g. the engine scope is cancelled on shutdown). The
@@ -379,11 +436,19 @@ class WorkflowActionRunner {
                     "action $idx: ${t::class.simpleName}: ${t.message.orEmpty()}".take(500),
                     outputs.joinToString("\n"))
             }
-            if (out == null) {
+            if (runtimeResult is ToolExecutionPlanResult.TimedOut) {
                 return RunResult(false,
                     "action $idx: ${action.tool} exceeded ${action.timeoutSeconds}s",
                     outputs.joinToString("\n"))
             }
+            if (runtimeResult is ToolExecutionPlanResult.Rejected) {
+                return RunResult(
+                    false,
+                    "action $idx: ${runtimeResult.errorCode}: ${runtimeResult.detail}".take(500),
+                    outputs.joinToString("\n"),
+                )
+            }
+            val out = (runtimeResult as ToolExecutionPlanResult.Completed).output
             // Surface the first ~200 chars of the tool's text output for the run history.
             val text = out.filterIsInstance<me.rerere.ai.ui.UIMessagePart.Text>()
                 .joinToString("\n") { it.text }

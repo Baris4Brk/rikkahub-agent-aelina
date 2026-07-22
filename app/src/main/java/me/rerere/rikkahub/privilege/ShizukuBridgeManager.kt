@@ -39,12 +39,13 @@ import me.rerere.rikkahub.data.ai.tools.local.ExternalPrivilegePackage
 import me.rerere.rikkahub.data.ai.tools.local.ExternalPrivilegePackageList
 import me.rerere.rikkahub.data.ai.tools.local.ProtectedPackagePolicy
 import me.rerere.rikkahub.data.ai.tools.ToolExecutionHandle
+import java.util.concurrent.CopyOnWriteArraySet
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.uuid.Uuid
 import rikka.shizuku.Shizuku
 
 /** App-process adapter around Shizuku/Sui Binder lifecycle and the typed UserService. */
-class ShizukuBridgeManager(context: Context) : ExternalPrivilegeBridge {
+class ShizukuBridgeManager(context: Context) : ExternalPrivilegeBridge, ManagedDisplayBridgeConnector {
     private val appContext = context.applicationContext
     private val packageManager = appContext.packageManager
     private val serviceMutex = Mutex()
@@ -61,6 +62,7 @@ class ShizukuBridgeManager(context: Context) : ExternalPrivilegeBridge {
     private val _status = MutableStateFlow(computeStatus())
     val statusFlow: StateFlow<ExternalPrivilegeBridgeStatus> = _status.asStateFlow()
     private val activeCommands = AtomicInteger(0)
+    private val displayBridgeDeathListeners = CopyOnWriteArraySet<() -> Unit>()
 
     /** Process-local count used only for runtime diagnostics; command payloads are never retained. */
     val activeCommandCount: Int get() = activeCommands.get().coerceAtLeast(0)
@@ -71,7 +73,7 @@ class ShizukuBridgeManager(context: Context) : ExternalPrivilegeBridge {
 
     private val binderReceivedListener = Shizuku.OnBinderReceivedListener { refreshStatus() }
     private val binderDeadListener = Shizuku.OnBinderDeadListener {
-        clearUserService()
+        clearUserService(notifyDisplayListeners = true)
         pendingConnection?.completeExceptionally(IllegalStateException("Shizuku Binder died."))
         pendingConnection = null
         refreshStatus()
@@ -84,7 +86,7 @@ class ShizukuBridgeManager(context: Context) : ExternalPrivilegeBridge {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
             val connected = IExternalPrivilegeBridgeService.Stub.asInterface(binder)
             if (connected == null) {
-                clearUserService()
+                clearUserService(notifyDisplayListeners = true)
                 pendingConnection?.completeExceptionally(
                     IllegalStateException("Shizuku UserService returned a null Binder."),
                 )
@@ -96,7 +98,7 @@ class ShizukuBridgeManager(context: Context) : ExternalPrivilegeBridge {
             userService = connected
             val deathRecipient = IBinder.DeathRecipient {
                 if (userService?.asBinder() == connected.asBinder()) {
-                    clearUserService()
+                    clearUserService(notifyDisplayListeners = true)
                     refreshStatus()
                 }
             }
@@ -108,7 +110,7 @@ class ShizukuBridgeManager(context: Context) : ExternalPrivilegeBridge {
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
-            clearUserService()
+            clearUserService(notifyDisplayListeners = true)
             refreshStatus()
         }
     }
@@ -218,7 +220,9 @@ class ShizukuBridgeManager(context: Context) : ExternalPrivilegeBridge {
                     ),
                 )
             } catch (error: Exception) {
-                if (!service.asBinder().isBinderAlive) clearUserService()
+                if (!service.asBinder().isBinderAlive) {
+                    clearUserService(notifyDisplayListeners = true)
+                }
                 commandResult(
                     commandId,
                     "BINDER_DIED",
@@ -246,7 +250,9 @@ class ShizukuBridgeManager(context: Context) : ExternalPrivilegeBridge {
         return runCatching {
             PrivilegedCommandJson.decodeResult(service.cancelAllCommands())
         }.getOrElse { error ->
-            if (!service.asBinder().isBinderAlive) clearUserService()
+            if (!service.asBinder().isBinderAlive) {
+                clearUserService(notifyDisplayListeners = true)
+            }
             PrivilegedCommandResult(
                 ok = false,
                 code = "BINDER_DIED",
@@ -255,12 +261,44 @@ class ShizukuBridgeManager(context: Context) : ExternalPrivilegeBridge {
         }
     }
 
+    override suspend fun createManagedDisplayResponse(): Result<String> =
+        callDisplayBridge { it.createDisplay() }
+
+    override suspend fun closeManagedDisplayResponse(displayId: Int): Result<String> {
+        if (displayId <= 0) return Result.failure(IllegalArgumentException("display_primary_forbidden"))
+        return callDisplayBridge { it.closeDisplay(displayId) }
+    }
+
+    override fun addDisplayBridgeDeathListener(listener: () -> Unit): AutoCloseable {
+        displayBridgeDeathListeners += listener
+        return AutoCloseable { displayBridgeDeathListeners -= listener }
+    }
+
+    private suspend fun callDisplayBridge(
+        request: (IDisplayAutomationBridge) -> String,
+    ): Result<String> = connectService().fold(
+        onSuccess = { service ->
+            runCatching {
+                check(service.asBinder().isBinderAlive) { "display_capability_unavailable" }
+                val bridge = service.displayAutomationBridge()
+                    ?: throw IllegalStateException("display_capability_unavailable")
+                check(bridge.asBinder().isBinderAlive) { "display_capability_unavailable" }
+                request(bridge)
+            }.onFailure {
+                if (!service.asBinder().isBinderAlive) {
+                    clearUserService(notifyDisplayListeners = true)
+                }
+            }
+        },
+        onFailure = { error -> Result.failure(error) },
+    )
+
     private suspend fun cancelCommand(
         service: IExternalPrivilegeBridgeService,
         commandId: String,
     ): PrivilegedCommandResult {
         if (!service.asBinder().isBinderAlive) {
-            clearUserService()
+            clearUserService(notifyDisplayListeners = true)
             return commandResult(
                 commandId,
                 "BINDER_DIED",
@@ -270,7 +308,9 @@ class ShizukuBridgeManager(context: Context) : ExternalPrivilegeBridge {
         return runCatching {
             PrivilegedCommandJson.decodeResult(service.cancelCommand(commandId))
         }.getOrElse { error ->
-            if (!service.asBinder().isBinderAlive) clearUserService()
+            if (!service.asBinder().isBinderAlive) {
+                clearUserService(notifyDisplayListeners = true)
+            }
             commandResult(
                 commandId,
                 "BINDER_DIED",
@@ -389,7 +429,7 @@ class ShizukuBridgeManager(context: Context) : ExternalPrivilegeBridge {
         _status.value = computeStatus()
     }
 
-    private fun clearUserService() {
+    private fun clearUserService(notifyDisplayListeners: Boolean = false) {
         val current = userService
         val deathRecipient = userServiceDeathRecipient
         if (current != null && deathRecipient != null) {
@@ -397,6 +437,9 @@ class ShizukuBridgeManager(context: Context) : ExternalPrivilegeBridge {
         }
         userServiceDeathRecipient = null
         userService = null
+        if (notifyDisplayListeners) {
+            displayBridgeDeathListeners.forEach { listener -> runCatching(listener) }
+        }
     }
 
     private fun protectedPackages(): Set<String> = buildSet {
