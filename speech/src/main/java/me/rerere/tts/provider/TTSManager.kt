@@ -4,6 +4,7 @@ import android.content.Context
 import kotlinx.coroutines.flow.Flow
 import me.rerere.tts.model.AudioChunk
 import me.rerere.tts.model.TTSRequest
+import me.rerere.tts.provider.providers.AuraTTSProvider
 import me.rerere.tts.provider.providers.GeminiTTSProvider
 import me.rerere.tts.provider.providers.GroqTTSProvider
 import me.rerere.tts.provider.providers.MiMoTTSProvider
@@ -18,6 +19,7 @@ class TTSManager(private val context: Context) {
     private val geminiProvider = GeminiTTSProvider()
     private val systemProvider = SystemTTSProvider()
     private val miniMaxProvider = MiniMaxTTSProvider()
+    private val auraProvider = AuraTTSProvider()
     private val qwenProvider = QwenTTSProvider()
     private val groqProvider = GroqTTSProvider()
     private val xaiProvider = XAITTSProvider()
@@ -32,6 +34,7 @@ class TTSManager(private val context: Context) {
             is TTSProviderSetting.Gemini -> geminiProvider.generateSpeech(context, providerSetting, request)
             is TTSProviderSetting.SystemTTS -> systemProvider.generateSpeech(context, providerSetting, request)
             is TTSProviderSetting.MiniMax -> miniMaxProvider.generateSpeech(context, providerSetting, request)
+            is TTSProviderSetting.Aura -> auraProvider.generateSpeech(context, providerSetting, request)
             is TTSProviderSetting.Qwen -> qwenProvider.generateSpeech(context, providerSetting, request)
             is TTSProviderSetting.Groq -> groqProvider.generateSpeech(context, providerSetting, request)
             is TTSProviderSetting.XAI -> xaiProvider.generateSpeech(context, providerSetting, request)

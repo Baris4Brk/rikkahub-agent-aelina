@@ -51,8 +51,6 @@ languages:
     name: "Korean"
   - code: "values-ru"
     name: "Russian"
-  - code: "values-ar"
-    name: "Arabic"
 
 # AI 翻译配置
 translation:

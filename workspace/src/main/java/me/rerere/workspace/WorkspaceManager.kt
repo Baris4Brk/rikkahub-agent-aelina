@@ -36,6 +36,7 @@ class WorkspaceManager(
 
     fun tempDir(root: String): File = File(workspaceDir(root), TEMP_DIR)
 
+    /** Private ledger for managed background-process definitions; never part of workspace files. */
     fun managedProcessesDir(root: String): File = File(workspaceDir(root), MANAGED_PROCESSES_DIR)
 
     fun hasRootfs(root: String): Boolean = File(linuxDir(root), "bin/sh").isFile

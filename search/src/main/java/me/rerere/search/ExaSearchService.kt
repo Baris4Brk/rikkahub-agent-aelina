@@ -16,7 +16,6 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import me.rerere.ai.core.InputSchema
-import me.rerere.search.SearchService.Companion.httpClient
 import me.rerere.search.SearchService.Companion.keyRoulette
 
 object ExaSearchService : SearchService<SearchServiceOptions.ExaOptions> {
@@ -94,7 +93,7 @@ object ExaSearchService : SearchService<SearchServiceOptions.ExaOptions> {
         }
     }
 
-    private fun client() = ExaClient(OkHttpExaTransport { httpClient })
+    private fun client() = ExaClient(OkHttpExaTransport { SearchService.httpClient })
 
     private suspend fun <T> captureFailure(block: suspend () -> T): Result<T> = try {
         Result.success(block())

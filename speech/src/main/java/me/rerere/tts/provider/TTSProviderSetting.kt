@@ -184,6 +184,29 @@ sealed class TTSProviderSetting {
         }
     }
 
+    @Serializable
+    @SerialName("aura")
+    data class Aura(
+        override var id: Uuid = Uuid.random(),
+        override var name: String = "Aura TTS",
+        val apiKey: String = "",
+        val baseUrl: String = "https://tts.aurastd.com/api/v1",
+        val model: String = "speech-2.8-turbo",
+        val voiceId: String = "female-shaonv",
+        val emotion: String = "neutral",
+        val speed: Float = 1.0f,
+    ) : TTSProviderSetting() {
+        override fun copyProvider(
+            id: Uuid,
+            name: String,
+        ): TTSProviderSetting {
+            return this.copy(
+                id = id,
+                name = name,
+            )
+        }
+    }
+
     companion object {
         val Types by lazy {
             listOf(
@@ -191,6 +214,7 @@ sealed class TTSProviderSetting {
                 Gemini::class,
                 SystemTTS::class,
                 MiniMax::class,
+                Aura::class,
                 Qwen::class,
                 Groq::class,
                 XAI::class,

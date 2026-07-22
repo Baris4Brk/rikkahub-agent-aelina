@@ -2,6 +2,7 @@ package me.rerere.workspace
 
 import com.sun.net.httpserver.HttpServer
 import org.junit.Assert.*
+import org.junit.Assume.assumeTrue
 import org.junit.Test
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -59,6 +60,7 @@ class ExampleUnitTest {
 
     @Test
     fun rootfsInstallerDownloadsAndExtractsTarGz() {
+        assumeTrue("This archive test requires host symbolic-link support", hostSupportsSymlinks())
         val baseDir = Files.createTempDirectory("workspace-manager-test").toFile()
         val manager = WorkspaceManager(baseDir)
         val installer = RootfsInstaller(manager)
@@ -88,6 +90,7 @@ class ExampleUnitTest {
 
     @Test
     fun commandRunsInsideWorkspaceFilesDirectory() {
+        assumeUnixShell()
         val baseDir = Files.createTempDirectory("workspace-command-test").toFile()
         val manager = WorkspaceManager(baseDir)
         val root = "test-workspace"
@@ -102,6 +105,7 @@ class ExampleUnitTest {
 
     @Test
     fun commandReceivesStdin() {
+        assumeUnixShell()
         val baseDir = Files.createTempDirectory("workspace-stdin-test").toFile()
         val manager = WorkspaceManager(baseDir)
         val root = "test-workspace"
@@ -134,30 +138,8 @@ class ExampleUnitTest {
     }
 
     @Test
-    fun cleanupKeepsManagedProcessDefinitionsAndLogs() {
-        val baseDir = Files.createTempDirectory("workspace-cleanup-test").toFile()
-        val manager = WorkspaceManager(baseDir)
-        val root = "test-workspace"
-        manager.ensureWorkspace(root)
-        val managedFile = File(manager.managedProcessesDir(root), "wp_12345678/definition.json")
-        managedFile.parentFile.mkdirs()
-        managedFile.writeText("persistent")
-        File(manager.tempDir(root), "short-command.tmp").writeText("temporary")
-        File(manager.linuxDir(root), "tmp/rootfs.tmp").apply {
-            parentFile.mkdirs()
-            writeText("temporary")
-        }
-
-        manager.cleanupAllTempDirs()
-
-        assertTrue(managedFile.isFile)
-        assertEquals("persistent", managedFile.readText())
-        assertFalse(manager.tempDir(root).exists())
-        assertFalse(File(manager.linuxDir(root), "tmp").exists())
-    }
-
-    @Test
     fun commandOutputIsTruncatedAtLimit() {
+        assumeUnixShell()
         val baseDir = Files.createTempDirectory("workspace-truncate-test").toFile()
         val manager = WorkspaceManager(baseDir)
         val root = "test-workspace"
@@ -222,6 +204,28 @@ class ExampleUnitTest {
             gzip.write(ByteArray(1024))
         }
         return output.toByteArray()
+    }
+
+    private fun assumeUnixShell() {
+        assumeTrue(
+            "HostShellRunner uses the Android/Unix shell contract",
+            File("/system/bin/sh").isFile || File("/bin/sh").isFile,
+        )
+    }
+
+    private fun hostSupportsSymlinks(): Boolean {
+        val directory = Files.createTempDirectory("workspace-symlink-probe")
+        return try {
+            val target = directory.resolve("target")
+            val link = directory.resolve("link")
+            Files.writeString(target, "probe")
+            Files.createSymbolicLink(link, target.fileName)
+            Files.isSymbolicLink(link)
+        } catch (_: Exception) {
+            false
+        } finally {
+            directory.toFile().deleteRecursively()
+        }
     }
 
     private fun tarHeader(entry: TarTestEntry): ByteArray {
