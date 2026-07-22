@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "id": "bounded-state-example",
+  "name": "Bounded State Example",
+  "version": "1.0.0",
+  "entry": "index.html",
+  "permissions": {
+    "stateRead": true,
+    "storageRead": false,
+    "storageWrite": false,
+    "networkHosts": []
+  },
+  "tools": [
+    {
+      "slug": "read_state",
+      "description": "Read the host's bounded non-chat status projection.",
+      "handler": "readState",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Optional label for this read."
+          }
+        }
+      }
+    }
+  ],
+  "hooks": {
+    "promptHandler": "promptAddendum"
+  }
+}
