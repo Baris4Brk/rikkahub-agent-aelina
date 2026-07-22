@@ -49,6 +49,7 @@ class MemoryRetriever(
         includeGlobal: Boolean,
         limit: Int = DEFAULT_MEMORY_TOP_K,
         maxChars: Int = DEFAULT_MEMORY_PROMPT_MAX_CHARS,
+        excludeMemoryIds: Set<Int> = emptySet(),
     ): List<MemoryMatch> {
         val normalizedQuery = query.trim()
         if (normalizedQuery.isEmpty() || limit <= 0 || maxChars <= 0) return emptyList()
@@ -61,12 +62,13 @@ class MemoryRetriever(
             index.search(
                 scopeId = scopeId,
                 query = normalizedQuery,
-                limit = (limit * 4).coerceIn(limit, 64),
+                limit = ((limit + excludeMemoryIds.size) * 4).coerceIn(limit, 256),
             )
         }.getOrElse { return emptyList() }
         val terms = memoryQueryTerms(normalizedQuery)
         val now = nowMs()
         val ranked = candidates
+            .filterNot { it.id in excludeMemoryIds }
             .map { candidate -> candidate.toScoredMatch(terms, normalizedQuery, now) }
             .sortedWith(compareByDescending<MemoryMatch> { it.score }.thenBy { it.memory.id })
 

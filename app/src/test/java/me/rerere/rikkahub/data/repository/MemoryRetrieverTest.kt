@@ -106,6 +106,36 @@ class MemoryRetrieverTest {
             )
         }
 
+    @Test
+    fun `standing memories can be excluded without consuming contextual top k`() = runBlocking {
+        val assistantId = Uuid.random()
+        val candidates = (1..12).map { id ->
+            MemorySearchCandidate(
+                id = id,
+                title = "coffee $id",
+                content = "coffee memory $id",
+                updatedAtMs = id.toLong(),
+                importance = 0.5f,
+                ftsRank = -id.toDouble(),
+            )
+        }
+        val retriever = MemoryRetriever(
+            index = MemorySearchIndex { _, _, limit -> candidates.take(limit) },
+            nowMs = { 20L },
+        )
+
+        val matches = retriever.queryRelevant(
+            assistantId = assistantId,
+            query = "coffee",
+            includeGlobal = false,
+            limit = 4,
+            excludeMemoryIds = (9..12).toSet(),
+        )
+
+        assertEquals(4, matches.size)
+        assertTrue(matches.none { it.memory.id in 9..12 })
+    }
+
     private class FakeMemorySearchIndex(
         private val byScope: Map<String, List<MemorySearchCandidate>>,
     ) : MemorySearchIndex {

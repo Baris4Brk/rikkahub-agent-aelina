@@ -11,16 +11,40 @@ const val MEMORY_FTS_SIMPLE_CREATE_SQL = """
     CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
         title,
         content,
+        outcome,
+        tags_search,
         memory_id UNINDEXED,
         assistant_id UNINDEXED,
         updated_at_ms UNINDEXED,
         importance UNINDEXED,
+        lifecycle_status UNINDEXED,
+        expires_at_ms UNINDEXED,
         tokenize = 'simple'
     )
 """
 
 /** Portable migration form; the on-open reconciler replaces it with the simple tokenizer. */
 const val MEMORY_FTS_PORTABLE_CREATE_SQL = """
+    CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
+        title,
+        content,
+        outcome,
+        tags_search,
+        memory_id UNINDEXED,
+        assistant_id UNINDEXED,
+        updated_at_ms UNINDEXED,
+        importance UNINDEXED,
+        lifecycle_status UNINDEXED,
+        expires_at_ms UNINDEXED,
+        tokenize = 'unicode61'
+    )
+"""
+
+/**
+ * The version-30 projection predates Memory V2 metadata. Keep this separate from the current
+ * projection so a 29 -> 30 migration never asks SQLite for fields introduced by 30 -> 31.
+ */
+const val MEMORY_FTS_V30_PORTABLE_CREATE_SQL = """
     CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
         title,
         content,
@@ -32,14 +56,14 @@ const val MEMORY_FTS_PORTABLE_CREATE_SQL = """
     )
 """
 
-val MEMORY_FTS_TRIGGER_SQL: List<String> = listOf(
+val MEMORY_FTS_V30_TRIGGER_SQL: List<String> = listOf(
     """
     CREATE TRIGGER IF NOT EXISTS memory_fts_ai AFTER INSERT ON MemoryEntity BEGIN
         INSERT INTO memory_fts(
             rowid, title, content, memory_id, assistant_id, updated_at_ms, importance
         ) VALUES (
-            new.id, new.title, new.content, new.id, new.assistant_id,
-            new.updated_at_ms, new.importance
+            new.id, new.title, new.content, new.id, new.assistant_id, new.updated_at_ms,
+            new.importance
         );
     END
     """.trimIndent(),
@@ -49,8 +73,47 @@ val MEMORY_FTS_TRIGGER_SQL: List<String> = listOf(
         INSERT INTO memory_fts(
             rowid, title, content, memory_id, assistant_id, updated_at_ms, importance
         ) VALUES (
-            new.id, new.title, new.content, new.id, new.assistant_id,
-            new.updated_at_ms, new.importance
+            new.id, new.title, new.content, new.id, new.assistant_id, new.updated_at_ms,
+            new.importance
+        );
+    END
+    """.trimIndent(),
+    """
+    CREATE TRIGGER IF NOT EXISTS memory_fts_ad AFTER DELETE ON MemoryEntity BEGIN
+        DELETE FROM memory_fts WHERE rowid = old.id;
+    END
+    """.trimIndent(),
+)
+
+const val MEMORY_FTS_V30_BACKFILL_SQL = """
+    INSERT INTO memory_fts(
+        rowid, title, content, memory_id, assistant_id, updated_at_ms, importance
+    )
+    SELECT id, title, content, id, assistant_id, updated_at_ms, importance
+    FROM MemoryEntity
+"""
+
+val MEMORY_FTS_TRIGGER_SQL: List<String> = listOf(
+    """
+    CREATE TRIGGER IF NOT EXISTS memory_fts_ai AFTER INSERT ON MemoryEntity BEGIN
+        INSERT INTO memory_fts(
+            rowid, title, content, outcome, tags_search, memory_id, assistant_id, updated_at_ms,
+            importance, lifecycle_status, expires_at_ms
+        ) VALUES (
+            new.id, new.title, new.content, new.outcome, new.tags_search, new.id, new.assistant_id,
+            new.updated_at_ms, new.importance, new.lifecycle_status, new.expires_at_ms
+        );
+    END
+    """.trimIndent(),
+    """
+    CREATE TRIGGER IF NOT EXISTS memory_fts_au AFTER UPDATE ON MemoryEntity BEGIN
+        DELETE FROM memory_fts WHERE rowid = old.id;
+        INSERT INTO memory_fts(
+            rowid, title, content, outcome, tags_search, memory_id, assistant_id, updated_at_ms,
+            importance, lifecycle_status, expires_at_ms
+        ) VALUES (
+            new.id, new.title, new.content, new.outcome, new.tags_search, new.id, new.assistant_id,
+            new.updated_at_ms, new.importance, new.lifecycle_status, new.expires_at_ms
         );
     END
     """.trimIndent(),
@@ -63,11 +126,23 @@ val MEMORY_FTS_TRIGGER_SQL: List<String> = listOf(
 
 const val MEMORY_FTS_BACKFILL_SQL = """
     INSERT INTO memory_fts(
-        rowid, title, content, memory_id, assistant_id, updated_at_ms, importance
+        rowid, title, content, outcome, tags_search, memory_id, assistant_id, updated_at_ms,
+        importance, lifecycle_status, expires_at_ms
     )
-    SELECT id, title, content, id, assistant_id, updated_at_ms, importance
+    SELECT id, title, content, outcome, tags_search, id, assistant_id, updated_at_ms, importance,
+           lifecycle_status, expires_at_ms
     FROM MemoryEntity
 """
+
+/** Projection used while a 30 -> 31 -> 32 migration chain is between its two steps. */
+val MEMORY_FTS_V31_PORTABLE_CREATE_SQL = MEMORY_FTS_PORTABLE_CREATE_SQL.replace("        outcome,\n", "")
+val MEMORY_FTS_V31_TRIGGER_SQL = MEMORY_FTS_TRIGGER_SQL.map { sql ->
+    sql.replace("content, outcome, tags_search", "content, tags_search")
+        .replace("new.content, new.outcome, new.tags_search", "new.content, new.tags_search")
+}
+val MEMORY_FTS_V31_BACKFILL_SQL = MEMORY_FTS_BACKFILL_SQL
+    .replace("content, outcome, tags_search", "content, tags_search")
+    .replace("content, outcome, tags_search", "content, tags_search")
 
 /**
  * Makes the memory projection deterministic after migration, import or an interrupted rebuild.
@@ -115,13 +190,16 @@ class MemoryFtsManager(
         database.openHelper.readableDatabase.query(
             """
             SELECT memory_id, title, content, updated_at_ms, importance,
-                   bm25(memory_fts, 5.0, 1.0, 0.0, 0.0, 0.0, 0.0) AS fts_rank
+                   bm25(memory_fts, 5.0, 1.0, 1.5, 2.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+                       AS fts_rank
             FROM memory_fts
             WHERE memory_fts MATCH jieba_query(?) AND assistant_id = ?
+              AND lifecycle_status = 'ACTIVE'
+              AND (expires_at_ms IS NULL OR CAST(expires_at_ms AS INTEGER) > ?)
             ORDER BY fts_rank ASC, updated_at_ms DESC, memory_id ASC
             LIMIT ?
             """.trimIndent(),
-            arrayOf<Any?>(query, scopeId, limit.coerceIn(1, 64)),
+            arrayOf<Any?>(query, scopeId, System.currentTimeMillis(), limit.coerceIn(1, 64)),
         ).use { cursor ->
             while (cursor.moveToNext()) {
                 results += MemorySearchCandidate(
