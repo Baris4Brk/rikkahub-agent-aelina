@@ -350,9 +350,26 @@
     <activity
       android:name=".browser.BrowserActivity"
       android:exported="false"
+      android:launchMode="singleTask"
       android:configChanges="screenSize|orientation|keyboardHidden"
       android:hardwareAccelerated="true"
       android:theme="@style/Theme.Rikkahub" />
+
+    <service
+      android:name=".browser.BrowserTaskService"
+      android:exported="false"
+      android:foregroundServiceType="specialUse">
+      <property
+        android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+        android:value="silent AI browser task" />
+    </service>
+
+    <!-- Every plugin invocation gets a new WebView in this short-lived process. Keeping it out
+         of the main process prevents plugin page state from sharing the app WebView profile. -->
+    <service
+      android:name=".plugin.PluginRuntimeService"
+      android:exported="false"
+      android:process=":plugin_runtime" />
 
     <!-- Phase 13: External Automation Intent API. Exported activity that accepts
          RUN_TASK / RUN_CHAT intents from Tasker / MacroDroid / Locale / app callers.

@@ -675,6 +675,7 @@ private fun TTSProviderItem(
                             is TTSProviderSetting.OpenAI -> stringResource(R.string.setting_tts_page_provider_openai)
                             is TTSProviderSetting.Gemini -> stringResource(R.string.setting_tts_page_provider_gemini)
                             is TTSProviderSetting.MiniMax -> "MiniMax"
+                            is TTSProviderSetting.Aura -> "Aura"
                             is TTSProviderSetting.SystemTTS -> stringResource(R.string.setting_tts_page_provider_system)
                             is TTSProviderSetting.Qwen -> "Qwen"
                             is TTSProviderSetting.Groq -> "Groq"

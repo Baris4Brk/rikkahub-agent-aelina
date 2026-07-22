@@ -8,6 +8,13 @@ import kotlinx.coroutines.withContext
 import me.rerere.rikkahub.data.ai.tools.local.ExternalPrivilegeBridge
 import me.rerere.rikkahub.data.ai.tools.local.TermuxSessionEmergencyController
 import me.rerere.rikkahub.data.repository.WorkspaceRepository
+import me.rerere.rikkahub.execution.ManagedExecutionCoordinator
+import me.rerere.rikkahub.execution.ManagedExecutionRequest
+import me.rerere.rikkahub.execution.ManagedExecutionResult
+import me.rerere.rikkahub.execution.ManagedExecutionRuntime
+import me.rerere.rikkahub.display.DisplayAutomationRuntime
+import me.rerere.rikkahub.display.DisplayRequest
+import me.rerere.rikkahub.display.DisplayResult
 import me.rerere.rikkahub.privilege.PrivilegedCommandResult
 import me.rerere.rikkahub.research.ResearchCoordinator
 import me.rerere.rikkahub.service.ChatService
@@ -66,6 +73,8 @@ class EmergencyStopCoordinator(
     private val subAgentRegistry: SubAgentRegistry,
     private val researchCoordinator: ResearchCoordinator,
     private val workflowEmergencyController: WorkflowEmergencyController,
+    private val managedExecutionCoordinator: ManagedExecutionCoordinator,
+    private val displayAutomationRuntime: DisplayAutomationRuntime,
 ) {
     suspend fun setStopped(stopped: Boolean): EmergencyStopResult? {
         if (!stopped) {
@@ -106,6 +115,69 @@ class EmergencyStopCoordinator(
                         message = result.message,
                         affectedCount = result.requestedCount,
                     )
+                },
+                emergencyStopParticipant("managed_executions") {
+                    // WorkspaceProcessManager already owns the workspace stop path above.
+                    // Limit this participant to remote/local supervisor records so a workspace
+                    // process is not signalled twice while preserving explicit uncertainty.
+                    val result = managedExecutionCoordinator.dispatch(
+                        ManagedExecutionRequest.EmergencyStopRuntimes(
+                            setOf(ManagedExecutionRuntime.TERMUX, ManagedExecutionRuntime.SSH),
+                        )
+                    )
+                    when (result) {
+                        is ManagedExecutionResult.Executions -> {
+                            val uncertain = result.executions.count {
+                                it.alive || it.terminationUncertain
+                            }
+                            EmergencyStopParticipantResult(
+                                participantId = "managed_executions",
+                                ok = uncertain == 0,
+                                code = if (uncertain == 0) "STOPPED" else "TERMINATION_UNCERTAIN",
+                                message = if (uncertain == 0) {
+                                    "Stopped ${result.executions.size} managed Termux and SSH tasks."
+                                } else {
+                                    "$uncertain managed task(s) could not be confirmed stopped."
+                                },
+                                affectedCount = result.executions.size,
+                            )
+                        }
+                        is ManagedExecutionResult.Error -> EmergencyStopParticipantResult(
+                            participantId = "managed_executions",
+                            ok = false,
+                            code = result.code,
+                            message = "Managed task termination could not be started.",
+                        )
+                        else -> EmergencyStopParticipantResult(
+                            participantId = "managed_executions",
+                            ok = false,
+                            code = "MANAGED_EXECUTION_PROTOCOL_ERROR",
+                            message = "Managed task termination returned an unexpected result.",
+                        )
+                    }
+                },
+                emergencyStopParticipant("display_sessions") {
+                    when (val result = displayAutomationRuntime.dispatch(DisplayRequest.EmergencyStop)) {
+                        is DisplayResult.Closed -> EmergencyStopParticipantResult(
+                            participantId = "display_sessions",
+                            ok = true,
+                            code = "STOPPED",
+                            message = "Closed active managed display sessions.",
+                            affectedCount = if (result.sessionId.isBlank()) 0 else 1,
+                        )
+                        is DisplayResult.Error -> EmergencyStopParticipantResult(
+                            participantId = "display_sessions",
+                            ok = false,
+                            code = result.code,
+                            message = "Managed display sessions could not be closed.",
+                        )
+                        else -> EmergencyStopParticipantResult(
+                            participantId = "display_sessions",
+                            ok = false,
+                            code = "DISPLAY_PROTOCOL_ERROR",
+                            message = "Managed display shutdown returned an unexpected result.",
+                        )
+                    }
                 },
                 emergencyStopParticipant("sub_agents") {
                     val affected = subAgentRegistry.cancelAllActive()

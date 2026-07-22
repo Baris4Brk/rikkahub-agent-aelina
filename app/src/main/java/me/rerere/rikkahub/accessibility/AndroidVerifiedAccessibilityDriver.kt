@@ -7,14 +7,20 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.first
 import me.rerere.rikkahub.service.RikkaAccessibilityService
 
-/** Android adapter that resolves every selector against a newly acquired active-window root. */
-class AndroidVerifiedAccessibilityDriver : VerifiedAccessibilityDriver {
+/**
+ * Android adapter that resolves every selector against a newly acquired root for one display.
+ * A managed session supplies a non-zero [displayId]; the service never substitutes the primary
+ * display if that session's root is unavailable.
+ */
+class AndroidVerifiedAccessibilityDriver(
+    private val displayId: Int = android.view.Display.DEFAULT_DISPLAY,
+) : VerifiedAccessibilityDriver {
     override fun isServiceAvailable(): Boolean = RikkaAccessibilityService.instance != null
 
     override suspend fun snapshot(): UiWindowSnapshot? {
         currentCoroutineContext().ensureActive()
         val service = RikkaAccessibilityService.instance ?: return null
-        val root = service.rootInActiveWindow ?: return null
+        val root = service.rootForDisplay(displayId) ?: return null
         return snapshotRoot(root, service.windowState.value.version)
     }
 
@@ -64,7 +70,7 @@ class AndroidVerifiedAccessibilityDriver : VerifiedAccessibilityDriver {
         currentCoroutineContext().ensureActive()
         val service = RikkaAccessibilityService.instance
             ?: return UiDriverActionResult(false, "ACCESSIBILITY_SERVICE_NOT_ACTIVE", "Accessibility service is not active.")
-        val root = service.rootInActiveWindow
+        val root = service.rootForDisplay(displayId)
             ?: return UiDriverActionResult(false, "NO_ACTIVE_WINDOW", "There is no active accessibility window.")
         val snapshot = snapshotRoot(root, service.windowState.value.version)
         SensitiveUiPolicy.check(snapshot, UiAutomationAction.SCROLL, containerSelector).let { safety ->
@@ -105,7 +111,7 @@ class AndroidVerifiedAccessibilityDriver : VerifiedAccessibilityDriver {
     ): UiDriverActionResult {
         val service = RikkaAccessibilityService.instance
             ?: return UiDriverActionResult(false, "ACCESSIBILITY_SERVICE_NOT_ACTIVE", "Accessibility service is not active.")
-        val root = service.rootInActiveWindow
+        val root = service.rootForDisplay(displayId)
             ?: return UiDriverActionResult(false, "NO_ACTIVE_WINDOW", "There is no active accessibility window.")
         val snapshot = snapshotRoot(root, service.windowState.value.version)
         SensitiveUiPolicy.check(snapshot, automationAction, selector).let { safety ->

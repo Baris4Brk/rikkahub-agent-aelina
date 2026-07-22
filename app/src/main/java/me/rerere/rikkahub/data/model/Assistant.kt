@@ -2,12 +2,17 @@ package me.rerere.rikkahub.data.model
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.Transient
 import me.rerere.ai.core.MessageRole
 import me.rerere.ai.provider.CustomBody
 import me.rerere.ai.provider.CustomHeader
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.core.ReasoningLevel
 import me.rerere.rikkahub.data.ai.tools.LocalToolOption
+import me.rerere.rikkahub.memory.MemoryAutoSaveMode
+import me.rerere.rikkahub.memory.MemoryApprovalSource
+import me.rerere.rikkahub.memory.MemoryCaptureOrigin
+import me.rerere.rikkahub.memory.MemoryKind
 import kotlin.uuid.Uuid
 
 @Serializable
@@ -25,8 +30,31 @@ data class Assistant(
     val streamOutput: Boolean = true,
     val enableWebSearch: Boolean = false,
     val enableMemory: Boolean = false,
+    val memoryAutoSaveMode: MemoryAutoSaveMode = MemoryAutoSaveMode.OFF,
+    val memoryCaptureOrigins: Set<MemoryCaptureOrigin> = setOf(
+        MemoryCaptureOrigin.APP_UI,
+        MemoryCaptureOrigin.SYSTEM_ASSISTANT,
+    ),
+    val memoryIdleDelayMinutes: Int = 10,
+    val memoryImmediateCaptureThreshold: Int = 5,
+    /** Number of consecutive completed turns that one extraction may combine. */
+    val memoryConversationContextTurns: Int = 12,
+    val memoryNarrativeEventsEnabled: Boolean = false,
+    val memoryInsightsTheoriesEnabled: Boolean = false,
+    /** Readable names used for the person and conversation partner in narrative memories. */
+    val memoryNarrativeUserName: String = "",
+    val memoryNarrativeCompanionName: String = "",
     val useGlobalMemory: Boolean = false, // 使用全局共享记忆而非助手隔离记忆
     val enableRecentChatsReference: Boolean = false,
+    val autoContextEnabled: Boolean = false,
+    val autoContextForegroundWindow: Boolean = true,
+    val autoContextUiTree: Boolean = true,
+    val autoContextDeviceStatus: Boolean = true,
+    val autoContextOcrFallback: Boolean = false,
+    val autoContextUsageStats: Boolean = false,
+    val autoContextNotifications: Boolean = false,
+    val autoContextMaxChars: Int = 6000,
+    val enabledPluginIds: Set<String> = emptySet(),
     val messageTemplate: String = "{{ message }}",
     val presetMessages: List<UIMessage> = emptyList(),
     val quickMessageIds: Set<Uuid> = emptySet(),
@@ -84,6 +112,12 @@ data class QuickMessage(
 data class AssistantMemory(
     val id: Int,
     val content: String = "",
+    @Transient
+    val title: String? = null,
+    @Transient
+    val kind: MemoryKind = MemoryKind.OTHER,
+    @Transient
+    val approvalSource: MemoryApprovalSource = MemoryApprovalSource.LEGACY,
 )
 
 @Serializable

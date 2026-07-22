@@ -5,11 +5,24 @@ import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import kotlinx.coroutines.runBlocking
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
 import me.rerere.ai.core.Tool
 import me.rerere.ai.ui.UIMessagePart
+import me.rerere.rikkahub.data.ai.ToolCallOrigin
+import me.rerere.rikkahub.data.ai.execution.DefaultToolRuntime
+import me.rerere.rikkahub.data.ai.execution.ToolCancellationCapability
+import me.rerere.rikkahub.data.ai.execution.ToolConcurrency
+import me.rerere.rikkahub.data.ai.execution.ToolDescriptorApproval
+import me.rerere.rikkahub.data.ai.execution.ToolDescriptorSource
+import me.rerere.rikkahub.data.ai.execution.ToolEffect
+import me.rerere.rikkahub.data.ai.execution.ToolExecutionPolicy
+import me.rerere.rikkahub.data.ai.execution.ToolExecutionPolicyResolver
+import me.rerere.rikkahub.data.ai.execution.ToolPreExecutionDecision
+import me.rerere.rikkahub.data.ai.execution.ToolRunPreflight
+import me.rerere.rikkahub.data.ai.execution.ToolRuntimeInvocation
+import me.rerere.rikkahub.data.ai.execution.ToolSecurityDescriptor
+import me.rerere.rikkahub.data.ai.execution.ToolSecurityDescriptorResolver
+import me.rerere.rikkahub.data.ai.execution.ToolStartableResolver
+import me.rerere.rikkahub.data.ai.tools.ToolExecutionContext
 import me.rerere.rikkahub.data.db.AppDatabase
 import me.rerere.rikkahub.data.db.entity.ScheduledJobEntity
 import me.rerere.rikkahub.data.db.entity.ScheduledJobRunEntity
@@ -61,7 +74,21 @@ class CronJobWorkerInstrumentedTest {
             .build()
         jobRepo = ScheduledJobRepository(db.scheduledJobDao())
         runRepo = ScheduledJobRunRepository(db.scheduledJobRunDao())
-        directRunner = DirectModeActionRunner(Json)
+        directRunner = DirectModeActionRunner(
+            toolRuntime = DefaultToolRuntime(
+                policyResolver = ToolExecutionPolicyResolver { _, _, _ -> TEST_POLICY },
+                securityDescriptorResolver = ToolSecurityDescriptorResolver { name, _ ->
+                    ToolSecurityDescriptor(
+                        toolName = name,
+                        source = ToolDescriptorSource.INTERNAL,
+                        approval = ToolDescriptorApproval.CALL_DEFINED,
+                        allowsPermanentApproval = false,
+                    )
+                },
+            ),
+            toolStartableResolver = ToolStartableResolver.NONE,
+            preflight = ToolRunPreflight { _, _, _, _ -> ToolPreExecutionDecision.Allow },
+        )
     }
 
     @After
@@ -132,7 +159,11 @@ class CronJobWorkerInstrumentedTest {
             return runRepo.getRecent(job.id, 1).first()
         }
 
-        val seq = directRunner.run(parsed, availableTools)
+        val seq = directRunner.run(
+            actions = parsed,
+            availableTools = availableTools,
+            invocation = directInvocation(),
+        )
 
         // Update row with real outcome (mirrors CronJobWorker lines 100-110)
         runRepo.update(
@@ -341,7 +372,11 @@ class CronJobWorkerInstrumentedTest {
 
         // Execute actions
         val parsed = DirectModeActionRunner.parse(actionsJson).getOrThrow()
-        val seq = directRunner.run(parsed, listOf(fakeOk))
+        val seq = directRunner.run(
+            actions = parsed,
+            availableTools = listOf(fakeOk),
+            invocation = directInvocation(),
+        )
         val outcome = seq.finalOutcome
 
         // Update run row with real outcome
@@ -393,4 +428,21 @@ class CronJobWorkerInstrumentedTest {
     // TODO: concurrent_skip test — skipped because it requires WorkManager
     //       TestDriver dispatching two real workers racing the same job ID.
     //       Covered by audit/follow-up once WorkManager TestDriver scaffolding lands.
+
+    private fun directInvocation() = ToolRuntimeInvocation(
+        executionContext = ToolExecutionContext(
+            runId = Uuid.random(),
+            conversationId = Uuid.random(),
+            assistantId = fakeAssistantId,
+            callOrigin = ToolCallOrigin.TrustedWorkflow,
+        ),
+    )
+
+    private companion object {
+        val TEST_POLICY = ToolExecutionPolicy(
+            effects = setOf(ToolEffect.LOCAL_READ),
+            concurrency = ToolConcurrency.PARALLEL_SAFE,
+            cancellationCapability = ToolCancellationCapability.LOCAL_WAIT_ONLY,
+        )
+    }
 }

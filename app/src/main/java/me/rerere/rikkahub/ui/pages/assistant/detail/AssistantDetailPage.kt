@@ -53,6 +53,7 @@ fun AssistantDetailPage(id: String) {
         }
     )
     val assistant by vm.assistant.collectAsStateWithLifecycle()
+    val pendingReviewCount by vm.pendingReviewCount.collectAsStateWithLifecycle()
     val navController = LocalNavController.current
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
 
@@ -117,7 +118,21 @@ fun AssistantDetailPage(id: String) {
                     item(
                         onClick = { navController.navigate(Screen.AssistantMemory(id)) },
                         leadingContent = { Icon(HugeIcons.Brain02, null) },
-                        supportingContent = { Text(stringResource(R.string.assistant_detail_memory_desc)) },
+                        supportingContent = {
+                            Column {
+                                Text(stringResource(R.string.assistant_detail_memory_desc))
+                                if (pendingReviewCount > 0) {
+                                    Text(
+                                        text = stringResource(
+                                            R.string.memory_v2_pending_review_count,
+                                            pendingReviewCount,
+                                        ),
+                                        color = MaterialTheme.colorScheme.primary,
+                                        style = MaterialTheme.typography.labelMedium,
+                                    )
+                                }
+                            }
+                        },
                         headlineContent = { Text(stringResource(R.string.assistant_page_tab_memory)) },
                         trailingContent = { Icon(HugeIcons.ArrowRight01, null) },
                     )

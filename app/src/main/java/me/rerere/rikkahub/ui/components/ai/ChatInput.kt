@@ -113,6 +113,17 @@ import me.rerere.rikkahub.utils.SoundEffectPlayer
 import org.koin.compose.koinInject
 import kotlin.time.Duration.Companion.seconds
 
+internal enum class ChatInputPrimaryAction {
+    SEND,
+    STOP,
+}
+
+internal fun resolveChatInputPrimaryAction(
+    loading: Boolean,
+    inputIsEmpty: Boolean,
+): ChatInputPrimaryAction =
+    if (loading && inputIsEmpty) ChatInputPrimaryAction.STOP else ChatInputPrimaryAction.SEND
+
 @Composable
 fun ChatInput(
     state: ChatInputState,
@@ -142,13 +153,19 @@ fun ChatInput(
     fun sendMessage() {
         focusManager.clearFocus(force = true)
         keyboardController?.hide()
-        if (loading && !state.isEmpty()) onSendClick() else if (loading) onCancelClick() else onSendClick()
+        when (resolveChatInputPrimaryAction(loading, state.isEmpty())) {
+            ChatInputPrimaryAction.SEND -> onSendClick()
+            ChatInputPrimaryAction.STOP -> onCancelClick()
+        }
     }
 
     fun sendMessageWithoutAnswer() {
         focusManager.clearFocus(force = true)
         keyboardController?.hide()
-        if (loading && !state.isEmpty()) onLongSendClick() else if (loading) onCancelClick() else onLongSendClick()
+        when (resolveChatInputPrimaryAction(loading, state.isEmpty())) {
+            ChatInputPrimaryAction.SEND -> onLongSendClick()
+            ChatInputPrimaryAction.STOP -> onCancelClick()
+        }
     }
 
     val asr = LocalASRState.current
@@ -368,7 +385,7 @@ fun ChatInput(
                                     } else {
                                         Icon(
                                             imageVector = HugeIcons.ArrowUp02,
-                                            contentDescription = "Send (interrupt)",
+                                            contentDescription = stringResource(R.string.send),
                                             tint = contentColor,
                                             modifier = Modifier.size(18.dp)
                                         )

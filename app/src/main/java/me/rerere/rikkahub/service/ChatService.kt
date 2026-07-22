@@ -38,7 +38,9 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.put
 import kotlin.time.Duration.Companion.seconds
 import me.rerere.ai.core.MessageRole
 import me.rerere.ai.core.ReasoningLevel
@@ -157,6 +159,7 @@ import me.rerere.rikkahub.subagent.allowsTool
 import me.rerere.rikkahub.subagent.generationMaxSteps
 
 private const val TAG = "ChatService"
+private const val FAST_PATH_TOOL_BUDGET_MS = 30_000L
 
 internal fun backgroundTextGenerationParams(
     model: Model,
@@ -401,6 +404,7 @@ class ChatService(
     private val settingsStore: SettingsStore,
     private val conversationRepo: ConversationRepository,
     private val memoryRepository: MemoryRepository,
+    private val memoryV2Coordinator: me.rerere.rikkahub.memory.MemoryV2Coordinator,
     private val generationHandler: GenerationHandler,
     private val templateTransformer: TemplateTransformer,
     private val providerManager: ProviderManager,
@@ -413,6 +417,9 @@ class ChatService(
     private val workflowRepository: WorkflowRepository,
     private val durableCommandQueue: DurableCommandQueue,
     private val toolExecutionGate: me.rerere.rikkahub.data.ai.ToolExecutionGate,
+    private val toolRuntime: me.rerere.rikkahub.data.ai.execution.ToolRuntime,
+    private val pluginToolCatalog: me.rerere.rikkahub.plugin.PluginToolCatalog,
+    private val pluginHookBridge: me.rerere.rikkahub.plugin.PluginHookBridge,
     private val agentSafetySettings: me.rerere.rikkahub.data.ai.AgentSafetySettings,
     private val shizukuBridgeManager: me.rerere.rikkahub.privilege.ShizukuBridgeManager,
     private val workspaceProcessManager: me.rerere.workspace.WorkspaceProcessManager,
@@ -422,6 +429,7 @@ class ChatService(
         me.rerere.rikkahub.subagent.SubAgentExecutionProfileRegistry,
     private val setupTransactionCoordinator:
         me.rerere.rikkahub.setup.SetupTransactionCoordinator,
+    private val displayAutomationRuntime: me.rerere.rikkahub.display.DisplayAutomationRuntime? = null,
 ) {
     // workspace 系统提示注入 (依赖 workspaceRepository, 故在类内构�?
     private val workspaceReminderTransformer = WorkspaceReminderTransformer(workspaceRepository)
@@ -1335,6 +1343,9 @@ class ChatService(
             me.rerere.rikkahub.data.ai.tools.ToolInvocationContext(
                 callerAssistantId = context.assistant.id.toString(),
                 callerConversationId = context.conversation.id.toString(),
+                callerRunId = context.commandId.toString(),
+                callerWorkspaceId = context.assistant.workspaceId?.toString(),
+                callOrigin = resolveToolOrigin(context.conversation.id, context.origin),
                 isHeadless = false,
             ),
         )
@@ -1344,7 +1355,43 @@ class ChatService(
             .checkTool(match.toolName, match.args.toString())
         if (hardlineReason != null) return@FastPathRouter FastPathDecision.NotMatched
         val rendered = try {
-            val out = tool.execute(match.args)
+            val callOrigin = resolveToolOrigin(context.conversation.id, context.origin)
+            val runtimeResult = toolRuntime.execute(
+                me.rerere.rikkahub.data.ai.execution.ToolExecutionPlanRequest(
+                    toolCallId = "fast-${context.commandId}",
+                    toolName = tool.name,
+                    args = match.args,
+                    executionContext = me.rerere.rikkahub.data.ai.tools.ToolExecutionContext(
+                        runId = context.commandId,
+                        conversationId = context.conversation.id,
+                        assistantId = context.assistant.id.toString(),
+                        callOrigin = callOrigin,
+                    ),
+                    startableTool = null,
+                    legacyExecute = { input -> tool.execute(input.jsonObject) },
+                    runControl = null,
+                    wallClockBudgetMs = FAST_PATH_TOOL_BUDGET_MS,
+                    preExecutionGate = {
+                        when (val gate = toolExecutionGate.evaluate(
+                            toolName = tool.name,
+                            origin = callOrigin,
+                            conversationId = context.conversation.id,
+                            commandId = context.commandId,
+                            arguments = match.args,
+                            unrestrictedOverride = context.assistant.unrestricted,
+                        )) {
+                            me.rerere.rikkahub.data.ai.ToolExecutionGate.GateResult.Allowed ->
+                                me.rerere.rikkahub.data.ai.execution.ToolPreExecutionDecision.Allow
+                            is me.rerere.rikkahub.data.ai.ToolExecutionGate.GateResult.Denied ->
+                                me.rerere.rikkahub.data.ai.execution.ToolPreExecutionDecision.Deny(
+                                    errorCode = "tool_blocked",
+                                    reason = gate.reason,
+                                )
+                        }
+                    },
+                )
+            )
+            val out = runtimeResult.output
             val rawText = out.filterIsInstance<UIMessagePart.Text>().joinToString("\n") { it.text }
             val parsed = runCatching {
                 kotlinx.serialization.json.Json.parseToJsonElement(rawText).jsonObject
@@ -1731,6 +1778,9 @@ class ChatService(
             val invocationCtx = me.rerere.rikkahub.data.ai.tools.ToolInvocationContext(
                 callerAssistantId = assistant.id.toString(),
                 callerConversationId = conversationId.toString(),
+                callerRunId = runControl?.runId?.toString(),
+                callerWorkspaceId = assistant.workspaceId?.toString(),
+                callOrigin = callOrigin,
                 callerModelId = model.id.toString(),
                 isHeadless = isHeadless,
                 modelCanSeeImages = Modality.IMAGE in model.inputModalities,
@@ -1773,6 +1823,38 @@ class ChatService(
             }
             val localToolDefinitions = localTools.getTools(localToolOptions, invocationCtx)
                 .filter { tool -> canExposeLocalTool(tool.name) }
+            val pluginToolRegistrations = if (invocationSurfaceCanExposeTools) {
+                pluginToolCatalog.registrations(
+                    me.rerere.rikkahub.plugin.PluginToolSurfaceRequest(
+                        assistantId = assistant.id.toString(),
+                        conversationId = conversationId.toString(),
+                        runId = runControl?.runId?.toString().orEmpty(),
+                        origin = callOrigin,
+                        assistantEnabledPluginIds = assistant.enabledPluginIds,
+                        isHeadless = isHeadless,
+                        isSubAgent = subAgentProfile != null,
+                        stateProjection = buildJsonObject {
+                            put("version", 1)
+                            put("surface", "local_chat")
+                            put("assistant_name", assistant.name.take(80))
+                            put("memory_enabled", assistant.enableMemory)
+                        }.toString(),
+                    ),
+                )
+            } else {
+                emptyList()
+            }
+            val pluginPromptAddendum = pluginHookBridge.collectPromptAddendum(
+                me.rerere.rikkahub.plugin.PluginPromptHookRequest(
+                    assistantId = assistant.id.toString(),
+                    conversationId = conversationId.toString(),
+                    runId = runControl?.runId?.toString().orEmpty(),
+                    origin = callOrigin,
+                    assistantEnabledPluginIds = assistant.enabledPluginIds,
+                    isHeadless = isHeadless,
+                    isSubAgent = subAgentProfile != null,
+                ),
+            )
             val privilegedShellRegistration = if (
                 invocationSurfaceCanExposeTools &&
                 canExposeTool(me.rerere.rikkahub.privilege.PRIVILEGED_SHELL_TOOL_NAME) &&
@@ -1835,6 +1917,9 @@ class ChatService(
             ) {
                 me.rerere.rikkahub.data.ai.tools.local.verifiedAccessibilityTools(
                     invocationContext = invocationCtx,
+                    displayTargetResolver = displayAutomationRuntime?.let { runtime ->
+                        me.rerere.rikkahub.data.ai.tools.local.DisplayTargetResolver(runtime)
+                    },
                 )
             } else {
                 emptyList()
@@ -1867,8 +1952,11 @@ class ChatService(
                 // anything else) gets its runtime context into the system prompt without
                 // having to plumb a parameter all the way through sendMessage. Returns null
                 // for in-app conversations that didn't register one.
-                systemAddendum = me.rerere.rikkahub.data.ai.tools
-                    .ConversationSystemAddendum.get(conversationId),
+                systemAddendum = listOfNotNull(
+                    me.rerere.rikkahub.data.ai.tools.ConversationSystemAddendum
+                        .get(conversationId),
+                    pluginPromptAddendum,
+                ).joinToString("\n\n").ifBlank { null },
                 isToolAutoApproved = { toolName ->
                     // YOLO mode ("I AM STUPID" toggle in Settings �?Tool approvals): every
                     // tool auto-approves. User opted into this explicitly. HARDLINE still
@@ -1892,7 +1980,9 @@ class ChatService(
                     // ask_user_unavailable. In a headless run (cron / sub-agent) there's nobody to
                     // answer, so it still auto-approves there and falls through to that graceful
                     // envelope instead of hanging the turn.
-                    if (toolName == "ask_user") {
+                    if (me.rerere.rikkahub.plugin.isPluginModelToolName(toolName)) {
+                        false
+                    } else if (toolName == "ask_user") {
                         me.rerere.rikkahub.data.ai.tools.HeadlessConversations
                             .shouldAutoApprove(conversationId)
                     } else {
@@ -1923,9 +2013,12 @@ class ChatService(
                 conversationLorebookIds = conversation.lorebookIds,
                 workspaceCwd = conversation.workspaceCwd,
                 callOrigin = callOrigin,
+                commandOrigin = origin,
                 conversationId = conversationId,
                 commandId = activeCommandId,
                 runControl = runControl,
+                isHeadless = isHeadless,
+                isSubAgent = subAgentProfile != null,
                 maxSteps = subAgentProfile?.generationMaxSteps() ?: 32,
                 memoryToolAllowed = subAgentProfile?.allowsTool("memory_tool") ?: true,
                 invocationSurfaceContextProvider =
@@ -1945,21 +2038,30 @@ class ChatService(
                     structuredPrivilegedV2Registration?.let { registration ->
                         putAll(registration.startables.filterKeys(::canExposeTool))
                     }
+                    pluginToolRegistrations.forEach { registration ->
+                        put(registration.definition.name, registration.startable)
+                    }
                 },
                 memories = if (!assistant.enableMemory) {
                     emptyList()
                 } else {
+                    val standingPreferences = memoryRepository.getUserApprovedStandingMemories(
+                        assistantId = assistant.id,
+                        includeGlobal = assistant.useGlobalMemory,
+                    )
                     val query = conversation.currentMessages
                         .lastOrNull { it.role == MessageRole.USER }
                         ?.parts
                         ?.filterIsInstance<UIMessagePart.Text>()
                         ?.joinToString("\n") { it.text }
                         .orEmpty()
-                    memoryRepository.queryRelevant(
+                    val relevantMemories = memoryRepository.queryRelevant(
                         assistantId = assistant.id,
                         query = query,
                         includeGlobal = assistant.useGlobalMemory,
+                        excludeMemoryIds = standingPreferences.mapTo(hashSetOf()) { it.id },
                     ).map { it.memory }
+                    (standingPreferences + relevantMemories).distinctBy { it.id }
                 },
                 inputTransformers = buildList {
                     addAll(inputTransformers)
@@ -1973,6 +2075,7 @@ class ChatService(
                     }
                     addAll(createConversationTools(conversationRepo, assistant.id))
                     addAll(localToolDefinitions)
+                    addAll(pluginToolRegistrations.map { it.definition })
                     privilegedShellRegistration?.let { add(it.definition) }
                     structuredPrivilegedRegistration?.let { addAll(it.definitions) }
                     structuredPrivilegedV2Registration?.let { addAll(it.definitions) }
@@ -2089,13 +2192,17 @@ class ChatService(
                             (subAgentProfile?.allowsTool("memory_tool") ?: true)
                         val availableNames = buildSet {
                             definitions.mapTo(this) { it.name }
-                            if (memoryToolAvailable) add("memory_tool")
+                            if (memoryToolAvailable) {
+                                add("memory_tool")
+                                add("memory_query")
+                            }
                         }
                         val knownNames = buildSet {
                             me.rerere.rikkahub.data.capability.CapabilityCatalog
                                 .allCapabilities()
                                 .flatMapTo(this) { it.toolNames }
                             add("memory_tool")
+                            add("memory_query")
                             addAll(availableNames)
                         }
                         check(toolNameSurface.publish(availableNames, knownNames)) {
@@ -2200,6 +2307,14 @@ class ChatService(
                 saveConversation(conversationId, finalConversation)
 
                 if (!finalConversation.latestAssistantNeedsFinalAnswer()) {
+                    enqueueMemoryCapture(
+                        conversationId = conversationId,
+                        commandOrigin = origin,
+                        toolOrigin = callOrigin,
+                        assistant = baseAssistant,
+                        conversation = finalConversation,
+                        isSubAgent = subAgentProfile != null,
+                    )
                     launchWithConversationReference(conversationId) {
                         generateTitle(conversationId, finalConversation)
                     }
@@ -2210,6 +2325,165 @@ class ChatService(
             }
         }
         if (propagateFailure) generationResult.getOrThrow()
+    }
+
+    private fun enqueueMemoryCapture(
+        conversationId: Uuid,
+        commandOrigin: CommandOrigin,
+        toolOrigin: ToolCallOrigin,
+        assistant: Assistant,
+        conversation: Conversation,
+        isSubAgent: Boolean,
+    ) {
+        val messages = conversation.currentMessages
+        val assistantIndex = messages.indexOfLast { it.role == MessageRole.ASSISTANT }
+        if (assistantIndex <= 0) return
+        val assistantMessage = messages[assistantIndex]
+        val userMessage = messages.subList(0, assistantIndex)
+            .lastOrNull { it.role == MessageRole.USER } ?: return
+        val userText = userMessage.parts.filterIsInstance<UIMessagePart.Text>()
+            .joinToString("\n") { it.text }.trim()
+        val assistantText = assistantMessage.parts.filterIsInstance<UIMessagePart.Text>()
+            .joinToString("\n") { it.text }.trim()
+        if (userText.isEmpty() || assistantText.isEmpty()) return
+
+        val captureOrigin = when (toolOrigin) {
+            ToolCallOrigin.LocalChat -> me.rerere.rikkahub.memory.MemoryCaptureOrigin.APP_UI
+            ToolCallOrigin.SystemAssistant ->
+                me.rerere.rikkahub.memory.MemoryCaptureOrigin.SYSTEM_ASSISTANT
+            ToolCallOrigin.SystemAssistantKeyguard ->
+                me.rerere.rikkahub.memory.MemoryCaptureOrigin.SYSTEM_ASSISTANT_KEYGUARD
+            ToolCallOrigin.Telegram -> me.rerere.rikkahub.memory.MemoryCaptureOrigin.TELEGRAM
+            ToolCallOrigin.WebServer -> me.rerere.rikkahub.memory.MemoryCaptureOrigin.WEB_API
+            ToolCallOrigin.TrustedWorkflow -> if (commandOrigin == CommandOrigin.CRON) {
+                me.rerere.rikkahub.memory.MemoryCaptureOrigin.CRON
+            } else {
+                me.rerere.rikkahub.memory.MemoryCaptureOrigin.INTERNAL
+            }
+            ToolCallOrigin.MCP,
+            ToolCallOrigin.ExternalIntent,
+            -> me.rerere.rikkahub.memory.MemoryCaptureOrigin.INTERNAL
+        }
+        val scopeId = if (assistant.useGlobalMemory) {
+            MemoryRepository.GLOBAL_MEMORY_ID
+        } else {
+            assistant.id.toString()
+        }
+        val isHeadless = isSubAgent ||
+            me.rerere.rikkahub.data.ai.tools.HeadlessConversations.isHeadless(conversationId)
+        appScope.launch(Dispatchers.IO) {
+            runCatching {
+                memoryV2Coordinator.capture(
+                    me.rerere.rikkahub.memory.CompletedMemoryTurn(
+                        assistantId = assistant.id,
+                        scopeId = scopeId,
+                        conversationId = conversationId,
+                        userMessageId = userMessage.id,
+                        assistantMessageId = assistantMessage.id,
+                        origin = captureOrigin,
+                        userText = userText,
+                        assistantText = assistantText,
+                        memoryEnabled = assistant.enableMemory,
+                        autoSaveMode = assistant.memoryAutoSaveMode,
+                        allowedOrigins = assistant.memoryCaptureOrigins,
+                        isHeadless = isHeadless,
+                        needsFinalAnswer = conversation.latestAssistantNeedsFinalAnswer(),
+                        idleDelayMs = assistant.memoryIdleDelayMinutes
+                            .coerceIn(1, 1_440) * 60_000L,
+                        immediateCaptureThreshold = assistant.memoryImmediateCaptureThreshold
+                            .coerceIn(1, 50),
+                        // Freeze the selected context window on this capture. A later settings
+                        // change must never alter the batch that this completed turn belongs to.
+                        conversationContextTurns = assistant.memoryConversationContextTurns
+                            .coerceIn(3, 30),
+                        narrativeEventsEnabled = assistant.memoryNarrativeEventsEnabled,
+                        insightsTheoriesEnabled = assistant.memoryInsightsTheoriesEnabled,
+                    ),
+                )
+            }.onFailure { error ->
+                Log.w(TAG, "Memory V2 capture failed after successful chat turn", error)
+            }
+        }
+    }
+
+    /**
+     * Queues an explicit user selection for Memory V2. Assistant messages are context only; a
+     * selection containing no user-authored text is rejected before anything is persisted.
+     */
+    suspend fun captureMemorySelection(
+        conversationId: Uuid,
+        selectedNodeIds: Set<Uuid>,
+    ): me.rerere.rikkahub.memory.ManualMemorySelectionResult {
+        val conversation = getConversationFlow(conversationId).value
+        val assistant = settingsStore.settingsFlow.first()
+            .getAssistantById(conversation.assistantId)
+            ?: return me.rerere.rikkahub.memory.ManualMemorySelectionResult.FAILED
+        if (!assistant.enableMemory) {
+            return me.rerere.rikkahub.memory.ManualMemorySelectionResult.MEMORY_DISABLED
+        }
+        val selectedMessages = conversation.messageNodes
+            .filter { it.id in selectedNodeIds }
+            .map { it.currentMessage }
+        val userMessages = selectedMessages.filter { it.role == MessageRole.USER }
+        val userText = userMessages.joinToString("\n\n") { message ->
+            message.parts.filterIsInstance<UIMessagePart.Text>().joinToString("\n") { it.text }
+        }.trim()
+        if (userText.isBlank()) {
+            return me.rerere.rikkahub.memory.ManualMemorySelectionResult.NO_USER_TEXT
+        }
+        val assistantMessages = selectedMessages.filter { it.role == MessageRole.ASSISTANT }
+        val assistantText = assistantMessages.joinToString("\n\n") { message ->
+            message.parts.filterIsInstance<UIMessagePart.Text>().joinToString("\n") { it.text }
+        }.trim()
+        val evidenceAnchor = assistantMessages.lastOrNull()?.id ?: userMessages.last().id
+        val scopeId = if (assistant.useGlobalMemory) {
+            MemoryRepository.GLOBAL_MEMORY_ID
+        } else {
+            assistant.id.toString()
+        }
+        return runCatching {
+            memoryV2Coordinator.capture(
+                me.rerere.rikkahub.memory.CompletedMemoryTurn(
+                    assistantId = assistant.id,
+                    scopeId = scopeId,
+                    conversationId = conversationId,
+                    userMessageId = userMessages.first().id,
+                    assistantMessageId = evidenceAnchor,
+                    origin = me.rerere.rikkahub.memory.MemoryCaptureOrigin.APP_UI,
+                    userText = userText,
+                    assistantText = assistantText,
+                    memoryEnabled = true,
+                    autoSaveMode = assistant.memoryAutoSaveMode.takeUnless {
+                        it == me.rerere.rikkahub.memory.MemoryAutoSaveMode.OFF
+                    } ?: me.rerere.rikkahub.memory.MemoryAutoSaveMode.REVIEW_ALL,
+                    allowedOrigins = setOf(me.rerere.rikkahub.memory.MemoryCaptureOrigin.APP_UI),
+                    isHeadless = false,
+                    needsFinalAnswer = false,
+                    captureSource = me.rerere.rikkahub.memory.MemoryCaptureSource.MANUAL_SELECTION,
+                    idleDelayMs = 0L,
+                    immediateCaptureThreshold = 1,
+                    conversationContextTurns = assistant.memoryConversationContextTurns
+                        .coerceIn(3, 30),
+                    narrativeEventsEnabled = assistant.memoryNarrativeEventsEnabled,
+                    insightsTheoriesEnabled = assistant.memoryInsightsTheoriesEnabled,
+                ),
+            )
+        }.fold(
+            onSuccess = { result ->
+                when (result) {
+                    is me.rerere.rikkahub.memory.MemoryCaptureResult.Queued,
+                    is me.rerere.rikkahub.memory.MemoryCaptureResult.Duplicate,
+                    -> me.rerere.rikkahub.memory.ManualMemorySelectionResult.QUEUED
+
+                    is me.rerere.rikkahub.memory.MemoryCaptureResult.Skipped ->
+                        me.rerere.rikkahub.memory.ManualMemorySelectionResult.FAILED
+                }
+            },
+            onFailure = {
+                Log.w(TAG, "Manual Memory V2 selection capture failed", it)
+                me.rerere.rikkahub.memory.ManualMemorySelectionResult.FAILED
+            },
+        )
     }
 
     private suspend fun createWorkspaceToolsIfReady(workspaceId: String?, cwd: String? = null): List<Tool> {

@@ -122,9 +122,7 @@ fun SettingFilesPage(
                             val result = runCatching {
                                 filesManager.cleanupFolder(ManagedFolder.Upload)
                             }.getOrElse {
-                                toaster.show(
-                                    context.getString(R.string.setting_files_page_cleanup_failed),
-                                )
+                                toaster.show(context.getString(R.string.setting_files_page_cleanup_failed))
                                 return@launch
                             }
                             val message = when {

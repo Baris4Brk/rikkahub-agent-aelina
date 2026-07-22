@@ -107,6 +107,7 @@ import me.rerere.rikkahub.ui.pages.log.LogPage
 import me.rerere.rikkahub.ui.pages.search.SearchPage
 import me.rerere.rikkahub.ui.pages.setting.SettingAboutPage
 import me.rerere.rikkahub.ui.pages.setting.SettingAccessibilityPage
+import me.rerere.rikkahub.ui.pages.setting.AgentRuntimeSettingsRoute
 import me.rerere.rikkahub.ui.pages.setting.SettingNotificationsPage
 import me.rerere.rikkahub.ui.pages.setting.SettingPermissionsPage
 import me.rerere.rikkahub.ui.pages.setting.CapabilityDiagnosticsPage
@@ -584,6 +585,10 @@ class RouteActivity : ComponentActivity() {
                                 SettingSystemAssistantPage()
                             }
 
+                            entry<Screen.SettingAgentRuntime> {
+                                AgentRuntimeSettingsRoute.Content()
+                            }
+
                             entry<Screen.Developer> {
                                 DeveloperPage()
                             }
@@ -847,6 +852,9 @@ sealed interface Screen : NavKey {
 
     @Serializable
     data object SettingSystemAssistant : Screen
+
+    @Serializable
+    data object SettingAgentRuntime : Screen
 
     @Serializable
     data object SettingPermissions : Screen

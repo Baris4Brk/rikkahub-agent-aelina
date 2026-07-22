@@ -57,6 +57,7 @@ internal fun defaultFilter(n: AccessibilityNodeInfo, depth: Int): Boolean {
 fun readWindowTreeTool(
     invocationContext: ToolInvocationContext = ToolInvocationContext.EMPTY,
     streamer: InteractiveToolStreamer = InteractiveToolStreamer.NoOp,
+    displayTargetResolver: DisplayTargetResolver? = null,
 ): Tool = Tool(
     name = "read_window_tree",
     description = "Snapshot of the active window's a11y node tree. Default filters to visible nodes that are clickable / scrollable / editable / have text or content_description. verbose=true skips the filter (use sparingly). max_nodes caps result (default 500, max 2000). package_name optionally restricts + errors if the foreground app doesn't match.",
@@ -75,18 +76,34 @@ fun readWindowTreeTool(
                     put("type", "string")
                     put("description", "If set, return wrong_foreground_app error if the foreground app does not match")
                 })
+                put(DisplayTargetResolver.DISPLAY_SESSION_ID, displaySessionIdSchema())
             }
         )
     },
     execute = { input ->
-        me.rerere.rikkahub.service.RikkaAccessibilityService.instance?.let { wakeScreenIfNeeded(it) }
         val verbose = input.jsonObject["verbose"]?.jsonPrimitive?.booleanOrNull ?: false
         val maxNodesRaw = input.jsonObject["max_nodes"]?.jsonPrimitive?.intOrNull ?: DEFAULT_MAX_NODES
         val maxNodes = maxNodesRaw.coerceIn(1, MAX_NODES_HARD_CEILING)
         val pkgFilter = input.jsonObject["package_name"]?.jsonPrimitive?.contentOrNull
+        val displayTarget = when (
+            val resolution = resolveDisplayTargetOrPrimary(
+                resolver = displayTargetResolver,
+                input = input,
+                invocationContext = invocationContext,
+                requiredCapability = me.rerere.rikkahub.display.DisplayCapability.TREE,
+            )
+        ) {
+            is DisplayTargetResolution.Resolved -> resolution.target
+            is DisplayTargetResolution.Error -> return@Tool listOf(
+                UIMessagePart.Text(displayTargetError(resolution.code).toString())
+            )
+        }
+        if (displayTarget.isPrimary) {
+            me.rerere.rikkahub.service.RikkaAccessibilityService.instance?.let { wakeScreenIfNeeded(it) }
+        }
 
         val payload = AccessibilityServiceHandle.withService { svc ->
-            val root = svc.rootInActiveWindow
+            val root = svc.rootForDisplay(displayTarget.displayId)
             if (root == null) {
                 svc.appendLog(
                     ActionLogEntry(
@@ -129,7 +146,7 @@ fun readWindowTreeTool(
             svc.appendLog(
                 ActionLogEntry(
                     type = "read_window_tree",
-                    paramsSummary = "$emitted/$seen nodes, pkg=$pkg" + if (verbose) ", verbose" else "",
+                    paramsSummary = "$emitted/$seen nodes, pkg=$pkg, display=${displayTarget.displayId}" + if (verbose) ", verbose" else "",
                     success = true,
                     timestampMs = System.currentTimeMillis(),
                 )
@@ -139,6 +156,8 @@ fun readWindowTreeTool(
                 put("truncated", truncated)
                 put("total_seen", seen)
                 put("package", pkg)
+                put("display_id", displayTarget.displayId)
+                displayTarget.sessionId?.let { put(DisplayTargetResolver.DISPLAY_SESSION_ID, it) }
                 root.window?.title?.toString()?.let { put("window_title", it) } ?: put("window_title", "")
             }
         }

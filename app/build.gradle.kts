@@ -1,6 +1,7 @@
 import com.android.build.api.dsl.Packaging
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
+import org.gradle.api.tasks.testing.Test
 import java.io.FileInputStream
 import java.util.Properties
 
@@ -19,8 +20,8 @@ android {
         applicationId = "me.rerere.rikkahub"
         minSdk = 26
         targetSdk = 37
-        versionCode = 170
-        versionName = "2.3.1-agent-up242.6"
+        versionCode = 184
+        versionName = "2.3.1-agent-up244.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -161,6 +162,15 @@ composeCompiler {
 tasks.register("buildAll") {
     dependsOn("assembleRelease", "bundleRelease")
     description = "Build both APK and AAB"
+}
+
+tasks.withType<Test>().configureEach {
+    // This repository's Android/KSP graph already occupies most of the Windows commit limit.
+    // Keep unit tests deterministic on low-pagefile machines instead of allowing Gradle to
+    // fork multiple 512 MiB G1 heaps that fail before a single test executes (errno 1455).
+    maxParallelForks = 1
+    maxHeapSize = "192m"
+    jvmArgs("-XX:+UseSerialGC")
 }
 
 ksp {

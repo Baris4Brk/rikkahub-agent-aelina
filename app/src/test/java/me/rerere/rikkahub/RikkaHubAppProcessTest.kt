@@ -21,4 +21,16 @@ class RikkaHubAppProcessTest {
         assertFalse(isVoiceInteractorProcess("me.rerere.rikkahub", "me.rerere.rikkahub:web"))
         assertFalse(isVoiceInteractorProcess("me.rerere.rikkahub", null))
     }
+
+    @Test
+    fun `plugin runtime process is classified as lightweight`() {
+        assertTrue(
+            isPluginRuntimeProcess(
+                packageName = "me.rerere.rikkahub",
+                processName = "me.rerere.rikkahub:plugin_runtime",
+            )
+        )
+        assertFalse(isPluginRuntimeProcess("me.rerere.rikkahub", "me.rerere.rikkahub"))
+        assertFalse(isPluginRuntimeProcess("me.rerere.rikkahub", "me.rerere.rikkahub:web"))
+    }
 }

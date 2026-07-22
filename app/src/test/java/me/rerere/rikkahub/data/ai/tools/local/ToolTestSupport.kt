@@ -27,9 +27,6 @@ internal val NULL_CONTEXT: Context =
     UNSAFE.allocateInstance(ContextWrapper::class.java) as Context
 
 internal fun execTool(tool: Tool, args: String): String = runBlocking {
-    // TemporaryFolder returns backslash paths on Windows. These tests interpolate paths
-    // into JSON literals, so normalize only on Windows before parsing; Android accepts
-    // forward slashes and the same test inputs remain valid on every host OS.
     val portableArgs = if (java.io.File.separatorChar == '\\') args.replace('\\', '/') else args
     val parts = tool.execute(Json.parseToJsonElement(portableArgs))
     (parts.first() as UIMessagePart.Text).text

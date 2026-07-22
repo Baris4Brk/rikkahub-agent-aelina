@@ -22,6 +22,7 @@ private fun numOrNull(input: kotlinx.serialization.json.JsonElement, key: String
 fun swipeTool(
     invocationContext: ToolInvocationContext = ToolInvocationContext.EMPTY,
     streamer: InteractiveToolStreamer = InteractiveToolStreamer.NoOp,
+    displayTargetResolver: DisplayTargetResolver? = null,
 ): Tool = Tool(
     name = "swipe",
     description = """
@@ -40,13 +41,12 @@ fun swipeTool(
                     put("type", "integer")
                     put("description", "Swipe duration in milliseconds (default 300, range 50-5000)")
                 })
+                put(DisplayTargetResolver.DISPLAY_SESSION_ID, displaySessionIdSchema())
             },
             required = listOf("start_x", "start_y", "end_x", "end_y")
         )
     },
     execute = { input ->
-        AgentTurnTracker.recordAutomationAction()
-        me.rerere.rikkahub.service.RikkaAccessibilityService.instance?.let { wakeScreenIfNeeded(it) }
         val sx = numOrNull(input, "start_x")
         val sy = numOrNull(input, "start_y")
         val ex = numOrNull(input, "end_x")
@@ -59,6 +59,23 @@ fun swipeTool(
                     }.toString()
                 )
             )
+        }
+        val displayTarget = when (
+            val resolution = resolveDisplayTargetOrPrimary(
+                resolver = displayTargetResolver,
+                input = input,
+                invocationContext = invocationContext,
+                requiredCapability = me.rerere.rikkahub.display.DisplayCapability.GESTURE,
+            )
+        ) {
+            is DisplayTargetResolution.Resolved -> resolution.target
+            is DisplayTargetResolution.Error -> return@Tool listOf(
+                UIMessagePart.Text(displayTargetError(resolution.code).toString())
+            )
+        }
+        AgentTurnTracker.recordAutomationAction()
+        if (displayTarget.isPrimary) {
+            me.rerere.rikkahub.service.RikkaAccessibilityService.instance?.let { wakeScreenIfNeeded(it) }
         }
         val duration = input.jsonObject["duration_ms"]?.jsonPrimitive?.longOrNull ?: DEFAULT_SWIPE_MS
         if (duration < 50L || duration > 5000L) {
@@ -74,12 +91,15 @@ fun swipeTool(
             val path = svc.buildSwipePath(sx.toFloat(), sy.toFloat(), ex.toFloat(), ey.toFloat())
             val gesture = GestureDescription.Builder()
                 .addStroke(GestureDescription.StrokeDescription(path, 0L, duration))
-                .build()
+                .buildForDisplay(displayTarget.displayId)
+                ?: return@withService buildJsonObject {
+                    put("error", "display_api_unsupported")
+                }
             val ok = svc.dispatchGestureAsync(gesture)
             svc.appendLog(
                 ActionLogEntry(
                     type = "swipe",
-                    paramsSummary = "(${sx.toInt()},${sy.toInt()})->(${ex.toInt()},${ey.toInt()}) ${duration}ms",
+                    paramsSummary = "(${sx.toInt()},${sy.toInt()})->(${ex.toInt()},${ey.toInt()}) ${duration}ms display=${displayTarget.displayId}",
                     success = ok,
                     timestampMs = System.currentTimeMillis(),
                 )

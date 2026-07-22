@@ -16,6 +16,7 @@ import kotlinx.serialization.json.put
 import me.rerere.ai.core.InputSchema
 import me.rerere.ai.core.Tool
 import me.rerere.ai.ui.UIMessagePart
+import me.rerere.rikkahub.data.ai.tools.ToolInvocationContext
 import me.rerere.rikkahub.service.ActionLogEntry
 import me.rerere.rikkahub.service.RikkaAccessibilityService
 import java.io.File
@@ -35,7 +36,11 @@ private fun pruneOldCacheScreenshots(dir: File) {
     }
 }
 
-fun takeScreenshotTool(context: Context): Tool = Tool(
+fun takeScreenshotTool(
+    context: Context,
+    invocationContext: ToolInvocationContext = ToolInvocationContext.EMPTY,
+    displayTargetResolver: DisplayTargetResolver? = null,
+): Tool = Tool(
     name = "take_screenshot",
     description = "Capture the current display via AccessibilityService and return it as a vision attachment. PNG also saved to Pictures/RikkaHub/Screenshots/ — gallery_path in the result is the on-device absolute path. Secure surfaces (banking, DRM, password fields) error gracefully. OS-rate-limited to ~1/sec.",
     parameters = {
@@ -43,13 +48,28 @@ fun takeScreenshotTool(context: Context): Tool = Tool(
             properties = buildJsonObject {
                 put("display_id", buildJsonObject {
                     put("type", "integer")
-                    put("description", "Display id to capture (default 0)")
+                    put("description", "Legacy primary display id only; nonzero values require display_session_id")
                 })
+                put(DisplayTargetResolver.DISPLAY_SESSION_ID, displaySessionIdSchema())
             }
         )
     },
     execute = { input ->
-        val displayId = input.jsonObject["display_id"]?.jsonPrimitive?.intOrNull ?: 0
+        val displayTarget = when (
+            val resolution = resolveDisplayTargetOrPrimary(
+                resolver = displayTargetResolver,
+                input = input,
+                invocationContext = invocationContext,
+                requiredCapability = me.rerere.rikkahub.display.DisplayCapability.SCREENSHOT,
+                legacyDisplayIdKey = "display_id",
+            )
+        ) {
+            is DisplayTargetResolution.Resolved -> resolution.target
+            is DisplayTargetResolution.Error -> return@Tool listOf(
+                UIMessagePart.Text(displayTargetError(resolution.code).toString())
+            )
+        }
+        val displayId = displayTarget.displayId
 
         val outcome = AccessibilityServiceHandle.withService { svc ->
             val cacheDir = File(context.cacheDir, SCREENSHOT_CACHE_DIR).apply { mkdirs() }

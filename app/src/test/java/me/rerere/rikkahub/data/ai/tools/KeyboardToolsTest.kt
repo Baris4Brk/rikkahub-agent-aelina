@@ -70,17 +70,6 @@ class KeyboardToolsTest {
     }
 
     @Test
-    fun `keyboard_input is a compatibility alias for keyboard_type`() {
-        val canonical = keyboardTypeTool(client)
-        val alias = keyboardInputTool(client)
-
-        assertEquals("keyboard_input", alias.name)
-        assertEquals(canonical.parameters(), alias.parameters())
-        assertEquals(canonical.needsApproval(JsonObject(emptyMap())), alias.needsApproval(JsonObject(emptyMap())))
-        assertEquals(exec(canonical, """{}"""), exec(alias, """{}"""))
-    }
-
-    @Test
     fun `keyboard_press_key with unresolvable key returns invalid_key envelope`() {
         val out = exec(keyboardPressKeyTool(client), """{"key":"flibber"}""")
         assertTrue(out.contains("\"error\":\"invalid_key\""))

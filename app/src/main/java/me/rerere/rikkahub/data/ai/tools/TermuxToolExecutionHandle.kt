@@ -3,8 +3,10 @@ package me.rerere.rikkahub.data.ai.tools
 import java.security.MessageDigest
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.time.Duration
+import kotlin.time.Duration.Companion.milliseconds
 
 /**
  * Narrow bridge seam for a persistent, authenticated Termux process supervisor. The bridge
@@ -48,20 +50,40 @@ class TermuxToolExecutionHandle(
             return if (result.isCompleted) ToolTerminationState.StoppedConfirmed
             else ToolTerminationState.Unknown
         }
-        val graceful = withTimeoutOrNull(gracePeriod) {
+        try {
             bridge.cancel(runId, force = false)
-            verifyStopped()
-        } ?: false
-        if (graceful) return ToolTerminationState.StoppedConfirmed
-
-        val forced = try {
-            bridge.cancel(runId, force = true)
-            withTimeoutOrNull(gracePeriod) { verifyStopped() } ?: false
         } catch (_: Throwable) {
-            false
+            // A status poll can still confirm a process that exited while the cancellation
+            // transport was failing, so continue through the normal confirmation path.
         }
-        return if (forced) ToolTerminationState.StoppedConfirmed else ToolTerminationState.Unknown
+        if (waitForStopped(gracePeriod)) return ToolTerminationState.StoppedConfirmed
+
+        try {
+            bridge.cancel(runId, force = true)
+        } catch (_: Throwable) {
+            // Keep the outcome unknown unless the next bounded status polling can prove it.
+        }
+        return if (waitForStopped(gracePeriod)) {
+            ToolTerminationState.StoppedConfirmed
+        } else {
+            ToolTerminationState.Unknown
+        }
     }
+
+    /**
+     * A Termux cancel request only means the supervisor accepted the signal. Poll the identity
+     * through the whole grace period before escalating, otherwise a naturally exiting process
+     * is needlessly killed and a delayed exit is reported as unconfirmed.
+     */
+    private suspend fun waitForStopped(gracePeriod: Duration): Boolean =
+        withTimeoutOrNull(gracePeriod) {
+            while (true) {
+                if (verifyStopped()) return@withTimeoutOrNull true
+                delay(TERMINATION_POLL_INTERVAL)
+            }
+            @Suppress("UNREACHABLE_CODE")
+            false
+        } ?: false
 
     private suspend fun verifyStopped(): Boolean {
         val status = bridge.status(runId)
@@ -73,4 +95,8 @@ class TermuxToolExecutionHandle(
 
     private fun secureEquals(left: String, right: String): Boolean =
         MessageDigest.isEqual(left.toByteArray(), right.toByteArray())
+
+    private companion object {
+        val TERMINATION_POLL_INTERVAL = 50.milliseconds
+    }
 }

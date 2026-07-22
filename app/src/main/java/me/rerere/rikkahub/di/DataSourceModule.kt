@@ -8,6 +8,7 @@ import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.http.HttpHeaders
 import io.pebbletemplates.pebble.PebbleEngine
+import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.Json
 import me.rerere.ai.provider.ProviderManager
 import me.rerere.common.http.AcceptLanguageBuilder
@@ -41,8 +42,26 @@ import me.rerere.rikkahub.data.db.migrations.MIGRATION_26_27
 import me.rerere.rikkahub.data.db.migrations.MIGRATION_27_28
 import me.rerere.rikkahub.data.db.migrations.MIGRATION_28_29
 import me.rerere.rikkahub.data.db.migrations.MIGRATION_29_30
+import me.rerere.rikkahub.data.db.migrations.MIGRATION_30_31
+import me.rerere.rikkahub.data.db.migrations.MIGRATION_31_32
+import me.rerere.rikkahub.data.db.migrations.MIGRATION_32_33
+import me.rerere.rikkahub.data.db.migrations.MIGRATION_33_34
 import me.rerere.rikkahub.data.repository.MemorySearchIndex
 import me.rerere.rikkahub.data.repository.MemoryRetriever
+import me.rerere.rikkahub.memory.AndroidMemoryWorkScheduler
+import me.rerere.rikkahub.memory.DefaultMemoryV2Coordinator
+import me.rerere.rikkahub.memory.MemoryCaptureStore
+import me.rerere.rikkahub.memory.MemoryEmergencyGate
+import me.rerere.rikkahub.memory.MemoryExtractor
+import me.rerere.rikkahub.memory.MemoryProcessingStore
+import me.rerere.rikkahub.memory.MemoryMetadataReconciler
+import me.rerere.rikkahub.memory.DefaultMemoryMutationCoordinator
+import me.rerere.rikkahub.memory.MemoryMutationCoordinator
+import me.rerere.rikkahub.memory.MemoryV2Coordinator
+import me.rerere.rikkahub.memory.MemoryWorkScheduler
+import me.rerere.rikkahub.memory.ProviderMemoryExtractor
+import me.rerere.rikkahub.memory.RoomMemoryCaptureStore
+import me.rerere.rikkahub.memory.RoomMemoryProcessingStore
 import me.rerere.rikkahub.service.chat.DurableCommandQueue
 import me.rerere.rikkahub.data.ai.mcp.McpManager
 import me.rerere.rikkahub.data.agentrun.AgentRunBootRecovery
@@ -82,6 +101,10 @@ val dataSourceModule = module {
                 MIGRATION_27_28,
                 MIGRATION_28_29,
                 MIGRATION_29_30,
+                MIGRATION_30_31,
+                MIGRATION_31_32,
+                MIGRATION_32_33,
+                MIGRATION_33_34,
             )
             .addCallback(object : RoomDatabase.Callback() {
                 override fun onOpen(db: SupportSQLiteDatabase) {
@@ -132,6 +155,10 @@ val dataSourceModule = module {
     }
 
     single {
+        get<AppDatabase>().memoryV2Dao()
+    }
+
+    single {
         get<AppDatabase>().genMediaDao()
     }
 
@@ -156,6 +183,34 @@ val dataSourceModule = module {
     }
     single<MemorySearchIndex> { MemoryFtsManager(get()) }
     single { MemoryRetriever(get()) }
+    single { MemoryMetadataReconciler(get(), get()) }
+    single<MemoryWorkScheduler> { AndroidMemoryWorkScheduler(get()) }
+    single<MemoryCaptureStore> { RoomMemoryCaptureStore(get()) }
+    single<MemoryProcessingStore> {
+        RoomMemoryProcessingStore(
+            database = get(),
+            memoryDao = get(),
+            memoryV2Dao = get(),
+            retriever = get(),
+            json = get(),
+        )
+    }
+    single<MemoryMutationCoordinator> { DefaultMemoryMutationCoordinator(get()) }
+    single<MemoryExtractor> { ProviderMemoryExtractor(get(), get()) }
+    single<MemoryEmergencyGate> {
+        val safetySettings = get<me.rerere.rikkahub.data.ai.AgentSafetySettings>()
+        MemoryEmergencyGate { safetySettings.emergencyStopFlow.first() }
+    }
+    single<MemoryV2Coordinator> {
+        DefaultMemoryV2Coordinator(
+            captureStore = get(),
+            workScheduler = get(),
+            processingStore = get(),
+            extractor = get(),
+            emergencyGate = get(),
+            idGenerator = { kotlin.uuid.Uuid.random().toString() },
+        )
+    }
 
     // Phase 24 — unified AgentRun ledger. DAO + the single shared writer/reader + the
     // boot-recovery sweep. AgentRunRepository has no cross-dependencies (only the DAO), so
@@ -181,6 +236,11 @@ val dataSourceModule = module {
             aiLoggingManager = get(),
             systemPromptBuilder = get(),
             toolExecutionGate = get(),
+            toolRuntime = get(),
+            toolStartableResolver = get(),
+            toolExecutionBatchCoordinator = get(),
+            contextBroker = get(),
+            contextDiagnosticsStore = get(),
         )
     }
 

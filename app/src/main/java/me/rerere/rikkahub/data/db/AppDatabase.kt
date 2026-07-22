@@ -10,10 +10,12 @@ import me.rerere.rikkahub.data.agentrun.AgentRun
 import me.rerere.rikkahub.data.agentrun.AgentRunDao
 import me.rerere.rikkahub.data.db.dao.AlarmDao
 import me.rerere.rikkahub.data.db.dao.ConversationDAO
+import me.rerere.rikkahub.data.db.dao.BrowserLibraryDao
 import me.rerere.rikkahub.data.db.dao.FavoriteDAO
 import me.rerere.rikkahub.data.db.dao.GenMediaDAO
 import me.rerere.rikkahub.data.db.dao.ManagedFileDAO
 import me.rerere.rikkahub.data.db.dao.MemoryDAO
+import me.rerere.rikkahub.data.db.dao.MemoryV2Dao
 import me.rerere.rikkahub.data.db.dao.MessageNodeDAO
 import me.rerere.rikkahub.data.db.dao.PendingChatCommandDao
 import me.rerere.rikkahub.data.db.dao.ScheduledJobDao
@@ -23,10 +25,19 @@ import me.rerere.rikkahub.data.db.dao.TelegramChatDao
 import me.rerere.rikkahub.data.db.dao.WorkspaceDAO
 import me.rerere.rikkahub.data.db.entity.AlarmEntity
 import me.rerere.rikkahub.data.db.entity.ConversationEntity
+import me.rerere.rikkahub.data.db.entity.BrowserBookmarkEntity
+import me.rerere.rikkahub.data.db.entity.BrowserHistoryEntity
 import me.rerere.rikkahub.data.db.entity.FavoriteEntity
 import me.rerere.rikkahub.data.db.entity.GenMediaEntity
 import me.rerere.rikkahub.data.db.entity.ManagedFileEntity
 import me.rerere.rikkahub.data.db.entity.MemoryEntity
+import me.rerere.rikkahub.data.db.entity.MemoryCandidateEntity
+import me.rerere.rikkahub.data.db.entity.MemoryCaptureEntity
+import me.rerere.rikkahub.data.db.entity.MemoryRevisionEntity
+import me.rerere.rikkahub.data.db.entity.MemoryEvidenceEntity
+import me.rerere.rikkahub.data.db.entity.MemoryLinkEntity
+import me.rerere.rikkahub.data.db.entity.MemoryRelationCandidateEntity
+import me.rerere.rikkahub.data.db.entity.MemoryBackfillRunEntity
 import me.rerere.rikkahub.data.db.entity.MessageNodeEntity
 import me.rerere.rikkahub.data.db.entity.PendingChatCommandEntity
 import me.rerere.rikkahub.data.db.entity.ScheduledJobEntity
@@ -50,8 +61,17 @@ import me.rerere.rikkahub.workflow.db.WorkflowRunEntity
 @Database(
     entities = [
         AlarmEntity::class,
+        BrowserBookmarkEntity::class,
+        BrowserHistoryEntity::class,
         ConversationEntity::class,
         MemoryEntity::class,
+        MemoryCaptureEntity::class,
+        MemoryCandidateEntity::class,
+        MemoryRevisionEntity::class,
+        MemoryEvidenceEntity::class,
+        MemoryLinkEntity::class,
+        MemoryRelationCandidateEntity::class,
+        MemoryBackfillRunEntity::class,
         GenMediaEntity::class,
         MessageNodeEntity::class,
         ManagedFileEntity::class,
@@ -66,7 +86,9 @@ import me.rerere.rikkahub.workflow.db.WorkflowRunEntity
         WorkspaceEntity::class,
         PendingChatCommandEntity::class,
     ],
-    version = 30,
+    // v33 freezes the conversation-context limit with each queued capture so changing the
+    // setting later cannot split or enlarge a batch that has already been accepted.
+    version = 34,
     autoMigrations = [
         AutoMigration(from = 1, to = 2),
         AutoMigration(from = 2, to = 3),
@@ -97,9 +119,13 @@ import me.rerere.rikkahub.workflow.db.WorkflowRunEntity
 abstract class AppDatabase : RoomDatabase() {
     abstract fun alarmDao(): AlarmDao
 
+    abstract fun browserLibraryDao(): BrowserLibraryDao
+
     abstract fun conversationDao(): ConversationDAO
 
     abstract fun memoryDao(): MemoryDAO
+
+    abstract fun memoryV2Dao(): MemoryV2Dao
 
     abstract fun genMediaDao(): GenMediaDAO
 

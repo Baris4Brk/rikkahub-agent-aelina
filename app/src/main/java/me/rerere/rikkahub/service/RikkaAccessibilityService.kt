@@ -10,6 +10,7 @@ import android.os.HandlerThread
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -170,6 +171,23 @@ class RikkaAccessibilityService : AccessibilityService() {
     fun buildSwipePath(sx: Float, sy: Float, ex: Float, ey: Float): Path = Path().apply {
         moveTo(sx, sy)
         lineTo(ex, ey)
+    }
+
+    /**
+     * Returns a root belonging to exactly [displayId]. A non-primary display never falls back
+     * to [rootInActiveWindow], because that could redirect an owned virtual-display operation
+     * onto the user's physical screen.
+     */
+    fun rootForDisplay(displayId: Int): AccessibilityNodeInfo? {
+        if (displayId == android.view.Display.DEFAULT_DISPLAY) return rootInActiveWindow
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+        val windows = windowsOnAllDisplays.get(displayId) ?: return null
+        val window = windows.firstOrNull { it.isActive }
+            ?: windows.firstOrNull { it.isFocused }
+            ?: windows.firstOrNull { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }
+            ?: windows.firstOrNull()
+            ?: return null
+        return window.root
     }
 
     /**

@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.datastore.SettingsStore
+import me.rerere.rikkahub.data.db.dao.MemoryV2Dao
 import me.rerere.rikkahub.data.db.entity.WorkspaceEntity
 import me.rerere.rikkahub.data.files.FilesManager
 import me.rerere.rikkahub.data.files.SkillManager
@@ -34,6 +35,7 @@ class AssistantDetailVM(
     private val id: String,
     private val settingsStore: SettingsStore,
     private val memoryRepository: MemoryRepository,
+    private val memoryV2Dao: MemoryV2Dao,
     private val filesManager: FilesManager,
     private val skillManager: SkillManager,
     private val workspaceRepository: WorkspaceRepository,
@@ -102,6 +104,21 @@ class AssistantDetailVM(
             scope = viewModelScope,
             started = SharingStarted.Eagerly,
             initialValue = emptyList(),
+        )
+
+    val pendingReviewCount = assistant
+        .flatMapLatest { currentAssistant ->
+            val scopeId = if (currentAssistant.useGlobalMemory) {
+                MemoryRepository.GLOBAL_MEMORY_ID
+            } else {
+                assistantId.toString()
+            }
+            memoryV2Dao.observePendingCandidateCount(scopeId)
+        }
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.Eagerly,
+            initialValue = 0,
         )
 
     val conversations = conversationRepository
@@ -223,8 +240,9 @@ class AssistantDetailVM(
                 assistantId.toString()
             }
             memoryRepository.addMemory(
-                assistantId = memoryAssistantId,
-                content = memory.content
+                scopeId = memoryAssistantId,
+                content = memory.content,
+                originAssistantId = assistantId.toString(),
             )
         }
     }

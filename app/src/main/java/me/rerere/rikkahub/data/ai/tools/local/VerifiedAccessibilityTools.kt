@@ -57,6 +57,8 @@ fun uiWaitForWindowTool(
     controller: VerifiedAccessibilityController = defaultVerifiedAccessibilityController(),
     invocationContext: ToolInvocationContext = ToolInvocationContext.EMPTY,
     streamer: InteractiveToolStreamer = InteractiveToolStreamer.NoOp,
+    displayTargetResolver: DisplayTargetResolver? = null,
+    controllerForDisplay: (Int) -> VerifiedAccessibilityController = ::defaultVerifiedAccessibilityControllerForDisplay,
 ): Tool = Tool(
     name = "ui_wait_for_window",
     description = "Wait up to 30 seconds for an accessibility window matching a package and/or title. Stops immediately on protected password, biometric, payment, transfer, factory-reset, or device-admin surfaces.",
@@ -66,20 +68,31 @@ fun uiWaitForWindowTool(
                 put("package_name", stringSchema("Exact foreground package name"))
                 put("title_contains", stringSchema("Case-insensitive window title fragment"))
                 put("timeout_ms", integerSchema("Wait timeout; default 10000, maximum 30000"))
+                put(DisplayTargetResolver.DISPLAY_SESSION_ID, displaySessionIdSchema())
             },
         )
     },
     execute = { input ->
         val obj = input.jsonObject
-        obj.rejectUnknown(setOf("package_name", "title_contains", "timeout_ms"))?.let {
+        obj.rejectUnknown(setOf("package_name", "title_contains", "timeout_ms", DisplayTargetResolver.DISPLAY_SESSION_ID))?.let {
             return@Tool textResult(it)
         }
-        obj.rejectInvalidTypes(strings = setOf("package_name", "title_contains"), longs = setOf("timeout_ms"))
+        obj.rejectInvalidTypes(
+            strings = setOf("package_name", "title_contains", DisplayTargetResolver.DISPLAY_SESSION_ID),
+            longs = setOf("timeout_ms"),
+        )
             ?.let { return@Tool textResult(it) }
         val packageName = obj.string("package_name")
         val title = obj.string("title_contains")
         val timeout = obj.long("timeout_ms") ?: DEFAULT_UI_WAIT_TIMEOUT_MS
-        val result = controller.waitForWindow(UiExpectation.WindowMatches(packageName, title), timeout)
+        val targetController = resolveDisplayScopedController(
+            input = input,
+            invocationContext = invocationContext,
+            displayTargetResolver = displayTargetResolver,
+            primaryController = controller,
+            controllerForDisplay = controllerForDisplay,
+        ).getOrElse { return@Tool textResult(displayTargetResult(it)) }
+        val result = targetController.waitForWindow(UiExpectation.WindowMatches(packageName, title), timeout)
         streamer.streamIfHeadless(invocationContext, "WaitForWindow")
         textResult(result)
     },
@@ -89,6 +102,8 @@ fun uiWaitForNodeTool(
     controller: VerifiedAccessibilityController = defaultVerifiedAccessibilityController(),
     invocationContext: ToolInvocationContext = ToolInvocationContext.EMPTY,
     streamer: InteractiveToolStreamer = InteractiveToolStreamer.NoOp,
+    displayTargetResolver: DisplayTargetResolver? = null,
+    controllerForDisplay: (Int) -> VerifiedAccessibilityController = ::defaultVerifiedAccessibilityControllerForDisplay,
 ): Tool = Tool(
     name = "ui_wait_for_node",
     description = "Wait for a node to appear or disappear. Selectors may use view_id, exact text, content_description, class_name, and an optional ancestor selector. Every check reads a fresh accessibility tree.",
@@ -98,20 +113,32 @@ fun uiWaitForNodeTool(
                 put("selector", selectorSchema(includeAncestor = true))
                 put("present", booleanSchema("true to wait for presence; false for absence (default true)"))
                 put("timeout_ms", integerSchema("Wait timeout; default 10000, maximum 30000"))
+                put(DisplayTargetResolver.DISPLAY_SESSION_ID, displaySessionIdSchema())
             },
             required = listOf("selector"),
         )
     },
     execute = { input ->
         val obj = input.jsonObject
-        obj.rejectUnknown(setOf("selector", "present", "timeout_ms"))?.let { return@Tool textResult(it) }
-        obj.rejectInvalidTypes(booleans = setOf("present"), longs = setOf("timeout_ms"))
+        obj.rejectUnknown(setOf("selector", "present", "timeout_ms", DisplayTargetResolver.DISPLAY_SESSION_ID))?.let { return@Tool textResult(it) }
+        obj.rejectInvalidTypes(
+            strings = setOf(DisplayTargetResolver.DISPLAY_SESSION_ID),
+            booleans = setOf("present"),
+            longs = setOf("timeout_ms"),
+        )
             ?.let { return@Tool textResult(it) }
         val selector = parseSelector(obj["selector"])
             ?: return@Tool textResult(invalidResult("selector is invalid"))
         val present = obj.boolean("present") ?: true
         val timeout = obj.long("timeout_ms") ?: DEFAULT_UI_WAIT_TIMEOUT_MS
-        val result = controller.waitForNode(selector, present, timeout)
+        val targetController = resolveDisplayScopedController(
+            input = input,
+            invocationContext = invocationContext,
+            displayTargetResolver = displayTargetResolver,
+            primaryController = controller,
+            controllerForDisplay = controllerForDisplay,
+        ).getOrElse { return@Tool textResult(displayTargetResult(it)) }
+        val result = targetController.waitForNode(selector, present, timeout)
         streamer.streamIfHeadless(invocationContext, "WaitForNode")
         textResult(result)
     },
@@ -121,6 +148,8 @@ fun uiClickNodeVerifiedTool(
     controller: VerifiedAccessibilityController = defaultVerifiedAccessibilityController(),
     invocationContext: ToolInvocationContext = ToolInvocationContext.EMPTY,
     streamer: InteractiveToolStreamer = InteractiveToolStreamer.NoOp,
+    displayTargetResolver: DisplayTargetResolver? = null,
+    controllerForDisplay: (Int) -> VerifiedAccessibilityController = ::defaultVerifiedAccessibilityControllerForDisplay,
 ): Tool = Tool(
     name = "ui_click_node_verified",
     description = "Resolve a node from a fresh tree, click it, then verify a window/content change or an explicit node/window condition. Re-resolves stale targets up to two times, but never repeats a click Android already accepted.",
@@ -140,6 +169,7 @@ fun uiClickNodeVerifiedTool(
                 put("expected_package_name", stringSchema("Package for window_matches"))
                 put("expected_title_contains", stringSchema("Title fragment for window_matches"))
                 put("timeout_ms", integerSchema("Whole action timeout; default 10000, maximum 30000"))
+                put(DisplayTargetResolver.DISPLAY_SESSION_ID, displaySessionIdSchema())
             },
             required = listOf("selector"),
         )
@@ -151,10 +181,14 @@ fun uiClickNodeVerifiedTool(
             setOf(
                 "selector", "nth", "expectation", "expected_selector",
                 "expected_package_name", "expected_title_contains", "timeout_ms",
+                DisplayTargetResolver.DISPLAY_SESSION_ID,
             )
         )?.let { return@Tool textResult(it) }
         obj.rejectInvalidTypes(
-            strings = setOf("expectation", "expected_package_name", "expected_title_contains"),
+            strings = setOf(
+                "expectation", "expected_package_name", "expected_title_contains",
+                DisplayTargetResolver.DISPLAY_SESSION_ID,
+            ),
             ints = setOf("nth"),
             longs = setOf("timeout_ms"),
         )?.let { return@Tool textResult(it) }
@@ -164,7 +198,14 @@ fun uiClickNodeVerifiedTool(
             ?: return@Tool textResult(invalidResult("expectation arguments are incomplete or invalid"))
         val nth = obj.int("nth") ?: 0
         val timeout = obj.long("timeout_ms") ?: DEFAULT_UI_WAIT_TIMEOUT_MS
-        val result = controller.clickNodeVerified(selector, nth, expectation, timeout)
+        val targetController = resolveDisplayScopedController(
+            input = input,
+            invocationContext = invocationContext,
+            displayTargetResolver = displayTargetResolver,
+            primaryController = controller,
+            controllerForDisplay = controllerForDisplay,
+        ).getOrElse { return@Tool textResult(displayTargetResult(it)) }
+        val result = targetController.clickNodeVerified(selector, nth, expectation, timeout)
         streamer.streamIfHeadless(invocationContext, "ClickNodeVerified")
         textResult(result)
     },
@@ -174,6 +215,8 @@ fun uiSetTextVerifiedTool(
     controller: VerifiedAccessibilityController = defaultVerifiedAccessibilityController(),
     invocationContext: ToolInvocationContext = ToolInvocationContext.EMPTY,
     streamer: InteractiveToolStreamer = InteractiveToolStreamer.NoOp,
+    displayTargetResolver: DisplayTargetResolver? = null,
+    controllerForDisplay: (Int) -> VerifiedAccessibilityController = ::defaultVerifiedAccessibilityControllerForDisplay,
 ): Tool = Tool(
     name = "ui_set_text_verified",
     description = "Set text on a freshly resolved editable node and re-read the tree until the value matches. Verification codes may be filled, but this tool does not confirm or submit them. Text is not echoed in the result or action summary.",
@@ -184,6 +227,7 @@ fun uiSetTextVerifiedTool(
                 put("text", stringSchema("Text to set; never logged by this tool"))
                 put("nth", integerSchema("Zero-based match index; default 0"))
                 put("timeout_ms", integerSchema("Whole action timeout; default 10000, maximum 30000"))
+                put(DisplayTargetResolver.DISPLAY_SESSION_ID, displaySessionIdSchema())
             },
             required = listOf("selector", "text"),
         )
@@ -191,10 +235,14 @@ fun uiSetTextVerifiedTool(
     execute = { input ->
         AgentTurnTracker.recordAutomationAction()
         val obj = input.jsonObject
-        obj.rejectUnknown(setOf("selector", "text", "nth", "timeout_ms"))?.let {
+        obj.rejectUnknown(setOf("selector", "text", "nth", "timeout_ms", DisplayTargetResolver.DISPLAY_SESSION_ID))?.let {
             return@Tool textResult(it)
         }
-        obj.rejectInvalidTypes(strings = setOf("text"), ints = setOf("nth"), longs = setOf("timeout_ms"))
+        obj.rejectInvalidTypes(
+            strings = setOf("text", DisplayTargetResolver.DISPLAY_SESSION_ID),
+            ints = setOf("nth"),
+            longs = setOf("timeout_ms"),
+        )
             ?.let { return@Tool textResult(it) }
         val selector = parseSelector(obj["selector"])
             ?: return@Tool textResult(invalidResult("selector is invalid"))
@@ -205,7 +253,14 @@ fun uiSetTextVerifiedTool(
         }
         val nth = obj.int("nth") ?: 0
         val timeout = obj.long("timeout_ms") ?: DEFAULT_UI_WAIT_TIMEOUT_MS
-        val result = controller.setTextVerified(selector, text, nth, timeout)
+        val targetController = resolveDisplayScopedController(
+            input = input,
+            invocationContext = invocationContext,
+            displayTargetResolver = displayTargetResolver,
+            primaryController = controller,
+            controllerForDisplay = controllerForDisplay,
+        ).getOrElse { return@Tool textResult(displayTargetResult(it)) }
+        val result = targetController.setTextVerified(selector, text, nth, timeout)
         streamer.streamIfHeadless(invocationContext, "SetTextVerified")
         textResult(result)
     },
@@ -215,6 +270,8 @@ fun uiScrollUntilTool(
     controller: VerifiedAccessibilityController = defaultVerifiedAccessibilityController(),
     invocationContext: ToolInvocationContext = ToolInvocationContext.EMPTY,
     streamer: InteractiveToolStreamer = InteractiveToolStreamer.NoOp,
+    displayTargetResolver: DisplayTargetResolver? = null,
+    controllerForDisplay: (Int) -> VerifiedAccessibilityController = ::defaultVerifiedAccessibilityControllerForDisplay,
 ): Tool = Tool(
     name = "ui_scroll_until",
     description = "Scroll a freshly resolved container until a target node appears. Defaults to 8 scrolls (maximum 20), re-reading the complete accessibility snapshot after every action.",
@@ -229,6 +286,7 @@ fun uiScrollUntilTool(
                 put("container_selector", selectorSchema(includeAncestor = true))
                 put("max_scrolls", integerSchema("Default 8, maximum 20"))
                 put("timeout_ms", integerSchema("Whole action timeout; default 10000, maximum 30000"))
+                put(DisplayTargetResolver.DISPLAY_SESSION_ID, displaySessionIdSchema())
             },
             required = listOf("selector", "direction"),
         )
@@ -236,10 +294,19 @@ fun uiScrollUntilTool(
     execute = { input ->
         AgentTurnTracker.recordAutomationAction()
         val obj = input.jsonObject
-        obj.rejectUnknown(setOf("selector", "direction", "container_selector", "max_scrolls", "timeout_ms"))?.let {
+        obj.rejectUnknown(
+            setOf(
+                "selector", "direction", "container_selector", "max_scrolls", "timeout_ms",
+                DisplayTargetResolver.DISPLAY_SESSION_ID,
+            )
+        )?.let {
             return@Tool textResult(it)
         }
-        obj.rejectInvalidTypes(strings = setOf("direction"), ints = setOf("max_scrolls"), longs = setOf("timeout_ms"))
+        obj.rejectInvalidTypes(
+            strings = setOf("direction", DisplayTargetResolver.DISPLAY_SESSION_ID),
+            ints = setOf("max_scrolls"),
+            longs = setOf("timeout_ms"),
+        )
             ?.let { return@Tool textResult(it) }
         val selector = parseSelector(obj["selector"])
             ?: return@Tool textResult(invalidResult("selector is invalid"))
@@ -256,7 +323,14 @@ fun uiScrollUntilTool(
         }
         val maxScrolls = obj.int("max_scrolls") ?: DEFAULT_MAX_SCROLLS
         val timeout = obj.long("timeout_ms") ?: DEFAULT_UI_WAIT_TIMEOUT_MS
-        val result = controller.scrollUntil(selector, direction, container, maxScrolls, timeout)
+        val targetController = resolveDisplayScopedController(
+            input = input,
+            invocationContext = invocationContext,
+            displayTargetResolver = displayTargetResolver,
+            primaryController = controller,
+            controllerForDisplay = controllerForDisplay,
+        ).getOrElse { return@Tool textResult(displayTargetResult(it)) }
+        val result = targetController.scrollUntil(selector, direction, container, maxScrolls, timeout)
         streamer.streamIfHeadless(invocationContext, "ScrollUntil")
         textResult(result)
     },
@@ -267,16 +341,62 @@ fun verifiedAccessibilityTools(
     controller: VerifiedAccessibilityController = defaultVerifiedAccessibilityController(),
     invocationContext: ToolInvocationContext = ToolInvocationContext.EMPTY,
     streamer: InteractiveToolStreamer = InteractiveToolStreamer.NoOp,
+    displayTargetResolver: DisplayTargetResolver? = null,
+    controllerForDisplay: (Int) -> VerifiedAccessibilityController = ::defaultVerifiedAccessibilityControllerForDisplay,
 ): List<Tool> = listOf(
-    uiWaitForWindowTool(controller, invocationContext, streamer),
-    uiWaitForNodeTool(controller, invocationContext, streamer),
-    uiClickNodeVerifiedTool(controller, invocationContext, streamer),
-    uiSetTextVerifiedTool(controller, invocationContext, streamer),
-    uiScrollUntilTool(controller, invocationContext, streamer),
+    uiWaitForWindowTool(controller, invocationContext, streamer, displayTargetResolver, controllerForDisplay),
+    uiWaitForNodeTool(controller, invocationContext, streamer, displayTargetResolver, controllerForDisplay),
+    uiClickNodeVerifiedTool(controller, invocationContext, streamer, displayTargetResolver, controllerForDisplay),
+    uiSetTextVerifiedTool(controller, invocationContext, streamer, displayTargetResolver, controllerForDisplay),
+    uiScrollUntilTool(controller, invocationContext, streamer, displayTargetResolver, controllerForDisplay),
 )
 
 private fun defaultVerifiedAccessibilityController(): VerifiedAccessibilityController =
     DefaultVerifiedAccessibilityController(AndroidVerifiedAccessibilityDriver())
+
+private fun defaultVerifiedAccessibilityControllerForDisplay(displayId: Int): VerifiedAccessibilityController =
+    DefaultVerifiedAccessibilityController(AndroidVerifiedAccessibilityDriver(displayId))
+
+private suspend fun resolveDisplayScopedController(
+    input: JsonElement,
+    invocationContext: ToolInvocationContext,
+    displayTargetResolver: DisplayTargetResolver?,
+    primaryController: VerifiedAccessibilityController,
+    controllerForDisplay: (Int) -> VerifiedAccessibilityController,
+): Result<VerifiedAccessibilityController> {
+    val obj = input.jsonObject
+    val rawSessionId = obj[DisplayTargetResolver.DISPLAY_SESSION_ID]
+        ?.let { value -> (value as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull }
+    if (!obj.containsKey(DisplayTargetResolver.DISPLAY_SESSION_ID)) return Result.success(primaryController)
+    if (rawSessionId.isNullOrBlank()) return Result.failure(
+        IllegalArgumentException("display_session_id_required")
+    )
+    return when (
+        val resolution = resolveDisplayTargetOrPrimary(
+            resolver = displayTargetResolver,
+            input = input,
+            invocationContext = invocationContext,
+            requiredCapability = me.rerere.rikkahub.display.DisplayCapability.TREE,
+        )
+    ) {
+        is DisplayTargetResolution.Resolved -> {
+            if (resolution.target.isPrimary) {
+                Result.failure(IllegalStateException("display_primary_forbidden"))
+            } else {
+                Result.success(controllerForDisplay(resolution.target.displayId))
+            }
+        }
+        is DisplayTargetResolution.Error -> Result.failure(IllegalStateException(resolution.code))
+    }
+}
+
+private fun displayTargetResult(error: Throwable): VerifiedUiResult = VerifiedUiResult(
+    ok = false,
+    code = error.message?.takeIf { it.matches(Regex("[a-z0-9_]{3,80}")) }
+        ?: "display_resolution_failed",
+    message = "The requested managed display cannot be used for this action.",
+    step = me.rerere.rikkahub.accessibility.VerifiedUiStep.VALIDATE,
+)
 
 private fun selectorSchema(includeAncestor: Boolean): JsonObject = buildJsonObject {
     put("type", "object")

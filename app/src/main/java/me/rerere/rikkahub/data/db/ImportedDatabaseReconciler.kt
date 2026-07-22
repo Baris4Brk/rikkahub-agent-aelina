@@ -3,6 +3,9 @@ package me.rerere.rikkahub.data.db
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.util.Log
+import me.rerere.rikkahub.data.db.fts.MEMORY_FTS_BACKFILL_SQL
+import me.rerere.rikkahub.data.db.fts.MEMORY_FTS_PORTABLE_CREATE_SQL
+import me.rerere.rikkahub.data.db.fts.MEMORY_FTS_TRIGGER_SQL
 
 /**
  * Reconciles a database file that was just restored from a backup so Room can open it.
@@ -44,12 +47,12 @@ object ImportedDatabaseReconciler {
 
     /**
      * Room's schema version and identity hash for [AppDatabase]. Both are copied verbatim
-     * from app/schemas/me.rerere.rikkahub.data.db.AppDatabase/30.json. When the schema
+     * from app/schemas/me.rerere.rikkahub.data.db.AppDatabase/34.json. When the schema
      * version is bumped, update BOTH constants (and the table DDL below if the fork-only
      * tables changed) or this reconciliation will silently stop matching.
      */
-    private const val EXPECTED_VERSION = 30
-    private const val EXPECTED_IDENTITY_HASH = "7f3079f05b75920c987d5d2463382013"
+    internal const val EXPECTED_VERSION = 34
+    internal const val EXPECTED_IDENTITY_HASH = "48ec748cc533a47fb0dbcd3431c17ebe"
 
     /**
      * Fork-only tables absent from an upstream backup, with their exact current create + index
@@ -90,6 +93,19 @@ object ImportedDatabaseReconciler {
             "ON `pending_chat_commands` (`dedupeKey`)",
         "CREATE UNIQUE INDEX IF NOT EXISTS `index_pending_chat_commands_idempotencyKey` " +
             "ON `pending_chat_commands` (`idempotencyKey`)",
+        "CREATE TABLE IF NOT EXISTS `memory_captures` (`id` TEXT NOT NULL, `assistant_id` TEXT NOT NULL, `scope_id` TEXT NOT NULL, `conversation_id` TEXT NOT NULL, `user_message_id` TEXT NOT NULL, `assistant_message_id` TEXT NOT NULL, `origin` TEXT NOT NULL, `capture_source` TEXT NOT NULL DEFAULT 'AUTOMATIC_TURN', `auto_save_mode` TEXT NOT NULL, `user_text` TEXT NOT NULL, `assistant_text` TEXT NOT NULL, `state` TEXT NOT NULL DEFAULT 'PENDING', `retry_count` INTEGER NOT NULL DEFAULT 0, `last_error_code` TEXT, `last_error_message` TEXT, `created_at_ms` INTEGER NOT NULL, `updated_at_ms` INTEGER NOT NULL, `lease_owner` TEXT, `lease_until_ms` INTEGER, `processed_at_ms` INTEGER, PRIMARY KEY(`id`))",
+        "CREATE UNIQUE INDEX IF NOT EXISTS `index_memory_captures_conversation_id_assistant_message_id_capture_source` ON `memory_captures` (`conversation_id`, `assistant_message_id`, `capture_source`)",
+        "CREATE INDEX IF NOT EXISTS `index_memory_captures_scope_id_state_created_at_ms` ON `memory_captures` (`scope_id`, `state`, `created_at_ms`)",
+        "CREATE INDEX IF NOT EXISTS `index_memory_captures_lease_until_ms` ON `memory_captures` (`lease_until_ms`)",
+        "CREATE INDEX IF NOT EXISTS `index_memory_captures_conversation_id` ON `memory_captures` (`conversation_id`)",
+        "CREATE TABLE IF NOT EXISTS `memory_candidates` (`id` TEXT NOT NULL, `scope_id` TEXT NOT NULL, `assistant_id` TEXT NOT NULL, `source_conversation_id` TEXT NOT NULL, `capture_ids_json` TEXT NOT NULL, `action` TEXT NOT NULL, `target_memory_ids_json` TEXT NOT NULL, `expected_revisions_json` TEXT NOT NULL, `title` TEXT NOT NULL, `content` TEXT NOT NULL, `memory_kind` TEXT NOT NULL, `tags_json` TEXT NOT NULL, `importance` REAL NOT NULL, `confidence` REAL NOT NULL, `expires_at_ms` INTEGER, `risk_flags_json` TEXT NOT NULL, `reason` TEXT NOT NULL, `evidence_message_ids_json` TEXT NOT NULL, `status` TEXT NOT NULL DEFAULT 'PENDING_REVIEW', `applied_memory_id` INTEGER, `resolution_error` TEXT, `created_at_ms` INTEGER NOT NULL, `updated_at_ms` INTEGER NOT NULL, PRIMARY KEY(`id`))",
+        "CREATE INDEX IF NOT EXISTS `index_memory_candidates_scope_id_status_created_at_ms` ON `memory_candidates` (`scope_id`, `status`, `created_at_ms`)",
+        "CREATE INDEX IF NOT EXISTS `index_memory_candidates_source_conversation_id` ON `memory_candidates` (`source_conversation_id`)",
+        "CREATE INDEX IF NOT EXISTS `index_memory_candidates_applied_memory_id` ON `memory_candidates` (`applied_memory_id`)",
+        "CREATE TABLE IF NOT EXISTS `memory_revisions` (`id` TEXT NOT NULL, `memory_id` INTEGER NOT NULL, `revision` INTEGER NOT NULL, `operation` TEXT NOT NULL, `before_snapshot_json` TEXT, `after_snapshot_json` TEXT, `actor` TEXT NOT NULL, `candidate_id` TEXT, `source_conversation_id` TEXT, `source_message_ids_json` TEXT NOT NULL DEFAULT '[]', `created_at_ms` INTEGER NOT NULL, PRIMARY KEY(`id`))",
+        "CREATE UNIQUE INDEX IF NOT EXISTS `index_memory_revisions_memory_id_revision` ON `memory_revisions` (`memory_id`, `revision`)",
+        "CREATE INDEX IF NOT EXISTS `index_memory_revisions_memory_id_created_at_ms` ON `memory_revisions` (`memory_id`, `created_at_ms`)",
+        "CREATE INDEX IF NOT EXISTS `index_memory_revisions_candidate_id` ON `memory_revisions` (`candidate_id`)",
     )
 
     private fun ensureConversationFolderV29Column(db: SQLiteDatabase) {
@@ -136,7 +152,7 @@ object ImportedDatabaseReconciler {
         }
     }
 
-    private fun ensureMemoryV30Columns(db: SQLiteDatabase) {
+    private fun ensureMemoryV31Columns(db: SQLiteDatabase) {
         val columns = db.rawQuery("PRAGMA table_info(`MemoryEntity`)", null).use { cursor ->
             val nameIndex = cursor.getColumnIndex("name")
             buildSet {
@@ -157,6 +173,160 @@ object ImportedDatabaseReconciler {
             db.execSQL(
                 "ALTER TABLE `MemoryEntity` ADD COLUMN `importance` REAL NOT NULL DEFAULT 0.5",
             )
+        }
+        val additions = listOf(
+            "created_at_ms" to "INTEGER NOT NULL DEFAULT 0",
+            "last_accessed_at_ms" to "INTEGER",
+            "expires_at_ms" to "INTEGER",
+            "memory_kind" to "TEXT NOT NULL DEFAULT 'OTHER'",
+            "confidence" to "REAL NOT NULL DEFAULT 1.0",
+            "tags_json" to "TEXT NOT NULL DEFAULT '[]'",
+            "tags_search" to "TEXT NOT NULL DEFAULT ''",
+            "content_hash" to "TEXT NOT NULL DEFAULT ''",
+            "source_type" to "TEXT NOT NULL DEFAULT 'LEGACY'",
+            "source_conversation_id" to "TEXT",
+            "source_message_ids_json" to "TEXT NOT NULL DEFAULT '[]'",
+            "lifecycle_status" to "TEXT NOT NULL DEFAULT 'ACTIVE'",
+            "approval_source" to "TEXT NOT NULL DEFAULT 'LEGACY'",
+            "revision" to "INTEGER NOT NULL DEFAULT 1",
+        )
+        additions.forEach { (name, declaration) ->
+            if (name !in columns) {
+                db.execSQL("ALTER TABLE `MemoryEntity` ADD COLUMN `$name` $declaration")
+            }
+        }
+        db.execSQL(
+            "UPDATE `MemoryEntity` SET `created_at_ms` = " +
+                "CASE WHEN `updated_at_ms` > 0 THEN `updated_at_ms` ELSE ? END " +
+                "WHERE `created_at_ms` = 0",
+            arrayOf(System.currentTimeMillis()),
+        )
+    }
+
+    /** Supports an early v31 Memory V2 preview database restored before source isolation existed. */
+    private fun ensureMemoryV31CaptureColumns(db: SQLiteDatabase) {
+        val columns = db.rawQuery("PRAGMA table_info(`memory_captures`)", null).use { cursor ->
+            val nameIndex = cursor.getColumnIndex("name")
+            buildSet {
+                if (nameIndex >= 0) while (cursor.moveToNext()) add(cursor.getString(nameIndex))
+            }
+        }
+        if ("capture_source" !in columns) {
+            db.execSQL(
+                "ALTER TABLE `memory_captures` ADD COLUMN `capture_source` " +
+                    "TEXT NOT NULL DEFAULT 'AUTOMATIC_TURN'",
+            )
+        }
+        db.execSQL(
+            "DROP INDEX IF EXISTS `index_memory_captures_conversation_id_assistant_message_id`",
+        )
+        db.execSQL(
+            "CREATE UNIQUE INDEX IF NOT EXISTS " +
+                "`index_memory_captures_conversation_id_assistant_message_id_capture_source` " +
+            "ON `memory_captures` (`conversation_id`, `assistant_message_id`, `capture_source`)",
+        )
+    }
+
+    /**
+     * Upstream and agent builds can share a Room user_version while only the agent has these
+     * tables. For a restored database already at a later schema step, Room will not replay the
+     * missing intermediate migration, so provide the same idempotent scaffolding here.
+     */
+    private fun ensureMemoryV32Schema(db: SQLiteDatabase) {
+        ensureColumns(
+            db,
+            "MemoryEntity",
+            listOf(
+                "origin_assistant_id" to "TEXT",
+                "attribution" to "TEXT NOT NULL DEFAULT 'UNKNOWN'",
+                "truth_status" to "TEXT NOT NULL DEFAULT 'CONFIRMED'",
+                "occurred_at_ms" to "INTEGER",
+                "participants_json" to "TEXT NOT NULL DEFAULT '[]'",
+                "outcome" to "TEXT",
+            ),
+        )
+        ensureColumns(
+            db,
+            "memory_candidates",
+            listOf(
+                "proposal_key" to "TEXT",
+                "attribution" to "TEXT NOT NULL DEFAULT 'UNKNOWN'",
+                "truth_status" to "TEXT NOT NULL DEFAULT 'CONFIRMED'",
+                "occurred_at_ms" to "INTEGER",
+                "participants_json" to "TEXT NOT NULL DEFAULT '[]'",
+                "outcome" to "TEXT",
+            ),
+        )
+        ensureColumns(
+            db,
+            "memory_captures",
+            listOf(
+                "processing_outcome" to "TEXT",
+                "candidate_count" to "INTEGER NOT NULL DEFAULT 0",
+                "supersedes_capture_id" to "TEXT",
+                "narrative_events_enabled" to "INTEGER NOT NULL DEFAULT 0",
+                "insights_theories_enabled" to "INTEGER NOT NULL DEFAULT 0",
+            ),
+        )
+        listOf(
+            "CREATE TABLE IF NOT EXISTS `memory_evidence` (`id` TEXT NOT NULL, `memory_id` INTEGER, `candidate_id` TEXT, `conversation_id` TEXT NOT NULL, `message_id` TEXT NOT NULL, `role` TEXT NOT NULL, `excerpt` TEXT NOT NULL, `content_hash` TEXT NOT NULL, `captured_at_ms` INTEGER NOT NULL, `quality` TEXT NOT NULL DEFAULT 'ORIGINAL_MESSAGE', PRIMARY KEY(`id`))",
+            "CREATE INDEX IF NOT EXISTS `index_memory_evidence_memory_id` ON `memory_evidence` (`memory_id`)",
+            "CREATE INDEX IF NOT EXISTS `index_memory_evidence_candidate_id` ON `memory_evidence` (`candidate_id`)",
+            "CREATE INDEX IF NOT EXISTS `index_memory_evidence_message_id` ON `memory_evidence` (`message_id`)",
+            "CREATE TABLE IF NOT EXISTS `memory_links` (`id` TEXT NOT NULL, `source_memory_id` INTEGER NOT NULL, `target_memory_id` INTEGER NOT NULL, `relation_type` TEXT NOT NULL, `weight` REAL NOT NULL, `description` TEXT NOT NULL, `evidence_message_ids_json` TEXT NOT NULL, `created_by_assistant_id` TEXT NOT NULL, `created_at_ms` INTEGER NOT NULL, `revision` INTEGER NOT NULL DEFAULT 1, PRIMARY KEY(`id`))",
+            "CREATE UNIQUE INDEX IF NOT EXISTS `index_memory_links_source_memory_id_target_memory_id_relation_type` ON `memory_links` (`source_memory_id`, `target_memory_id`, `relation_type`)",
+            "CREATE INDEX IF NOT EXISTS `index_memory_links_target_memory_id` ON `memory_links` (`target_memory_id`)",
+            "CREATE TABLE IF NOT EXISTS `memory_relation_candidates` (`id` TEXT NOT NULL, `batch_id` TEXT NOT NULL, `source_proposal_key` TEXT, `source_memory_id` INTEGER, `target_proposal_key` TEXT, `target_memory_id` INTEGER, `relation_type` TEXT NOT NULL, `weight` REAL NOT NULL, `description` TEXT NOT NULL, `evidence_message_ids_json` TEXT NOT NULL, `status` TEXT NOT NULL DEFAULT 'PENDING', `created_at_ms` INTEGER NOT NULL, PRIMARY KEY(`id`))",
+            "CREATE INDEX IF NOT EXISTS `index_memory_relation_candidates_batch_id` ON `memory_relation_candidates` (`batch_id`)",
+            "CREATE INDEX IF NOT EXISTS `index_memory_relation_candidates_status` ON `memory_relation_candidates` (`status`)",
+            "CREATE TABLE IF NOT EXISTS `memory_backfill_runs` (`id` TEXT NOT NULL, `assistant_id` TEXT NOT NULL, `scope_id` TEXT NOT NULL, `selection_json` TEXT NOT NULL, `total_turns` INTEGER NOT NULL, `processed_turns` INTEGER NOT NULL DEFAULT 0, `failed_turns` INTEGER NOT NULL DEFAULT 0, `status` TEXT NOT NULL DEFAULT 'PENDING', `last_error` TEXT, `created_at_ms` INTEGER NOT NULL, `updated_at_ms` INTEGER NOT NULL, PRIMARY KEY(`id`))",
+            "CREATE INDEX IF NOT EXISTS `index_memory_backfill_runs_assistant_id` ON `memory_backfill_runs` (`assistant_id`)",
+            "CREATE INDEX IF NOT EXISTS `index_memory_backfill_runs_status` ON `memory_backfill_runs` (`status`)",
+        ).forEach(db::execSQL)
+        rebuildPortableMemoryFts(db)
+    }
+
+    private fun ensureMemoryV33Schema(db: SQLiteDatabase) {
+        ensureColumns(
+            db,
+            "memory_captures",
+            listOf("context_turn_limit" to "INTEGER NOT NULL DEFAULT 12"),
+        )
+    }
+
+    private fun ensureBrowserV34Schema(db: SQLiteDatabase) {
+        listOf(
+            "CREATE TABLE IF NOT EXISTS `browser_bookmarks` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `normalized_url` TEXT NOT NULL, `url` TEXT NOT NULL, `title` TEXT NOT NULL, `created_at_ms` INTEGER NOT NULL, `updated_at_ms` INTEGER NOT NULL)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS `index_browser_bookmarks_normalized_url` ON `browser_bookmarks` (`normalized_url`)",
+            "CREATE TABLE IF NOT EXISTS `browser_history` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `normalized_url` TEXT NOT NULL, `url` TEXT NOT NULL, `title` TEXT NOT NULL, `visited_at_ms` INTEGER NOT NULL)",
+            "CREATE INDEX IF NOT EXISTS `index_browser_history_normalized_url` ON `browser_history` (`normalized_url`)",
+            "CREATE INDEX IF NOT EXISTS `index_browser_history_visited_at_ms` ON `browser_history` (`visited_at_ms`)",
+        ).forEach(db::execSQL)
+    }
+
+    private fun rebuildPortableMemoryFts(db: SQLiteDatabase) {
+        db.execSQL("DROP TRIGGER IF EXISTS memory_fts_ai")
+        db.execSQL("DROP TRIGGER IF EXISTS memory_fts_au")
+        db.execSQL("DROP TRIGGER IF EXISTS memory_fts_ad")
+        db.execSQL("DROP TABLE IF EXISTS memory_fts")
+        db.execSQL(MEMORY_FTS_PORTABLE_CREATE_SQL.trimIndent())
+        db.execSQL(MEMORY_FTS_BACKFILL_SQL.trimIndent())
+        MEMORY_FTS_TRIGGER_SQL.forEach(db::execSQL)
+    }
+
+    private fun ensureColumns(
+        db: SQLiteDatabase,
+        table: String,
+        additions: List<Pair<String, String>>,
+    ) {
+        val existing = db.rawQuery("PRAGMA table_info(`$table`)", null).use { cursor ->
+            val nameIndex = cursor.getColumnIndex("name")
+            buildSet {
+                if (nameIndex >= 0) while (cursor.moveToNext()) add(cursor.getString(nameIndex))
+            }
+        }
+        additions.forEach { (name, declaration) ->
+            if (name !in existing) db.execSQL("ALTER TABLE `$table` ADD COLUMN `$name` $declaration")
         }
     }
 
@@ -189,14 +359,23 @@ object ImportedDatabaseReconciler {
                     ensureScheduledJobsV29Column(db)
                     ensureConversationFolderV29Column(db)
 
+                    // A shared upstream user_version may already be ahead of the first agent
+                    // memory migration. Add only the schema floors Room will no longer visit.
+                    if (version >= 31) {
+                        ensureMemoryV31Columns(db)
+                        ensureMemoryV31CaptureColumns(db)
+                    }
+                    if (version >= 32) ensureMemoryV32Schema(db)
+                    if (version >= 33) ensureMemoryV33Schema(db)
+                    if (version >= 34) ensureBrowserV34Schema(db)
+
                     // Older backups must keep their original user_version so Room can run
                     // every real migration (including 28→29). Precreating fork-only tables
-                    // makes upstream backups compatible, but stamping v30 here would silently
-                    // skip migrations and risk losing schema changes. Only a genuine v30 file
-                    // is stamped with the fork identity hash because Room will not run a
-                    // migration in that case.
+                    // makes upstream backups compatible, but stamping the current version here
+                    // would silently skip migrations and risk losing schema changes. Only a
+                    // database already at the current Room version receives the fork identity
+                    // hash, because Room will not run a migration in that case.
                     if (version == EXPECTED_VERSION) {
-                        ensureMemoryV30Columns(db)
                         db.execSQL(
                             "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY, identity_hash TEXT)"
                         )

@@ -182,7 +182,10 @@ internal suspend fun runCommandCapture(
                 // lands in logcat in release builds. Log only non-sensitive metadata.
                 android.util.Log.i(
                     "RikkaTermux",
-                    "result bundle keys=${bundle.keySet().joinToString(",")} exit=${bundle.getInt(RESULT_KEY_EXIT_CODE, -999)} err=${bundle.getInt(RESULT_KEY_ERR, -999)} errmsg='${bundle.getString(RESULT_KEY_ERRMSG, "<null>")}'",
+                    "result bundle keys=${bundle.keySet().joinToString(",")} " +
+                        "exit=${bundle.getInt(RESULT_KEY_EXIT_CODE, -999)} " +
+                        "err=${bundle.getInt(RESULT_KEY_ERR, -999)} " +
+                        "errmsgPresent=${!bundle.getString(RESULT_KEY_ERRMSG).isNullOrBlank()}",
                 )
             }
             // Some Termux variants put the keys directly on the broadcast intent rather than
@@ -212,7 +215,9 @@ internal suspend fun runCommandCapture(
         )
     } catch (t: Throwable) {
         try { ctx.unregisterReceiver(receiver) } catch (_: Throwable) {}
-        return CaptureResult.OtherError("PendingIntent creation failed: ${t.message}")
+        return CaptureResult.OtherError(
+            "PendingIntent creation failed (${t::class.java.simpleName})",
+        )
     }
 
     val intent = Intent().apply {
@@ -259,7 +264,10 @@ internal suspend fun runCommandCapture(
     } catch (t: RuntimeException) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
             t.javaClass.name.contains("ForegroundServiceStartNotAllowedException")) {
-            CaptureResult.OtherError("app is in background uid null — Android 12+ forbids starting Termux service from background. Keep RikkaHub in foreground, set Termux battery to unrestricted, or use termux-wake-lock.")
+            CaptureResult.OtherError(
+                "Android 12+ blocked starting Termux while RikkaHub is in the background. " +
+                    "Keep RikkaHub visible, set Termux battery use to unrestricted, or use termux-wake-lock.",
+            )
         } else {
             CaptureResult.OtherError(t.message ?: t::class.java.simpleName)
         }
@@ -457,8 +465,13 @@ fun termuxRunCommandTool(context: Context): Tool = Tool(
                         UIMessagePart.Text(
                             buildJsonObject {
                                 put("error", "termux_run_failed")
-                                put("detail", "Not allowed to start service Intent ... app is in background uid null")
-                                put("human_error", "Termux run failed: RikkaHub is in background. Android 12+ does not allow background apps to start Termux. Keep RikkaHub visible, set Termux battery to unrestricted, or run termux-wake-lock in Termux.")
+                                put("detail", "Android blocked the background foreground-service start")
+                                put(
+                                    "human_error",
+                                    "Termux could not start while RikkaHub was in the background. " +
+                                        "Keep RikkaHub visible, set Termux battery use to unrestricted, " +
+                                        "or run termux-wake-lock in Termux.",
+                                )
                             }.toString()
                         )
                     )

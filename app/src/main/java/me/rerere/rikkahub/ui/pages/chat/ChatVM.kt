@@ -176,6 +176,9 @@ class ChatVM(
         }
     }
 
+    suspend fun captureMemorySelection(selectedNodeIds: Set<Uuid>) =
+        chatService.captureMemorySelection(_conversationId, selectedNodeIds)
+
     // 检查用户头像删除
     private fun checkUserAvatarDelete(oldSettings: Settings, newSettings: Settings) {
         val oldAvatar = oldSettings.displaySetting.userAvatar

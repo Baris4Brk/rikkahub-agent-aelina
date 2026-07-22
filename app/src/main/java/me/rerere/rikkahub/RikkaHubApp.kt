@@ -50,6 +50,7 @@ import org.koin.core.context.startKoin
 
 private const val TAG = "RikkaHubApp"
 internal const val VOICE_INTERACTOR_PROCESS_SUFFIX = ":voice_interactor"
+internal const val PLUGIN_RUNTIME_PROCESS_SUFFIX = ":plugin_runtime"
 
 const val CHAT_COMPLETED_NOTIFICATION_CHANNEL_ID = "chat_completed"
 const val CHAT_LIVE_UPDATE_NOTIFICATION_CHANNEL_ID = "chat_live_update"
@@ -61,8 +62,8 @@ class RikkaHubApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
-        if (isVoiceInteractorProcess()) {
-            Log.i(TAG, "Skipping full app initialization in the voice interactor process")
+        if (isVoiceInteractorProcess() || isPluginRuntimeProcess()) {
+            Log.i(TAG, "Skipping full app initialization in a lightweight runtime process")
             return
         }
         // Reconcile the database before Room or any DI/DB layer opens it.
@@ -185,6 +186,7 @@ class RikkaHubApp : Application() {
         // cross-pillar generalisation of the Phase 9.5 cron stranded-row sweep and is what
         // makes background sub-agents survivable across process death.
         runAgentRunBootRecovery()
+        reconcileMemoryV2Metadata()
 
         // Auto-recover from a prior native crash inside a local-runtime JNI lib
         // (LiteRT-LM 0.11.0 has known SIGSEGVs on the GPU/NNAPI backend during
@@ -419,6 +421,17 @@ class RikkaHubApp : Application() {
         }
     }
 
+    private fun reconcileMemoryV2Metadata() {
+        get<AppScope>().launch(Dispatchers.IO) {
+            runCatching {
+                val count = get<me.rerere.rikkahub.memory.MemoryMetadataReconciler>().reconcile()
+                if (count > 0) Log.i(TAG, "Memory V2 metadata reconciled for $count rows")
+            }.onFailure { error ->
+                Log.w(TAG, "Memory V2 metadata reconciliation failed", error)
+            }
+        }
+    }
+
     private fun restoreWorkspaceProcessesWhenForegrounded() {
         ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
             override fun onStart(owner: LifecycleOwner) {
@@ -598,6 +611,11 @@ class RikkaHubApp : Application() {
         processName = currentProcessNameCompat(),
     )
 
+    private fun isPluginRuntimeProcess(): Boolean = isPluginRuntimeProcess(
+        packageName = packageName,
+        processName = currentProcessNameCompat(),
+    )
+
     @Suppress("DEPRECATION")
     private fun currentProcessNameCompat(): String? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
         getProcessName()
@@ -617,6 +635,9 @@ class RikkaHubApp : Application() {
 
 internal fun isVoiceInteractorProcess(packageName: String, processName: String?): Boolean =
     processName == packageName + VOICE_INTERACTOR_PROCESS_SUFFIX
+
+internal fun isPluginRuntimeProcess(packageName: String, processName: String?): Boolean =
+    processName == packageName + PLUGIN_RUNTIME_PROCESS_SUFFIX
 
 class AppScope : CoroutineScope by CoroutineScope(
     SupervisorJob()

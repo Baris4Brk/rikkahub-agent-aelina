@@ -24,7 +24,6 @@ class WorkspaceReminderTransformer(
     ): List<UIMessage> {
         val workspaceId = ctx.assistant.workspaceId?.toString() ?: return messages
         val workspace = workspaceRepository.getById(workspaceId) ?: return messages
-        // 与 ChatService.createWorkspaceToolsIfReady 保持一致: 仅在 shell 就绪时注入
         val prompt = buildList {
             if (workspace.shellStatus == WorkspaceShellStatus.READY.name) {
                 add(buildWorkspacePrompt(workspace, ctx.workspaceCwd))

@@ -2,6 +2,7 @@ package me.rerere.rikkahub.di
 
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.Json
+import me.rerere.rikkahub.plugin.containsApprovedModelTool
 import me.rerere.highlight.Highlighter
 import me.rerere.rikkahub.AppScope
 import me.rerere.rikkahub.data.ai.AgentSafetySettings
@@ -50,7 +51,13 @@ val appModule = module {
 
     single { ScheduledJobRepository(get<me.rerere.rikkahub.data.db.AppDatabase>().scheduledJobDao()) }
     single { me.rerere.rikkahub.data.repository.ScheduledJobRunRepository(get<me.rerere.rikkahub.data.db.AppDatabase>().scheduledJobRunDao()) }
-    single { me.rerere.rikkahub.service.DirectModeActionRunner(get()) }
+    single {
+        me.rerere.rikkahub.service.DirectModeActionRunner(
+            toolRuntime = get(),
+            toolStartableResolver = get(),
+            preflight = get(),
+        )
+    }
     single { CronJobScheduler(get(), get()) }
     single { SshHostRepository(get<me.rerere.rikkahub.data.db.AppDatabase>().sshHostDao()) }
     single { TelegramChatRepository(get<me.rerere.rikkahub.data.db.AppDatabase>().telegramChatDao()) }
@@ -203,7 +210,13 @@ val appModule = module {
         )
     }
     single { me.rerere.rikkahub.workflow.condition.ContextProvider(get()) }
-    single { me.rerere.rikkahub.workflow.execution.WorkflowActionRunner() }
+    single {
+        me.rerere.rikkahub.workflow.execution.WorkflowActionRunner(
+            toolRuntime = get(),
+            toolStartableResolver = get(),
+            preflight = get(),
+        )
+    }
     single {
         me.rerere.rikkahub.workflow.execution.WorkflowEngine(
             repository = get(),
@@ -298,6 +311,12 @@ val appModule = module {
             shizukuBridgeManager = get(),
             workspaceProcessManager = get(),
             keyboardApiClient = get(),
+            contextDiagnosticsStore = get(),
+            displayAutomationRuntime = get(),
+            managedExecutionCoordinator = get(),
+            pluginRegistryStore = get(),
+            toolSecurityDescriptorResolver = get(),
+            toolExecutionPolicyResolver = get(),
         )
     }
     single {
@@ -343,6 +362,8 @@ val appModule = module {
             shizukuBridgeManager = get(),
             phoneCallController = get(),
             apkInstallController = get(),
+            managedExecutionCoordinator = get(),
+            displayAutomationRuntime = get(),
         )
     }
 
@@ -373,6 +394,208 @@ val appModule = module {
     // P0: Agent safety and security gate
     single { AgentSafetySettings(context = get()) }
     single { ToolExecutionGate(context = get(), safetySettings = get()) }
+    single<me.rerere.rikkahub.data.ai.execution.ToolRunPreflight> {
+        me.rerere.rikkahub.data.ai.execution.DefaultToolRunPreflight(get())
+    }
+    // P0 Plugin Runtime Lite. The registry and package root are app-private; its installation
+    // marker deliberately lives under noBackupFilesDir so restored plugins always require a new
+    // review before their tools or hooks can run.
+    single<me.rerere.rikkahub.plugin.PluginRegistryStore> {
+        val context = get<android.content.Context>()
+        me.rerere.rikkahub.plugin.FilePluginRegistryStore(
+            root = me.rerere.rikkahub.plugin.PluginRuntimePaths.root(context),
+            markerDirectory = me.rerere.rikkahub.plugin.PluginRuntimePaths
+                .installationMarkerDirectory(context),
+        )
+    }
+    single<me.rerere.rikkahub.plugin.PluginNetworkGateway> {
+        me.rerere.rikkahub.plugin.AndroidPluginNetworkGateway(get())
+    }
+    single {
+        val context = get<android.content.Context>()
+        me.rerere.rikkahub.plugin.PluginHostRpcGateway(
+            storageRoot = me.rerere.rikkahub.plugin.PluginRuntimePaths.storageRoot(context),
+            networkGateway = get(),
+        )
+    }
+    single<me.rerere.rikkahub.plugin.PluginRuntimeTransport> {
+        me.rerere.rikkahub.plugin.AndroidPluginRuntimeTransport(
+            context = get(),
+            hostRpcGateway = get(),
+        )
+    }
+    single { me.rerere.rikkahub.plugin.PluginAuditStore() }
+    single {
+        val settingsStore = get<me.rerere.rikkahub.data.datastore.SettingsStore>()
+        me.rerere.rikkahub.plugin.PluginRuntimeCoordinator(
+            registry = get(),
+            transport = get(),
+            hostRpcGateway = get(),
+            isRuntimeEnabled = { settingsStore.settingsFlow.value.pluginRuntimeEnabled },
+            auditStore = get(),
+        )
+    }
+    single<me.rerere.rikkahub.plugin.PluginInvocationRunner> { get<me.rerere.rikkahub.plugin.PluginRuntimeCoordinator>() }
+    single {
+        val context = get<android.content.Context>()
+        me.rerere.rikkahub.plugin.PluginPackageInstaller(
+            root = me.rerere.rikkahub.plugin.PluginRuntimePaths.root(context),
+            registry = get(),
+        )
+    }
+    single {
+        me.rerere.rikkahub.plugin.PluginBuiltInExampleInstaller(
+            context = get(),
+            installer = get(),
+        )
+    }
+    single {
+        val settingsStore = get<me.rerere.rikkahub.data.datastore.SettingsStore>()
+        me.rerere.rikkahub.plugin.PluginHookBridge(
+            registry = get(),
+            invoker = get(),
+            isRuntimeEnabled = { settingsStore.settingsFlow.value.pluginRuntimeEnabled },
+            enabledPluginsForAssistant = { assistantId ->
+                settingsStore.settingsFlow.value.assistants
+                    .firstOrNull { it.id.toString() == assistantId }
+                    ?.enabledPluginIds
+                    .orEmpty()
+            },
+        )
+    }
+    single {
+        val settingsStore = get<me.rerere.rikkahub.data.datastore.SettingsStore>()
+        me.rerere.rikkahub.plugin.PluginToolCatalog(
+            registry = get(),
+            invoker = get(),
+            isRuntimeEnabled = { settingsStore.settingsFlow.value.pluginRuntimeEnabled },
+            executionScope = get<me.rerere.rikkahub.AppScope>(),
+        )
+    }
+    // P0 ToolRuntime: every production tool call goes through the shared policy,
+    // descriptor and cancellation seam.  These are deliberately registered here
+    // rather than constructed by GenerationHandler so Fast Path and future callers
+    // can resolve the same runtime without creating a second policy boundary.
+    single<me.rerere.rikkahub.data.ai.execution.ToolExecutionPolicyResolver> {
+        me.rerere.rikkahub.data.ai.execution.DefaultToolExecutionPolicyResolver()
+    }
+    single {
+        me.rerere.rikkahub.data.ai.execution.ToolExecutionBatchCoordinator(
+            me.rerere.rikkahub.data.ai.execution.ToolExecutionBatchPlanner(get()),
+        )
+    }
+    single<me.rerere.rikkahub.data.ai.execution.ToolSecurityDescriptorResolver> {
+        val registry = get<me.rerere.rikkahub.plugin.PluginRegistryStore>()
+        me.rerere.rikkahub.data.ai.execution.DefaultToolSecurityDescriptorResolver(
+            pluginToolKnown = { toolName -> registry.containsApprovedModelTool(toolName) },
+        )
+    }
+    single<me.rerere.rikkahub.execution.ManagedExecutionLedger> {
+        me.rerere.rikkahub.execution.AtomicFileManagedExecutionLedger(get())
+    }
+    single<me.rerere.rikkahub.execution.ExecutionTokenProvider> {
+        me.rerere.rikkahub.execution.AndroidKeystoreExecutionTokenProvider()
+    }
+    single<me.rerere.rikkahub.execution.TermuxManagedSupervisor> {
+        me.rerere.rikkahub.execution.AndroidTermuxManagedSupervisor(get())
+    }
+    single {
+        me.rerere.rikkahub.execution.TermuxManagedStartableFactory(
+            supervisor = get(),
+            ledger = get(),
+            tokenProvider = get(),
+            scope = get<me.rerere.rikkahub.AppScope>(),
+        )
+    }
+    single {
+        me.rerere.rikkahub.execution.SshManagedStartableFactory(
+            context = get(),
+            repository = get(),
+            scope = get<me.rerere.rikkahub.AppScope>(),
+            ledger = get(),
+            tokenProvider = get(),
+        )
+    }
+    single<me.rerere.rikkahub.data.ai.execution.ToolStartableResolver> {
+        me.rerere.rikkahub.data.ai.execution.DefaultToolStartableResolver(
+            termuxFactory = get(),
+            sshFactory = get(),
+        )
+    }
+    single<me.rerere.rikkahub.data.ai.execution.ToolRuntime> {
+        val pluginHooks = get<me.rerere.rikkahub.plugin.PluginHookBridge>()
+        me.rerere.rikkahub.data.ai.execution.DefaultToolRuntime(
+            policyResolver = get(),
+            securityDescriptorResolver = get(),
+            interceptors = listOf(pluginHooks),
+            observers = listOf(pluginHooks),
+        )
+    }
+    single<me.rerere.rikkahub.execution.ManagedExecutionCoordinator> {
+        val ledger = get<me.rerere.rikkahub.execution.ManagedExecutionLedger>()
+        val tokenProvider = get<me.rerere.rikkahub.execution.ExecutionTokenProvider>()
+        me.rerere.rikkahub.execution.DefaultManagedExecutionCoordinator(
+            adapters = listOf(
+                me.rerere.rikkahub.execution.WorkspaceManagedExecutionAdapter(
+                    me.rerere.rikkahub.execution.WorkspaceProcessManagerPort(get()),
+                ),
+                me.rerere.rikkahub.execution.TermuxManagedExecutionAdapter(
+                    ledger = ledger,
+                    supervisor = get(),
+                    tokenProvider = tokenProvider,
+                ),
+                me.rerere.rikkahub.execution.SshManagedExecutionAdapter(
+                    ledger = ledger,
+                    supervisor = me.rerere.rikkahub.execution.AndroidSshManagedSupervisor(get()),
+                    profileResolver = me.rerere.rikkahub.execution
+                        .RepositorySshSavedConnectionResolver(get()),
+                    tokenProvider = tokenProvider,
+                ),
+            ),
+        )
+    }
+    single<me.rerere.rikkahub.display.PrivilegedDisplayBridgePort> {
+        me.rerere.rikkahub.privilege.ShizukuDisplayBridgePort(
+            get<me.rerere.rikkahub.privilege.ShizukuBridgeManager>(),
+        )
+    }
+    single<me.rerere.rikkahub.display.DisplayPublicCapabilityProbe> {
+        me.rerere.rikkahub.display.AndroidDisplayPublicCapabilityProbe()
+    }
+    // A missing Shizuku bridge or an unavailable public adapter fails closed inside this
+    // provisioner. It never fabricates Display 0 or remaps an operation to the primary phone.
+    single<me.rerere.rikkahub.display.DisplayAutomationRuntime> {
+        me.rerere.rikkahub.display.DefaultDisplayAutomationRuntime(
+            me.rerere.rikkahub.display.ShizukuDisplayProvisioner(
+                bridge = get(),
+                publicCapabilityProbe = get(),
+            ),
+        )
+    }
+    // P0 Context Broker. The broker is opt-in per assistant and rejects every remote,
+    // keyguard, and sub-agent surface before a platform reader can inspect device state.
+    single<me.rerere.rikkahub.context.VisionDescriptionClient> {
+        me.rerere.rikkahub.context.ProviderVisionDescriptionClient(get(), get())
+    }
+    single { me.rerere.rikkahub.context.ContextDiagnosticsStore() }
+    single<me.rerere.rikkahub.context.ContextBroker> {
+        val accessibilityReader = me.rerere.rikkahub.context.AndroidAccessibilityContextReader(get())
+        val visionClient = get<me.rerere.rikkahub.context.VisionDescriptionClient>()
+        me.rerere.rikkahub.context.DefaultContextBroker(
+            readers = mapOf(
+                me.rerere.rikkahub.context.ContextSource.FOREGROUND_WINDOW to accessibilityReader,
+                me.rerere.rikkahub.context.ContextSource.UI_TREE to accessibilityReader,
+                me.rerere.rikkahub.context.ContextSource.DEVICE_STATUS to
+                    me.rerere.rikkahub.context.AndroidDeviceStatusContextReader(get()),
+                me.rerere.rikkahub.context.ContextSource.OCR_FALLBACK to
+                    me.rerere.rikkahub.context.AndroidOcrContextReader(get(), visionClient),
+                me.rerere.rikkahub.context.ContextSource.USAGE_STATS to
+                    me.rerere.rikkahub.context.AndroidUsageStatsContextReader(get()),
+                me.rerere.rikkahub.context.ContextSource.NOTIFICATIONS to
+                    me.rerere.rikkahub.context.AndroidNotificationContextReader(),
+            ),
+        )
+    }
     single {
         me.rerere.rikkahub.data.ai.EmergencyStopCoordinator(
             safetySettings = get(),
@@ -384,6 +607,8 @@ val appModule = module {
             subAgentRegistry = get(),
             researchCoordinator = get(),
             workflowEmergencyController = get(),
+            managedExecutionCoordinator = get(),
+            displayAutomationRuntime = get(),
         )
     }
 
@@ -398,6 +623,7 @@ val appModule = module {
             settingsStore = get(),
             conversationRepo = get(),
             memoryRepository = get(),
+            memoryV2Coordinator = get(),
             generationHandler = get(),
             templateTransformer = get(),
             providerManager = get(),
@@ -410,12 +636,16 @@ val appModule = module {
             workflowRepository = get(),
             durableCommandQueue = get(),
             toolExecutionGate = get(),
+            toolRuntime = get(),
+            pluginToolCatalog = get(),
+            pluginHookBridge = get(),
             agentSafetySettings = get(),
             shizukuBridgeManager = get(),
             workspaceProcessManager = get(),
             structuredPrivilegedCommandExecutor = get(),
             subAgentExecutionProfileRegistry = get(),
             setupTransactionCoordinator = get(),
+            displayAutomationRuntime = get(),
         )
     }
 

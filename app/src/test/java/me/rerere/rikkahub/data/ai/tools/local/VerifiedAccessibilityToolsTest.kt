@@ -1,5 +1,6 @@
 package me.rerere.rikkahub.data.ai.tools.local
 
+import kotlinx.coroutines.flow.MutableStateFlow
 import me.rerere.rikkahub.accessibility.UiExpectation
 import me.rerere.rikkahub.accessibility.UiNodeSelector
 import me.rerere.rikkahub.accessibility.UiScrollDirection
@@ -7,6 +8,11 @@ import me.rerere.rikkahub.accessibility.VerifiedAccessibilityController
 import me.rerere.rikkahub.accessibility.VerifiedUiResult
 import me.rerere.rikkahub.accessibility.VerifiedUiStep
 import me.rerere.rikkahub.data.ai.ToolCallOrigin
+import me.rerere.rikkahub.data.ai.tools.ToolInvocationContext
+import me.rerere.rikkahub.display.DisplayAutomationRuntime
+import me.rerere.rikkahub.display.DisplayRequest
+import me.rerere.rikkahub.display.DisplayResult
+import me.rerere.rikkahub.display.DisplayRuntimeState
 import me.rerere.rikkahub.privilege.PrivilegedSessionContext
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -130,6 +136,56 @@ class VerifiedAccessibilityToolsTest {
         )
 
         assertTrue(result.contains("INVALID_ARGUMENT"))
+        assertFalse(controller.called)
+    }
+
+    @Test
+    fun `managed display session routes ui tool to a display-scoped controller`() {
+        val primary = RecordingController()
+        val scoped = RecordingController()
+        val runtime = object : DisplayAutomationRuntime {
+            override val state = MutableStateFlow(DisplayRuntimeState())
+
+            override suspend fun dispatch(request: DisplayRequest): DisplayResult =
+                DisplayResult.Resolved("session-a", 7)
+        }
+        var requestedDisplay: Int? = null
+        val tool = uiWaitForNodeTool(
+            controller = primary,
+            invocationContext = ToolInvocationContext(
+                callerAssistantId = "assistant-a",
+                callerConversationId = "conversation-a",
+                callerRunId = "run-a",
+                callOrigin = ToolCallOrigin.LocalChat,
+            ),
+            displayTargetResolver = DisplayTargetResolver(runtime),
+            controllerForDisplay = { displayId ->
+                requestedDisplay = displayId
+                scoped
+            },
+        )
+
+        val result = execTool(
+            tool,
+            """{"selector":{"text":"OK"},"display_session_id":"session-a"}""",
+        )
+
+        assertTrue(result.contains("NODE_FOUND"))
+        assertEquals(7, requestedDisplay)
+        assertTrue(scoped.called)
+        assertFalse(primary.called)
+    }
+
+    @Test
+    fun `blank display session id is rejected instead of using primary controller`() {
+        val controller = RecordingController()
+
+        val result = execTool(
+            uiWaitForNodeTool(controller),
+            """{"selector":{"text":"OK"},"display_session_id":" "}""",
+        )
+
+        assertTrue(result.contains("display_session_id_required"))
         assertFalse(controller.called)
     }
 

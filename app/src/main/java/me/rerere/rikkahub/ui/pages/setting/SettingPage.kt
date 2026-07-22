@@ -99,6 +99,7 @@ fun SettingPage(vm: SettingVM = koinViewModel()) {
     val navController = LocalNavController.current
     val settings by vm.settings.collectAsStateWithLifecycle()
     val filesManager: FilesManager = koinInject()
+    val agentRuntimeHomeItem = AgentRuntimeSettingsRoute.settingsHomeItem
 
     if (settings.launchCount > 100 && (settings.launchCount - settings.sponsorAlertDismissedAt) >= 50) {
         AlertDialog(
@@ -285,8 +286,8 @@ fun SettingPage(vm: SettingVM = koinViewModel()) {
                     item(
                         onClick = { navController.navigate(Screen.SettingAlarm) },
                         leadingContent = { Icon(HugeIcons.Alert01, null) },
-                        supportingContent = { Text("Manage app-owned alarms created by the AI.") },
-                        headlineContent = { Text("Alarm") },
+                        supportingContent = { Text(stringResource(R.string.setting_page_alarm_desc)) },
+                        headlineContent = { Text(stringResource(R.string.setting_page_alarm)) },
                     )
                     item(
                         onClick = { navController.navigate(Screen.SettingBrowser) },
@@ -333,24 +334,26 @@ fun SettingPage(vm: SettingVM = koinViewModel()) {
                     item(
                         onClick = { navController.navigate(Screen.SettingSystemAssistant) },
                         leadingContent = { Icon(HugeIcons.SmartPhone01, null) },
-                        supportingContent = {
-                            Text(stringResource(R.string.setting_page_system_assistant_desc))
-                        },
-                        headlineContent = {
-                            Text(stringResource(R.string.setting_page_system_assistant))
-                        },
+                        supportingContent = { Text(stringResource(R.string.setting_page_system_assistant_desc)) },
+                        headlineContent = { Text(stringResource(R.string.setting_page_system_assistant)) },
+                    )
+                    item(
+                        onClick = { navController.navigate(agentRuntimeHomeItem.destination) },
+                        leadingContent = { Icon(HugeIcons.Settings03, null) },
+                        supportingContent = { Text(stringResource(agentRuntimeHomeItem.summaryRes)) },
+                        headlineContent = { Text(stringResource(agentRuntimeHomeItem.titleRes)) },
                     )
                     item(
                         onClick = { navController.navigate(Screen.SettingEmergencyStop) },
                         leadingContent = { Icon(HugeIcons.Alert01, null) },
-                        supportingContent = { Text("Emergency stop, high-risk tool toggles, and remote call restrictions.") },
-                        headlineContent = { Text("Safety & Emergency Stop") },
+                        supportingContent = { Text(stringResource(R.string.setting_page_emergency_stop_desc)) },
+                        headlineContent = { Text(stringResource(R.string.setting_page_emergency_stop)) },
                     )
                     item(
                         onClick = { navController.navigate(Screen.SettingDiagnostics) },
                         leadingContent = { Icon(HugeIcons.Shield01, null) },
-                        supportingContent = { Text("View detailed status of every capability, its permissions, and requirements.") },
-                        headlineContent = { Text("Capability Diagnostics") },
+                        supportingContent = { Text(stringResource(R.string.setting_page_capability_diagnostics_desc)) },
+                        headlineContent = { Text(stringResource(R.string.setting_page_capability_diagnostics)) },
                     )
                 }
             }

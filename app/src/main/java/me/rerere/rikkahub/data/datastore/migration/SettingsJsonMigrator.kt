@@ -63,8 +63,8 @@ object SettingsJsonMigrator {
                 }
             }
 
-            // V4: legacy backups stored one global switch. Only assistants without an
-            // explicit value inherit it; newer backup values remain authoritative.
+            // V4 stored one global web-search switch. Only assistants without an explicit
+            // value inherit it, so newer per-assistant choices remain authoritative.
             root["assistants"]?.let { element ->
                 val legacyEnabled = (root["enableWebSearch"] as? JsonPrimitive)
                     ?.booleanOrNull == true

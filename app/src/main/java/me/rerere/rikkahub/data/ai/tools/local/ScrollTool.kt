@@ -55,6 +55,7 @@ private fun findFirstScrollable(root: AccessibilityNodeInfo): AccessibilityNodeI
 fun scrollTool(
     invocationContext: ToolInvocationContext = ToolInvocationContext.EMPTY,
     streamer: InteractiveToolStreamer = InteractiveToolStreamer.NoOp,
+    displayTargetResolver: DisplayTargetResolver? = null,
 ): Tool = Tool(
     name = "scroll",
     description = """
@@ -74,13 +75,12 @@ fun scrollTool(
                 })
                 put("x", buildJsonObject { put("type", "number"); put("description", "Optional anchor px") })
                 put("y", buildJsonObject { put("type", "number"); put("description", "Optional anchor px") })
+                put(DisplayTargetResolver.DISPLAY_SESSION_ID, displaySessionIdSchema())
             },
             required = listOf("direction")
         )
     },
     execute = { input ->
-        AgentTurnTracker.recordAutomationAction()
-        me.rerere.rikkahub.service.RikkaAccessibilityService.instance?.let { wakeScreenIfNeeded(it) }
         val direction = input.jsonObject["direction"]?.jsonPrimitive?.contentOrNull
         if (direction == null || direction !in ALLOWED_DIRECTIONS) {
             return@Tool listOf(
@@ -93,9 +93,26 @@ fun scrollTool(
         }
         val anchorX = input.jsonObject["x"]?.jsonPrimitive?.doubleOrNull?.takeIf { it.isFinite() }
         val anchorY = input.jsonObject["y"]?.jsonPrimitive?.doubleOrNull?.takeIf { it.isFinite() }
+        val displayTarget = when (
+            val resolution = resolveDisplayTargetOrPrimary(
+                resolver = displayTargetResolver,
+                input = input,
+                invocationContext = invocationContext,
+                requiredCapability = me.rerere.rikkahub.display.DisplayCapability.TREE,
+            )
+        ) {
+            is DisplayTargetResolution.Resolved -> resolution.target
+            is DisplayTargetResolution.Error -> return@Tool listOf(
+                UIMessagePart.Text(displayTargetError(resolution.code).toString())
+            )
+        }
+        AgentTurnTracker.recordAutomationAction()
+        if (displayTarget.isPrimary) {
+            me.rerere.rikkahub.service.RikkaAccessibilityService.instance?.let { wakeScreenIfNeeded(it) }
+        }
 
         val payload = AccessibilityServiceHandle.withService { svc ->
-            val root = svc.rootInActiveWindow
+            val root = svc.rootForDisplay(displayTarget.displayId)
                 ?: return@withService buildJsonObject { put("error", "no_active_window") }
 
             val target = if (anchorX != null && anchorY != null) {
@@ -112,6 +129,23 @@ fun scrollTool(
                 }
                 target.performAction(action)
             } else {
+                if (displayTarget.sessionId != null) {
+                    when (
+                        val gestureResolution = resolveDisplayTargetOrPrimary(
+                            resolver = displayTargetResolver,
+                            input = input,
+                            invocationContext = invocationContext,
+                            requiredCapability = me.rerere.rikkahub.display.DisplayCapability.GESTURE,
+                        )
+                    ) {
+                        is DisplayTargetResolution.Error -> return@withService displayTargetError(gestureResolution.code)
+                        is DisplayTargetResolution.Resolved -> {
+                            if (gestureResolution.target.displayId != displayTarget.displayId) {
+                                return@withService displayTargetError("display_id_mismatch")
+                            }
+                        }
+                    }
+                }
                 // Fallback: dispatch a swipe gesture across the screen center
                 val rect = Rect()
                 root.getBoundsInScreen(rect)
@@ -129,13 +163,17 @@ fun scrollTool(
                 svc.dispatchGestureAsync(
                     GestureDescription.Builder()
                         .addStroke(GestureDescription.StrokeDescription(path, 0L, SCROLL_GESTURE_MS))
-                        .build()
+                        .buildForDisplay(displayTarget.displayId)
+                        ?: return@withService buildJsonObject {
+                            put("error", "display_api_unsupported")
+                        }
                 )
             }
             svc.appendLog(
                 ActionLogEntry(
                     type = "scroll",
-                    paramsSummary = "$direction" + (if (target != null) " (node)" else " (fallback swipe)"),
+                    paramsSummary = "$direction display=${displayTarget.displayId}" +
+                        (if (target != null) " (node)" else " (fallback swipe)"),
                     success = ok,
                     timestampMs = System.currentTimeMillis(),
                 )
@@ -143,6 +181,8 @@ fun scrollTool(
             buildJsonObject {
                 put("success", ok)
                 if (!ok) put("reason", "no_scroll_action_accepted")
+                put("display_id", displayTarget.displayId)
+                displayTarget.sessionId?.let { put(DisplayTargetResolver.DISPLAY_SESSION_ID, it) }
             }
         }
         streamer.streamIfHeadless(invocationContext, "Scroll $direction")

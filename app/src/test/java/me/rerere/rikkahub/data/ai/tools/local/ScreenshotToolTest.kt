@@ -16,10 +16,10 @@ class ScreenshotToolTest {
     }
 
     @Test
-    fun `take_screenshot accepts display_id param`() {
+    fun `take_screenshot rejects bare nonprimary display id`() {
         val tool = takeScreenshotTool(NULL_CONTEXT)
         val result = execTool(tool, """{"display_id":1}""")
-        // Service is offline in JVM tests — still returns the not-active envelope, no validation error.
-        assertTrue(result.contains("AccessibilityService not active"))
+        // A non-primary display needs an owned display_session_id and must never fall back.
+        assertTrue(result.contains("display_session_required"))
     }
 }

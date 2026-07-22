@@ -54,6 +54,7 @@ private fun parseSelector(input: kotlinx.serialization.json.JsonElement): Triple
 fun findNodeTool(
     invocationContext: ToolInvocationContext = ToolInvocationContext.EMPTY,
     streamer: InteractiveToolStreamer = InteractiveToolStreamer.NoOp,
+    displayTargetResolver: DisplayTargetResolver? = null,
 ): Tool = Tool(
     name = "find_node",
     description = """
@@ -78,12 +79,12 @@ fun findNodeTool(
                     put("type", "string")
                     put("description", "Optional foreground package guard")
                 })
+                put(DisplayTargetResolver.DISPLAY_SESSION_ID, displaySessionIdSchema())
             },
             required = listOf("by", "value")
         )
     },
     execute = { input ->
-        me.rerere.rikkahub.service.RikkaAccessibilityService.instance?.let { wakeScreenIfNeeded(it) }
         val (by, value, pkgFilter) = parseSelector(input)
         if (by == null || by !in ALLOWED_BY || value == null) {
             return@Tool listOf(
@@ -94,8 +95,24 @@ fun findNodeTool(
                 )
             )
         }
+        val displayTarget = when (
+            val resolution = resolveDisplayTargetOrPrimary(
+                resolver = displayTargetResolver,
+                input = input,
+                invocationContext = invocationContext,
+                requiredCapability = me.rerere.rikkahub.display.DisplayCapability.TREE,
+            )
+        ) {
+            is DisplayTargetResolution.Resolved -> resolution.target
+            is DisplayTargetResolution.Error -> return@Tool listOf(
+                UIMessagePart.Text(displayTargetError(resolution.code).toString())
+            )
+        }
+        if (displayTarget.isPrimary) {
+            me.rerere.rikkahub.service.RikkaAccessibilityService.instance?.let { wakeScreenIfNeeded(it) }
+        }
         val payload = AccessibilityServiceHandle.withService { svc ->
-            val root = svc.rootInActiveWindow
+            val root = svc.rootForDisplay(displayTarget.displayId)
             if (root == null) {
                 return@withService buildJsonObject {
                     put("error", "no_active_window")
@@ -114,7 +131,7 @@ fun findNodeTool(
             svc.appendLog(
                 ActionLogEntry(
                     type = "find_node",
-                    paramsSummary = "$by=\"${value.take(40)}\" -> ${matches.size}",
+                    paramsSummary = "$by=\"${value.take(40)}\" -> ${matches.size} display=${displayTarget.displayId}",
                     success = true,
                     timestampMs = System.currentTimeMillis(),
                 )
@@ -123,6 +140,8 @@ fun findNodeTool(
                 put("matches", buildJsonArray {
                     matches.forEachIndexed { i, n -> add(nodeToJson(n, root.windowId, i)) }
                 })
+                put("display_id", displayTarget.displayId)
+                displayTarget.sessionId?.let { put(DisplayTargetResolver.DISPLAY_SESSION_ID, it) }
             }
         }
         streamer.streamIfHeadless(invocationContext, "FindNode $by=\"${value.take(30)}\"")
@@ -133,6 +152,7 @@ fun findNodeTool(
 fun clickNodeTool(
     invocationContext: ToolInvocationContext = ToolInvocationContext.EMPTY,
     streamer: InteractiveToolStreamer = InteractiveToolStreamer.NoOp,
+    displayTargetResolver: DisplayTargetResolver? = null,
 ): Tool = Tool(
     name = "click_node",
     description = """
@@ -154,13 +174,12 @@ fun clickNodeTool(
                     put("type", "integer")
                     put("description", "Zero-based index when multiple nodes match (default 0)")
                 })
+                put(DisplayTargetResolver.DISPLAY_SESSION_ID, displaySessionIdSchema())
             },
             required = listOf("by", "value")
         )
     },
     execute = { input ->
-        AgentTurnTracker.recordAutomationAction()
-        me.rerere.rikkahub.service.RikkaAccessibilityService.instance?.let { wakeScreenIfNeeded(it) }
         val (by, value, pkgFilter) = parseSelector(input)
         val nth = input.jsonObject["nth"]?.jsonPrimitive?.intOrNull ?: 0
         if (by == null || by !in ALLOWED_BY || value == null) {
@@ -181,8 +200,25 @@ fun clickNodeTool(
                 )
             )
         }
+        val displayTarget = when (
+            val resolution = resolveDisplayTargetOrPrimary(
+                resolver = displayTargetResolver,
+                input = input,
+                invocationContext = invocationContext,
+                requiredCapability = me.rerere.rikkahub.display.DisplayCapability.TREE,
+            )
+        ) {
+            is DisplayTargetResolution.Resolved -> resolution.target
+            is DisplayTargetResolution.Error -> return@Tool listOf(
+                UIMessagePart.Text(displayTargetError(resolution.code).toString())
+            )
+        }
+        AgentTurnTracker.recordAutomationAction()
+        if (displayTarget.isPrimary) {
+            me.rerere.rikkahub.service.RikkaAccessibilityService.instance?.let { wakeScreenIfNeeded(it) }
+        }
         val payload = AccessibilityServiceHandle.withService { svc ->
-            val root = svc.rootInActiveWindow
+            val root = svc.rootForDisplay(displayTarget.displayId)
             if (root == null) {
                 return@withService buildJsonObject { put("error", "no_active_window") }
             }
@@ -210,13 +246,15 @@ fun clickNodeTool(
             svc.appendLog(
                 ActionLogEntry(
                     type = "click_node",
-                    paramsSummary = "$by=\"${value.take(40)}\" nth=$nth -> ${if (ok) "ok" else "fail"}",
+                    paramsSummary = "$by=\"${value.take(40)}\" nth=$nth -> ${if (ok) "ok" else "fail"} display=${displayTarget.displayId}",
                     success = ok,
                     timestampMs = System.currentTimeMillis(),
                 )
             )
             buildJsonObject {
                 put("success", ok)
+                put("display_id", displayTarget.displayId)
+                displayTarget.sessionId?.let { put(DisplayTargetResolver.DISPLAY_SESSION_ID, it) }
                 put("clicked", buildJsonObject {
                     val rect = android.graphics.Rect()
                     clickable.getBoundsInScreen(rect)
@@ -242,6 +280,7 @@ fun clickNodeTool(
 fun setTextTool(
     invocationContext: ToolInvocationContext = ToolInvocationContext.EMPTY,
     streamer: InteractiveToolStreamer = InteractiveToolStreamer.NoOp,
+    displayTargetResolver: DisplayTargetResolver? = null,
 ): Tool = Tool(
     name = "set_text",
     description = """
@@ -275,13 +314,12 @@ fun setTextTool(
                     put("type", "integer")
                     put("description", "Zero-based index when multiple nodes match (default 0)")
                 })
+                put(DisplayTargetResolver.DISPLAY_SESSION_ID, displaySessionIdSchema())
             },
             required = listOf("by", "value", "text")
         )
     },
     execute = { input ->
-        AgentTurnTracker.recordAutomationAction()
-        me.rerere.rikkahub.service.RikkaAccessibilityService.instance?.let { wakeScreenIfNeeded(it) }
         val (by, value, pkgFilter) = parseSelector(input)
         val nth = input.jsonObject["nth"]?.jsonPrimitive?.intOrNull ?: 0
         val newText = input.jsonObject["text"]?.jsonPrimitive?.contentOrNull
@@ -301,8 +339,25 @@ fun setTextTool(
                 )
             )
         }
+        val displayTarget = when (
+            val resolution = resolveDisplayTargetOrPrimary(
+                resolver = displayTargetResolver,
+                input = input,
+                invocationContext = invocationContext,
+                requiredCapability = me.rerere.rikkahub.display.DisplayCapability.TREE,
+            )
+        ) {
+            is DisplayTargetResolution.Resolved -> resolution.target
+            is DisplayTargetResolution.Error -> return@Tool listOf(
+                UIMessagePart.Text(displayTargetError(resolution.code).toString())
+            )
+        }
+        AgentTurnTracker.recordAutomationAction()
+        if (displayTarget.isPrimary) {
+            me.rerere.rikkahub.service.RikkaAccessibilityService.instance?.let { wakeScreenIfNeeded(it) }
+        }
         val payload = AccessibilityServiceHandle.withService { svc ->
-            val root = svc.rootInActiveWindow
+            val root = svc.rootForDisplay(displayTarget.displayId)
                 ?: return@withService buildJsonObject { put("error", "no_active_window") }
             val pkg = root.packageName?.toString().orEmpty()
             if (pkgFilter != null && pkgFilter != pkg) {
@@ -344,7 +399,7 @@ fun setTextTool(
             svc.appendLog(
                 ActionLogEntry(
                     type = "set_text",
-                    paramsSummary = "$by=\"${value.take(30)}\" -> \"${newText.take(30)}\"",
+                    paramsSummary = "$by=\"${value.take(30)}\" -> \"${newText.take(30)}\" display=${displayTarget.displayId}",
                     success = ok,
                     timestampMs = System.currentTimeMillis(),
                 )
@@ -353,6 +408,8 @@ fun setTextTool(
                 put("success", ok)
                 if (!ok) put("reason", "action_rejected")
                 put("set_to", newText)
+                put("display_id", displayTarget.displayId)
+                displayTarget.sessionId?.let { put(DisplayTargetResolver.DISPLAY_SESSION_ID, it) }
             }
         }
         streamer.streamIfHeadless(invocationContext, "SetText $by=\"${value.take(20)}\" -> \"${newText.take(20)}\"")

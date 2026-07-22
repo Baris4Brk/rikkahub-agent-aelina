@@ -726,6 +726,39 @@ private fun ChatPageContent(
                     vm.updateConversation(conversation.copy(customSystemPrompt = newPrompt))
                     vm.saveConversationAsync()
                 },
+                onAddSelectionToMemory = { selectedNodeIds ->
+                    scope.launch {
+                        when (vm.captureMemorySelection(selectedNodeIds)) {
+                            me.rerere.rikkahub.memory.ManualMemorySelectionResult.QUEUED -> {
+                                toaster.show(
+                                    context.getString(R.string.memory_v2_manual_queued),
+                                    type = ToastType.Success,
+                                )
+                            }
+                            me.rerere.rikkahub.memory.ManualMemorySelectionResult.MEMORY_DISABLED -> {
+                                toaster.show(
+                                    context.getString(R.string.memory_v2_manual_enable_first),
+                                    type = ToastType.Warning,
+                                )
+                                navController.navigate(
+                                    Screen.AssistantMemory(conversation.assistantId.toString()),
+                                )
+                            }
+                            me.rerere.rikkahub.memory.ManualMemorySelectionResult.NO_USER_TEXT -> {
+                                toaster.show(
+                                    context.getString(R.string.memory_v2_manual_requires_user),
+                                    type = ToastType.Warning,
+                                )
+                            }
+                            me.rerere.rikkahub.memory.ManualMemorySelectionResult.FAILED -> {
+                                toaster.show(
+                                    context.getString(R.string.memory_v2_manual_failed),
+                                    type = ToastType.Error,
+                                )
+                            }
+                        }
+                    }
+                },
             )
         }
 

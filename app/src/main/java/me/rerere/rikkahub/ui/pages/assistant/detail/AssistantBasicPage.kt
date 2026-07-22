@@ -309,15 +309,11 @@ internal fun AssistantBasicContent(
             HorizontalDivider()
             FormItem(
                 modifier = Modifier.padding(8.dp),
-                label = {
-                    Text(stringResource(R.string.use_web_search))
-                },
+                label = { Text(stringResource(R.string.use_web_search)) },
                 tail = {
                     Switch(
                         checked = assistant.enableWebSearch,
-                        onCheckedChange = {
-                            onUpdate(assistant.copy(enableWebSearch = it))
-                        },
+                        onCheckedChange = { onUpdate(assistant.copy(enableWebSearch = it)) },
                     )
                 },
             )
@@ -487,6 +483,18 @@ internal fun AssistantBasicContent(
             HorizontalDivider()
             FormItem(
                 modifier = Modifier.padding(8.dp),
+                label = { Text(stringResource(R.string.assistant_unrestricted_mode)) },
+                description = { Text(stringResource(R.string.assistant_unrestricted_mode_desc)) },
+                tail = {
+                    Switch(
+                        checked = assistant.unrestricted,
+                        onCheckedChange = { onUpdate(assistant.copy(unrestricted = it)) },
+                    )
+                },
+            )
+            HorizontalDivider()
+            FormItem(
+                modifier = Modifier.padding(8.dp),
                 label = {
                     Text(stringResource(R.string.assistant_page_fast_path_router))
                 },
@@ -498,24 +506,6 @@ internal fun AssistantBasicContent(
                         checked = assistant.fastPathRouterEnabled,
                         onCheckedChange = {
                             onUpdate(assistant.copy(fastPathRouterEnabled = it))
-                        }
-                    )
-                }
-            )
-            HorizontalDivider()
-            FormItem(
-                modifier = Modifier.padding(8.dp),
-                label = {
-                    Text("不受限模式")
-                },
-                description = {
-                    Text("开启后跳过所有安全门（高风险、远程、后台、锁屏、来源检查），只有紧急停止仍有效。请慎重使用。")
-                },
-                tail = {
-                    Switch(
-                        checked = assistant.unrestricted,
-                        onCheckedChange = {
-                            onUpdate(assistant.copy(unrestricted = it))
                         }
                     )
                 }

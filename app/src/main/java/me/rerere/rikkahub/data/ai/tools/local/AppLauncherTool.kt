@@ -1,8 +1,10 @@
 package me.rerere.rikkahub.data.ai.tools.local
 
+import android.app.ActivityOptions
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.os.Build
 import androidx.core.net.toUri
 import kotlinx.coroutines.delay
 import kotlinx.serialization.json.add
@@ -22,6 +24,7 @@ import me.rerere.rikkahub.service.RikkaAccessibilityService
 
 private suspend fun waitForForegroundPackage(
     expectedPkg: String,
+    displayId: Int = android.view.Display.DEFAULT_DISPLAY,
     timeoutMs: Long = 2500,
     stepMs: Long = 150,
 ): String? {
@@ -29,7 +32,7 @@ private suspend fun waitForForegroundPackage(
     var current: String? = null
     while (System.currentTimeMillis() < deadline) {
         val svc = RikkaAccessibilityService.instance ?: return null
-        current = svc.rootInActiveWindow?.packageName?.toString()
+        current = svc.rootForDisplay(displayId)?.packageName?.toString()
         if (current == expectedPkg) return current
         delay(stepMs)
     }
@@ -48,6 +51,7 @@ fun launchAppTool(
     context: Context,
     invocationContext: ToolInvocationContext = ToolInvocationContext.EMPTY,
     streamer: InteractiveToolStreamer = InteractiveToolStreamer.NoOp,
+    displayTargetResolver: DisplayTargetResolver? = null,
 ): Tool = Tool(
     name = "launch_app",
     description = """
@@ -63,6 +67,7 @@ fun launchAppTool(
                     put("type", "string")
                     put("description", "Application package id, e.g. com.termux")
                 })
+                put(DisplayTargetResolver.DISPLAY_SESSION_ID, displaySessionIdSchema())
             },
             required = listOf("package_name")
         )
@@ -74,6 +79,19 @@ fun launchAppTool(
                 UIMessagePart.Text(
                     buildJsonObject { put("error", "package_name is required") }.toString()
                 )
+            )
+        }
+        val displayTarget = when (
+            val resolution = resolveDisplayTargetOrPrimary(
+                resolver = displayTargetResolver,
+                input = input,
+                invocationContext = invocationContext,
+                requiredCapability = me.rerere.rikkahub.display.DisplayCapability.LAUNCH,
+            )
+        ) {
+            is DisplayTargetResolution.Resolved -> resolution.target
+            is DisplayTargetResolution.Error -> return@Tool listOf(
+                UIMessagePart.Text(displayTargetError(resolution.code).toString())
             )
         }
         val intent = context.packageManager.getLaunchIntentForPackage(pkg)
@@ -91,14 +109,24 @@ fun launchAppTool(
         // Wake the screen if it's off; without this the activity launches behind the lock
         // screen and any subsequent read_window_tree call will see no_active_window. We do
         // not bypass a real PIN/biometric keyguard - that requires the user.
-        val wasOff = !ScreenWaker.isInteractive(context)
+        val wasOff = displayTarget.isPrimary && !ScreenWaker.isInteractive(context)
         val woke = if (wasOff) ScreenWaker.wakeIfOff(context) else false
-        val keyLocked = ScreenWaker.isKeyguardLocked(context)
-        val keySecure = ScreenWaker.isKeyguardSecure(context)
+        val keyLocked = displayTarget.isPrimary && ScreenWaker.isKeyguardLocked(context)
+        val keySecure = displayTarget.isPrimary && ScreenWaker.isKeyguardSecure(context)
 
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         val result = try {
-            context.startActivity(intent)
+            if (displayTarget.isPrimary) {
+                context.startActivity(intent)
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val options = ActivityOptions.makeBasic()
+                    .setLaunchDisplayId(displayTarget.displayId)
+                context.startActivity(intent, options.toBundle())
+            } else {
+                return@Tool listOf(
+                    UIMessagePart.Text(displayTargetError("display_api_unsupported").toString())
+                )
+            }
             // Confirm the launched app actually took focus. If the user is physically
             // in another app (e.g. RikkaHub's own chat), the launch can be silently
             // ignored and subsequent screen-automation calls will loop on
@@ -106,7 +134,7 @@ fun launchAppTool(
             // when unbound we cannot verify and report confirmed_foreground:false.
             val accessibilityRunning = RikkaAccessibilityService.instance != null
             val finalForeground: String? = if (accessibilityRunning && !keyLocked) {
-                waitForForegroundPackage(pkg)
+                waitForForegroundPackage(pkg, displayTarget.displayId)
             } else null
             val confirmed = finalForeground == pkg
             if (accessibilityRunning && !keyLocked && !confirmed) {
@@ -116,6 +144,8 @@ fun launchAppTool(
                             put("error", "launch_did_not_focus")
                             put("requested", pkg)
                             put("current_foreground", finalForeground.orEmpty())
+                            put("display_id", displayTarget.displayId)
+                            displayTarget.sessionId?.let { put(DisplayTargetResolver.DISPLAY_SESSION_ID, it) }
                             put(
                                 "recovery",
                                 "The launch intent was dispatched but the OS did not move ${pkg} to the foreground within 2.5s. The user is likely actively viewing another app (often RikkaHub itself) — do NOT pass package_name to read_window_tree on this turn. Either ask the user to switch to ${pkg}, or call read_window_tree with no package_name guard so you can see whatever IS currently on screen."
@@ -125,13 +155,17 @@ fun launchAppTool(
                     )
                 )
             } else {
-                AgentTurnTracker.recordNavigatedAway(pkg)
-                AgentTurnTracker.touchPackage(pkg)
+                if (displayTarget.isPrimary) {
+                    AgentTurnTracker.recordNavigatedAway(pkg)
+                    AgentTurnTracker.touchPackage(pkg)
+                }
                 listOf(
                     UIMessagePart.Text(
                         buildJsonObject {
-                            put("success", true)
-                            put("package", pkg)
+                        put("success", true)
+                        put("package", pkg)
+                        put("display_id", displayTarget.displayId)
+                        displayTarget.sessionId?.let { put(DisplayTargetResolver.DISPLAY_SESSION_ID, it) }
                             put("confirmed_foreground", confirmed)
                             if (!accessibilityRunning) {
                                 put("note", "AccessibilityService not bound — could not verify foreground. Treat success as best-effort.")

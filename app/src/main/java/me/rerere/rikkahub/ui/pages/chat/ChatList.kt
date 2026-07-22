@@ -9,6 +9,7 @@ import me.rerere.hugeicons.stroke.ArrowUpDouble
 import me.rerere.hugeicons.stroke.CursorPointer01
 import me.rerere.hugeicons.stroke.Search01
 import me.rerere.hugeicons.stroke.Cancel01
+import me.rerere.hugeicons.stroke.Brain01
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.AnimatedVisibilityScope
@@ -135,6 +136,7 @@ fun ChatList(
     onToolAnswer: ((toolCallId: String, answer: String) -> Unit)? = null,
     onToggleFavorite: ((MessageNode) -> Unit)? = null,
     onConversationSystemPromptChange: ((String?) -> Unit)? = null,
+    onAddSelectionToMemory: (Set<Uuid>) -> Unit = {},
 ) {
     AnimatedContent(
         targetState = previewMode,
@@ -177,6 +179,7 @@ fun ChatList(
                 onToolAnswer = onToolAnswer,
                 onToggleFavorite = onToggleFavorite,
                 onConversationSystemPromptChange = onConversationSystemPromptChange,
+                onAddSelectionToMemory = onAddSelectionToMemory,
             )
         }
     }
@@ -207,6 +210,7 @@ private fun ChatListNormal(
     onToolAnswer: ((toolCallId: String, answer: String) -> Unit)? = null,
     onToggleFavorite: ((MessageNode) -> Unit)? = null,
     onConversationSystemPromptChange: ((String?) -> Unit)? = null,
+    onAddSelectionToMemory: (Set<Uuid>) -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
     val loadingState by rememberUpdatedState(loading)
@@ -472,6 +476,23 @@ private fun ChatListNormal(
                             }
                         ) {
                             Icon(HugeIcons.CursorPointer01, null)
+                        }
+                    }
+                    Tooltip(
+                        tooltip = {
+                            Text(stringResource(R.string.memory_v2_add_selection))
+                        }
+                    ) {
+                        IconButton(
+                            enabled = selectedItems.isNotEmpty(),
+                            onClick = {
+                                onAddSelectionToMemory(selectedItems.toSet())
+                            }
+                        ) {
+                            Icon(
+                                HugeIcons.Brain01,
+                                stringResource(R.string.memory_v2_add_selection),
+                            )
                         }
                     }
                     Tooltip(

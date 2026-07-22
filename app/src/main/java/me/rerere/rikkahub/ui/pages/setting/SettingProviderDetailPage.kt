@@ -523,6 +523,11 @@ private fun ModelSettingsForm(
 ) {
     val pagerState = rememberPagerState { 3 }
     val scope = rememberCoroutineScope()
+    var userContextWindowTokensText by remember(model.id) {
+        mutableStateOf(model.userContextWindowTokens.toString())
+    }
+    val parsedUserContextWindowTokens = userContextWindowTokensText.trim().toIntOrNull()
+        ?.takeIf { it > 0 }
 
     fun setModelId(id: String) {
         val inputModality = ModelRegistry.MODEL_INPUT_MODALITIES.getData(id)
@@ -616,6 +621,26 @@ private fun ModelSettingsForm(
                                     Text(stringResource(R.string.setting_provider_page_model_display_name_placeholder))
                                 }
                             }
+                        )
+
+                        OutlinedTextField(
+                            value = userContextWindowTokensText,
+                            onValueChange = { value ->
+                                userContextWindowTokensText = value
+                                value.trim().toIntOrNull()?.takeIf { it > 0 }?.let { tokens ->
+                                    onModelChange(model.copy(userContextWindowTokens = tokens))
+                                }
+                            },
+                            label = {
+                                Text(stringResource(R.string.setting_provider_page_user_context_window))
+                            },
+                            supportingText = {
+                                Text(stringResource(R.string.setting_provider_page_user_context_window_desc))
+                            },
+                            isError = parsedUserContextWindowTokens == null,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
                         )
 
                         ModelTypeSelector(

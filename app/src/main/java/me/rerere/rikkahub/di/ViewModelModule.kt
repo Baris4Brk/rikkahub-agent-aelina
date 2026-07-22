@@ -19,6 +19,7 @@ import me.rerere.rikkahub.ui.pages.extensions.skills.SkillsVM
 import me.rerere.rikkahub.ui.pages.extensions.workspace.WorkspaceDetailVM
 import me.rerere.rikkahub.ui.pages.extensions.workspace.WorkspaceVM
 import me.rerere.rikkahub.ui.pages.setting.SettingVM
+import me.rerere.rikkahub.ui.pages.setting.AgentRuntimeSettingsViewModel
 import me.rerere.rikkahub.ui.pages.setting.browser.SettingBrowserViewModel
 import me.rerere.rikkahub.ui.pages.setting.termux.SettingTermuxViewModel
 import me.rerere.rikkahub.ui.pages.setting.locallm.SettingLocalLlmViewModel
@@ -26,6 +27,7 @@ import me.rerere.rikkahub.ui.pages.share.handler.ShareHandlerVM
 import me.rerere.rikkahub.ui.pages.translator.TranslatorVM
 import me.rerere.rikkahub.ui.pages.setting.doctor.DoctorViewModel
 import me.rerere.rikkahub.ui.pages.setting.scheduledjobs.ScheduledJobsViewModel
+import me.rerere.rikkahub.ui.pages.memory.MemoryCenterVM
 import me.rerere.rikkahub.workflow.ui.WorkflowsViewModel
 import org.koin.core.module.dsl.viewModel
 import org.koin.core.module.dsl.viewModelOf
@@ -46,6 +48,7 @@ val viewModelModule = module {
     }
     viewModelOf(::ChatDrawerVM)
     viewModelOf(::SettingVM)
+    viewModelOf(::AgentRuntimeSettingsViewModel)
     viewModelOf(::DebugVM)
     viewModelOf(::DeveloperVM)
     viewModelOf(::HistoryVM)
@@ -55,9 +58,23 @@ val viewModelModule = module {
             id = it.get(),
             settingsStore = get(),
             memoryRepository = get(),
+            memoryV2Dao = get(),
             filesManager = get(),
             skillManager = get(),
             workspaceRepository = get(),
+            conversationRepository = get(),
+        )
+    }
+    viewModel<MemoryCenterVM> { params ->
+        MemoryCenterVM(
+            id = params.get(),
+            settingsStore = get(),
+            memoryDao = get(),
+            memoryV2Dao = get(),
+            memoryRepository = get(),
+            mutationCoordinator = get(),
+            coordinator = get(),
+            scheduler = get(),
             conversationRepository = get(),
         )
     }

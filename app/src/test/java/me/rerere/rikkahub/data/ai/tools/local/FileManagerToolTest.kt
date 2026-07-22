@@ -70,21 +70,6 @@ class FileManagerToolTest {
         assertEquals("path_blocked", result["error"]?.jsonPrimitive?.content)
     }
 
-    @Test fun `create_directory blocks sys path`() {
-        val result = invokeTool(createDirectoryTool(), """{"path":"/sys/newdir"}""")
-        assertEquals("path_blocked", result["error"]?.jsonPrimitive?.content)
-    }
-
-    @Test fun `file_info blocks dev path`() {
-        val result = invokeTool(fileInfoTool(), """{"path":"/dev/zero"}""")
-        assertEquals("path_blocked", result["error"]?.jsonPrimitive?.content)
-    }
-
-    @Test fun `find_files blocks apex path`() {
-        val result = invokeTool(findFilesTool(), """{"root":"/apex","query":"lib"}""")
-        assertEquals("path_blocked", result["error"]?.jsonPrimitive?.content)
-    }
-
     @Test fun `all file manager mutation paths reject core second user data`() {
         val appRoot = "/data/user/0/${BuildConfig.APPLICATION_ID}"
         val cases = listOf(
@@ -106,6 +91,21 @@ class FileManagerToolTest {
             val result = invokeTool(tool, args)
             assertEquals(tool.name, "path_blocked", result["error"]?.jsonPrimitive?.content)
         }
+    }
+
+    @Test fun `create_directory blocks sys path`() {
+        val result = invokeTool(createDirectoryTool(), """{"path":"/sys/newdir"}""")
+        assertEquals("path_blocked", result["error"]?.jsonPrimitive?.content)
+    }
+
+    @Test fun `file_info blocks dev path`() {
+        val result = invokeTool(fileInfoTool(), """{"path":"/dev/zero"}""")
+        assertEquals("path_blocked", result["error"]?.jsonPrimitive?.content)
+    }
+
+    @Test fun `find_files blocks apex path`() {
+        val result = invokeTool(findFilesTool(), """{"root":"/apex","query":"lib"}""")
+        assertEquals("path_blocked", result["error"]?.jsonPrimitive?.content)
     }
 
     // ========== list_files ==========

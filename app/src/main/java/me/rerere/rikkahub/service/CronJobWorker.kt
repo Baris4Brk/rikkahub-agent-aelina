@@ -19,8 +19,11 @@ import me.rerere.ai.ui.UIMessagePart
 import me.rerere.rikkahub.data.agentrun.AgentRunKind
 import me.rerere.rikkahub.data.agentrun.AgentRunRepository
 import me.rerere.rikkahub.data.agentrun.AgentRunStatus
+import me.rerere.rikkahub.data.ai.ToolCallOrigin
+import me.rerere.rikkahub.data.ai.execution.ToolRuntimeInvocation
 import me.rerere.rikkahub.data.ai.tools.HeadlessConversations
 import me.rerere.rikkahub.data.ai.tools.LocalTools
+import me.rerere.rikkahub.data.ai.tools.ToolExecutionContext
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.datastore.findAssistantById
 import me.rerere.rikkahub.data.db.entity.ScheduledJobEntity
@@ -359,15 +362,33 @@ class CronJobWorker(
             ?: return Triple("failed", "assistant_not_found", null)
         // Headless context — sub-agent recursion guard fires from this dispatch path so
         // a cron job's direct-mode action sequence cannot itself spawn a sub-agent.
+        val executionContext = ToolExecutionContext(
+            runId = Uuid.random(),
+            conversationId = Uuid.random(),
+            assistantId = assistantUuid.toString(),
+            callOrigin = ToolCallOrigin.TrustedWorkflow,
+        )
         val tools = localTools.getTools(
             assistant.localTools,
             me.rerere.rikkahub.data.ai.tools.ToolInvocationContext(
                 callerAssistantId = assistantUuid.toString(),
                 callerConversationId = null,  // direct-mode has no conversation
+                callerWorkspaceId = assistant.workspaceId?.toString(),
                 isHeadless = true,
+            ).copy(
+                callerConversationId = executionContext.conversationId.toString(),
+                callerRunId = executionContext.runId.toString(),
+                callOrigin = ToolCallOrigin.TrustedWorkflow,
             ),
         )
-        val seq = directRunner.run(parsed, tools)
+        val seq = directRunner.run(
+            actions = parsed,
+            availableTools = tools,
+            invocation = ToolRuntimeInvocation(
+                executionContext = executionContext,
+                unrestrictedOverride = assistant.unrestricted,
+            ),
+        )
         return Triple(seq.finalOutcome, seq.errorMessage, null)
     }
 

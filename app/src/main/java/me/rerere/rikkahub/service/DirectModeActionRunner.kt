@@ -1,7 +1,7 @@
 package me.rerere.rikkahub.service
 
 import android.util.Log
-import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -9,8 +9,15 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
 import me.rerere.ai.core.Tool
 import me.rerere.ai.ui.UIMessagePart
+import me.rerere.rikkahub.data.ai.execution.ToolExecutionPlanRequest
+import me.rerere.rikkahub.data.ai.execution.ToolExecutionPlanResult
+import me.rerere.rikkahub.data.ai.execution.ToolRunPreflight
+import me.rerere.rikkahub.data.ai.execution.ToolRuntime
+import me.rerere.rikkahub.data.ai.execution.ToolRuntimeInvocation
+import me.rerere.rikkahub.data.ai.execution.ToolStartableResolver
 import me.rerere.rikkahub.data.ai.tools.HardlineCommandGuard
 
 /**
@@ -22,7 +29,9 @@ import me.rerere.rikkahub.data.ai.tools.HardlineCommandGuard
  * §"Out of scope for v1" — that's Phase 12 Workflows territory.)
  */
 class DirectModeActionRunner(
-    private val json: Json,
+    private val toolRuntime: ToolRuntime,
+    private val toolStartableResolver: ToolStartableResolver,
+    private val preflight: ToolRunPreflight,
 ) {
 
     @Serializable
@@ -51,9 +60,13 @@ class DirectModeActionRunner(
     /**
      * Execute each action sequentially. Aborts on first non-success result.
      */
-    suspend fun run(actions: List<Action>, availableTools: List<Tool>): SequenceResult {
+    suspend fun run(
+        actions: List<Action>,
+        availableTools: List<Tool>,
+        invocation: ToolRuntimeInvocation,
+    ): SequenceResult {
         for ((idx, action) in actions.withIndex()) {
-            val result = runOne(idx, action, availableTools)
+            val result = runOne(idx, action, availableTools, invocation)
             when (result) {
                 is StepResult.Success        -> continue
                 is StepResult.Failed         -> return SequenceResult("failed", "action $idx: ${result.errorMessage}")
@@ -75,6 +88,7 @@ class DirectModeActionRunner(
         idx: Int,
         action: Action,
         availableTools: List<Tool>,
+        invocation: ToolRuntimeInvocation,
     ): StepResult {
         val hardlineReason = HardlineCommandGuard.checkTool(action.tool, action.args.toString())
         if (hardlineReason != null) {
@@ -84,8 +98,39 @@ class DirectModeActionRunner(
         val tool = availableTools.find { it.name == action.tool }
             ?: return StepResult.UnknownTool(action.tool)
         return try {
-            val out = withTimeoutOrNull(60_000L) { tool.execute(action.args) }
-            if (out == null) StepResult.TimedOut else StepResult.Success(out)
+            when (
+                val result = toolRuntime.execute(
+                    ToolExecutionPlanRequest(
+                        toolCallId = "direct-${invocation.executionContext.runId}-$idx",
+                        toolName = tool.name,
+                        args = action.args,
+                        executionContext = invocation.executionContext,
+                        startableTool = toolStartableResolver.resolve(
+                            tool,
+                            invocation.executionContext,
+                        ),
+                        legacyExecute = { input -> tool.execute(input.jsonObject) },
+                        runControl = null,
+                        wallClockBudgetMs = ACTION_TIMEOUT_MS,
+                        preExecutionGate = {
+                            preflight.authorize(
+                                toolName = tool.name,
+                                args = action.args,
+                                context = invocation.executionContext,
+                                unrestrictedOverride = invocation.unrestrictedOverride,
+                            )
+                        },
+                    ),
+                )
+            ) {
+                is ToolExecutionPlanResult.Completed -> StepResult.Success(result.output)
+                is ToolExecutionPlanResult.TimedOut -> StepResult.TimedOut
+                is ToolExecutionPlanResult.Rejected -> StepResult.Failed(
+                    "${result.errorCode}: ${result.detail}".take(500),
+                )
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (t: Throwable) {
             Log.w(TAG, "direct-mode action $idx tool=${action.tool} threw", t)
             StepResult.Failed("${t::class.simpleName}: ${t.message.orEmpty()}".take(500))
@@ -94,6 +139,7 @@ class DirectModeActionRunner(
 
     companion object {
         private const val TAG = "DirectModeActionRunner"
+        private const val ACTION_TIMEOUT_MS = 60_000L
 
         /**
          * Parse a JSON string representing an array of actions. Returns a [Result] wrapping

@@ -24,6 +24,7 @@ private fun coordOrError(jsonObj: kotlinx.serialization.json.JsonElement, key: S
 fun tapTool(
     invocationContext: ToolInvocationContext = ToolInvocationContext.EMPTY,
     streamer: InteractiveToolStreamer = InteractiveToolStreamer.NoOp,
+    displayTargetResolver: DisplayTargetResolver? = null,
 ): Tool = Tool(
     name = "tap",
     description = """
@@ -42,14 +43,12 @@ fun tapTool(
                     put("type", "number")
                     put("description", "Absolute y in pixels of the active display")
                 })
+                put(DisplayTargetResolver.DISPLAY_SESSION_ID, displaySessionIdSchema())
             },
             required = listOf("x", "y")
         )
     },
     execute = { input ->
-        AgentTurnTracker.recordAutomationAction()
-        // Wake screen so gestures land on a visible surface, not a dark screen.
-        me.rerere.rikkahub.service.RikkaAccessibilityService.instance?.let { wakeScreenIfNeeded(it) }
         val x = coordOrError(input, "x")
         val y = coordOrError(input, "y")
         if (x == null || y == null) {
@@ -61,16 +60,38 @@ fun tapTool(
                 )
             )
         }
+        val displayTarget = when (
+            val resolution = resolveDisplayTargetOrPrimary(
+                resolver = displayTargetResolver,
+                input = input,
+                invocationContext = invocationContext,
+                requiredCapability = me.rerere.rikkahub.display.DisplayCapability.GESTURE,
+            )
+        ) {
+            is DisplayTargetResolution.Resolved -> resolution.target
+            is DisplayTargetResolution.Error -> return@Tool listOf(
+                UIMessagePart.Text(displayTargetError(resolution.code).toString())
+            )
+        }
+        AgentTurnTracker.recordAutomationAction()
+        // Waking only makes sense for the user-visible physical display. A virtual-display
+        // session must never issue a primary-display wake as an accidental side effect.
+        if (displayTarget.isPrimary) {
+            me.rerere.rikkahub.service.RikkaAccessibilityService.instance?.let { wakeScreenIfNeeded(it) }
+        }
         val payload = AccessibilityServiceHandle.withService { svc ->
             val path = svc.buildTapPath(x.toFloat(), y.toFloat())
             val gesture = GestureDescription.Builder()
                 .addStroke(GestureDescription.StrokeDescription(path, 0L, 50L))
-                .build()
+                .buildForDisplay(displayTarget.displayId)
+                ?: return@withService buildJsonObject {
+                    put("error", "display_api_unsupported")
+                }
             val ok = svc.dispatchGestureAsync(gesture)
             svc.appendLog(
                 ActionLogEntry(
                     type = "tap",
-                    paramsSummary = "(${x.toInt()}, ${y.toInt()})",
+                    paramsSummary = "(${x.toInt()}, ${y.toInt()}) display=${displayTarget.displayId}",
                     success = ok,
                     timestampMs = System.currentTimeMillis(),
                 )
@@ -88,6 +109,7 @@ fun tapTool(
 fun longPressTool(
     invocationContext: ToolInvocationContext = ToolInvocationContext.EMPTY,
     streamer: InteractiveToolStreamer = InteractiveToolStreamer.NoOp,
+    displayTargetResolver: DisplayTargetResolver? = null,
 ): Tool = Tool(
     name = "long_press",
     description = """
@@ -109,13 +131,12 @@ fun longPressTool(
                     put("type", "integer")
                     put("description", "Hold duration in milliseconds (default 600, range 100-5000)")
                 })
+                put(DisplayTargetResolver.DISPLAY_SESSION_ID, displaySessionIdSchema())
             },
             required = listOf("x", "y")
         )
     },
     execute = { input ->
-        AgentTurnTracker.recordAutomationAction()
-        me.rerere.rikkahub.service.RikkaAccessibilityService.instance?.let { wakeScreenIfNeeded(it) }
         val x = coordOrError(input, "x")
         val y = coordOrError(input, "y")
         if (x == null || y == null) {
@@ -126,6 +147,23 @@ fun longPressTool(
                     }.toString()
                 )
             )
+        }
+        val displayTarget = when (
+            val resolution = resolveDisplayTargetOrPrimary(
+                resolver = displayTargetResolver,
+                input = input,
+                invocationContext = invocationContext,
+                requiredCapability = me.rerere.rikkahub.display.DisplayCapability.GESTURE,
+            )
+        ) {
+            is DisplayTargetResolution.Resolved -> resolution.target
+            is DisplayTargetResolution.Error -> return@Tool listOf(
+                UIMessagePart.Text(displayTargetError(resolution.code).toString())
+            )
+        }
+        AgentTurnTracker.recordAutomationAction()
+        if (displayTarget.isPrimary) {
+            me.rerere.rikkahub.service.RikkaAccessibilityService.instance?.let { wakeScreenIfNeeded(it) }
         }
         val durationRaw = input.jsonObject["duration_ms"]?.jsonPrimitive?.longOrNull
             ?: DEFAULT_LONG_PRESS_MS
@@ -142,12 +180,15 @@ fun longPressTool(
             val path = svc.buildTapPath(x.toFloat(), y.toFloat())
             val gesture = GestureDescription.Builder()
                 .addStroke(GestureDescription.StrokeDescription(path, 0L, durationRaw))
-                .build()
+                .buildForDisplay(displayTarget.displayId)
+                ?: return@withService buildJsonObject {
+                    put("error", "display_api_unsupported")
+                }
             val ok = svc.dispatchGestureAsync(gesture)
             svc.appendLog(
                 ActionLogEntry(
                     type = "long_press",
-                    paramsSummary = "(${x.toInt()}, ${y.toInt()}) ${durationRaw}ms",
+                    paramsSummary = "(${x.toInt()}, ${y.toInt()}) ${durationRaw}ms display=${displayTarget.displayId}",
                     success = ok,
                     timestampMs = System.currentTimeMillis(),
                 )

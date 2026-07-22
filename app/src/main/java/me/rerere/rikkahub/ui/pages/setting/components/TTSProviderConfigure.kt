@@ -52,6 +52,7 @@ fun TTSProviderConfigure(
                         is TTSProviderSetting.Gemini -> "Gemini"
                         is TTSProviderSetting.SystemTTS -> "System TTS"
                         is TTSProviderSetting.MiniMax -> "MiniMax"
+                        is TTSProviderSetting.Aura -> "Aura"
                         is TTSProviderSetting.Qwen -> "Qwen"
                         is TTSProviderSetting.Groq -> "Groq"
                         is TTSProviderSetting.XAI -> "xAI"
@@ -79,6 +80,7 @@ fun TTSProviderConfigure(
                                         TTSProviderSetting.Gemini::class -> "Gemini"
                                         TTSProviderSetting.SystemTTS::class -> "System TTS"
                                         TTSProviderSetting.MiniMax::class -> "MiniMax"
+                                        TTSProviderSetting.Aura::class -> "Aura"
                                         TTSProviderSetting.Qwen::class -> "Qwen"
                                         TTSProviderSetting.Groq::class -> "Groq"
                                         TTSProviderSetting.XAI::class -> "xAI"
@@ -108,6 +110,11 @@ fun TTSProviderConfigure(
                                     TTSProviderSetting.MiniMax::class -> TTSProviderSetting.MiniMax(
                                         id = setting.id,
                                         name = "MiniMax TTS"
+                                    )
+
+                                    TTSProviderSetting.Aura::class -> TTSProviderSetting.Aura(
+                                        id = setting.id,
+                                        name = "Aura TTS"
                                     )
 
                                     TTSProviderSetting.Qwen::class -> TTSProviderSetting.Qwen(
@@ -160,6 +167,7 @@ fun TTSProviderConfigure(
             is TTSProviderSetting.OpenAI -> OpenAITTSConfiguration(setting, onValueChange)
             is TTSProviderSetting.Gemini -> GeminiTTSConfiguration(setting, onValueChange)
             is TTSProviderSetting.MiniMax -> MiniMaxTTSConfiguration(setting, onValueChange)
+            is TTSProviderSetting.Aura -> AuraTTSConfiguration(setting, onValueChange)
             is TTSProviderSetting.SystemTTS -> SystemTTSConfiguration(setting, onValueChange)
             is TTSProviderSetting.Qwen -> QwenTTSConfiguration(setting, onValueChange)
             is TTSProviderSetting.Groq -> GroqTTSConfiguration(setting, onValueChange)
@@ -324,6 +332,174 @@ private fun MiMoTTSConfiguration(
             },
             modifier = Modifier.fillMaxWidth(),
             placeholder = { Text("mimo_default") }
+        )
+    }
+}
+
+@Composable
+private fun AuraTTSConfiguration(
+    setting: TTSProviderSetting.Aura,
+    onValueChange: (TTSProviderSetting) -> Unit
+) {
+    FormItem(
+        label = { Text(stringResource(R.string.setting_tts_page_api_key)) },
+        description = { Text(stringResource(R.string.setting_tts_page_api_key_description)) }
+    ) {
+        OutlinedTextField(
+            value = setting.apiKey,
+            onValueChange = { newApiKey ->
+                onValueChange(setting.copy(apiKey = newApiKey))
+            },
+            modifier = Modifier.fillMaxWidth(),
+            placeholder = { Text("sk_xxx") },
+        )
+    }
+
+    FormItem(
+        label = { Text(stringResource(R.string.setting_tts_page_base_url)) },
+        description = { Text(stringResource(R.string.setting_tts_page_base_url_description)) }
+    ) {
+        OutlinedTextField(
+            value = setting.baseUrl,
+            onValueChange = { newBaseUrl ->
+                onValueChange(setting.copy(baseUrl = newBaseUrl))
+            },
+            modifier = Modifier.fillMaxWidth(),
+            placeholder = { Text("https://tts.aurastd.com/api/v1") }
+        )
+    }
+
+    FormItem(
+        label = { Text(stringResource(R.string.setting_tts_page_model)) },
+        description = { Text(stringResource(R.string.setting_tts_page_model_description)) }
+    ) {
+        OutlinedTextField(
+            value = setting.model,
+            onValueChange = { newModel ->
+                onValueChange(setting.copy(model = newModel))
+            },
+            modifier = Modifier.fillMaxWidth(),
+            placeholder = { Text("speech-2.8-turbo") }
+        )
+    }
+
+    var voiceIdExpanded by remember { mutableStateOf(false) }
+    val voiceIds = listOf(
+        "female-shaonv",
+        "female-yujie",
+        "female-chengshu",
+        "female-tianmei",
+        "male-qn-qingse",
+        "male-qn-jingying",
+        "male-qn-badao",
+        "male-qn-daxuesheng",
+        "audiobook_male_1",
+        "audiobook_female_1",
+        "cartoon_pig",
+        "English_expressive_narrator"
+    )
+
+    FormItem(
+        label = { Text(stringResource(R.string.setting_tts_page_voice_id)) },
+        description = { Text(stringResource(R.string.setting_tts_page_voice_id_description)) }
+    ) {
+        ExposedDropdownMenuBox(
+            expanded = voiceIdExpanded,
+            onExpandedChange = { voiceIdExpanded = !voiceIdExpanded }
+        ) {
+            OutlinedTextField(
+                value = setting.voiceId,
+                onValueChange = { newVoiceId ->
+                    onValueChange(setting.copy(voiceId = newVoiceId))
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryEditable),
+                trailingIcon = {
+                    ExposedDropdownMenuDefaults.TrailingIcon(expanded = voiceIdExpanded)
+                }
+            )
+            ExposedDropdownMenu(
+                expanded = voiceIdExpanded,
+                onDismissRequest = { voiceIdExpanded = false }
+            ) {
+                voiceIds.forEach { voiceId ->
+                    DropdownMenuItem(
+                        text = { Text(voiceId) },
+                        onClick = {
+                            voiceIdExpanded = false
+                            onValueChange(setting.copy(voiceId = voiceId))
+                        }
+                    )
+                }
+            }
+        }
+    }
+
+    var emotionExpanded by remember { mutableStateOf(false) }
+    val emotions = listOf(
+        "neutral",
+        "calm",
+        "happy",
+        "sad",
+        "angry",
+        "fearful",
+        "disgusted",
+        "surprised",
+        "fluent",
+        "whisper"
+    )
+
+    FormItem(
+        label = { Text(stringResource(R.string.setting_tts_page_emotion)) },
+        description = { Text(stringResource(R.string.setting_tts_page_emotion_description)) }
+    ) {
+        ExposedDropdownMenuBox(
+            expanded = emotionExpanded,
+            onExpandedChange = { emotionExpanded = !emotionExpanded }
+        ) {
+            OutlinedTextField(
+                value = setting.emotion,
+                onValueChange = { newEmotion ->
+                    onValueChange(setting.copy(emotion = newEmotion))
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryEditable),
+                trailingIcon = {
+                    ExposedDropdownMenuDefaults.TrailingIcon(expanded = emotionExpanded)
+                }
+            )
+            ExposedDropdownMenu(
+                expanded = emotionExpanded,
+                onDismissRequest = { emotionExpanded = false }
+            ) {
+                emotions.forEach { emotion ->
+                    DropdownMenuItem(
+                        text = { Text(emotion) },
+                        onClick = {
+                            emotionExpanded = false
+                            onValueChange(setting.copy(emotion = emotion))
+                        }
+                    )
+                }
+            }
+        }
+    }
+
+    FormItem(
+        label = { Text(stringResource(R.string.setting_tts_page_speed)) },
+        description = { Text(stringResource(R.string.setting_tts_page_speed_description)) }
+    ) {
+        OutlinedNumberInput(
+            value = setting.speed,
+            onValueChange = { newSpeed ->
+                if (newSpeed in 0.5f..2.0f) {
+                    onValueChange(setting.copy(speed = newSpeed))
+                }
+            },
+            modifier = Modifier.fillMaxWidth(),
+            label = stringResource(R.string.setting_tts_page_speed)
         )
     }
 }

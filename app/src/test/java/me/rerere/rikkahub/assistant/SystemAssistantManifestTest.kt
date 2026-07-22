@@ -152,6 +152,25 @@ class SystemAssistantManifestTest {
         assertTrue(requestedPermissions.contains("android.permission.WRITE_SECURE_SETTINGS"))
     }
 
+    @Test
+    fun `static shortcuts keep the second user assistant entry`() {
+        val shortcuts = parseXml(File("src/main/res/xml/shortcuts.xml"))
+        val shortcut = shortcuts
+            .getElementsByTagName("shortcut")
+            .asElements()
+            .singleOrNull { it.androidShortcutId == "second_user_assistant" }
+
+        assertNotNull("The launcher must keep the second-user assistant shortcut", shortcut)
+        assertEquals("true", shortcut!!.androidEnabled)
+
+        val intent = shortcut
+            .getElementsByTagName("intent")
+            .asElements()
+            .single()
+        assertEquals(SECOND_USER_ASSISTANT_ACTION, intent.androidAction)
+        assertEquals(SECOND_USER_ASSISTANT_ACTIVITY, intent.androidTargetClass)
+    }
+
     private fun parseXml(file: File) = DocumentBuilderFactory.newInstance()
         .newDocumentBuilder()
         .parse(file)
@@ -189,6 +208,18 @@ class SystemAssistantManifestTest {
     private val Element.androidDescription: String
         get() = getAttribute("android:description")
 
+    private val Element.androidShortcutId: String
+        get() = getAttribute("android:shortcutId")
+
+    private val Element.androidEnabled: String
+        get() = getAttribute("android:enabled")
+
+    private val Element.androidAction: String
+        get() = getAttribute("android:action")
+
+    private val Element.androidTargetClass: String
+        get() = getAttribute("android:targetClass")
+
     private val Element.androidResource: String
         get() = getAttribute("android:resource")
 
@@ -221,6 +252,10 @@ class SystemAssistantManifestTest {
             "me.rerere.rikkahub.action.SHOW_SYSTEM_ASSISTANT_ACCESSIBILITY"
         const val HARDWARE_OVERLAY_ACTION =
             "me.rerere.rikkahub.action.SHOW_SYSTEM_ASSISTANT_HARDWARE"
+        const val SECOND_USER_ASSISTANT_ACTION =
+            "me.rerere.rikkahub.action.OPEN_SECOND_USER_ASSISTANT"
+        const val SECOND_USER_ASSISTANT_ACTIVITY =
+            "me.rerere.rikkahub.assistant.SystemAssistantFallbackActivity"
         const val RECOGNITION_SERVICE =
             "me.rerere.rikkahub.assistant.RikkaNoOpRecognitionService"
     }
