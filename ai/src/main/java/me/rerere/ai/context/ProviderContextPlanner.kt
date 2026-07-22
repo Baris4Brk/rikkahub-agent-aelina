@@ -177,18 +177,18 @@ private fun MessageRole.transientSummaryLabel(): String = when (this) {
 /**
  * Plans a bounded provider context while preserving semantic boundaries.
  *
- * Defaults intentionally match the application policy: a conservative 128K window when model metadata
- * is absent, compression above 75%, and a post-compression target of 60%.
+ * Callers must provide a trusted context window. There is deliberately no implicit fallback: a
+ * missing provider declaration must not turn into a silent automatic-compression limit.
  */
 class ProviderContextPlanner(
     private val tokenEstimator: ContextTokenEstimator = ApproximateContextTokenEstimator,
-    private val defaultContextWindowTokens: Int = 128_000,
+    private val defaultContextWindowTokens: Int? = null,
     private val compressionTriggerRatio: Double = 0.75,
     private val compressionTargetRatio: Double = 0.60,
     private val summaryTokenReserve: Int = 2_048,
 ) {
     init {
-        require(defaultContextWindowTokens > 0)
+        defaultContextWindowTokens?.let { require(it > 0) }
         require(compressionTriggerRatio in 0.0..1.0)
         require(compressionTargetRatio in 0.0..compressionTriggerRatio)
         require(summaryTokenReserve >= 0)
@@ -199,7 +199,9 @@ class ProviderContextPlanner(
         declaredContextTokens: Int?,
     ): ProviderContextPlan {
         val contextWindow = declaredContextTokens?.takeIf { it > 0 }
-            ?: defaultContextWindowTokens
+            ?: requireNotNull(defaultContextWindowTokens) {
+                "Automatic provider context planning requires an explicit trusted context window"
+            }
         val trigger = floor(contextWindow * compressionTriggerRatio).toInt()
         val target = floor(contextWindow * compressionTargetRatio).toInt()
         val originalTokens = messages.sumOf(::estimate)

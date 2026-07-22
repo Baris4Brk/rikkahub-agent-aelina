@@ -2,6 +2,7 @@ package me.rerere.ai.provider
 
 import kotlinx.coroutines.flow.Flow
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.Transient
 import kotlinx.serialization.json.JsonElement
 import me.rerere.ai.core.ReasoningLevel
 import me.rerere.ai.core.Tool
@@ -59,6 +60,12 @@ data class TextGenerationParams(
     val maxTokens: Int? = null,
     val tools: List<Tool> = emptyList(),
     val reasoningLevel: ReasoningLevel = ReasoningLevel.OFF,
+    /**
+     * For non-chat system calls, omit a disabled reasoning field instead of sending a
+     * provider-specific disabled value. The default preserves ordinary chat request shapes.
+     */
+    @Transient
+    val omitReasoningConfigurationWhenOff: Boolean = false,
     val customHeaders: List<CustomHeader> = emptyList(),
     val customBody: List<CustomBody> = emptyList(),
 )

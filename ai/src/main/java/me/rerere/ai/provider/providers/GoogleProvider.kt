@@ -386,7 +386,6 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
             }
 
             override fun onClosed(eventSource: EventSource) {
-                println("[onClosed] 连接已关闭")
                 close()
             }
         }
@@ -395,7 +394,6 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
                 .newEventSource(request, listener)
 
         awaitClose {
-            println("[awaitClose] 关闭eventSource")
             eventSource.cancel()
         }
     }.bufferProviderStream()
@@ -656,8 +654,10 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
         }
     }
 
-    private fun buildContents(messages: List<UIMessage>): JsonArray =
-        buildContents(messages, listOf(Modality.TEXT))
+    private fun buildContents(messages: List<UIMessage>): JsonArray = buildContents(
+        messages = messages,
+        toolResultInputModalities = listOf(Modality.TEXT),
+    )
 
     private fun buildContents(
         messages: List<UIMessage>,
@@ -833,7 +833,7 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
                         ToolResultReplayPlan.MULTIMODAL_RESULT_FOLLOWS_TEXT
                     } else {
                         replay.text
-                    },
+                    }
                 )
             })
         })

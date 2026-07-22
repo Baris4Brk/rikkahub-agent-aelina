@@ -4,6 +4,8 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlin.uuid.Uuid
 
+const val DEFAULT_USER_CONTEXT_WINDOW_TOKENS = 1_000_000
+
 @Serializable
 data class Model(
     val modelId: String = "",
@@ -19,6 +21,8 @@ data class Model(
     val providerOverwrite: ProviderSetting? = null,
     // Optional capability/pricing metadata, populated from OpenRouter's /models endpoint.
     val contextLength: Int? = null,
+    // User-owned policy setting. Unlike [contextLength], provider catalog refreshes never define it.
+    val userContextWindowTokens: Int = DEFAULT_USER_CONTEXT_WINDOW_TOKENS,
     val supportedParameters: List<String> = emptyList(),
     val pricePromptPerToken: Double? = null,
     val priceCompletionPerToken: Double? = null,
@@ -60,6 +64,5 @@ sealed class BuiltInTools {
     @SerialName("image_generation")
     data object ImageGeneration : BuiltInTools()
 }
-
 
 

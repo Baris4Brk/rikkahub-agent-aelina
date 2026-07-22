@@ -58,4 +58,18 @@ class ProviderLogPrivacyTest {
         assertTrue(sanitized.message.orEmpty().contains("error=IllegalArgumentException"))
         assertTrue(sanitized.cause == null)
     }
+
+    @Test
+    fun `encoding failure omits source and exception message`() {
+        val secret = "file:///private/photo.jpg?token=secret"
+        val diagnostic = ProviderLogPrivacy.encodingFailure(
+            contentKind = "image",
+            error = IllegalArgumentException(secret),
+        )
+
+        assertTrue(diagnostic.contains("kind=image"))
+        assertTrue(diagnostic.contains("error=IllegalArgumentException"))
+        assertFalse(diagnostic.contains(secret))
+        assertFalse(diagnostic.contains("token="))
+    }
 }

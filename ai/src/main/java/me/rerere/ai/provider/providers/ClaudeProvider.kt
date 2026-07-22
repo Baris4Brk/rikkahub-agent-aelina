@@ -291,6 +291,7 @@ class ClaudeProvider(private val client: OkHttpClient, context: Context? = null)
                         close(error)
                     }
                 }
+
                 } catch (error: Exception) {
                     val sanitized = ProviderLogPrivacy.parseException(data.length, type, error)
                     Log.w(TAG, sanitized.message.orEmpty())
@@ -574,7 +575,7 @@ class ClaudeProvider(private val client: OkHttpClient, context: Context? = null)
                     put("data", encoded.base64)
                 })
             }.onFailure {
-                Log.w(TAG, "encode image failed", it)
+                Log.w(TAG, ProviderLogPrivacy.encodingFailure("image", it))
                 put("type", "text")
                 put("text", "")
             }

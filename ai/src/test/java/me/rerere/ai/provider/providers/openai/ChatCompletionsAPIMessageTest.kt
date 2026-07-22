@@ -35,23 +35,15 @@ class ChatCompletionsAPIMessageTest {
     private fun invokeBuildMessages(
         messages: List<UIMessage>,
         includeHistoryReasoning: Boolean = true,
-        requireToolReasoningContent: Boolean = false,
     ): JsonArray {
         val method = ChatCompletionsAPI::class.java.getDeclaredMethod(
             "buildMessages",
             List::class.java,
             Boolean::class.javaPrimitiveType,
             Boolean::class.javaPrimitiveType,
-            Boolean::class.javaPrimitiveType,
         )
         method.isAccessible = true
-        return method.invoke(
-            api,
-            messages,
-            includeHistoryReasoning,
-            false,
-            requireToolReasoningContent,
-        ) as JsonArray
+        return method.invoke(api, messages, includeHistoryReasoning, false) as JsonArray
     }
 
     private fun invokeBuildMessagesWithToolModalities(
@@ -63,11 +55,33 @@ class ChatCompletionsAPIMessageTest {
             List::class.java,
             Boolean::class.javaPrimitiveType,
             Boolean::class.javaPrimitiveType,
+            Collection::class.java,
+        )
+        method.isAccessible = true
+        return method.invoke(api, messages, true, false, modalities) as JsonArray
+    }
+
+    private fun invokeBuildMessagesForToolReasoning(
+        messages: List<UIMessage>,
+        includeHistoryReasoning: Boolean,
+    ): JsonArray {
+        val method = ChatCompletionsAPI::class.java.getDeclaredMethod(
+            "buildMessages",
+            List::class.java,
+            Boolean::class.javaPrimitiveType,
+            Boolean::class.javaPrimitiveType,
             Boolean::class.javaPrimitiveType,
             Collection::class.java,
         )
         method.isAccessible = true
-        return method.invoke(api, messages, true, false, false, modalities) as JsonArray
+        return method.invoke(
+            api,
+            messages,
+            includeHistoryReasoning,
+            false,
+            true,
+            listOf(Modality.TEXT),
+        ) as JsonArray
     }
 
     @Test
@@ -82,9 +96,9 @@ class ChatCompletionsAPIMessageTest {
             ),
         )
 
-        val result = invokeBuildMessages(
+        val result = invokeBuildMessagesForToolReasoning(
             messages = messages,
-            requireToolReasoningContent = true,
+            includeHistoryReasoning = true,
         )
         val assistantToolTurn = result.first {
             it.jsonObject["role"]?.jsonPrimitive?.content == "assistant"
@@ -107,10 +121,9 @@ class ChatCompletionsAPIMessageTest {
             ),
         )
 
-        val result = invokeBuildMessages(
+        val result = invokeBuildMessagesForToolReasoning(
             messages = messages,
             includeHistoryReasoning = false,
-            requireToolReasoningContent = true,
         )
         val assistantToolTurn = result.first {
             it.jsonObject["role"]?.jsonPrimitive?.content == "assistant"
@@ -452,6 +465,28 @@ class ChatCompletionsAPIMessageTest {
         assertEquals("assistant", result[1].jsonObject["role"]?.jsonPrimitive?.content)
         assertEquals("thinking", result[1].jsonObject["reasoning_content"]?.jsonPrimitive?.content)
         assertEquals("", result[1].jsonObject["content"]?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun `historical screenshot is omitted for a text only model`() {
+        val tool = UIMessagePart.Tool(
+            toolCallId = "call_image",
+            toolName = "take_screenshot",
+            input = "{}",
+            output = listOf(UIMessagePart.Image("data:image/png;base64,AA==")),
+        )
+
+        val result = invokeBuildMessagesWithToolModalities(
+            messages = listOf(
+                UIMessage.user("inspect"),
+                UIMessage(role = MessageRole.ASSISTANT, parts = listOf(tool)),
+                UIMessage.user("continue"),
+            ),
+            modalities = listOf(Modality.TEXT),
+        ).toString()
+
+        assertTrue(result.contains("Image omitted"))
+        assertFalse(result.contains("data:image/png;base64,AA=="))
     }
 
     @Test

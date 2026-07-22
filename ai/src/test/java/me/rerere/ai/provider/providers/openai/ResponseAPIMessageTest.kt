@@ -3,14 +3,16 @@ package me.rerere.ai.provider.providers.openai
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import me.rerere.ai.core.MessageRole
 import me.rerere.ai.core.ReasoningLevel
+import me.rerere.ai.provider.Modality
 import me.rerere.ai.provider.Model
 import me.rerere.ai.provider.ModelAbility
-import me.rerere.ai.provider.Modality
+import me.rerere.ai.provider.CustomBody
 import me.rerere.ai.provider.ProviderSetting
 import me.rerere.ai.provider.TextGenerationParams
 import me.rerere.ai.ui.FinishCategory
@@ -346,6 +348,33 @@ class ResponseAPIMessageTest {
     }
 
     @Test
+    fun `memory extraction omits Response API reasoning when disabled`() {
+        val requestBody = invokeBuildRequestBody(
+            providerSetting = ProviderSetting.OpenAI(baseUrl = "https://opencode.ai/v1"),
+            messages = listOf(UIMessage.user("hello")),
+            params = createReasoningParams().copy(
+                omitReasoningConfigurationWhenOff = true,
+            ),
+        )
+
+        assertFalse(requestBody.containsKey("reasoning"))
+    }
+
+    @Test
+    fun `memory extraction prevents custom body from restoring Response API reasoning`() {
+        val requestBody = invokeBuildRequestBody(
+            providerSetting = ProviderSetting.OpenAI(baseUrl = "https://opencode.ai/v1"),
+            messages = listOf(UIMessage.user("hello")),
+            params = createReasoningParams().copy(
+                omitReasoningConfigurationWhenOff = true,
+                customBody = listOf(CustomBody("reasoning", JsonPrimitive("none"))),
+            ),
+        )
+
+        assertFalse(requestBody.containsKey("reasoning"))
+    }
+
+    @Test
     fun `volc response api should keep reasoning effort when non auto`() {
         val providerSetting = ProviderSetting.OpenAI(
             baseUrl = "https://ark.cn-beijing.volces.com/api/v3"
@@ -396,6 +425,64 @@ class ResponseAPIMessageTest {
             "data:image/png;base64,AA==",
             image.jsonObject["image_url"]?.jsonPrimitive?.content,
         )
+    }
+
+    @Test
+    fun `historical screenshot is omitted from responses input for a text only model`() {
+        val tool = UIMessagePart.Tool(
+            toolCallId = "call_image",
+            toolName = "take_screenshot",
+            input = "{}",
+            output = listOf(UIMessagePart.Image("data:image/png;base64,AA==")),
+        )
+
+        val result = api.buildMessages(
+            messages = listOf(
+                UIMessage.user("inspect"),
+                UIMessage(role = MessageRole.ASSISTANT, parts = listOf(tool)),
+                UIMessage.user("continue"),
+            ),
+            toolResultInputModalities = listOf(Modality.TEXT),
+        ).toString()
+
+        assertTrue(result.contains("Image omitted"))
+        assertFalse(result.contains("data:image/png;base64,AA=="))
+    }
+
+    @Test
+    fun `responses sends a tool image exactly once in the following multimodal item`() {
+        val tool = UIMessagePart.Tool(
+            toolCallId = "call_image",
+            toolName = "screenshot",
+            input = "{}",
+            output = listOf(
+                UIMessagePart.Text("before"),
+                UIMessagePart.Image("data:image/png;base64,AA=="),
+                UIMessagePart.Text("after"),
+            ),
+        )
+
+        val result = api.buildMessages(
+            messages = listOf(
+                UIMessage.user("inspect"),
+                UIMessage(role = MessageRole.ASSISTANT, parts = listOf(tool)),
+            ),
+            toolResultInputModalities = listOf(Modality.TEXT, Modality.IMAGE),
+        )
+        val imageBlocks = result.flatMap { item ->
+            (item.jsonObject["content"] as? JsonArray).orEmpty()
+        }.filter { it.jsonObject["type"]?.jsonPrimitive?.content == "input_image" }
+        val multimodal = result.first { item ->
+            (item.jsonObject["content"] as? JsonArray)
+                ?.any { it.jsonObject["type"]?.jsonPrimitive?.content == "input_image" } == true
+        }.jsonObject["content"]!!.jsonArray
+
+        assertEquals(1, imageBlocks.size)
+        assertEquals(
+            listOf("input_text", "input_image", "input_text"),
+            multimodal.map { it.jsonObject["type"]?.jsonPrimitive?.content },
+        )
+        assertEquals(1, result.toString().split("data:image/png;base64,AA==").size - 1)
     }
 
     @Test
@@ -470,42 +557,6 @@ class ResponseAPIMessageTest {
         assertEquals(FinishCategory.SAFETY, chunk.terminal?.category)
         assertEquals("refusal", chunk.terminal?.providerReason)
         assertEquals("I cannot help with that request.", text)
-    }
-
-    @Test
-    fun `responses sends a tool image exactly once in the following multimodal item`() {
-        val tool = UIMessagePart.Tool(
-            toolCallId = "call_image",
-            toolName = "screenshot",
-            input = "{}",
-            output = listOf(
-                UIMessagePart.Text("before"),
-                UIMessagePart.Image("data:image/png;base64,AA=="),
-                UIMessagePart.Text("after"),
-            ),
-        )
-
-        val result = api.buildMessages(
-            messages = listOf(
-                UIMessage.user("inspect"),
-                UIMessage(role = MessageRole.ASSISTANT, parts = listOf(tool)),
-            ),
-            toolResultInputModalities = listOf(Modality.TEXT, Modality.IMAGE),
-        )
-        val imageBlocks = result.flatMap { item ->
-            (item.jsonObject["content"] as? JsonArray).orEmpty()
-        }.filter { it.jsonObject["type"]?.jsonPrimitive?.content == "input_image" }
-        val multimodal = result.first { item ->
-            (item.jsonObject["content"] as? JsonArray)
-                ?.any { it.jsonObject["type"]?.jsonPrimitive?.content == "input_image" } == true
-        }.jsonObject["content"]!!.jsonArray
-
-        assertEquals(1, imageBlocks.size)
-        assertEquals(
-            listOf("input_text", "input_image", "input_text"),
-            multimodal.map { it.jsonObject["type"]?.jsonPrimitive?.content },
-        )
-        assertEquals(1, result.toString().split("data:image/png;base64,AA==").size - 1)
     }
 
     // ==================== Helper Functions ====================

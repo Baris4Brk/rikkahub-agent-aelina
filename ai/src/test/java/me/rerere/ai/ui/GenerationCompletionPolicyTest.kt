@@ -180,6 +180,70 @@ class GenerationCompletionPolicyTest {
     }
 
     @Test
+    fun `provider exception retries the same answer with streaming transport before limit`() {
+        val decision = FinalAnswerRecoveryAttemptPolicy.afterFailure(
+            failure = FinalAnswerRecoveryFailure.PROVIDER_EXCEPTION,
+            attempt = 1,
+            maxAttempts = 10,
+        )
+
+        assertEquals(
+            FinalAnswerRecoveryAttemptDecision.Retry(stream = true),
+            decision,
+        )
+    }
+
+    @Test
+    fun `provider exceptions stop after exactly ten recovery attempts`() {
+        val firstNine = (1..9).map { attempt ->
+            FinalAnswerRecoveryAttemptPolicy.afterFailure(
+                failure = FinalAnswerRecoveryFailure.PROVIDER_EXCEPTION,
+                attempt = attempt,
+                maxAttempts = 10,
+            )
+        }
+        val tenth = FinalAnswerRecoveryAttemptPolicy.afterFailure(
+            failure = FinalAnswerRecoveryFailure.PROVIDER_EXCEPTION,
+            attempt = 10,
+            maxAttempts = 10,
+        )
+
+        assertTrue(firstNine.all { it == FinalAnswerRecoveryAttemptDecision.Retry(stream = true) })
+        assertEquals(
+            FinalAnswerRecoveryAttemptDecision.Stop("recovery_attempts_exhausted"),
+            tenth,
+        )
+    }
+
+    @Test
+    fun `recovered final answer keeps original reasoning and appends only new text`() {
+        val original = UIMessage(
+            role = MessageRole.ASSISTANT,
+            parts = listOf(UIMessagePart.Reasoning("original reasoning")),
+        )
+        val recoveryCandidate = original.copy(
+            parts = original.parts + listOf(
+                UIMessagePart.Reasoning("recovery reasoning must stay hidden"),
+                UIMessagePart.Text("final answer"),
+            ),
+        )
+
+        val merged = FinalAnswerRecoveryMessagePolicy.mergeVisibleAnswer(
+            original = original,
+            recoveryCandidate = recoveryCandidate,
+        )
+
+        assertEquals(original.id, merged.id)
+        assertEquals(
+            listOf(
+                original.parts.single(),
+                UIMessagePart.Text("final answer"),
+            ),
+            merged.parts,
+        )
+    }
+
+    @Test
     fun `reasoning after executed tool without visible answer needs final answer`() {
         val message = UIMessage(
             role = MessageRole.ASSISTANT,

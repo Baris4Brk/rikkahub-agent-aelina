@@ -13,17 +13,25 @@ class ProviderContextPlannerTest {
         message.parts.sumOf { part -> part.testTokenSize() }.coerceAtLeast(1)
     }
 
-    @Test
-    fun `missing model metadata uses 128k window with 75 and 60 percent watermarks`() {
-        val plan = ProviderContextPlanner(estimator).plan(
+    @Test(expected = IllegalArgumentException::class)
+    fun `missing model metadata requires an explicit trusted context window`() {
+        ProviderContextPlanner(estimator).plan(
             messages = listOf(UIMessage.user("hello")),
             declaredContextTokens = null,
         )
+    }
 
-        assertEquals(128_000, plan.budget.contextWindowTokens)
-        assertEquals(96_000, plan.budget.compressionTriggerTokens)
-        assertEquals(76_800, plan.budget.compressionTargetTokens)
+    @Test
+    fun `one million token window does not summarize before its 750k trigger`() {
+        val plan = ProviderContextPlanner(estimator).plan(
+            messages = listOf(UIMessage.user("x".repeat(749_999))),
+            declaredContextTokens = 1_000_000,
+        )
+
+        assertEquals(1_000_000, plan.budget.contextWindowTokens)
+        assertEquals(750_000, plan.budget.compressionTriggerTokens)
         assertFalse(plan.compressed)
+        assertFalse(plan.requiresSummary)
     }
 
     @Test

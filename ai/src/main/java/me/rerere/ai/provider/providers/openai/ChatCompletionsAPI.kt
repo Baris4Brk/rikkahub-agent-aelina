@@ -9,6 +9,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonArrayBuilder
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
@@ -71,6 +72,102 @@ import kotlin.time.Clock
 
 private const val TAG = "ChatCompletionsAPI"
 
+/**
+ * Error bodies are provider-controlled and may echo credentials. Keep the useful detail for the
+ * caller while making this adapter the single seam that bounds and redacts it.
+ */
+internal fun providerHttpErrorMessage(responseCode: Int, rawBody: String?): String =
+    buildString {
+        append("Failed to get response: ")
+        append(responseCode)
+        rawBody.toSafeProviderErrorDetail()?.let {
+            append(": ")
+            append(it)
+        }
+    }
+
+private fun okhttp3.ResponseBody.readProviderErrorBody(): String? =
+    charStream().use { reader ->
+        val buffer = CharArray(MAX_PROVIDER_ERROR_BODY_CHARS)
+        val count = reader.read(buffer)
+        if (count <= 0) null else String(buffer, 0, count).trim()
+    }
+
+private fun String?.toSafeProviderErrorDetail(): String? {
+    val raw = this?.take(MAX_PROVIDER_ERROR_BODY_CHARS)?.trim().orEmpty()
+    if (raw.isBlank()) return null
+
+    val structured = runCatching {
+        Json.parseToJsonElement(raw).findProviderErrorDetail()
+    }.getOrNull()
+    val candidate = structured ?: raw.takeIf { !it.startsWith('{') && !it.startsWith('[') }
+    return candidate?.sanitizeProviderErrorDetail()?.takeIf { it.isNotBlank() }
+}
+
+private fun JsonElement.findProviderErrorDetail(): String? = when (this) {
+    is JsonObject -> PROVIDER_ERROR_FIELDS
+        .asSequence()
+        .mapNotNull { field -> this[field]?.findProviderErrorDetail() }
+        .firstOrNull()
+
+    is JsonArray -> asSequence()
+        .mapNotNull { element -> element.findProviderErrorDetail() }
+        .firstOrNull()
+
+    is JsonPrimitive -> contentOrNull?.takeUnless { it.equals("null", ignoreCase = true) }
+}
+
+private fun String.sanitizeProviderErrorDetail(): String =
+    replace(HEADER_CREDENTIAL_PATTERN) { match ->
+        "${match.groupValues[1]}<redacted>"
+    }
+        .replace(QUERY_CREDENTIAL_PATTERN) { match ->
+            "${match.groupValues[1]}<redacted>"
+        }
+        .replace(BEARER_CREDENTIAL_PATTERN, "Bearer <redacted>")
+        .replace(NAMED_CREDENTIAL_PATTERN) { match ->
+            "${match.groupValues[1]}<redacted>"
+        }
+        .replace(OPAQUE_PROVIDER_CREDENTIAL_PATTERN, "<redacted>")
+        .replace(JWT_PATTERN, "<redacted>")
+        .replace(WHITESPACE_PATTERN, " ")
+        .trim()
+        .take(MAX_PROVIDER_ERROR_DETAIL_CHARS)
+
+private const val MAX_PROVIDER_ERROR_BODY_CHARS = 4_096
+private const val MAX_PROVIDER_ERROR_DETAIL_CHARS = 400
+
+private val PROVIDER_ERROR_FIELDS = listOf(
+    "error",
+    "errors",
+    "detail",
+    "message",
+    "description",
+    "error_description",
+)
+
+private val HEADER_CREDENTIAL_PATTERN = Regex(
+    """(?i)([\"']?(?:(?:proxy[-_ ]?)?authorization|(?:set[-_ ]?)?cookie)[\"']?\s*[:=]\s*)""" +
+        """(?:"[^"]*"|'[^']*'|[^\r\n}\]]+)""",
+)
+private val QUERY_CREDENTIAL_PATTERN = Regex(
+    """(?i)([?&](?:key|api[-_]?key|access[-_]?token|token|signature|sig)=)[^&#\s,;}\]"']+""",
+)
+private val BEARER_CREDENTIAL_PATTERN = Regex(
+    """(?i)\bbearer\s+['\"]?[A-Za-z0-9._~+/=-]+['\"]?""",
+)
+private val NAMED_CREDENTIAL_PATTERN = Regex(
+    """(?i)([\"']?(?:(?:x[-_ ]?)?api[-_ ]?key|(?:access|refresh|id|session)[-_ ]?token|token|secret|password|credential|jwt|client[-_ ]?secret|private[-_ ]?key|signature|sig)[\"']?\s*[:=]\s*)""" +
+        """(?:"[^"]*"|'[^']*'|[^\s,;}\]]+)""",
+)
+private val OPAQUE_PROVIDER_CREDENTIAL_PATTERN = Regex(
+    """(?i)\b(?:sk-[A-Za-z0-9_-]{8,}|AIza[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{16,})\b""",
+)
+private val JWT_PATTERN = Regex(
+    """(?i)\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b""",
+)
+private val WHITESPACE_PATTERN = Regex("\\s+")
+
 class ChatCompletionsAPI(
     private val client: OkHttpClient,
     private val keyRoulette: KeyRoulette
@@ -104,8 +201,8 @@ class ChatCompletionsAPI(
         val response = client.newCall(request).await()
         if (!response.isSuccessful) {
             val responseCode = response.code
-            response.body.close()
-            throw Exception("Failed to get response: $responseCode")
+            val rawBody = response.body.readProviderErrorBody()
+            throw Exception(providerHttpErrorMessage(responseCode, rawBody))
         }
 
         val bodyStr = response.body.string()
@@ -176,59 +273,56 @@ class ChatCompletionsAPI(
                 data: String
             ) {
                 try {
-                if (data == "[DONE]") {
-                    println("[onEvent] (done) 结束流: $data")
-                    close()
-                    return
-                }
-                Log.d(TAG, "onEvent: chars=${data.length}, type=${type.orEmpty()}")
-                data
-                    .trim()
-                    .split("\n")
-                    .filter { it.isNotBlank() }
-                    .map { json.parseToJsonElement(it).jsonObject }
-                    .forEach {
-                        if (it["error"] != null) {
-                            val error = it["error"]!!.parseErrorDetail()
-                            throw error
-                        }
-                        val id = it["id"]?.jsonPrimitive?.contentOrNull ?: ""
-                        val model = it["model"]?.jsonPrimitive?.contentOrNull ?: ""
+                    if (data == "[DONE]") {
+                        close()
+                        return
+                    }
+                    Log.d(TAG, "onEvent: chars=${data.length}, type=${type.orEmpty()}")
+                    data
+                        .trim()
+                        .split("\n")
+                        .filter { it.isNotBlank() }
+                        .map { json.parseToJsonElement(it).jsonObject }
+                        .forEach { event ->
+                            if (event["error"] != null) {
+                                throw event["error"]!!.parseErrorDetail()
+                            }
+                            val eventId = event["id"]?.jsonPrimitive?.contentOrNull ?: ""
+                            val model = event["model"]?.jsonPrimitive?.contentOrNull ?: ""
 
-                        val choices = it["choices"]?.jsonArray ?: JsonArray(emptyList())
-                        val choiceList = buildList {
-                            if (choices.isNotEmpty()) {
-                                val choice = choices[0].jsonObject
-                                val message =
-                                    choice["delta"]?.jsonObject ?: choice["message"]?.jsonObject
-                                    ?: throw Exception("delta/message is null")
-                                val finishReason =
-                                    choice["finish_reason"]?.jsonPrimitive?.contentOrNull
-                                add(
-                                    UIMessageChoice(
-                                        index = 0,
-                                        delta = parseMessage(message),
-                                        message = null,
-                                        finishReason = finishReason,
+                            val choices = event["choices"]?.jsonArray ?: JsonArray(emptyList())
+                            val choiceList = buildList {
+                                if (choices.isNotEmpty()) {
+                                    val choice = choices[0].jsonObject
+                                    val message =
+                                        choice["delta"]?.jsonObject ?: choice["message"]?.jsonObject
+                                        ?: throw Exception("delta/message is null")
+                                    add(
+                                        UIMessageChoice(
+                                            index = 0,
+                                            delta = parseMessage(message),
+                                            message = null,
+                                            finishReason = choice["finish_reason"]
+                                                ?.jsonPrimitive?.contentOrNull,
+                                        )
                                     )
-                                )
+                                }
+                            }
+                            val usage = parseTokenUsage(event["usage"] as? JsonObject)
+
+                            val messageChunk = MessageChunk(
+                                id = eventId,
+                                model = model,
+                                choices = choiceList,
+                                usage = usage,
+                                terminal = choiceList.firstNotNullOfOrNull { choice ->
+                                    choice.finishReason?.let(GenerationTerminal::fromProviderReason)
+                                },
+                            )
+                            deliverProviderChunk(TAG, messageChunk) { summary ->
+                                Log.w(TAG, summary)
                             }
                         }
-                        val usage = parseTokenUsage(it["usage"] as? JsonObject)
-
-                        val messageChunk = MessageChunk(
-                            id = id,
-                            model = model,
-                            choices = choiceList,
-                            usage = usage,
-                            terminal = choiceList.firstNotNullOfOrNull { choice ->
-                                choice.finishReason?.let(GenerationTerminal::fromProviderReason)
-                            },
-                        )
-                        deliverProviderChunk(TAG, messageChunk) { summary ->
-                            Log.w(TAG, summary)
-                        }
-                    }
                 } catch (error: Exception) {
                     val sanitized = ProviderLogPrivacy.parseException(data.length, type, error)
                     Log.w(TAG, sanitized.message.orEmpty())
@@ -245,9 +339,7 @@ class ChatCompletionsAPI(
                 try {
                     if (!bodyRaw.isNullOrBlank()) {
                         val bodyElement = Json.parseToJsonElement(bodyRaw)
-                        Log.d(TAG, "onFailure: structured error body received")
                         exception = bodyElement.parseErrorDetail()
-                        Log.i(TAG, "onFailure: parsed provider error (${exception?.javaClass?.simpleName})")
                     }
                 } catch (e: Throwable) {
                     val sanitized = ProviderLogPrivacy.errorBodyParseException(bodyRaw?.length ?: 0, e)
@@ -266,7 +358,6 @@ class ChatCompletionsAPI(
         val eventSource = EventSources.createFactory(client).newEventSource(request, listener)
 
         awaitClose {
-            println("[awaitClose] 关闭eventSource ")
             eventSource.cancel()
         }
     }.bufferProviderStream()
@@ -293,7 +384,7 @@ class ChatCompletionsAPI(
         ).let {
             if (openRouterCache) insertOpenRouterCacheControl(it) else it
         }
-        return buildJsonObject {
+        val request = buildJsonObject {
             put("model", params.model.modelId)
             put("messages", messagesArray)
 
@@ -481,6 +572,14 @@ class ChatCompletionsAPI(
                 }
             }
         }.mergeCustomBody(params.customBody)
+        return if (
+            params.reasoningLevel == ReasoningLevel.OFF &&
+            params.omitReasoningConfigurationWhenOff
+        ) {
+            JsonObject(request - setOf("reasoning_effort", "reasoning"))
+        } else {
+            request
+        }
     }
 
     // Mirrors the native ClaudeProvider's breakpoint placement, but in OpenAI message
@@ -564,17 +663,32 @@ class ChatCompletionsAPI(
         return !ModelRegistry.OPENAI_O_MODELS.match(model.modelId) && !ModelRegistry.GPT_5.match(model.modelId)
     }
 
+    private fun requiresToolReasoningContent(modelId: String): Boolean =
+        "deepseek-v4-" in modelId.lowercase()
+
     private fun buildMessages(
         messages: List<UIMessage>,
         includeHistoryReasoning: Boolean = true,
         openRouterCache: Boolean = false,
-        requireToolReasoningContent: Boolean = false,
     ): JsonArray = buildMessages(
         messages = messages,
         includeHistoryReasoning = includeHistoryReasoning,
         openRouterCache = openRouterCache,
-        requireToolReasoningContent = requireToolReasoningContent,
+        requireToolReasoningContent = false,
         toolResultInputModalities = listOf(Modality.TEXT),
+    )
+
+    private fun buildMessages(
+        messages: List<UIMessage>,
+        includeHistoryReasoning: Boolean,
+        openRouterCache: Boolean,
+        toolResultInputModalities: Collection<Modality>,
+    ) = buildMessages(
+        messages = messages,
+        includeHistoryReasoning = includeHistoryReasoning,
+        openRouterCache = openRouterCache,
+        requireToolReasoningContent = false,
+        toolResultInputModalities = toolResultInputModalities,
     )
 
     private fun buildMessages(
@@ -592,17 +706,28 @@ class ChatCompletionsAPI(
                 val isActiveToolTurn = requireToolReasoningContent &&
                     index > latestUserIndex &&
                     message.getTools().isNotEmpty()
-                    addAssistantMessages(
-                        message = message,
-                        includeReasoning = includeHistoryReasoning || isActiveToolTurn,
-                        requireToolReasoningContent = requireToolReasoningContent,
-                        toolResultInputModalities = toolResultInputModalities,
+                addAssistantMessages(
+                    message = message,
+                    includeReasoning = includeHistoryReasoning || isActiveToolTurn,
+                    requireToolReasoningContent = requireToolReasoningContent,
+                    toolResultInputModalities = toolResultInputModalities,
                 )
             } else {
                 addNonAssistantMessage(message, openRouterCache = openRouterCache)
             }
         }
     }
+
+    private fun JsonArrayBuilder.addAssistantMessages(
+        message: UIMessage,
+        includeReasoning: Boolean,
+        toolResultInputModalities: Collection<Modality>,
+    ) = addAssistantMessages(
+        message = message,
+        includeReasoning = includeReasoning,
+        requireToolReasoningContent = false,
+        toolResultInputModalities = toolResultInputModalities,
+    )
 
     private fun JsonArrayBuilder.addAssistantMessages(
         message: UIMessage,
@@ -709,6 +834,17 @@ class ChatCompletionsAPI(
         contentParts: List<UIMessagePart>,
         tools: List<UIMessagePart.Tool>,
         reasoningPart: UIMessagePart.Reasoning?,
+    ): JsonObject? = buildAssistantMessageJson(
+        contentParts = contentParts,
+        tools = tools,
+        reasoningPart = reasoningPart,
+        requireToolReasoningContent = false,
+    )
+
+    private fun buildAssistantMessageJson(
+        contentParts: List<UIMessagePart>,
+        tools: List<UIMessagePart.Tool>,
+        reasoningPart: UIMessagePart.Reasoning?,
         requireToolReasoningContent: Boolean,
     ): JsonObject? {
         val hasUsableContent = contentParts.any { part ->
@@ -785,9 +921,6 @@ class ChatCompletionsAPI(
             }
         }
     }
-
-    private fun requiresToolReasoningContent(modelId: String): Boolean =
-        "deepseek-v4-" in modelId.lowercase()
 
     private fun JsonArrayBuilder.addNonAssistantMessage(message: UIMessage, openRouterCache: Boolean = false) {
         add(buildJsonObject {

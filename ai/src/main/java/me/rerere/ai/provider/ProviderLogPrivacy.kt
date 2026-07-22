@@ -41,6 +41,12 @@ internal object ProviderLogPrivacy {
     ): String = "provider transport failed " +
         "(status=${statusCode ?: "none"}, error=${error?.safeClassName() ?: "none"})"
 
+    fun encodingFailure(
+        contentKind: String,
+        error: Throwable,
+    ): String = "provider content encoding failed " +
+        "(kind=${contentKind.safeToken("unknown")}, error=${error.safeClassName()})"
+
     private fun String?.safeToken(fallback: String): String {
         val candidate = this ?: return fallback
         return candidate.takeIf { value ->

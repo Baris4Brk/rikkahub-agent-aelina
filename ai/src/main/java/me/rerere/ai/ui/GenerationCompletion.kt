@@ -124,6 +124,69 @@ object FinalAnswerRecoveryPolicy {
     }
 }
 
+enum class FinalAnswerRecoveryFailure {
+    PROVIDER_EXCEPTION,
+    NO_VISIBLE_ANSWER,
+    TIME_BUDGET_EXHAUSTED,
+    CANCELLED_OR_EMERGENCY,
+    TOOL_CALL,
+}
+
+sealed interface FinalAnswerRecoveryAttemptDecision {
+    data class Retry(val stream: Boolean) : FinalAnswerRecoveryAttemptDecision
+    data class Stop(val reason: String) : FinalAnswerRecoveryAttemptDecision
+}
+
+/**
+ * Decides what to do after one final-answer reminder did not produce a usable answer.
+ *
+ * Recovery starts non-streaming for broad provider compatibility. Any retry switches to the
+ * streaming transport used by the ordinary conversation, while tools and reasoning remain
+ * disabled by the caller. This keeps recovery in the same assistant message without creating a
+ * regenerated branch.
+ */
+object FinalAnswerRecoveryAttemptPolicy {
+    fun afterFailure(
+        failure: FinalAnswerRecoveryFailure,
+        attempt: Int,
+        maxAttempts: Int,
+    ): FinalAnswerRecoveryAttemptDecision {
+        require(attempt > 0) { "attempt must be positive" }
+        require(maxAttempts > 0) { "maxAttempts must be positive" }
+        return when {
+            failure == FinalAnswerRecoveryFailure.CANCELLED_OR_EMERGENCY ->
+                FinalAnswerRecoveryAttemptDecision.Stop("recovery_cancelled_or_emergency_stopped")
+            failure == FinalAnswerRecoveryFailure.TIME_BUDGET_EXHAUSTED ->
+                FinalAnswerRecoveryAttemptDecision.Stop("recovery_time_budget_exhausted")
+            failure == FinalAnswerRecoveryFailure.TOOL_CALL ->
+                FinalAnswerRecoveryAttemptDecision.Stop("recovery_attempted_tool_call")
+            attempt >= maxAttempts ->
+                FinalAnswerRecoveryAttemptDecision.Stop("recovery_attempts_exhausted")
+            else -> FinalAnswerRecoveryAttemptDecision.Retry(stream = true)
+        }
+    }
+}
+
+/** Keeps recovery inside the original assistant message and exposes only its new final text. */
+object FinalAnswerRecoveryMessagePolicy {
+    fun mergeVisibleAnswer(
+        original: UIMessage,
+        recoveryCandidate: UIMessage,
+    ): UIMessage {
+        require(original.id == recoveryCandidate.id) {
+            "Final-answer recovery must not create a new assistant message"
+        }
+        val recoveredText = recoveryCandidate.parts
+            .drop(original.parts.size)
+            .filterIsInstance<UIMessagePart.Text>()
+            .filter { it.text.isNotBlank() }
+        require(recoveredText.isNotEmpty()) {
+            "Final-answer recovery did not append visible text"
+        }
+        return recoveryCandidate.copy(parts = original.parts + recoveredText)
+    }
+}
+
 /**
  * Provider-neutral completion policy. Provider adapters report how a step ended; this module
  * decides whether the caller actually received a user-visible answer after the last tool call.

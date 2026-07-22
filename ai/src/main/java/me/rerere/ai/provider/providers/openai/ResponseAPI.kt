@@ -24,9 +24,9 @@ import me.rerere.ai.core.MessageRole
 import me.rerere.ai.core.ReasoningLevel
 import me.rerere.ai.core.TokenUsage
 import me.rerere.ai.provider.BuiltInTools
+import me.rerere.ai.provider.Modality
 import me.rerere.ai.provider.Model
 import me.rerere.ai.provider.ModelAbility
-import me.rerere.ai.provider.Modality
 import me.rerere.ai.provider.ProviderSetting
 import me.rerere.ai.provider.ProviderLogPrivacy
 import me.rerere.ai.provider.TextGenerationParams
@@ -145,23 +145,23 @@ class ResponseAPI(
                 data: String
             ) {
                 try {
-                if (data == "[DONE]") {
-                    close()
-                    return
-                }
-                Log.d(TAG, "onEvent: id=${id.orEmpty()}, type=${type.orEmpty()}, chars=${data.length}")
-                val json = json.parseToJsonElement(data).jsonObject
-                val chunk = parseResponseDelta(json)
-                val delivered = if (chunk != null) {
-                    deliverProviderChunk(TAG, chunk) { summary ->
-                        Log.w(TAG, summary)
+                    if (data == "[DONE]") {
+                        close()
+                        return
                     }
-                } else {
-                    true
-                }
-                if (chunk?.terminal != null && delivered) {
-                    close()
-                }
+                    Log.d(TAG, "onEvent: id=${id.orEmpty()}, type=${type.orEmpty()}, chars=${data.length}")
+                    val event = json.parseToJsonElement(data).jsonObject
+                    val chunk = parseResponseDelta(event)
+                    val delivered = if (chunk != null) {
+                        deliverProviderChunk(TAG, chunk) { summary ->
+                            Log.w(TAG, summary)
+                        }
+                    } else {
+                        true
+                    }
+                    if (chunk?.terminal != null && delivered) {
+                        close()
+                    }
                 } catch (error: Exception) {
                     val sanitized = ProviderLogPrivacy.parseException(data.length, type, error)
                     Log.w(TAG, sanitized.message.orEmpty())
@@ -200,7 +200,6 @@ class ResponseAPI(
             .newEventSource(request, listener)
 
         awaitClose {
-            println("[awaitClose] 关闭eventSource ")
             eventSource.cancel()
         }
     }.bufferProviderStream()
@@ -243,7 +242,10 @@ class ResponseAPI(
             put("input", buildMessages(messages, params.model.inputModalities))
 
             // reasoning
-            if (params.model.abilities.contains(ModelAbility.REASONING)) {
+            if (
+                params.model.abilities.contains(ModelAbility.REASONING) &&
+                !(params.omitReasoningConfigurationWhenOff && params.reasoningLevel == ReasoningLevel.OFF)
+            ) {
                 val level = params.reasoningLevel
                 put("reasoning", buildJsonObject {
                     if (capabilities.supportsReasoningSummary) {
@@ -301,10 +303,12 @@ class ResponseAPI(
                     }
                 }
             }
-        }.mergeCustomBody(params.customBody)
+        }
+            .mergeCustomBody(params.customBody)
+            .omitDisabledReasoningForSystemCall(params)
     }
 
-    fun buildMessages(messages: List<UIMessage>): JsonArray =
+    fun buildMessages(messages: List<UIMessage>): kotlinx.serialization.json.JsonArray =
         buildMessages(messages, listOf(Modality.TEXT))
 
     internal fun buildMessages(
@@ -324,7 +328,7 @@ class ResponseAPI(
 
     private fun JsonArrayBuilder.addAssistantItems(
         message: UIMessage,
-        toolResultInputModalities: Collection<me.rerere.ai.provider.Modality>,
+        toolResultInputModalities: Collection<Modality>,
     ) {
         val groups = groupPartsByToolBoundary(message.parts)
         val contentBuffer = mutableListOf<UIMessagePart>()
@@ -876,3 +880,21 @@ internal fun resolveResponseProviderCapabilities(host: String): ResponseProvider
         else -> ResponseProviderCapabilities()
     }
 }
+
+/** Remove disabled-reasoning markers after custom-body merging for non-interactive calls. */
+internal fun JsonObject.omitDisabledReasoningForSystemCall(
+    params: TextGenerationParams,
+): JsonObject {
+    if (
+        !params.omitReasoningConfigurationWhenOff ||
+        params.reasoningLevel != ReasoningLevel.OFF
+    ) {
+        return this
+    }
+    return JsonObject(filterKeys { it !in DISABLED_REASONING_CONFIGURATION_KEYS })
+}
+
+private val DISABLED_REASONING_CONFIGURATION_KEYS = setOf(
+    "reasoning_effort",
+    "reasoning",
+)
