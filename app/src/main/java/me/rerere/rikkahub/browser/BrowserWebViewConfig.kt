@@ -27,7 +27,7 @@ import android.webkit.WebView
  * Pulling the configuration into one shared function means future fixes for either
  * mode automatically benefit the other.
  */
-internal fun configureWebViewForRikka(webView: WebView) {
+internal fun configureWebViewForRikka(webView: WebView, allowLocalFiles: Boolean = false) {
     webView.settings.apply {
         javaScriptEnabled = true
         domStorageEnabled = true
@@ -38,7 +38,7 @@ internal fun configureWebViewForRikka(webView: WebView) {
         // Phase 20D needs this — skill webview cards produce file:// URLs into the
         // app's private data dir. Cross-origin protection still applies via the
         // file:// unique-origin rule (http(s) pages can't fetch file:// content).
-        allowFileAccess = true
+        allowFileAccess = allowLocalFiles
         // Required for skill webview assets: when a skill's viewer page (e.g.
         // virtual-piano's ui.html) is opened from a file:// URL it needs to load
         // sibling asset files (audio, images, sub-pages) also via file://. Without
@@ -46,16 +46,16 @@ internal fun configureWebViewForRikka(webView: WebView) {
         // <audio> elements). This only enables file:// → file:// sub-resource loads;
         // http(s) pages still cannot reach app-private file:// paths.
         @Suppress("DEPRECATION")
-        allowFileAccessFromFileURLs = true
+        allowFileAccessFromFileURLs = allowLocalFiles
         allowContentAccess = false
         useWideViewPort = true
         loadWithOverviewMode = true
-        setSupportMultipleWindows(false)
-        javaScriptCanOpenWindowsAutomatically = false
+        setSupportMultipleWindows(true)
+        javaScriptCanOpenWindowsAutomatically = true
         mediaPlaybackRequiresUserGesture = false
         builtInZoomControls = true
         displayZoomControls = false
-        mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+        mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
         userAgentString = userAgentString.replace("; wv)", ")")
     }
     // Hardware layer hint. For the foreground Activity's WebView this fixes a Compose

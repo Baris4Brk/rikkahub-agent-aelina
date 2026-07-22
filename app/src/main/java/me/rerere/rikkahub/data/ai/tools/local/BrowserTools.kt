@@ -25,6 +25,9 @@ import me.rerere.ai.ui.UIMessagePart
 import me.rerere.rikkahub.browser.BrowserController
 import me.rerere.rikkahub.browser.BrowserControllerHandle
 import me.rerere.rikkahub.browser.BrowserDiffHelper
+import me.rerere.rikkahub.browser.BrowserToolInvocationScope
+import me.rerere.rikkahub.browser.BrowserProfileClass
+import me.rerere.rikkahub.browser.BrowserTaskService
 import me.rerere.rikkahub.browser.BrowserToolDefaults
 import me.rerere.rikkahub.browser.HeadlessBrowserSessionPool
 import me.rerere.rikkahub.browser.ReadabilityRunner.runReadability
@@ -164,6 +167,12 @@ fun browserOpenTool(context: Context, invocationContext: ToolInvocationContext? 
                 put("error", "scheme_not_allowed")
                 put("detail", "browser_open only accepts http(s) and about: URLs; got scheme '$scheme'")
             }
+        } else if (exfilHits.isNotEmpty()) {
+            buildJsonObject {
+                put("error", "sensitive_url_blocked")
+                put("detail", "The URL query contains sensitive-looking data and was not opened.")
+                put("categories", exfilHits.joinToString { it.name.lowercase() })
+            }
         } else {
             withTimeoutOrNull(toolTimeoutMs) {
                 // Pass 3 mode picker. If the caller is a Telegram / cron / sub-agent
@@ -174,14 +183,21 @@ fun browserOpenTool(context: Context, invocationContext: ToolInvocationContext? 
                 val callerConvId = invocationContext?.callerConversationId
                 val headless = isHeadlessInvocation(invocationContext)
 
-                if (headless && callerConvId != null) {
+                if (headless && callerConvId == null) {
+                    return@withTimeoutOrNull buildJsonObject {
+                        put("error", "browser_session_key_missing")
+                        put("recovery", "Headless browsing requires a conversation id.")
+                    }
+                }
+
+                if (callerConvId != null) {
                     // Peek BEFORE allocating: getOrCreate + start() spin up a ~30 MB WebView,
                     // which bindHeadless would then immediately reject if a different live
                     // conversation owns the controller slot — wasting the allocation.
                     // canBindHeadless mirrors bindHeadless's reject rule without mutating state;
                     // bindHeadless stays authoritative and re-checks under its lock, so a race
                     // here costs at most a discarded allocation, never a wrong binding.
-                    if (!BrowserController.canBindHeadless(callerConvId)) {
+                    if (headless && !BrowserController.canBindHeadless(callerConvId)) {
                         return@withTimeoutOrNull BrowserController.bindBusyEnvelope()
                     }
                     // Headless path: get-or-create the per-conv WebView session. The
@@ -189,15 +205,29 @@ fun browserOpenTool(context: Context, invocationContext: ToolInvocationContext? 
                     // FGS dies, the whole pool dies with it. Subsequent tool calls will
                     // see Mode.Idle and return `browser_session_lost`.
                     val session = HeadlessBrowserSessionPool.getOrCreate(context, callerConvId)
-                    val webView = withContext(Dispatchers.Main) { session.start(callerConvId) }
+                    val webView = runCatching {
+                        withContext(Dispatchers.Main) {
+                            session.start(
+                                callerConvId,
+                                if (headless) BrowserProfileClass.REMOTE_EPHEMERAL
+                                else BrowserProfileClass.LOCAL_SHARED,
+                            )
+                        }
+                    }.getOrElse {
+                        return@withTimeoutOrNull buildJsonObject {
+                            put("error", "browser_profile_isolation_unavailable")
+                            put("detail", "This WebView cannot provide an isolated profile for this caller.")
+                        }
+                    }
                     // Reject if another conversation already holds the (single, global)
                     // controller binding — binding a second concurrently would route this
                     // conv's streamed screenshots into the other chat. Same-conv re-bind is
                     // always accepted, so the common per-task reuse path is unaffected.
-                    if (!BrowserController.bindHeadless(callerConvId, webView)) {
+                    if (headless && !BrowserController.bindHeadless(callerConvId, webView)) {
                         return@withTimeoutOrNull BrowserController.bindBusyEnvelope()
                     }
-                    BrowserController.startTaskWindow()
+                    if (!headless) BrowserTaskService.start(context, callerConvId)
+                    session.startTaskWindow()
                     BrowserController.appendAction("Open: $url")
                     val result = BrowserControllerHandle.withController {
                         withContext(Dispatchers.Main) { webView.loadUrl(url) }
@@ -252,20 +282,7 @@ fun browserOpenTool(context: Context, invocationContext: ToolInvocationContext? 
                 }
             } ?: timeoutEnvelope(BrowserToolDefaults.OPEN)
         }
-        val out = if (exfilHits.isEmpty() ||
-            rawOut["success"]?.jsonPrimitive?.booleanOrNull != true) rawOut
-        else buildJsonObject {
-            rawOut.forEach { (k, v) -> put(k, v) }
-            put(
-                "warning",
-                "URL query string carries content shaped like sensitive data " +
-                    "(${exfilHits.joinToString { it.name.lowercase() }}). " +
-                    "Verify with the user that they intended to send this " +
-                    "to ${rawOut["current_url"]?.jsonPrimitive?.contentOrNull ?: url} " +
-                    "before relying on the result, and do NOT echo the value back."
-            )
-        }
-        textPart(out)
+        textPart(rawOut)
     },
 )
 
@@ -1016,7 +1033,10 @@ fun browserClickAndReadTool(): Tool = Tool(
 
 // ---- Loop control --------------------------------------------------------------------------
 
-fun browserDoneTool(invocationContext: ToolInvocationContext? = null): Tool = Tool(
+fun browserDoneTool(
+    invocationContext: ToolInvocationContext? = null,
+    context: Context? = null,
+): Tool = Tool(
     name = BrowserToolDefaults.DONE,
     description = "Signal that the AI has finished its current browser task. Clears the per-task 5-minute timer so the next browser_open starts fresh. The browser session ITSELF stays alive — subsequent turns can navigate, click, scroll without re-opening; only `/new` (Telegram) or the in-app reset closes it. result_url is optional; pass the page URL the user should look at if any. {success}.$TELEGRAM_HEADLESS_CUE",
     parameters = {
@@ -1037,7 +1057,15 @@ fun browserDoneTool(invocationContext: ToolInvocationContext? = null): Tool = To
             missingArgEnvelope("summary", "summary is required")
         } else {
             BrowserController.appendAction("Done: $summary")
-            BrowserController.clearTaskWindow()
+            invocationContext?.callerConversationId
+                ?.let(HeadlessBrowserSessionPool::find)
+                ?.clearTaskWindow()
+                ?: BrowserController.clearTaskWindow()
+            invocationContext?.callerConversationId?.let {
+                context?.let { ctx ->
+                    runCatching { ctx.stopService(android.content.Intent(ctx, BrowserTaskService::class.java)) }
+                }
+            }
             // Pass 3 design originally released the headless WebView here. Live-test feedback
             // (2026-05-08): users want the session to persist across LLM turns so a follow-up
             // "click the next link" doesn't have to re-open from scratch — that broke the
@@ -1357,24 +1385,34 @@ fun createBrowserTool(
     toolName: String,
     context: Context,
     invocationContext: ToolInvocationContext? = null,
-): Tool? = when (toolName) {
-    BrowserToolDefaults.OPEN -> browserOpenTool(context, invocationContext)
-    BrowserToolDefaults.CURRENT_URL -> browserCurrentUrlTool()
-    BrowserToolDefaults.SCREENSHOT -> browserScreenshotTool(context)
-    BrowserToolDefaults.GET_TEXT -> browserGetTextTool()
-    BrowserToolDefaults.GET_DOM -> browserGetDomTool()
-    BrowserToolDefaults.GET_LINKS -> browserGetLinksTool()
-    BrowserToolDefaults.BACK -> browserBackTool()
-    BrowserToolDefaults.FORWARD -> browserForwardTool()
-    BrowserToolDefaults.WAIT_FOR -> browserWaitForTool()
-    BrowserToolDefaults.CLICK -> browserClickTool()
-    BrowserToolDefaults.TYPE -> browserTypeTool()
-    BrowserToolDefaults.SCROLL -> browserScrollTool()
-    BrowserToolDefaults.SUBMIT -> browserSubmitTool()
-    BrowserToolDefaults.SELECT -> browserSelectTool()
-    BrowserToolDefaults.PRESS_KEY -> browserPressKeyTool()
-    BrowserToolDefaults.EVAL_JS -> browserEvalJsTool()
-    BrowserToolDefaults.CLICK_AND_READ -> browserClickAndReadTool()
-    BrowserToolDefaults.DONE -> browserDoneTool(invocationContext)
-    else -> null
+): Tool? {
+    val tool = when (toolName) {
+        BrowserToolDefaults.OPEN -> browserOpenTool(context, invocationContext)
+        BrowserToolDefaults.CURRENT_URL -> browserCurrentUrlTool()
+        BrowserToolDefaults.SCREENSHOT -> browserScreenshotTool(context)
+        BrowserToolDefaults.GET_TEXT -> browserGetTextTool()
+        BrowserToolDefaults.GET_DOM -> browserGetDomTool()
+        BrowserToolDefaults.GET_LINKS -> browserGetLinksTool()
+        BrowserToolDefaults.BACK -> browserBackTool()
+        BrowserToolDefaults.FORWARD -> browserForwardTool()
+        BrowserToolDefaults.WAIT_FOR -> browserWaitForTool()
+        BrowserToolDefaults.CLICK -> browserClickTool()
+        BrowserToolDefaults.TYPE -> browserTypeTool()
+        BrowserToolDefaults.SCROLL -> browserScrollTool()
+        BrowserToolDefaults.SUBMIT -> browserSubmitTool()
+        BrowserToolDefaults.SELECT -> browserSelectTool()
+        BrowserToolDefaults.PRESS_KEY -> browserPressKeyTool()
+        BrowserToolDefaults.EVAL_JS -> browserEvalJsTool()
+        BrowserToolDefaults.CLICK_AND_READ -> browserClickAndReadTool()
+        BrowserToolDefaults.DONE -> browserDoneTool(invocationContext, context)
+        else -> null
+    } ?: return null
+    val originalExecute = tool.execute
+    return tool.copy(
+        execute = { input ->
+            BrowserToolInvocationScope.withConversation(invocationContext?.callerConversationId) {
+                originalExecute(input)
+            }
+        },
+    )
 }

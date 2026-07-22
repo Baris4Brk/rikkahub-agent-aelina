@@ -1,15 +1,26 @@
 package me.rerere.rikkahub.browser
 
+import android.app.Activity
 import android.content.Context
+import android.content.MutableContextWrapper
 import android.os.Handler
 import android.os.Looper
+import android.os.Message
 import android.view.View
+import android.view.ViewGroup
 import android.webkit.CookieManager
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.webkit.WebChromeClient
+import android.webkit.JsPromptResult
+import android.webkit.JsResult
+import android.webkit.SslErrorHandler
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import java.io.File
+import kotlinx.coroutines.Job
 
 /**
  * Pass 3: hosts a WebView offscreen, in the application process, for headless AI-driven
@@ -47,10 +58,41 @@ import java.io.File
  *    caller hasn't run a tool in a while, the LLM has likely moved on. This is the backstop
  *    for a caller FGS that died before browser_done/release fired.
  */
-class HeadlessBrowserSession(private val context: Context) {
+data class HeadlessBrowserPageState(
+    val title: String,
+    val url: String,
+    val progress: Int,
+    val canGoBack: Boolean,
+    val canGoForward: Boolean,
+    val errorDescription: String?,
+)
+
+internal interface HeadlessBrowserForegroundEvents {
+    fun onExternalProtocol(pageId: String, url: String, scheme: String): Boolean
+    fun onCreateWindow(pageId: String, resultMsg: Message): Boolean
+    fun onJavaScriptDialog(
+        pageId: String,
+        kind: BrowserPendingDialog.JavaScript.Kind,
+        message: String?,
+        defaultValue: String?,
+        result: JsResult?,
+    ): Boolean
+    fun onSslError(pageId: String, handler: SslErrorHandler, error: android.net.http.SslError?)
+}
+
+class HeadlessBrowserSession(
+    private val context: Context,
+    val pageId: String,
+) {
 
     private var webView: WebView? = null
     private var host: LinearLayout? = null
+    private var contextWrapper: MutableContextWrapper? = null
+    private var pageStateListener: ((HeadlessBrowserPageState) -> Unit)? = null
+    private var foregroundEvents: HeadlessBrowserForegroundEvents? = null
+    private var lastErrorDescription: String? = null
+    private var activeTaskJob: Job? = null
+    @Volatile private var taskStartedAtMs: Long = 0L
 
     /**
      * Lazily create the WebView on first call; subsequent calls return the same instance
@@ -64,7 +106,7 @@ class HeadlessBrowserSession(private val context: Context) {
      * unit test) so two threads can never both pass the null-check and leak a WebView.
      */
     @Synchronized
-    fun start(callerConvId: String): WebView {
+    fun start(callerConvId: String, profileClass: BrowserProfileClass = BrowserProfileClass.LOCAL_SHARED): WebView {
         val existing = webView
         if (existing != null) return existing
 
@@ -78,7 +120,8 @@ class HeadlessBrowserSession(private val context: Context) {
         // ever created (foreground BrowserActivity hasn't run, so it hasn't done this yet).
         CookieManager.getInstance().setAcceptCookie(true)
 
-        val parent = LinearLayout(context).apply {
+        val wrapper = MutableContextWrapper(context.applicationContext)
+        val parent = LinearLayout(context.applicationContext).apply {
             orientation = LinearLayout.VERTICAL
             // Manual measure + layout: WebView only lays itself out when its ViewParent
             // does, and an unattached LinearLayout never gets a layout pass from the OS.
@@ -86,7 +129,11 @@ class HeadlessBrowserSession(private val context: Context) {
             layoutParams = LinearLayout.LayoutParams(VIEWPORT_WIDTH, VIEWPORT_HEIGHT)
         }
 
-        val wv = WebView(context).apply {
+        val wv = WebView(wrapper).apply {
+            val profileResult = BrowserProfileManager.apply(this, profileClass, callerConvId)
+            if (profileResult == BrowserProfileResult.ISOLATION_UNAVAILABLE) {
+                throw IllegalStateException("browser_profile_isolation_unavailable")
+            }
             // Shared with foreground — every render-related setting (mixedContentMode,
             // hardware layer, autoplay, UA strip, file:// access) lives in
             // configureWebViewForRikka. Before this helper existed, headless mode lacked
@@ -110,21 +157,112 @@ class HeadlessBrowserSession(private val context: Context) {
                     view: WebView?,
                     request: WebResourceRequest?,
                 ): Boolean {
-                    // Same file:// navigation gate as the foreground BrowserView: headless
-                    // sessions are model-driven (Telegram/cron), so a page- or JS-initiated
-                    // hop into file:// would expose app-private files to browser_get_text.
-                    val toFile = request?.url?.scheme.equals("file", ignoreCase = true)
-                    return toFile && view?.url?.startsWith("file:", ignoreCase = true) != true
+                    val targetUrl = request?.url?.toString() ?: return true
+                    val mode = if (foregroundEvents == null) {
+                        BrowserInteractionMode.SILENT_AI
+                    } else {
+                        BrowserInteractionMode.FOREGROUND_USER
+                    }
+                    return when (
+                        val decision = BrowserNavigationPolicy.decide(view?.url, targetUrl, mode)
+                    ) {
+                        BrowserNavigationDecision.AllowInWebView -> false
+                        BrowserNavigationDecision.Block -> true
+                        is BrowserNavigationDecision.AskForegroundUser ->
+                            foregroundEvents?.onExternalProtocol(
+                                pageId,
+                                decision.url,
+                                decision.scheme,
+                            ) ?: true
+                    }
                 }
 
                 override fun onPageStarted(view: WebView, url: String?, favicon: android.graphics.Bitmap?) {
                     super.onPageStarted(view, url, favicon)
+                    lastErrorDescription = null
                     view.evaluateJavascript(VISIBILITY_SHIM_JS, null)
+                    notifyPageState(view)
+                }
+
+                override fun onPageFinished(view: WebView, url: String?) {
+                    super.onPageFinished(view, url)
+                    notifyPageState(view)
+                }
+
+                override fun onReceivedError(
+                    view: WebView,
+                    request: WebResourceRequest,
+                    error: WebResourceError,
+                ) {
+                    if (request.isForMainFrame) {
+                        lastErrorDescription = error.description?.toString() ?: "Load failed"
+                        notifyPageState(view)
+                    }
+                }
+
+                override fun onReceivedSslError(
+                    view: WebView?,
+                    handler: SslErrorHandler?,
+                    error: android.net.http.SslError?,
+                ) {
+                    if (handler != null && foregroundEvents != null) {
+                        foregroundEvents?.onSslError(pageId, handler, error)
+                    } else {
+                        handler?.cancel()
+                    }
                 }
             }
             // Per-WebView third-party cookie enable — must be called after the WebView
             // exists. The CookieManager singleton above only governs first-party.
-            CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+            CookieManager.getInstance().setAcceptThirdPartyCookies(this, false)
+            // A silent task cannot display a modal browser dialog. Cancel it explicitly so a
+            // page's alert/confirm/prompt or bad certificate never leaves a tool suspended.
+            webChromeClient = object : WebChromeClient() {
+                override fun onJsAlert(view: WebView?, url: String?, message: String?, result: JsResult?): Boolean {
+                    return foregroundEvents?.onJavaScriptDialog(
+                        pageId,
+                        BrowserPendingDialog.JavaScript.Kind.ALERT,
+                        message,
+                        null,
+                        result,
+                    ) ?: run { result?.cancel(); true }
+                }
+                override fun onJsConfirm(view: WebView?, url: String?, message: String?, result: JsResult?): Boolean {
+                    return foregroundEvents?.onJavaScriptDialog(
+                        pageId,
+                        BrowserPendingDialog.JavaScript.Kind.CONFIRM,
+                        message,
+                        null,
+                        result,
+                    ) ?: run { result?.cancel(); true }
+                }
+                override fun onJsPrompt(view: WebView?, url: String?, message: String?, defaultValue: String?, result: JsPromptResult?): Boolean {
+                    return foregroundEvents?.onJavaScriptDialog(
+                        pageId,
+                        BrowserPendingDialog.JavaScript.Kind.PROMPT,
+                        message,
+                        defaultValue,
+                        result,
+                    ) ?: run { result?.cancel(); true }
+                }
+                override fun onReceivedTitle(view: WebView?, title: String?) {
+                    view?.let(::notifyPageState)
+                }
+
+                override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                    view?.let(::notifyPageState)
+                }
+
+                override fun onCreateWindow(
+                    view: WebView?,
+                    isDialog: Boolean,
+                    isUserGesture: Boolean,
+                    resultMsg: Message?,
+                ): Boolean {
+                    if (!isUserGesture || resultMsg == null) return false
+                    return foregroundEvents?.onCreateWindow(pageId, resultMsg) == true
+                }
+            }
         }
 
         parent.addView(
@@ -141,8 +279,86 @@ class HeadlessBrowserSession(private val context: Context) {
         parent.layout(0, 0, VIEWPORT_WIDTH, VIEWPORT_HEIGHT)
 
         host = parent
+        contextWrapper = wrapper
         webView = wv
+        notifyPageState(wv)
         return wv
+    }
+
+    /** Move the live AI WebView into the foreground host without reloading its document. */
+    @Synchronized
+    internal fun attachToForeground(
+        container: FrameLayout,
+        activity: Activity,
+        events: HeadlessBrowserForegroundEvents,
+    ): WebView? {
+        val wv = webView ?: return null
+        val wrapper = contextWrapper ?: return null
+        foregroundEvents = events
+        (wv.parent as? ViewGroup)?.removeView(wv)
+        wrapper.baseContext = activity
+        wv.setLayerType(View.LAYER_TYPE_HARDWARE, null)
+        container.removeAllViews()
+        container.addView(
+            wv,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+            ),
+        )
+        notifyPageState(wv)
+        return wv
+    }
+
+    /** Return a foreground-observed AI page to its measured off-screen host. */
+    @Synchronized
+    fun attachToOffscreen(): WebView? {
+        val wv = webView ?: return null
+        val parent = host ?: return null
+        val wrapper = contextWrapper ?: return null
+        foregroundEvents = null
+        (wv.parent as? ViewGroup)?.removeView(wv)
+        wrapper.baseContext = context.applicationContext
+        wv.setLayerType(View.LAYER_TYPE_SOFTWARE, null)
+        parent.removeAllViews()
+        parent.addView(
+            wv,
+            LinearLayout.LayoutParams(VIEWPORT_WIDTH, VIEWPORT_HEIGHT),
+        )
+        parent.measure(
+            View.MeasureSpec.makeMeasureSpec(VIEWPORT_WIDTH, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(VIEWPORT_HEIGHT, View.MeasureSpec.EXACTLY),
+        )
+        parent.layout(0, 0, VIEWPORT_WIDTH, VIEWPORT_HEIGHT)
+        notifyPageState(wv)
+        return wv
+    }
+
+    @Synchronized
+    fun observePageState(listener: ((HeadlessBrowserPageState) -> Unit)?) {
+        pageStateListener = listener
+        if (listener != null) webView?.let(::notifyPageState)
+    }
+
+    @Synchronized
+    fun currentPageState(): HeadlessBrowserPageState? = webView?.let(::pageStateOf)
+
+    @Synchronized
+    fun registerActiveTask(job: Job?) {
+        activeTaskJob = job
+    }
+
+    @Synchronized
+    fun clearActiveTask(job: Job?) {
+        if (activeTaskJob === job) activeTaskJob = null
+    }
+
+    @Synchronized
+    fun cancelActiveTask(): Boolean {
+        val job = activeTaskJob ?: return false
+        activeTaskJob = null
+        job.cancel()
+        return true
     }
 
     /**
@@ -150,6 +366,7 @@ class HeadlessBrowserSession(private val context: Context) {
      * eviction timer or on `browser_done`. Releases the JS engine and ~30 MB of resident
      * memory; not optional.
      */
+    @Synchronized
     fun stop() {
         val wv = webView
         val h = host
@@ -157,11 +374,17 @@ class HeadlessBrowserSession(private val context: Context) {
         // even though the actual WebView teardown is marshalled to the main thread below.
         webView = null
         host = null
+        contextWrapper = null
+        pageStateListener = null
+        foregroundEvents = null
+        activeTaskJob?.cancel()
+        activeTaskJob = null
         if (wv == null) return
         val teardown = Runnable {
             runCatching {
                 wv.stopLoading()
                 wv.loadUrl("about:blank")
+                (wv.parent as? ViewGroup)?.removeView(wv)
                 h?.removeView(wv)
                 wv.destroy()
             }.onFailure {
@@ -185,7 +408,34 @@ class HeadlessBrowserSession(private val context: Context) {
     }
 
     /** Cheap accessor for the live WebView, or null if [stop] has run. */
+    @Synchronized
     fun activeWebView(): WebView? = webView
+
+    private fun notifyPageState(view: WebView) {
+        pageStateListener?.invoke(pageStateOf(view))
+    }
+
+    private fun pageStateOf(view: WebView) = HeadlessBrowserPageState(
+        title = view.title.orEmpty(),
+        url = view.url ?: "about:blank",
+        progress = view.progress,
+        canGoBack = view.canGoBack(),
+        canGoForward = view.canGoForward(),
+        errorDescription = lastErrorDescription,
+    )
+
+    fun startTaskWindow() {
+        taskStartedAtMs = System.currentTimeMillis()
+    }
+
+    fun clearTaskWindow() {
+        taskStartedAtMs = 0L
+    }
+
+    fun isWithinTaskWindow(timeoutMs: Long = BrowserController.singleTaskTimeoutMs): Boolean {
+        val started = taskStartedAtMs
+        return started > 0L && System.currentTimeMillis() - started <= timeoutMs
+    }
 
     companion object {
         // 1080x1920 is the canonical phone-portrait viewport per the spec. Most modern
@@ -263,7 +513,10 @@ object HeadlessBrowserSessionPool {
             val now = System.currentTimeMillis()
             sweepIdleLocked(now, keep = callerConvId)
             sessions[callerConvId]?.let { it.lastUsedAtMs = now; return it.session }
-            val s = HeadlessBrowserSession(context.applicationContext ?: context)
+            val s = HeadlessBrowserSession(
+                context.applicationContext ?: context,
+                pageId = BrowserNotificationHandoff.pageIdFor(callerConvId),
+            )
             sessions[callerConvId] = Entry(s, now)
             return s
         }
@@ -281,8 +534,9 @@ object HeadlessBrowserSessionPool {
         for ((id, entry) in stale) {
             // stop() is best-effort/idempotent; remove the mapping regardless so a throwing
             // teardown can't pin a dead entry in the pool forever.
-            runCatching { entry.session.stop() }
             sessions.remove(id)
+            BrowserTabManager.onHeadlessSessionReleased(entry.session.pageId)
+            runCatching { entry.session.stop() }
             // The controller's single mode slot may still be Mode.Headless for this conv,
             // pointing at the WebView stop() just destroyed. Reset it to Idle so the next tool
             // call returns browser_session_lost instead of dispatching onto a dead view.
@@ -298,14 +552,46 @@ object HeadlessBrowserSessionPool {
      */
     fun release(callerConvId: String) {
         val e = synchronized(lock) { sessions.remove(callerConvId) } ?: return
+        BrowserTabManager.onHeadlessSessionReleased(e.session.pageId)
         e.session.stop()
     }
 
+    /** Close a notification-visible page without requiring the UI to know its conversation id. */
+    internal fun releaseByPageId(pageId: String): Boolean {
+        val removed = synchronized(lock) {
+            val match = sessions.entries.firstOrNull { it.value.session.pageId == pageId }
+                ?: return@synchronized null
+            sessions.remove(match.key)
+            match.key to match.value
+        } ?: return false
+        removed.second.session.cancelActiveTask()
+        BrowserController.clearModeIfHeadless(removed.first)
+        BrowserTabManager.onHeadlessSessionReleased(pageId)
+        removed.second.session.stop()
+        return true
+    }
+
+    /** Read-only lookup used by tool dispatch; never creates or reassigns a session. */
+    internal fun find(callerConvId: String): HeadlessBrowserSession? =
+        synchronized(lock) { sessions[callerConvId]?.session }
+
+    /** Resolve the opaque notification page id without exposing the conversation id. */
+    internal fun findByPageId(pageId: String): HeadlessBrowserSession? =
+        synchronized(lock) { sessions.values.firstOrNull { it.session.pageId == pageId }?.session }
+
+    internal fun registeredPageIds(): Set<String> =
+        synchronized(lock) { sessions.values.mapTo(linkedSetOf()) { it.session.pageId } }
+
     /** Test seam: clear all sessions. Not used in production. */
     internal fun clearAll() {
-        synchronized(lock) {
-            sessions.values.forEach { runCatching { it.session.stop() } }
+        val removed = synchronized(lock) {
+            val snapshot = sessions.values.toList()
             sessions.clear()
+            snapshot
+        }
+        removed.forEach { entry ->
+            BrowserTabManager.onHeadlessSessionReleased(entry.session.pageId)
+            runCatching { entry.session.stop() }
         }
     }
 

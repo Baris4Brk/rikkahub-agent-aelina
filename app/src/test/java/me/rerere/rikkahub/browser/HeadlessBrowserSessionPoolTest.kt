@@ -1,7 +1,11 @@
 package me.rerere.rikkahub.browser
 
+import kotlinx.coroutines.Job
+import me.rerere.rikkahub.data.ai.tools.local.NULL_CONTEXT
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -50,5 +54,16 @@ class HeadlessBrowserSessionPoolTest {
         // minimum verifies the for-each loop is safe to run.
         HeadlessBrowserSessionPool.clearAll()
         assertEquals(0, HeadlessBrowserSessionPool.activeCount())
+    }
+
+    @Test fun `notification cancellation is scoped to the owning session task`() {
+        val session = HeadlessBrowserSession(NULL_CONTEXT, pageId = "ai-test-page")
+        val task = Job()
+
+        session.registerActiveTask(task)
+
+        assertTrue(session.cancelActiveTask())
+        assertTrue(task.isCancelled)
+        assertFalse(session.cancelActiveTask())
     }
 }

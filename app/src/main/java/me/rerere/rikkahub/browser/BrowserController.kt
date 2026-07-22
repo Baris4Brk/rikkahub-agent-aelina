@@ -6,6 +6,7 @@ import android.webkit.WebView
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -591,12 +592,21 @@ object BrowserControllerHandle {
     suspend fun withController(
         block: suspend WithControllerScope.() -> JsonObject,
     ): JsonObject {
-        val wv = BrowserController.activeWebView() ?: return BrowserController.notOpenEnvelope()
-        if (!BrowserController.isWithinTaskWindow()) {
-            return BrowserController.taskTimeoutEnvelope()
-        }
-        return withContext(Dispatchers.Main) {
-            WithControllerScope(BrowserController, wv).block()
+        val owner = BrowserToolInvocationScope.currentConversationId()
+        val session = owner?.let(HeadlessBrowserSessionPool::find)
+        val wv = if (owner != null) session?.activeWebView() else BrowserController.activeWebView()
+        if (wv == null) return BrowserController.notOpenEnvelope()
+        val withinWindow = if (session != null) session.isWithinTaskWindow()
+            else BrowserController.isWithinTaskWindow()
+        if (!withinWindow) return BrowserController.taskTimeoutEnvelope()
+        val job = currentCoroutineContext()[Job]
+        session?.registerActiveTask(job)
+        return try {
+            withContext(Dispatchers.Main) {
+                WithControllerScope(BrowserController, wv).block()
+            }
+        } finally {
+            session?.clearActiveTask(job)
         }
     }
 }
