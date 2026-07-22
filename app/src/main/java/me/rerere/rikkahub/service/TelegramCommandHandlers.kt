@@ -1,7 +1,6 @@
 package me.rerere.rikkahub.service
 
 import android.util.Log
-import kotlinx.coroutines.cancelAndJoin
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.addJsonObject
 import kotlinx.serialization.json.booleanOrNull
@@ -62,8 +61,8 @@ internal suspend fun TelegramBotService.handleBuiltInCommand(
     val handled = when (cmd) {
         "/start" -> { sendStart(m.chatId); true }
         "/help", "/?" -> { sendHelp(m.chatId); true }
-        "/new", "/reset", "/clear" -> { handleResetCommand(m.chatId); true }
-        "/stop", "/cancel" -> { handleStopCommand(m.chatId); true }
+        "/new", "/reset", "/clear" -> { handleResetCommand(m.chatId, m.messageId); true }
+        "/stop", "/cancel" -> { handleStopCommand(m.chatId, m.messageId); true }
         "/interrupt" -> { handleInterruptCommand(m.chatId, arg); true }
         "/steer" -> { handleSteerCommand(m.chatId, arg); true }
         "/status" -> { handleStatusCommand(m.chatId); true }
@@ -138,7 +137,10 @@ internal suspend fun TelegramBotService.handleInterruptCommand(chatId: Long, tex
         listOf(UIMessagePart.Text(text)),
         origin = CommandOrigin.TELEGRAM,
     )) {
-        is SubmitResult.Accepted -> client.sendMessage(chatId, "我会先停下手头的任务，收好已经完成的部分，再按这条新消息继续。")
+        is SubmitResult.Accepted -> client.sendMessage(
+            chatId,
+            "我会先停下手头的任务，收好已经完成的部分，再按这条新消息继续。",
+        )
         is SubmitResult.QueueFull -> client.sendMessage(chatId, "现在暂时停不下来，请稍后再试一次。")
         is SubmitResult.Rejected -> client.sendMessage(chatId, "这条替代消息暂时没能接收：${result.reason}")
         is SubmitResult.RuntimeUnavailable -> client.sendMessage(chatId, "这次对话暂时无法继续：${result.reason}")
@@ -198,7 +200,10 @@ internal suspend fun TelegramBotService.cancelStaleApprovalKeyboards(chatId: Lon
     ApprovalPromptRegistry.clearChat(chatId)
 }
 
-internal suspend fun TelegramBotService.handleResetCommand(chatId: Long) {
+internal suspend fun TelegramBotService.handleResetCommand(chatId: Long, messageId: Long) {
+    // Invalidate every older queued message before the first suspension. Telegram updates are
+    // launched concurrently, so a waiter from before /new must never enter the new mapping.
+    markTurnReset(chatId, messageId)
     // Cancel any in-flight generation for the OLD conversation before unmapping it.
     // Otherwise the stuck turn keeps burning tokens even after /new — the user thinks
     // they got a clean slate while the model is still churning on the previous prompt.
@@ -229,7 +234,7 @@ internal suspend fun TelegramBotService.handleResetCommand(chatId: Long) {
     }
     // Cancel the parked handleLlmTurn coroutine if any so the per-chat mutex
     // releases. Without this, the user's next message bounces off tryLock forever.
-    turnJobs.remove(chatId)?.cancelAndJoin()
+    cancelActiveTurn(chatId, throughMessageId = messageId)
     // Edit dead approval keyboards in place so the user knows tapping them won't
     // do anything. Then drop the registry entries.
     cancelStaleApprovalKeyboards(chatId, reason = "/new")
@@ -246,7 +251,7 @@ internal suspend fun TelegramBotService.handleResetCommand(chatId: Long) {
     try { client.sendMessage(chatId, msg) } catch (_: Throwable) {}
 }
 
-internal suspend fun TelegramBotService.handleStopCommand(chatId: Long) {
+internal suspend fun TelegramBotService.handleStopCommand(chatId: Long, messageId: Long) {
     val mapping = chatRepo.getByChatId(chatId)
     if (mapping == null) {
         try { client.sendMessage(chatId, "🛑 Nothing to stop — no active conversation in this chat.") } catch (_: Throwable) {}
@@ -260,7 +265,7 @@ internal suspend fun TelegramBotService.handleStopCommand(chatId: Long) {
     // ALSO cancel the handleLlmTurn coroutine if it's parked waiting for a new
     // generation that won't come (typical when /stop is sent during the gap between
     // approval iterations). Without this, the per-chat mutex stays held forever.
-    turnJobs.remove(chatId)?.cancelAndJoin()
+    cancelActiveTurn(chatId, throughMessageId = messageId)
     cancelStaleApprovalKeyboards(chatId, reason = "/stop")
     // Drop any unanswered ask_user clarify so the user's next message starts a new turn
     // instead of being consumed as the answer to the stopped turn's question.

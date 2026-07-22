@@ -1,6 +1,9 @@
 package me.rerere.rikkahub.data.ai.tools
 
 import java.util.concurrent.atomic.AtomicReference
+import me.rerere.rikkahub.data.ai.ToolCallOrigin
+import me.rerere.rikkahub.execution.ManagedExecutionCaller
+import me.rerere.rikkahub.execution.ManagedExecutionRuntime
 import me.rerere.rikkahub.privilege.PrivilegedSessionContext
 
 data class ToolNameSnapshot(
@@ -66,6 +69,9 @@ class ToolNameSurface private constructor(
  *    paths know it from their respective entity's assistant id.
  *  - [callerConversationId]: the conversation-uuid of the user-facing chat (interactive)
  *    or the headless conversation (cron / workflow / sub-agent / external-automation).
+ *  - [callerWorkspaceId]: the Assistant-selected workspace when this execution can safely
+ *    inspect that workspace's managed process ledger. It is deliberately optional because a
+ *    conversation can run without a workspace.
  *  - [isHeadless]: true when the dispatch is happening from a system flow rather than the
  *    user typing in a chat. Sub-agents, cron jobs, workflows, and external-automation
  *    runs all set this to true so the recursion guard fires.
@@ -80,6 +86,9 @@ data class ToolInvocationContext(
     val callerAssistantId: String? = null,
     val callerConversationId: String? = null,
     val callerModelId: String? = null,
+    val callerRunId: String? = null,
+    val callerWorkspaceId: String? = null,
+    val callOrigin: ToolCallOrigin? = null,
     val isHeadless: Boolean = false,
     val modelCanSeeImages: Boolean = true,
     val privilege: PrivilegedSessionContext? = null,
@@ -89,4 +98,35 @@ data class ToolInvocationContext(
         /** No-knowledge fallback. Factories that depend on context MUST handle this. */
         val EMPTY = ToolInvocationContext()
     }
+}
+
+/**
+ * Converts an already-scoped tool invocation into the smaller managed-execution interface.
+ *
+ * The managed execution tools are intentionally absent when a caller cannot prove all four
+ * ownership dimensions. This prevents headless or legacy callers from listing another run's
+ * records merely because the Assistant enabled Termux or SSH.
+ */
+internal fun ToolInvocationContext.toManagedExecutionCaller(
+    options: List<LocalToolOption>,
+): ManagedExecutionCaller? {
+    val assistantId = callerAssistantId?.takeIf(String::isNotBlank) ?: return null
+    val conversationId = callerConversationId?.takeIf(String::isNotBlank) ?: return null
+    val runId = callerRunId?.takeIf(String::isNotBlank) ?: return null
+    val origin = callOrigin ?: return null
+    val workspaceId = callerWorkspaceId?.takeIf(String::isNotBlank)
+    val allowedRuntimes = buildSet {
+        if (workspaceId != null) add(ManagedExecutionRuntime.WORKSPACE)
+        if (LocalToolOption.Termux in options) add(ManagedExecutionRuntime.TERMUX)
+        if (LocalToolOption.Ssh in options) add(ManagedExecutionRuntime.SSH)
+    }
+    if (allowedRuntimes.isEmpty()) return null
+    return ManagedExecutionCaller(
+        assistantId = assistantId,
+        conversationId = conversationId,
+        runId = runId,
+        origin = origin,
+        allowedRuntimes = allowedRuntimes,
+        workspaceId = workspaceId,
+    )
 }

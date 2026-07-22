@@ -36,7 +36,8 @@ class GenerationRunControl(
     private val steeringStates = mutableMapOf<Uuid, SteeringState>()
     private var steeringTokens: Int = 0
     private var steeringClosed: Boolean = false
-    private var executingToolCallId: String? = null
+    /** IDs admitted through the current execution boundary. Guarded by [steeringLock]. */
+    private val executingToolCallIds = linkedSetOf<String>()
 
     @Volatile var interruptedBy: Uuid? = null
         private set
@@ -57,7 +58,11 @@ class GenerationRunControl(
         }
 
     fun hasToolExecutionInFlight(): Boolean = synchronized(steeringLock) {
-        executingToolCallId != null || activeTools.isNotEmpty()
+        executingToolCallIds.isNotEmpty() || activeTools.isNotEmpty()
+    }
+
+    fun executingToolCallIds(): Set<String> = synchronized(steeringLock) {
+        executingToolCallIds.toSet()
     }
 
     fun registerTool(toolCallId: String, handle: ToolExecutionHandle) {
@@ -165,25 +170,40 @@ class GenerationRunControl(
      * old plan's next tool from starting.
      */
     fun beginToolExecutionOrYieldToSteering(toolCallId: String): ToolStartDecision =
-        synchronized(steeringLock) {
+        beginToolBatchOrYieldToSteering(setOf(toolCallId))
+
+    /**
+     * Linearizes one serial tool or one explicitly planned parallel batch against steering.
+     * A batch that has started is allowed to settle as a unit; newly submitted guidance blocks
+     * only the next boundary. Callers cannot replace an active batch with unrelated IDs.
+     */
+    fun beginToolBatchOrYieldToSteering(toolCallIds: Set<String>): ToolStartDecision {
+        require(toolCallIds.isNotEmpty()) { "A tool execution batch cannot be empty" }
+        return synchronized(steeringLock) {
+            val stableIds = toolCallIds.toSet()
             if (isRunCancellationRequested() || updateFenced.get()) {
                 ToolStartDecision.RunCancelled
             } else if (hasUndeliveredSteeringLocked()) {
                 ToolStartDecision.YieldToSteering
             } else {
-                check(executingToolCallId == null || executingToolCallId == toolCallId) {
-                    "Tool $executingToolCallId is already inside the execution boundary"
+                check(executingToolCallIds.isEmpty() || executingToolCallIds == stableIds) {
+                    "Tool batch $executingToolCallIds is already inside the execution boundary"
                 }
-                executingToolCallId = toolCallId
+                executingToolCallIds.addAll(stableIds)
                 ToolStartDecision.Proceed
             }
         }
+    }
 
     fun finishToolExecution(toolCallId: String) {
         synchronized(steeringLock) {
-            if (executingToolCallId == toolCallId) {
-                executingToolCallId = null
-            }
+            executingToolCallIds.remove(toolCallId)
+        }
+    }
+
+    fun finishToolBatch(toolCallIds: Set<String>) {
+        synchronized(steeringLock) {
+            executingToolCallIds.removeAll(toolCallIds)
         }
     }
 

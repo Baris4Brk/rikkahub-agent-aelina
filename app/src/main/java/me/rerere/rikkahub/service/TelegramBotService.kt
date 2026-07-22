@@ -18,6 +18,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -121,7 +122,37 @@ class TelegramBotService : Service() {
      * so every subsequent message bounces off `tryLock` with "previous turn waiting".
      * Recovery used to require force-stopping the app.
      */
-    internal val turnJobs = java.util.concurrent.ConcurrentHashMap<Long, Job>()
+    internal val turnJobs =
+        java.util.concurrent.ConcurrentHashMap<Long, TelegramTurnRegistration>()
+    private val turnResetGate = TelegramTurnResetGate()
+
+    internal fun markTurnReset(chatId: Long, messageId: Long) {
+        turnResetGate.markReset(chatId, messageId)
+    }
+
+    internal suspend fun cancelActiveTurn(
+        chatId: Long,
+        throughMessageId: Long? = null,
+    ) {
+        var registration: TelegramTurnRegistration? = null
+        if (throughMessageId == null) {
+            registration = turnJobs.remove(chatId)
+        } else {
+            turnJobs.compute(chatId) { _, current ->
+                if (current != null && telegramCommandMayCancelTurn(
+                        activeMessageId = current.messageId,
+                        commandMessageId = throughMessageId,
+                    )
+                ) {
+                    registration = current
+                    null
+                } else {
+                    current
+                }
+            }
+        }
+        registration?.job?.cancelAndJoin()
+    }
 
     /**
      * Conversations whose generation pump is currently being driven by an active
@@ -521,7 +552,7 @@ class TelegramBotService : Service() {
         val terminal = update.newStatus == "kicked" || update.newStatus == "left"
         if (!terminal) return
         // Cancel any parked turn for this chat so the per-chat mutex releases.
-        turnJobs.remove(update.chatId)?.let { runCatching { it.cancelAndJoin() } }
+        runCatching { cancelActiveTurn(update.chatId) }
         // Drop the chat -> conversation mapping. Conversation rows stay in the DB so the
         // user can still browse history in-app; only the Telegram routing breaks.
         runCatching { chatRepo.deleteByChatId(update.chatId) }
@@ -619,21 +650,30 @@ class TelegramBotService : Service() {
                     replyToMessageId = m.messageId,
                 )
             } catch (_: Throwable) {}
-            // Mutex waiters are resumed in order. We intentionally wait before starting the
-            // Telegram streaming pump; submitting several turns at once would make multiple
-            // pumps observe the same generation and send the wrong assistant reply.
+            // Mutex waiters are resumed in order. Wait before starting the Telegram
+            // streaming pump so queued turns cannot observe the same generation.
             mutex.lock()
         }
         // Register THIS coroutine as the chat's active turn so /stop and /new can cancel
         // it. Capture the parent Job from the running coroutine context. On exit (normal,
         // throw, or cancellation) the finally clears the registry and releases the mutex.
-        val turnJob = currentCoroutineContext()[Job]
-        if (turnJob != null) turnJobs[m.chatId] = turnJob
+        val turnRegistration = currentCoroutineContext()[Job]?.let { job ->
+            TelegramTurnRegistration(messageId = m.messageId, job = job)
+        }
+        if (turnRegistration != null) turnJobs[m.chatId] = turnRegistration
         try {
+            if (!turnResetGate.mayProcess(m.chatId, m.messageId)) {
+                android.util.Log.i(
+                    TAG,
+                    "handleIncoming: discarded stale queued turn messageId=${m.messageId}",
+                )
+                return
+            }
+            currentCoroutineContext().ensureActive()
             handleLlmTurn(cfg, m)
         } finally {
             // remove ONLY the entry that's still us, in case /new replaced it concurrently
-            turnJob?.let { turnJobs.remove(m.chatId, it) }
+            turnRegistration?.let { turnJobs.remove(m.chatId, it) }
             mutex.unlock()
         }
     }
@@ -649,7 +689,11 @@ class TelegramBotService : Service() {
         m: TelegramIncomingMessage,
     ) {
         val (convId, wasCreated) = lookupOrCreateConversation(cfg, m.chatId)
-        android.util.Log.i(TAG, "handleIncoming: routing to conv=$convId wasCreated=$wasCreated text='${m.text.take(80)}' photos=${m.photoFileIds.size}")
+        android.util.Log.i(
+            TAG,
+            "handleIncoming: routing to conv=$convId wasCreated=$wasCreated " +
+                "textChars=${m.text.length} photos=${m.photoFileIds.size}",
+        )
         // UX: tell Telegram "the bot is typing" so the user sees activity while we generate.
         try { client.sendChatAction(m.chatId, "typing") } catch (_: Throwable) {}
         chatService.initializeConversation(convId)
@@ -2169,4 +2213,3 @@ class TelegramBotService : Service() {
         }
     }
 }
-

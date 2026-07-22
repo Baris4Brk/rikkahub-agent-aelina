@@ -395,7 +395,13 @@ class LocalTools(
     private val shizukuBridgeManager: me.rerere.rikkahub.privilege.ShizukuBridgeManager,
     private val phoneCallController: me.rerere.rikkahub.data.phone.PhoneCallController,
     private val apkInstallController: me.rerere.rikkahub.data.packageinstaller.ApkInstallController,
+    private val managedExecutionCoordinator: me.rerere.rikkahub.execution.ManagedExecutionCoordinator,
+    private val displayAutomationRuntime: me.rerere.rikkahub.display.DisplayAutomationRuntime,
 ) {
+    private val displayTargetResolver by lazy {
+        me.rerere.rikkahub.data.ai.tools.local.DisplayTargetResolver(displayAutomationRuntime)
+    }
+
     val javascriptTool by lazy {
         Tool(
             name = "eval_javascript",
@@ -897,20 +903,41 @@ class LocalTools(
             tools.add(me.rerere.rikkahub.data.ai.tools.local.getJobHistoryTool(scheduledJobRepository, scheduledJobRunRepository))
         }
         if (options.contains(LocalToolOption.ScreenAutomation)) {
-            tools.add(tapTool(invocationContext, interactiveToolStreamer))
-            tools.add(longPressTool(invocationContext, interactiveToolStreamer))
-            tools.add(swipeTool(invocationContext, interactiveToolStreamer))
-            tools.add(readWindowTreeTool(invocationContext, interactiveToolStreamer))
-            tools.add(findNodeTool(invocationContext, interactiveToolStreamer))
-            tools.add(clickNodeTool(invocationContext, interactiveToolStreamer))
-            tools.add(me.rerere.rikkahub.data.ai.tools.local.setTextTool(invocationContext, interactiveToolStreamer))
-            tools.add(scrollTool(invocationContext, interactiveToolStreamer))
+            tools.add(tapTool(invocationContext, interactiveToolStreamer, displayTargetResolver))
+            tools.add(longPressTool(invocationContext, interactiveToolStreamer, displayTargetResolver))
+            tools.add(swipeTool(invocationContext, interactiveToolStreamer, displayTargetResolver))
+            tools.add(readWindowTreeTool(invocationContext, interactiveToolStreamer, displayTargetResolver))
+            tools.add(findNodeTool(invocationContext, interactiveToolStreamer, displayTargetResolver))
+            tools.add(clickNodeTool(invocationContext, interactiveToolStreamer, displayTargetResolver))
+            tools.add(me.rerere.rikkahub.data.ai.tools.local.setTextTool(invocationContext, interactiveToolStreamer, displayTargetResolver))
+            tools.add(scrollTool(invocationContext, interactiveToolStreamer, displayTargetResolver))
             tools.add(globalActionTool(invocationContext, interactiveToolStreamer))
-            tools.add(takeScreenshotTool(context))  // take_screenshot IS the screenshot; skip auto-stream
+            tools.add(
+                takeScreenshotTool(
+                    context = context,
+                    invocationContext = invocationContext,
+                    displayTargetResolver = displayTargetResolver,
+                )
+            ) // take_screenshot IS the screenshot; skip auto-stream
             tools.add(me.rerere.rikkahub.data.ai.tools.local.wakeScreenTool(context))
         }
+        tools.addAll(
+            me.rerere.rikkahub.data.ai.tools.local.displaySessionToolsForInvocation(
+                runtime = displayAutomationRuntime,
+                featureEnabled = settingsStore.settingsFlow.value.managedVirtualDisplayEnabled,
+                options = options,
+                invocationContext = invocationContext,
+            )
+        )
         if (options.contains(LocalToolOption.AppLauncher)) {
-            tools.add(me.rerere.rikkahub.data.ai.tools.local.launchAppTool(context, invocationContext, interactiveToolStreamer))
+            tools.add(
+                me.rerere.rikkahub.data.ai.tools.local.launchAppTool(
+                    context,
+                    invocationContext,
+                    interactiveToolStreamer,
+                    displayTargetResolver,
+                )
+            )
             tools.add(me.rerere.rikkahub.data.ai.tools.local.listInstalledAppsTool(context))
             tools.add(me.rerere.rikkahub.data.ai.tools.local.openUrlTool(context, invocationContext, interactiveToolStreamer))
         }
@@ -931,6 +958,17 @@ class LocalTools(
             // The LLM calls this BEFORE attempting transcription to know what's set up.
             tools.add(whisperStatusTool(context, settingsStore))
         }
+        // The management tools do not start commands. They are visible only when this exact
+        // invocation owns a workspace and/or has opted into the corresponding Termux/SSH tool.
+        // Keep this at the LocalTools seam so every normal, Fast Path, cron, and workflow caller
+        // gets the same capability and ownership rules.
+        tools.addAll(
+            managedExecutionToolsForInvocation(
+                coordinator = managedExecutionCoordinator,
+                options = options,
+                invocationContext = invocationContext,
+            )
+        )
         if (options.contains(LocalToolOption.NotificationListener)) {
             tools.add(listRecentNotificationsTool())
             tools.add(listActiveNotificationsTool())

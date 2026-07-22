@@ -7,8 +7,12 @@ import android.provider.Settings
 import androidx.core.app.NotificationManagerCompat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import me.rerere.rikkahub.R
+import me.rerere.rikkahub.context.ContextDiagnosticsStore
 import me.rerere.rikkahub.data.ai.AgentSafetySettings
 import me.rerere.rikkahub.data.ai.ToolCallOrigin
+import me.rerere.rikkahub.data.ai.execution.ToolExecutionPolicyResolver
+import me.rerere.rikkahub.data.ai.execution.ToolSecurityDescriptorResolver
 import me.rerere.rikkahub.data.ai.tools.local.AccessibilityServiceHandle
 import me.rerere.rikkahub.data.ai.tools.local.NotificationListenerHandle
 import me.rerere.rikkahub.data.ai.tools.local.TermuxIntegration
@@ -16,6 +20,9 @@ import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.keyboard.KeyboardApiClient
 import me.rerere.rikkahub.data.model.AssistantAffectScope
 import me.rerere.rikkahub.data.repository.ConversationRepository
+import me.rerere.rikkahub.display.DisplayAutomationRuntime
+import me.rerere.rikkahub.execution.ManagedExecutionCoordinator
+import me.rerere.rikkahub.plugin.PluginRegistryStore
 import me.rerere.rikkahub.privilege.DefaultPrivilegedSessionResolver
 import me.rerere.rikkahub.privilege.ShizukuBridgeManager
 import me.rerere.rikkahub.service.WorkspaceProcessService
@@ -30,6 +37,12 @@ class RuntimeDiagnosticsProvider(
     private val shizukuBridgeManager: ShizukuBridgeManager,
     private val workspaceProcessManager: WorkspaceProcessManager,
     private val keyboardApiClient: KeyboardApiClient,
+    private val contextDiagnosticsStore: ContextDiagnosticsStore,
+    private val displayAutomationRuntime: DisplayAutomationRuntime,
+    private val managedExecutionCoordinator: ManagedExecutionCoordinator,
+    private val pluginRegistryStore: PluginRegistryStore,
+    private val toolSecurityDescriptorResolver: ToolSecurityDescriptorResolver,
+    private val toolExecutionPolicyResolver: ToolExecutionPolicyResolver,
     private val clockMillis: () -> Long = System::currentTimeMillis,
 ) {
     private val appContext = context.applicationContext
@@ -50,6 +63,22 @@ class RuntimeDiagnosticsProvider(
         val batteryExempt = powerManager?.isIgnoringBatteryOptimizations(appContext.packageName) == true
         val manufacturer = Build.MANUFACTURER.orEmpty()
         val outputRegexSummary = resolveOutputRegexSummary(conversationId)
+        val collectedAtMs = clockMillis()
+        val pluginRecords = pluginRegistryStore.snapshot()
+        val p0Summary = summarizeRuntimeP0Diagnostics(
+            RuntimeP0DiagnosticsState(
+                contextRuns = contextDiagnosticsStore.entries.value,
+                displaySessions = displayAutomationRuntime.state.value.sessions,
+                managedExecutions = managedExecutionCoordinator.state.value.executions,
+                plugins = pluginRecords,
+                securityCoverage = calculateToolSecurityCoverage(
+                    resolver = toolSecurityDescriptorResolver,
+                    policyResolver = toolExecutionPolicyResolver,
+                    plugins = pluginRecords,
+                ),
+            ),
+            nowMs = collectedAtMs,
+        )
 
         val snapshot = buildRuntimeDiagnosticsSnapshot(
             RuntimeDiagnosticsRawState(
@@ -85,7 +114,7 @@ class RuntimeDiagnosticsProvider(
                     manufacturer.contains("huawei", ignoreCase = true),
                 manufacturer = manufacturer.ifBlank { "unknown" },
             ),
-            clockMillis(),
+            collectedAtMs,
         )
         val generation = RecentGenerationDiagnostics.snapshot()
         val extraItems = buildList {
@@ -113,9 +142,85 @@ class RuntimeDiagnosticsProvider(
                 },
                 detail = outputRegexSummary ?: "No conversation or fixed assistant was resolved.",
             ))
+            addAll(buildP0RuntimeDiagnosticItems(p0Summary))
         }
         snapshot.copy(items = snapshot.items + extraItems)
     }
+
+    private fun buildP0RuntimeDiagnosticItems(
+        summary: RuntimeP0DiagnosticsSummary,
+    ): List<RuntimeDiagnosticItem> = listOf(
+        RuntimeDiagnosticItem(
+            id = "context_broker",
+            title = appContext.getString(R.string.runtime_diagnostic_context_broker_title),
+            status = summary.context.status,
+            detail = if (summary.context.recentRunCount == 0) {
+                appContext.getString(R.string.runtime_diagnostic_context_broker_no_runs)
+            } else {
+                appContext.getString(
+                    R.string.runtime_diagnostic_context_broker_summary,
+                    summary.context.recentRunCount,
+                    formatCounterMap(summary.context.sourceCounts.mapKeys { it.key.name.lowercase() }),
+                    formatCounterMap(summary.context.omissionCounts.mapKeys { it.key.name.lowercase() }),
+                    summary.context.totalCharacters,
+                )
+            },
+        ),
+        RuntimeDiagnosticItem(
+            id = "display_sessions",
+            title = appContext.getString(R.string.runtime_diagnostic_display_sessions_title),
+            status = summary.display.status,
+            detail = appContext.getString(
+                R.string.runtime_diagnostic_display_sessions_summary,
+                summary.display.activeCount,
+                summary.display.expiredCount,
+                summary.display.lostCount,
+                summary.display.closedCount,
+            ),
+        ),
+        RuntimeDiagnosticItem(
+            id = "managed_executions",
+            title = appContext.getString(R.string.runtime_diagnostic_managed_executions_title),
+            status = summary.managedExecution.status,
+            detail = appContext.getString(
+                R.string.runtime_diagnostic_managed_executions_summary,
+                summary.managedExecution.knownCount,
+                summary.managedExecution.activeCount,
+                summary.managedExecution.stopRequestedCount,
+                summary.managedExecution.terminationUncertainCount,
+            ),
+        ),
+        RuntimeDiagnosticItem(
+            id = "plugin_runtime",
+            title = appContext.getString(R.string.runtime_diagnostic_plugin_runtime_title),
+            status = summary.plugins.status,
+            detail = appContext.getString(
+                R.string.runtime_diagnostic_plugin_runtime_summary,
+                summary.plugins.installedCount,
+                summary.plugins.enabledCount,
+                summary.plugins.needsReviewCount,
+                summary.plugins.quarantinedCount,
+                summary.plugins.recentFailureCount,
+            ),
+        ),
+        RuntimeDiagnosticItem(
+            id = "tool_policy_coverage",
+            title = appContext.getString(R.string.runtime_diagnostic_tool_policy_coverage_title),
+            status = summary.securityCoverage.status,
+            detail = appContext.getString(
+                R.string.runtime_diagnostic_tool_policy_coverage_summary,
+                summary.securityCoverage.staticCoveredToolCount,
+                summary.securityCoverage.staticToolCount,
+                summary.securityCoverage.approvedPluginCoveredToolCount,
+                summary.securityCoverage.approvedPluginToolCount,
+            ),
+        ),
+    )
+
+    private fun formatCounterMap(counts: Map<String, Int>): String = counts.entries
+        .sortedBy { it.key }
+        .joinToString(separator = ", ") { (name, count) -> "$name=$count" }
+        .ifBlank { appContext.getString(R.string.runtime_diagnostic_none) }
 
     private suspend fun resolveOutputRegexSummary(conversationId: String?): String? {
         val settings = settingsStore.settingsFlow.value

@@ -7,22 +7,18 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.SegmentedButton
-import androidx.compose.material3.SegmentedButtonDefaults
-import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
@@ -32,16 +28,43 @@ import kotlinx.coroutines.Job
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.ui.components.ui.RabbitLoadingIndicator
 
+internal data class CompressContextInput(
+    val targetTokens: Int,
+    val keepRecentMessages: Int,
+)
+
+internal fun parseCompressContextInput(
+    targetTokens: String,
+    keepRecentMessages: String,
+): CompressContextInput? {
+    val parsedTargetTokens = targetTokens.trim().toIntOrNull()
+        ?.takeIf { it in 100..32_000 }
+        ?: return null
+    val parsedKeepRecentMessages = keepRecentMessages.trim().toIntOrNull()
+        ?.takeIf { it >= 0 }
+        ?: return null
+    return CompressContextInput(
+        targetTokens = parsedTargetTokens,
+        keepRecentMessages = parsedKeepRecentMessages,
+    )
+}
+
 @Composable
 fun CompressContextDialog(
     onDismiss: () -> Unit,
     onConfirm: (additionalPrompt: String, targetTokens: Int, keepRecentMessages: Int) -> Job
 ) {
     var additionalPrompt by remember { mutableStateOf("") }
-    var selectedTokens by remember { mutableIntStateOf(2000) }
-    var keepRecentMessages by remember { mutableIntStateOf(200) }
+    var targetTokensText by remember { mutableStateOf("2000") }
+    var keepRecentMessagesText by remember { mutableStateOf("32") }
     var currentJob by remember { mutableStateOf<Job?>(null) }
     val isLoading = currentJob?.isActive == true
+    val parsedInput = parseCompressContextInput(
+        targetTokens = targetTokensText,
+        keepRecentMessages = keepRecentMessagesText,
+    )
+    val targetTokensValid = targetTokensText.trim().toIntOrNull() in 100..32_000
+    val keepRecentMessagesValid = keepRecentMessagesText.trim().toIntOrNull()?.let { it >= 0 } == true
 
     // Monitor job completion
     LaunchedEffect(currentJob) {
@@ -81,34 +104,30 @@ fun CompressContextDialog(
                 } else {
                     Text(stringResource(R.string.chat_page_compress_context_desc))
 
-                    // Target tokens input
-                    Text(
-                        text = stringResource(R.string.chat_page_compress_target_tokens),
-                        style = MaterialTheme.typography.labelMedium
-                    )
                     OutlinedTextField(
-                        value = selectedTokens.toString(),
-                        onValueChange = { value ->
-                            selectedTokens = value.filter { it.isDigit() }.takeIf { it.isNotEmpty() }?.toIntOrNull()?.coerceIn(100, 32000) ?: 2000
+                        value = targetTokensText,
+                        onValueChange = { targetTokensText = it },
+                        label = { Text(stringResource(R.string.chat_page_compress_target_tokens)) },
+                        supportingText = {
+                            Text(stringResource(R.string.chat_page_compress_target_tokens_supporting))
                         },
+                        isError = !targetTokensValid,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                         modifier = Modifier.fillMaxWidth(),
-                        singleLine = true
+                        singleLine = true,
                     )
 
-                    // Keep recent messages selector
-                    Text(
-                        text = stringResource(R.string.chat_page_compress_keep_recent),
-                        style = MaterialTheme.typography.labelMedium
-                    )
                     OutlinedTextField(
-                        value = keepRecentMessages.toString(),
-                        onValueChange = { value ->
-                            keepRecentMessages = value.filter { it.isDigit() }.takeIf { it.isNotEmpty() }?.toIntOrNull() ?: 0
+                        value = keepRecentMessagesText,
+                        onValueChange = { keepRecentMessagesText = it },
+                        label = { Text(stringResource(R.string.chat_page_compress_keep_recent)) },
+                        supportingText = {
+                            Text(stringResource(R.string.chat_page_compress_keep_recent_supporting))
                         },
+                        isError = !keepRecentMessagesValid,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                         modifier = Modifier.fillMaxWidth(),
-                        singleLine = true
+                        singleLine = true,
                     )
 
                     // Additional context input
@@ -143,9 +162,17 @@ fun CompressContextDialog(
                     Text(stringResource(R.string.cancel))
                 }
             } else {
-                TextButton(onClick = {
-                    currentJob = onConfirm(additionalPrompt, selectedTokens, keepRecentMessages)
-                }) {
+                TextButton(
+                    enabled = parsedInput != null,
+                    onClick = {
+                        val input = parsedInput ?: return@TextButton
+                        currentJob = onConfirm(
+                            additionalPrompt,
+                            input.targetTokens,
+                            input.keepRecentMessages,
+                        )
+                    },
+                ) {
                     Text(stringResource(R.string.confirm))
                 }
             }

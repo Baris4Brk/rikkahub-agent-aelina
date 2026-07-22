@@ -34,6 +34,7 @@ class SystemPromptBuilderTest {
     fun `buildSections puts assistant+tools in stable and memory+chats+addendum in volatile`() {
         val (stable, volatile) = builder.buildSections(
             assistantPrompt = "You are helpful.",
+            userIdentityPrompt = "Preferred address: 斯啾伊",
             memoryPrompt = "**Memories** m1",
             recentChatsPrompt = "**Recent Chats** c1",
             toolPrompts = listOf("tool_a docs"),
@@ -43,7 +44,9 @@ class SystemPromptBuilderTest {
         assertTrue(stable.contains("tool_a docs"))
         assertTrue(stable.contains("Tool cost guidance"))
         assertFalse(stable.contains("Memories"))
+        assertTrue(volatile.startsWith("Preferred address: 斯啾伊"))
         assertTrue(volatile.contains("**Memories** m1"))
+        assertTrue(volatile.indexOf("Preferred address") < volatile.indexOf("**Memories**"))
         assertTrue(volatile.contains("**Recent Chats** c1"))
         assertTrue(volatile.contains("telegram chat_id 5"))
     }

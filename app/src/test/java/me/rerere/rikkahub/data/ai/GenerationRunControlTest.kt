@@ -334,6 +334,37 @@ class GenerationRunControlTest {
     }
 
     @Test
+    fun `a started tool batch settles together and guidance blocks the next batch`() {
+        val control = GenerationRunControl(Uuid.random())
+        val firstBatch = setOf("tool-1", "tool-2")
+
+        assertEquals(
+            ToolStartDecision.Proceed,
+            control.beginToolBatchOrYieldToSteering(firstBatch),
+        )
+        assertEquals(firstBatch, control.executingToolCallIds())
+        assertEquals(
+            SteeringRegistrationResult.Accepted,
+            control.submitSteering(
+                SteeringNote(
+                    commandId = Uuid.random(),
+                    runId = control.runId,
+                    text = "Apply the new constraint after this batch",
+                    source = CommandOrigin.APP_UI,
+                )
+            ),
+        )
+
+        control.finishToolBatch(firstBatch)
+
+        assertTrue(control.executingToolCallIds().isEmpty())
+        assertEquals(
+            ToolStartDecision.YieldToSteering,
+            control.beginToolBatchOrYieldToSteering(setOf("tool-3")),
+        )
+    }
+
+    @Test
     fun `cancelled run rejects new tools and fenced updates`() = runBlocking {
         val control = GenerationRunControl(Uuid.random())
         control.markInterruptedBy(Uuid.random())

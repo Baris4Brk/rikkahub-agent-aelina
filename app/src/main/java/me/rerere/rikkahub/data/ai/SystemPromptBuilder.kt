@@ -7,8 +7,8 @@ package me.rerere.rikkahub.data.ai
  * rather than being reimplemented in GenerationHandler and the provider adapters.
  *
  * Ordering is **stable-first**: the assistant prompt and tool prompts (byte-identical turn
- * to turn) come first, then the volatile sections (memory, recent chats, per-call
- * addendum) that change between turns. This lets prompt caching work: auto-caching
+ * to turn) come first, then the volatile sections (user identity, memory, recent chats,
+ * per-call addendum) that change between turns. This lets prompt caching work: auto-caching
  * providers (OpenAI/DeepSeek/Grok/Gemini) reuse the stable byte-prefix, and OpenRouter's
  * explicit cache_control breakpoint is placed at the stable/volatile boundary (see
  * ChatCompletionsAPI). Volatile text in the prefix busts the cache every turn, which is
@@ -19,7 +19,7 @@ class SystemPromptBuilder {
     /**
      * Returns the system prompt split into `(stable, volatile)`.
      * - stable: assistant prompt + tool cost guidance + tool prompts.
-     * - volatile: memory + recent chats + per-call addendum.
+     * - volatile: user identity + memory + recent chats + per-call addendum.
      * Either may be blank.
      */
     fun buildSections(
@@ -28,6 +28,7 @@ class SystemPromptBuilder {
         recentChatsPrompt: String = "",
         toolPrompts: List<String> = emptyList(),
         systemAddendum: String? = null,
+        userIdentityPrompt: String = "",
     ): Pair<String, String> {
         val stable = buildString {
             if (assistantPrompt.isNotBlank()) append(assistantPrompt)
@@ -42,15 +43,15 @@ class SystemPromptBuilder {
         }.trim()
 
         val volatile = buildString {
-            if (memoryPrompt.isNotBlank()) append(memoryPrompt)
-            if (recentChatsPrompt.isNotBlank()) {
+            fun appendSection(section: String?) {
+                if (section.isNullOrBlank()) return
                 if (isNotEmpty()) appendLine()
-                append(recentChatsPrompt)
+                append(section)
             }
-            if (!systemAddendum.isNullOrBlank()) {
-                if (isNotEmpty()) appendLine()
-                append(systemAddendum)
-            }
+            appendSection(userIdentityPrompt)
+            appendSection(memoryPrompt)
+            appendSection(recentChatsPrompt)
+            appendSection(systemAddendum)
         }.trim()
 
         return stable to volatile
@@ -64,9 +65,15 @@ class SystemPromptBuilder {
         recentChatsPrompt: String = "",
         toolPrompts: List<String> = emptyList(),
         systemAddendum: String? = null,
+        userIdentityPrompt: String = "",
     ): String {
         val (stable, volatile) = buildSections(
-            assistantPrompt, memoryPrompt, recentChatsPrompt, toolPrompts, systemAddendum
+            assistantPrompt,
+            memoryPrompt,
+            recentChatsPrompt,
+            toolPrompts,
+            systemAddendum,
+            userIdentityPrompt,
         )
         return listOf(stable, volatile).filter { it.isNotBlank() }.joinToString("\n")
     }

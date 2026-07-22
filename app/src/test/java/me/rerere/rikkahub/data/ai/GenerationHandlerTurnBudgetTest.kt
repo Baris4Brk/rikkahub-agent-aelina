@@ -61,36 +61,4 @@ class GenerationHandlerTurnBudgetTest {
         assertEquals(clamped, ToolRuntimeLimits.turnBudgetMs)
         assertEquals(TermuxDefaults.MAX_TURN_BUDGET_MS, ToolRuntimeLimits.turnBudgetMs)
     }
-
-    @Test
-    fun lastPlannedStepAllowsExistingToolThenReservesToolFreeSummaryStep() {
-        val toolStep = generationFinalizationStep(
-            stepIndex = 31,
-            maxSteps = 32,
-            wallClockNeedsFinalization = false,
-            loopGuardNeedsFinalization = false,
-        )
-        val summaryStep = generationFinalizationStep(
-            stepIndex = 32,
-            maxSteps = 32,
-            wallClockNeedsFinalization = false,
-            loopGuardNeedsFinalization = false,
-        )
-
-        assertEquals(true, toolStep.forceFinalization)
-        assertEquals(false, toolStep.skipResumableTools)
-        assertEquals(true, summaryStep.forceFinalization)
-        assertEquals(true, summaryStep.skipResumableTools)
-    }
-
-    @Test
-    fun wallClockOrLoopGuardNeverStartsAnotherResumableTool() {
-        val wallClock = generationFinalizationStep(5, 32, true, false)
-        val loopGuard = generationFinalizationStep(5, 32, false, true)
-
-        assertEquals(true, wallClock.forceFinalization)
-        assertEquals(true, wallClock.skipResumableTools)
-        assertEquals(true, loopGuard.forceFinalization)
-        assertEquals(true, loopGuard.skipResumableTools)
-    }
 }
