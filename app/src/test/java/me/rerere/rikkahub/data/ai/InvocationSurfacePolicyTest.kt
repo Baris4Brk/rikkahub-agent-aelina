@@ -196,4 +196,29 @@ class InvocationSurfacePolicyTest {
             ),
         )
     }
+
+    @Test
+    fun `quick capture has an exact lease surface but no implicit tool directory or activity access`() {
+        val plan = ToolExposurePlan.create(
+            origin = ToolCallOrigin.QuickCapture,
+            deviceLocked = false,
+            hasAuthorizedInvocation = true,
+            surfaceContext = InvocationSurfaceContext(
+                origin = ToolCallOrigin.QuickCapture,
+                hostKind = SystemAssistantHostKind.QUICK_CAPTURE_OVERLAY,
+                presence = InvocationSurfacePresence.OVERLAY_VISIBLE,
+                conversationId = Uuid.random(),
+                commandId = Uuid.random(),
+                unlockedOwner = true,
+            ),
+        )
+
+        assertTrue(plan.surfaceAvailable)
+        assertFalse(plan.activityOverlayAuthorized)
+        assertFalse(plan.canExpose("ask_user"))
+        assertFalse(plan.canExpose("call_phone"))
+        // This otherwise background-safe tool remains unavailable until a future per-tool
+        // QuickCapture audit explicitly adds the origin to the capability catalog.
+        assertFalse(plan.canExpose("get_battery_status"))
+    }
 }

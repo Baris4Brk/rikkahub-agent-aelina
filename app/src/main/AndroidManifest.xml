@@ -22,6 +22,7 @@
   <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
   <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
@@ -573,6 +574,20 @@
         android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
         android:value="managed long-running PRoot workspace processes" />
     </service>
+
+    <service
+      android:name=".quickcapture.QuickCaptureOverlayService"
+      android:exported="false"
+      android:foregroundServiceType="specialUse">
+      <property
+        android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+        android:value="owner-visible QuickCapture floating button for user-initiated screen questions" />
+    </service>
+
+    <service
+      android:name=".quickcapture.QuickCaptureMediaProjectionService"
+      android:exported="false"
+      android:foregroundServiceType="mediaProjection" />
 
     <provider
       android:name="androidx.core.content.FileProvider"

@@ -136,11 +136,10 @@ internal fun applyInjections(
 
         if (beforeContent.isNotEmpty() || afterContent.isNotEmpty()) {
             val systemMessage = result[systemIndex]
-            // Preserve the system message's multi-part structure. The assistant builds it as
-            // [stable, volatile] Text parts so OpenRouter prompt caching can anchor a
-            // cache_control breakpoint on the stable block; collapsing everything into one
-            // part (the old behaviour) busted that cache whenever any injection fired.
-            // Prepend BEFORE content to the first text part, append AFTER content to the last.
+            // Preserve a multi-part system message when one is present. Some providers retain
+            // the legacy [stable, volatile] system layout, and collapsing it here would lose
+            // the intended boundary. Prepend BEFORE content to the first text part and append
+            // AFTER content to the last.
             val parts = systemMessage.parts.toMutableList()
             val firstText = parts.indexOfFirst { it is UIMessagePart.Text }
             val lastText = parts.indexOfLast { it is UIMessagePart.Text }

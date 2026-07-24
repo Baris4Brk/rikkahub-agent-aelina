@@ -119,9 +119,11 @@ class RikkaHubApp : Application() {
         // Android 12+ only permits the first foreground-service launch while the app is
         // user-visible. Existing START_STICKY services restore independently.
         restoreWorkspaceProcessesWhenForegrounded()
+        restoreQuickCaptureWhenForegrounded()
 
         // sync upload files to DB
         syncManagedFiles()
+        cleanupQuickCaptureFiles()
 
         // Start WebServer if enabled in settings
         startWebServerIfEnabled()
@@ -456,6 +458,29 @@ class RikkaHubApp : Application() {
         })
     }
 
+    private fun restoreQuickCaptureWhenForegrounded() {
+        ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
+            override fun onStart(owner: LifecycleOwner) {
+                get<AppScope>().launch(Dispatchers.IO) {
+                    runCatching {
+                        val settings = get<SettingsStore>().settingsFlowRaw.first()
+                        if (settings.quickCaptureSettings.enabled &&
+                            android.provider.Settings.canDrawOverlays(this@RikkaHubApp)
+                        ) {
+                            ContextCompat.startForegroundService(
+                                this@RikkaHubApp,
+                                me.rerere.rikkahub.quickcapture.QuickCaptureOverlayService
+                                    .startIntent(this@RikkaHubApp),
+                            )
+                        }
+                    }.onFailure {
+                        Log.w(TAG, "restoreQuickCaptureWhenForegrounded failed", it)
+                    }
+                }
+            }
+        })
+    }
+
     private fun seedDefaultSkillsIfNeeded() {
         get<AppScope>().launch(Dispatchers.IO) {
             runCatching {
@@ -502,6 +527,16 @@ class RikkaHubApp : Application() {
                 get<FilesManager>().syncFolder()
             }.onFailure {
                 Log.e(TAG, "syncManagedFiles failed", it)
+            }
+        }
+    }
+
+    private fun cleanupQuickCaptureFiles() {
+        get<AppScope>().launch(Dispatchers.IO) {
+            runCatching {
+                get<me.rerere.rikkahub.quickcapture.QuickCaptureFileCleaner>().cleanup()
+            }.onFailure {
+                Log.w(TAG, "cleanupQuickCaptureFiles failed", it)
             }
         }
     }

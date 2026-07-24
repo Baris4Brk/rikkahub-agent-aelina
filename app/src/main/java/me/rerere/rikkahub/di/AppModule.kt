@@ -251,6 +251,49 @@ val appModule = module {
             conversationReader = me.rerere.rikkahub.assistant.SecondUserTargetConversationReader { conversationId ->
                 conversationRepository.getAssistantIdOfConversation(conversationId)
             },
+            conversationTitleReader = me.rerere.rikkahub.assistant.SecondUserTargetConversationTitleReader {
+                    conversationId ->
+                conversationRepository.getConversationById(conversationId)?.title
+            },
+        )
+    }
+    single {
+        val settingsStore = get<me.rerere.rikkahub.data.datastore.SettingsStore>()
+        me.rerere.rikkahub.quickcapture.QuickCaptureTargetResolver(
+            settingsReader = me.rerere.rikkahub.quickcapture.QuickCaptureSettingsReader {
+                settingsStore.settingsFlow.first { settings -> !settings.init }
+            },
+            secondUserResolver = get(),
+        )
+    }
+    single<me.rerere.rikkahub.quickcapture.QuickCaptureAccessState> {
+        me.rerere.rikkahub.quickcapture.AndroidQuickCaptureAccessState(get())
+    }
+    single<me.rerere.rikkahub.quickcapture.QuickCaptureNavigator> {
+        me.rerere.rikkahub.quickcapture.AndroidQuickCaptureNavigator(get())
+    }
+    single { me.rerere.rikkahub.quickcapture.ScreenCaptureManager() }
+    single {
+        val database = get<me.rerere.rikkahub.data.db.AppDatabase>()
+        me.rerere.rikkahub.quickcapture.QuickCaptureFileCleaner(
+            filesManager = get(),
+            conversationDao = database.conversationDao(),
+            messageNodeDao = database.messageNodeDao(),
+            pendingCommandDao = database.pendingChatCommandDao(),
+        )
+    }
+    single {
+        me.rerere.rikkahub.quickcapture.QuickCaptureCoordinator(
+            context = get(),
+            settingsStore = get(),
+            targetResolver = get(),
+            captureManager = get(),
+            filesManager = get(),
+            chatService = get(),
+            safetySettings = get(),
+            accessState = get(),
+            navigator = get(),
+            parentScope = get(),
         )
     }
     single<me.rerere.rikkahub.assistant.SystemAssistantChatBackend> {

@@ -46,6 +46,9 @@ interface PendingChatCommandDao {
     @Query("SELECT * FROM pending_chat_commands WHERE state IN ('PENDING', 'INTERRUPTED', 'WAITING_APPROVAL') ORDER BY sequence ASC")
     fun observePending(): Flow<List<PendingChatCommandEntity>>
 
+    @Query("SELECT * FROM pending_chat_commands WHERE state IN ('PENDING', 'INTERRUPTED', 'WAITING_APPROVAL', 'RUNNING')")
+    suspend fun listActive(): List<PendingChatCommandEntity>
+
     @Query(
         "UPDATE pending_chat_commands SET type = :type, payloadJson = :payloadJson " +
             "WHERE id = :id AND state = 'PENDING'"

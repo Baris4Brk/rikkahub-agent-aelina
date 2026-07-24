@@ -5,6 +5,8 @@ import android.content.Context
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ProcessLifecycleOwner
 import me.rerere.rikkahub.assistant.SystemAssistantInvocationRegistry
+import me.rerere.rikkahub.quickcapture.QuickCaptureInvocationRegistry
+import me.rerere.rikkahub.quickcapture.InvocationSurfaceContexts
 import me.rerere.rikkahub.data.ai.tools.ToolApprovalDefaults
 import me.rerere.rikkahub.data.capability.CapabilityCatalog
 import me.rerere.rikkahub.data.capability.CapabilityDescriptor
@@ -60,8 +62,8 @@ internal fun catalogOriginHardBlockReason(
     origin: ToolCallOrigin,
     capability: CapabilityDescriptor?,
 ): String? = when {
-    capability == null && origin == ToolCallOrigin.SystemAssistant ->
-        "$toolName is not classified for the system-assistant surface."
+    capability == null && origin in setOf(ToolCallOrigin.SystemAssistant, ToolCallOrigin.QuickCapture) ->
+        "$toolName is not classified for the assistant-overlay surface."
     capability != null && origin !in capability.allowedOrigins ->
         "$toolName is not allowed from $origin according to the capability catalog. " +
             "This tool can be called from: ${capability.allowedOrigins.joinToString(", ")}."
@@ -161,7 +163,7 @@ internal fun systemAssistantSensitivePathBlockReason(
     origin: ToolCallOrigin,
     arguments: JsonObject?,
 ): String? {
-    if (origin != ToolCallOrigin.SystemAssistant) return null
+    if (origin != ToolCallOrigin.SystemAssistant && origin != ToolCallOrigin.QuickCapture) return null
     val argumentName = SYSTEM_ASSISTANT_SENSITIVE_PATH_ARGUMENTS[toolName] ?: return null
     val rawPath = (arguments?.get(argumentName) as? JsonPrimitive)
         ?.contentOrNull
@@ -173,7 +175,7 @@ internal fun systemAssistantSensitivePathBlockReason(
     }
     return violation?.let {
         "$toolName cannot read protected RikkaHub conversation or settings data " +
-            "from the system-assistant surface."
+            "from the assistant-overlay surface."
     }
 }
 
@@ -395,10 +397,13 @@ class ToolExecutionGate(
 
         val deviceLocked = isDeviceLocked()
         val hasAuthorizedInvocation = conversationId?.let { id ->
-            SystemAssistantInvocationRegistry.hasAuthorizedUnlockedInvocation(id, commandId)
+            when (origin) {
+                ToolCallOrigin.QuickCapture -> QuickCaptureInvocationRegistry.hasAuthorizedRun(id, commandId)
+                else -> SystemAssistantInvocationRegistry.hasAuthorizedUnlockedInvocation(id, commandId)
+            }
         } == true
         val surfaceContext = conversationId?.let { id ->
-            SystemAssistantInvocationRegistry.currentContext(origin, id, commandId)
+            InvocationSurfaceContexts.currentContext(origin, id, commandId)
         }
         val toolExposurePlan = ToolExposurePlan.create(
             origin = origin,
@@ -441,7 +446,7 @@ class ToolExecutionGate(
         // This check intentionally precedes unrestrictedOverride. A selected high-autonomy
         // assistant can skip approval, but cannot acquire an invocation origin or UI surface
         // that the Catalog never granted.
-        val catalogBlockReason = if (origin == ToolCallOrigin.SystemAssistant) {
+        val catalogBlockReason = if (origin == ToolCallOrigin.SystemAssistant || origin == ToolCallOrigin.QuickCapture) {
             toolExposurePlan.blockReason(toolName)
         } else {
             catalogOriginHardBlockReason(

@@ -20,6 +20,7 @@ import me.rerere.rikkahub.ui.pages.extensions.workspace.WorkspaceDetailVM
 import me.rerere.rikkahub.ui.pages.extensions.workspace.WorkspaceVM
 import me.rerere.rikkahub.ui.pages.setting.SettingVM
 import me.rerere.rikkahub.ui.pages.setting.AgentRuntimeSettingsViewModel
+import me.rerere.rikkahub.ui.pages.setting.QuickCaptureSettingsViewModel
 import me.rerere.rikkahub.ui.pages.setting.browser.SettingBrowserViewModel
 import me.rerere.rikkahub.ui.pages.setting.termux.SettingTermuxViewModel
 import me.rerere.rikkahub.ui.pages.setting.locallm.SettingLocalLlmViewModel
@@ -49,6 +50,7 @@ val viewModelModule = module {
     viewModelOf(::ChatDrawerVM)
     viewModelOf(::SettingVM)
     viewModelOf(::AgentRuntimeSettingsViewModel)
+    viewModelOf(::QuickCaptureSettingsViewModel)
     viewModelOf(::DebugVM)
     viewModelOf(::DeveloperVM)
     viewModelOf(::HistoryVM)

@@ -139,4 +139,33 @@ class PreferenceStoreMigrationHelpersTest {
         assertEquals(bad, migratedAssistants)
         assertTrue(extracted.isEmpty())
     }
+
+    // ---- V5: migrate legacy model context-window defaults ----
+
+    @Test
+    fun `context window migration upgrades serialized legacy 100k defaults`() {
+        val input = """
+            [{"type":"openai","name":"p","models":[
+              {"id":"legacy","userContextWindowTokens":100000},
+              {"id":"custom","userContextWindowTokens":600000},
+              {"id":"current","userContextWindowTokens":1000000},
+              {"id":"missing"}
+            ]}]
+        """.trimIndent()
+
+        val models = JsonInstant.parseToJsonElement(
+            migrateLegacyModelContextWindows(input),
+        ).jsonArray[0].jsonObject["models"]!!.jsonArray
+
+        assertEquals(1_000_000, models[0].jsonObject["userContextWindowTokens"]!!.jsonPrimitive.content.toInt())
+        assertEquals(600_000, models[1].jsonObject["userContextWindowTokens"]!!.jsonPrimitive.content.toInt())
+        assertEquals(1_000_000, models[2].jsonObject["userContextWindowTokens"]!!.jsonPrimitive.content.toInt())
+        assertFalse(models[3].jsonObject.containsKey("userContextWindowTokens"))
+    }
+
+    @Test
+    fun `context window migration returns malformed provider json unchanged`() {
+        val bad = "[not-json"
+        assertEquals(bad, migrateLegacyModelContextWindows(bad))
+    }
 }

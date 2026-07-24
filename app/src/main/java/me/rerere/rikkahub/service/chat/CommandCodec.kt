@@ -31,6 +31,7 @@ object CommandCodec {
             put("content", json.encodeToString(RawUserContent.serializer(), command.content))
             command.assistantIdSnapshot?.let { put("assistantIdSnapshot", it.toString()) }
             command.modelIdSnapshot?.let { put("modelIdSnapshot", it) }
+            command.quickCaptureSessionId?.let { put("quickCaptureSessionId", it.toString()) }
         }.toString()
         is StopCommand -> "stop" to buildJsonObject { put("pauseQueue", command.pauseQueue) }.toString()
         is InterruptCommand -> "interrupt" to buildJsonObject {
@@ -94,6 +95,8 @@ object CommandCodec {
                     content = json.decodeFromString(RawUserContent.serializer(), rawContent),
                     assistantIdSnapshot = root["assistantIdSnapshot"]?.jsonPrimitive?.content?.let { Uuid.parse(it) },
                     modelIdSnapshot = root["modelIdSnapshot"]?.jsonPrimitive?.content,
+                    quickCaptureSessionId = root["quickCaptureSessionId"]?.jsonPrimitive?.content
+                        ?.let { Uuid.parse(it) },
                 )
             }
             "interrupt" -> InterruptCommand(

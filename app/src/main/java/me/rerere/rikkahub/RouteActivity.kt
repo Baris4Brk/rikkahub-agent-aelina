@@ -108,6 +108,7 @@ import me.rerere.rikkahub.ui.pages.search.SearchPage
 import me.rerere.rikkahub.ui.pages.setting.SettingAboutPage
 import me.rerere.rikkahub.ui.pages.setting.SettingAccessibilityPage
 import me.rerere.rikkahub.ui.pages.setting.AgentRuntimeSettingsRoute
+import me.rerere.rikkahub.ui.pages.setting.QuickCaptureSettingsRoute
 import me.rerere.rikkahub.ui.pages.setting.SettingNotificationsPage
 import me.rerere.rikkahub.ui.pages.setting.SettingPermissionsPage
 import me.rerere.rikkahub.ui.pages.setting.CapabilityDiagnosticsPage
@@ -151,7 +152,10 @@ class RouteActivity : ComponentActivity() {
     companion object {
         const val EXTRA_OPEN_CODEX_SETTINGS = "open_codex_settings"
         const val EXTRA_OPEN_SYSTEM_ASSISTANT_SETTINGS = "open_system_assistant_settings"
+        const val EXTRA_OPEN_QUICK_CAPTURE_SETTINGS = "open_quick_capture_settings"
         const val EXTRA_CONVERSATION_ID = "conversationId"
+        const val EXTRA_QUICK_CAPTURE_DRAFT_TEXT = "quick_capture_draft_text"
+        const val EXTRA_QUICK_CAPTURE_DRAFT_FILES = "quick_capture_draft_files"
     }
 
     private val highlighter by inject<Highlighter>()
@@ -257,19 +261,29 @@ class RouteActivity : ComponentActivity() {
             source.getBooleanExtra(EXTRA_OPEN_SYSTEM_ASSISTANT_SETTINGS, false) -> {
                 Screen.SettingSystemAssistant
             }
+            source.getBooleanExtra(EXTRA_OPEN_QUICK_CAPTURE_SETTINGS, false) -> {
+                Screen.SettingQuickCapture
+            }
             source.getBooleanExtra(EXTRA_OPEN_CODEX_SETTINGS, false) -> {
                 Screen.SettingProviderDetail(DEFAULT_CODEX_PROVIDER_ID.toString())
             }
             source.hasExtra(EXTRA_CONVERSATION_ID) -> {
                 source.getStringExtra(EXTRA_CONVERSATION_ID)?.let { conversationId ->
-                    Screen.Chat(conversationId)
+                    Screen.Chat(
+                        id = conversationId,
+                        text = source.getStringExtra(EXTRA_QUICK_CAPTURE_DRAFT_TEXT),
+                        files = source.getStringArrayListExtra(EXTRA_QUICK_CAPTURE_DRAFT_FILES).orEmpty(),
+                    )
                 }
             }
             else -> null
         }
         source.removeExtra(EXTRA_OPEN_SYSTEM_ASSISTANT_SETTINGS)
+        source.removeExtra(EXTRA_OPEN_QUICK_CAPTURE_SETTINGS)
         source.removeExtra(EXTRA_OPEN_CODEX_SETTINGS)
         source.removeExtra(EXTRA_CONVERSATION_ID)
+        source.removeExtra(EXTRA_QUICK_CAPTURE_DRAFT_TEXT)
+        source.removeExtra(EXTRA_QUICK_CAPTURE_DRAFT_FILES)
         return destination
     }
 
@@ -589,6 +603,10 @@ class RouteActivity : ComponentActivity() {
                                 AgentRuntimeSettingsRoute.Content()
                             }
 
+                            entry<Screen.SettingQuickCapture> {
+                                QuickCaptureSettingsRoute.Content()
+                            }
+
                             entry<Screen.Developer> {
                                 DeveloperPage()
                             }
@@ -855,6 +873,9 @@ sealed interface Screen : NavKey {
 
     @Serializable
     data object SettingAgentRuntime : Screen
+
+    @Serializable
+    data object SettingQuickCapture : Screen
 
     @Serializable
     data object SettingPermissions : Screen

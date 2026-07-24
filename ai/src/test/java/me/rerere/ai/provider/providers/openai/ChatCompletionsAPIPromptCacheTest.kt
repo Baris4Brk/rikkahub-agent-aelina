@@ -147,6 +147,31 @@ class ChatCompletionsAPIPromptCacheTest {
         assertNull(msgs.userMessages().single().lastBlockCacheControl())
     }
 
+    @Test
+    fun `trailing runtime system marks latest persisted user and not volatile tail`() {
+        val request = buildRequest(
+            messages = listOf(
+                UIMessage.system("stable instructions"),
+                UIMessage.user("first question"),
+                UIMessage.assistant("first answer"),
+                UIMessage.user("current question"),
+                UIMessage.system("runtime context for this request only"),
+            ),
+            params = TextGenerationParams(model = Model(modelId = "anthropic/claude-sonnet-4")),
+            providerSetting = openRouter(),
+        )
+        val messages = request["messages"]!!.jsonArray
+        val systems = messages
+            .filter { it.jsonObject["role"]?.jsonPrimitive?.contentOrNull == "system" }
+            .map { it.jsonObject }
+        val users = messages.userMessages()
+
+        assertEquals("ephemeral", systems.first().lastBlockCacheControl()!!["type"]!!.jsonPrimitive.content)
+        assertNull(systems.last().lastBlockCacheControl())
+        assertNull(users.first().lastBlockCacheControl())
+        assertEquals("ephemeral", users.last().lastBlockCacheControl()!!["type"]!!.jsonPrimitive.content)
+    }
+
     private fun assertNoCacheControl(request: JsonObject) {
         request["messages"]!!.jsonArray.forEach { msg ->
             (msg.jsonObject["content"] as? JsonArray)?.forEach { block ->

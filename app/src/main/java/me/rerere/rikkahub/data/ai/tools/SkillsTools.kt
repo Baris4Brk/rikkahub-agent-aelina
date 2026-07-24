@@ -15,7 +15,8 @@ fun createSkillTools(
     allSkills: List<SkillMetadata>,
     skillManager: SkillManager,
 ): List<Tool> {
-    val available = allSkills.filter { it.name in enabledSkills }
+    val stableAllSkills = allSkills.sortedBy { it.name }
+    val available = stableAllSkills.filter { it.name in enabledSkills }
     if (available.isEmpty()) return emptyList()
 
     return listOf(
@@ -23,7 +24,7 @@ fun createSkillTools(
         // without re-installing it. Sits under the same skills surface as use_skill.
         skillGetContentTool(
             enabledSkills = enabledSkills,
-            allSkills = allSkills,
+            allSkills = stableAllSkills,
             contentReader = skillManager::getContent,
         ),
         Tool(
@@ -109,7 +110,7 @@ fun createSkillTools(
                             put(
                                 "available_skills",
                                 kotlinx.serialization.json.buildJsonArray {
-                                    enabledSkills.forEach {
+                                    enabledSkills.sorted().forEach {
                                         add(kotlinx.serialization.json.JsonPrimitive(it))
                                     }
                                 },

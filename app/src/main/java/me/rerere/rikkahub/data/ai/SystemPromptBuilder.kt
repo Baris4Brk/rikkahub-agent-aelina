@@ -8,11 +8,9 @@ package me.rerere.rikkahub.data.ai
  *
  * Ordering is **stable-first**: the assistant prompt and tool prompts (byte-identical turn
  * to turn) come first, then the volatile sections (user identity, memory, recent chats,
- * per-call addendum) that change between turns. This lets prompt caching work: auto-caching
- * providers (OpenAI/DeepSeek/Grok/Gemini) reuse the stable byte-prefix, and OpenRouter's
- * explicit cache_control breakpoint is placed at the stable/volatile boundary (see
- * ChatCompletionsAPI). Volatile text in the prefix busts the cache every turn, which is
- * what happened before when memory was enabled.
+ * per-call addendum) that change between turns. [GenerationHandler] can place the volatile
+ * section after persisted history for Chat Completions providers, preserving the long reusable
+ * prefix; providers that only read one system instruction still receive the combined prompt.
  */
 class SystemPromptBuilder {
 
@@ -58,7 +56,7 @@ class SystemPromptBuilder {
     }
 
     /** Combined single-string prompt (stable then volatile), for callers/providers that do
-     *  not split into cache blocks. */
+     *  not support a separate provider-only runtime message. */
     fun build(
         assistantPrompt: String,
         memoryPrompt: String = "",

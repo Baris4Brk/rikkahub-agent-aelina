@@ -21,6 +21,7 @@ enum class CommandOrigin {
     APP_UI,
     SYSTEM_ASSISTANT,
     SYSTEM_ASSISTANT_KEYGUARD,
+    QUICK_CAPTURE,
     TELEGRAM,
     WEB_API,
     CRON,
@@ -68,6 +69,8 @@ data class SendMessageCommand(
     val content: RawUserContent,
     val assistantIdSnapshot: Uuid? = null,
     val modelIdSnapshot: String? = null,
+    /** Present only for an already-authorized in-process QuickCapture submission. */
+    val quickCaptureSessionId: Uuid? = null,
 ) : NormalCommand
 
 data class RegenerateCommand(

@@ -16,7 +16,7 @@ data class ToolExposurePlan(
 
     fun blockReason(toolName: String): String? {
         if (!surfaceAvailable) return "$toolName is unavailable from the current invocation surface."
-        if (origin != ToolCallOrigin.SystemAssistant) return null
+        if (origin != ToolCallOrigin.SystemAssistant && origin != ToolCallOrigin.QuickCapture) return null
         if (toolName in ALWAYS_BLOCKED_SYSTEM_ASSISTANT_TOOLS) {
             return "$toolName is unavailable from the system-assistant surface."
         }
@@ -57,7 +57,7 @@ data class ToolExposurePlan(
                 deviceLocked = deviceLocked,
                 hasAuthorizedInvocation = hasAuthorizedInvocation,
             )
-            val activityOverlayAuthorized = origin == ToolCallOrigin.SystemAssistant &&
+        val activityOverlayAuthorized = origin == ToolCallOrigin.SystemAssistant &&
                 surfaceAvailable &&
                 surfaceContext?.hostKind == SystemAssistantHostKind.ACTIVITY_OVERLAY &&
                 surfaceContext.unlockedOwner &&

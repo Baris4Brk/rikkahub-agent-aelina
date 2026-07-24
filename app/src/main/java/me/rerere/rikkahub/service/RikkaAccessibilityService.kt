@@ -248,41 +248,54 @@ class RikkaAccessibilityService : AccessibilityService() {
             return ScreenshotOutcome.Failure("api_too_low")
         }
         return suspendCancellableCoroutine { cont ->
-            takeScreenshot(
-                displayId,
-                gestureExecutor,
-                object : TakeScreenshotCallback {
-                    override fun onSuccess(result: ScreenshotResult) {
-                        try {
-                            val bmp = try {
-                                Bitmap.wrapHardwareBuffer(result.hardwareBuffer, result.colorSpace)
-                                    ?.copy(Bitmap.Config.ARGB_8888, false)
+            try {
+                takeScreenshot(
+                    displayId,
+                    gestureExecutor,
+                    object : TakeScreenshotCallback {
+                        override fun onSuccess(result: ScreenshotResult) {
+                            var bitmap: Bitmap? = null
+                            try {
+                                bitmap = try {
+                                    Bitmap.wrapHardwareBuffer(result.hardwareBuffer, result.colorSpace)
+                                        ?.copy(Bitmap.Config.ARGB_8888, false)
+                                } finally {
+                                    result.hardwareBuffer.close()
+                                }
+                                val outcome = bitmap?.let(ScreenshotOutcome::Success)
+                                    ?: ScreenshotOutcome.Failure("bitmap_decode_failed")
+                                if (cont.isActive) {
+                                    cont.resume(outcome)
+                                    bitmap = null // ownership passed to the successful caller
+                                }
+                            } catch (t: Throwable) {
+                                if (cont.isActive) {
+                                    cont.resume(ScreenshotOutcome.Failure("exception:${t.message}"))
+                                }
                             } finally {
-                                result.hardwareBuffer.close()
+                                bitmap?.recycle()
                             }
-                            if (cont.isActive) {
-                                cont.resume(
-                                    if (bmp != null) ScreenshotOutcome.Success(bmp)
-                                    else ScreenshotOutcome.Failure("bitmap_decode_failed")
-                                )
-                            }
-                        } catch (t: Throwable) {
-                            if (cont.isActive) cont.resume(ScreenshotOutcome.Failure("exception:${t.message}"))
                         }
-                    }
 
-                    override fun onFailure(errorCode: Int) {
-                        val reason = when (errorCode) {
-                            ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT -> "rate_limited"
-                            ERROR_TAKE_SCREENSHOT_NO_ACCESSIBILITY_ACCESS -> "no_access"
-                            ERROR_TAKE_SCREENSHOT_INTERNAL_ERROR -> "internal_error"
-                            else -> "error_code_$errorCode"
+                        override fun onFailure(errorCode: Int) {
+                            if (cont.isActive) cont.resume(ScreenshotOutcome.Failure(screenshotFailureReason(errorCode)))
                         }
-                        if (cont.isActive) cont.resume(ScreenshotOutcome.Failure(reason))
                     }
-                }
-            )
+                )
+            } catch (failure: Throwable) {
+                if (cont.isActive) cont.resume(ScreenshotOutcome.Failure("exception:${failure.message}"))
+            }
         }
+    }
+
+    private fun screenshotFailureReason(errorCode: Int): String = when (errorCode) {
+        ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT -> "rate_limited"
+        ERROR_TAKE_SCREENSHOT_NO_ACCESSIBILITY_ACCESS -> "no_access"
+        ERROR_TAKE_SCREENSHOT_INTERNAL_ERROR -> "internal_error"
+        ERROR_TAKE_SCREENSHOT_INVALID_DISPLAY -> "invalid_display"
+        ERROR_TAKE_SCREENSHOT_INVALID_WINDOW -> "invalid_window"
+        ERROR_TAKE_SCREENSHOT_SECURE_WINDOW -> "secure_window"
+        else -> "error_code_$errorCode"
     }
 
     sealed class ScreenshotOutcome {

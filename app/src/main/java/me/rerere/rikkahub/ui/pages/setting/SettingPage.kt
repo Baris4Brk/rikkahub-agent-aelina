@@ -100,6 +100,7 @@ fun SettingPage(vm: SettingVM = koinViewModel()) {
     val settings by vm.settings.collectAsStateWithLifecycle()
     val filesManager: FilesManager = koinInject()
     val agentRuntimeHomeItem = AgentRuntimeSettingsRoute.settingsHomeItem
+    val quickCaptureHomeItem = QuickCaptureSettingsRoute.settingsHomeItem
 
     if (settings.launchCount > 100 && (settings.launchCount - settings.sponsorAlertDismissedAt) >= 50) {
         AlertDialog(
@@ -342,6 +343,12 @@ fun SettingPage(vm: SettingVM = koinViewModel()) {
                         leadingContent = { Icon(HugeIcons.Settings03, null) },
                         supportingContent = { Text(stringResource(agentRuntimeHomeItem.summaryRes)) },
                         headlineContent = { Text(stringResource(agentRuntimeHomeItem.titleRes)) },
+                    )
+                    item(
+                        onClick = { navController.navigate(quickCaptureHomeItem.destination) },
+                        leadingContent = { Icon(HugeIcons.ImageUpload, null) },
+                        supportingContent = { Text(stringResource(quickCaptureHomeItem.summaryRes)) },
+                        headlineContent = { Text(stringResource(quickCaptureHomeItem.titleRes)) },
                     )
                     item(
                         onClick = { navController.navigate(Screen.SettingEmergencyStop) },

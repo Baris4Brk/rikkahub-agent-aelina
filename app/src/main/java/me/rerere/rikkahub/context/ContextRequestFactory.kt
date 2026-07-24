@@ -57,6 +57,7 @@ object ContextRequestFactory {
             CommandOrigin.APP_UI -> ContextInvocationSurface.LOCAL_CHAT
             CommandOrigin.SYSTEM_ASSISTANT -> ContextInvocationSurface.SYSTEM_ASSISTANT
             CommandOrigin.SYSTEM_ASSISTANT_KEYGUARD -> ContextInvocationSurface.KEYGUARD
+            CommandOrigin.QUICK_CAPTURE -> ContextInvocationSurface.QUICK_CAPTURE
             CommandOrigin.TELEGRAM -> ContextInvocationSurface.TELEGRAM
             CommandOrigin.WEB_API -> ContextInvocationSurface.WEB
             CommandOrigin.CRON -> ContextInvocationSurface.CRON
@@ -64,6 +65,7 @@ object ContextRequestFactory {
                 ToolCallOrigin.LocalChat -> ContextInvocationSurface.LOCAL_CHAT
                 ToolCallOrigin.SystemAssistant -> ContextInvocationSurface.SYSTEM_ASSISTANT
                 ToolCallOrigin.SystemAssistantKeyguard -> ContextInvocationSurface.KEYGUARD
+                ToolCallOrigin.QuickCapture -> ContextInvocationSurface.QUICK_CAPTURE
                 ToolCallOrigin.TrustedWorkflow -> ContextInvocationSurface.WORKFLOW
                 ToolCallOrigin.Telegram -> ContextInvocationSurface.TELEGRAM
                 ToolCallOrigin.WebServer -> ContextInvocationSurface.WEB

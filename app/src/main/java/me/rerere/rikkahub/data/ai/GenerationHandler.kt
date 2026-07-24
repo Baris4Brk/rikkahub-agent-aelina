@@ -2074,7 +2074,7 @@ class GenerationHandler(
     ): GenerationTerminal {
         val persistentSteeringContext = preparePersistentSteeringContext(
             (contextMessages ?: messages)
-                .limitContext(assistant.contextMessageSize)
+                .selectOrdinaryChatContext(assistant.contextMessageSize)
                 .ageOldToolImages(),
         )
         val invocationSurfaceAddendum = conversationId?.let { id ->
@@ -2087,7 +2087,12 @@ class GenerationHandler(
             persistentSteeringContext.systemAddendum,
             invocationSurfaceAddendum,
         ).joinToString("\n\n").ifBlank { null }
-        val unplannedInternalMessages = buildList {
+        // OpenAI-compatible gateways may hoist every system message to the front even when it
+        // appears at the JSON tail. Anchor per-request context to the current user turn instead,
+        // preserving the long history prefix across tasks and the exact prefix inside tool loops.
+        // Responses/native providers keep the established combined system layout.
+        val useAnchoredVolatileContext = provider is ProviderSetting.OpenAI && !provider.useResponseApi
+        val systemPromptLayout = run {
             // Conversation-level system prompt override (upstream): when the assistant
             // allows it and the conversation supplies one, it replaces the assistant prompt.
             val effectiveSystemPrompt =
@@ -2108,9 +2113,9 @@ class GenerationHandler(
                 buildRecentChatsPrompt(assistant, conversationRepo)
             } else ""
             val toolPrompts = tools.map { tool -> tool.systemPrompt(model, messages) }
-            // Split into stable (assistant + tools) and volatile (memory + recent chats +
-            // addendum) so prompt caching survives memory injection: the stable part is the
-            // cached prefix, the volatile part sits after it. See SystemPromptBuilder.
+            // Split stable instructions from runtime data. Chat Completions anchor runtime data
+            // to the current user turn (below); otherwise an ever-changing device/memory
+            // addendum can cut the reusable prefix after only the system prompt.
             val (stableSystem, volatileSystem) = systemPromptBuilder.buildSections(
                 assistantPrompt = effectiveSystemPrompt,
                 userIdentityPrompt = buildUserIdentityPrompt(
@@ -2121,18 +2126,16 @@ class GenerationHandler(
                 toolPrompts = toolPrompts,
                 systemAddendum = providerSystemAddendum,
             )
-            val systemParts = buildList {
-                if (stableSystem.isNotBlank()) add(UIMessagePart.Text(stableSystem))
-                if (volatileSystem.isNotBlank()) add(UIMessagePart.Text(volatileSystem))
-            }
-            if (systemParts.isNotEmpty()) {
-                add(UIMessage(role = MessageRole.SYSTEM, parts = systemParts))
-            }
-            addAll(providerTailMessages.appendTo(persistentSteeringContext.messages))
+            ProviderSystemPromptLayout.create(
+                stableSystem = stableSystem,
+                volatileSystem = volatileSystem,
+                conversationMessages = providerTailMessages.appendTo(persistentSteeringContext.messages),
+                useAnchoredVolatileContext = useAnchoredVolatileContext,
+            )
         }
         val contextPreparer = GenerationProviderContextPreparer()
         val initialContextPreparation = contextPreparer.prepareOrdinaryChat(
-            messages = prepareSecondUserProviderMessages(unplannedInternalMessages),
+            messages = prepareSecondUserProviderMessages(systemPromptLayout.initialMessages),
             configuredContextWindowTokens = model.userContextWindowTokens,
             advertisedContextWindowTokens = model.contextLength,
         )
@@ -2149,7 +2152,7 @@ class GenerationHandler(
             workspaceCwd = workspaceCwd,
         )
         val contextPreparation = contextPreparer.prepareOrdinaryChat(
-            messages = transformedMessages,
+            messages = systemPromptLayout.applyVolatileContext(transformedMessages),
             configuredContextWindowTokens = model.userContextWindowTokens,
             advertisedContextWindowTokens = model.contextLength,
         )

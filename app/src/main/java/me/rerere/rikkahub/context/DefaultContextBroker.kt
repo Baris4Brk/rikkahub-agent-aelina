@@ -223,6 +223,9 @@ class DefaultContextBroker(
             ContextInvocationSurface.SYSTEM_ASSISTANT ->
                 request.commandOrigin == CommandOrigin.SYSTEM_ASSISTANT &&
                     request.toolCallOrigin == ToolCallOrigin.SystemAssistant
+            // A QuickCapture already contributes a screenshot to this run. Keep automatic
+            // context disabled until a future design can guarantee no duplicate OCR/capture.
+            ContextInvocationSurface.QUICK_CAPTURE -> false
             ContextInvocationSurface.TELEGRAM,
             ContextInvocationSurface.WEB,
             ContextInvocationSurface.WORKFLOW,

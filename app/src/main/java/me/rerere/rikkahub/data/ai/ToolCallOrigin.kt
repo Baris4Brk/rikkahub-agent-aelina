@@ -17,6 +17,9 @@ enum class ToolCallOrigin {
     /** A system-assistant invocation that began while keyguard was active. No tools are allowed. */
     SystemAssistantKeyguard,
 
+    /** A visible, unlocked QuickCapture overlay bound to one fixed second-user conversation. */
+    QuickCapture,
+
     /** A trusted local workflow is running. Same tool surface as LocalChat but may have
      *  reduced approval prompts (the workflow already had a creation-time approval gate). */
     TrustedWorkflow,

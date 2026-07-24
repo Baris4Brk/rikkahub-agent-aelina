@@ -20,12 +20,18 @@ fun interface SecondUserTargetConversationReader {
     suspend fun findAssistantId(id: Uuid): Uuid?
 }
 
+/** Optional presentation metadata. Identity checks deliberately remain on the narrow reader. */
+fun interface SecondUserTargetConversationTitleReader {
+    suspend fun findTitle(id: Uuid): String?
+}
+
 sealed interface SecondUserTargetResolution {
     data class Resolved(
         val assistantId: Uuid,
         val conversationId: Uuid,
         val displayName: String,
         val assistantName: String,
+        val conversationTitle: String = "",
     ) : SecondUserTargetResolution
 
     data object TargetNotSelected : SecondUserTargetResolution
@@ -59,11 +65,23 @@ sealed interface SecondUserTargetResolution {
 class SecondUserTargetResolver(
     private val settingsReader: SecondUserTargetSettingsReader,
     private val conversationReader: SecondUserTargetConversationReader,
+    private val conversationTitleReader: SecondUserTargetConversationTitleReader =
+        SecondUserTargetConversationTitleReader { null },
 ) {
     suspend fun resolve(): SecondUserTargetResolution {
         val settings = settingsReader.read()
-        val assistantId = settings.systemAssistantTargetAssistantId
-            ?: return SecondUserTargetResolution.TargetNotSelected
+        return resolveAssistant(settings, settings.systemAssistantTargetAssistantId)
+    }
+
+    /** Resolves a caller-selected assistant without ever falling back to global chat state. */
+    suspend fun resolveAssistant(assistantId: Uuid?): SecondUserTargetResolution =
+        resolveAssistant(settingsReader.read(), assistantId)
+
+    suspend fun resolveAssistant(
+        settings: Settings,
+        assistantId: Uuid?,
+    ): SecondUserTargetResolution {
+        assistantId ?: return SecondUserTargetResolution.TargetNotSelected
         val assistant = settings.assistants.firstOrNull { it.id == assistantId }
             ?: return SecondUserTargetResolution.AssistantNotFound(assistantId)
         val conversationId = assistant.privilegedConversationId
@@ -86,6 +104,7 @@ class SecondUserTargetResolver(
             displayName = settings.displaySetting.userNickname.trim()
                 .ifEmpty { DEFAULT_SYSTEM_ASSISTANT_OWNER_DISPLAY_NAME },
             assistantName = assistant.name.trim(),
+            conversationTitle = conversationTitleReader.findTitle(conversationId).orEmpty().trim(),
         )
     }
 }

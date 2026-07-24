@@ -6,6 +6,7 @@ import me.rerere.rikkahub.service.chat.CommandOrigin
 enum class ContextInvocationSurface {
     LOCAL_CHAT,
     SYSTEM_ASSISTANT,
+    QUICK_CAPTURE,
     TELEGRAM,
     WEB,
     WORKFLOW,

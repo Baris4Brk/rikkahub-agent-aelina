@@ -8,6 +8,30 @@ import kotlin.uuid.Uuid
 
 class MemoryV2CoordinatorTest {
     @Test
+    fun `quick capture memory is disabled by default and works only after explicit origin opt in`() =
+        runBlocking {
+            val store = InMemoryMemoryCaptureStore()
+            val coordinator: MemoryV2Coordinator = DefaultMemoryV2Coordinator(
+                captureStore = store,
+                workScheduler = RecordingMemoryWorkScheduler(),
+                idGenerator = { Uuid.random().toString() },
+            )
+            val quickCapture = completedTurn(1).copy(origin = MemoryCaptureOrigin.QUICK_CAPTURE)
+
+            assertEquals(
+                MemoryCaptureResult.Skipped(MemoryCaptureSkipReason.ORIGIN_NOT_ALLOWED),
+                coordinator.capture(quickCapture),
+            )
+            assertTrue(
+                coordinator.capture(
+                    quickCapture.copy(
+                        allowedOrigins = quickCapture.allowedOrigins + MemoryCaptureOrigin.QUICK_CAPTURE,
+                    ),
+                ) is MemoryCaptureResult.Queued,
+            )
+        }
+
+    @Test
     fun `manual capture keeps a separate durable record when the same turn was auto captured`() =
         runBlocking {
             val store = InMemoryMemoryCaptureStore()

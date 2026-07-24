@@ -26,6 +26,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Job
 import me.rerere.rikkahub.R
+import me.rerere.rikkahub.service.DEFAULT_MANUAL_COMPRESSION_TARGET_TOKENS
 import me.rerere.rikkahub.ui.components.ui.RabbitLoadingIndicator
 
 internal data class CompressContextInput(
@@ -51,12 +52,15 @@ internal fun parseCompressContextInput(
 
 @Composable
 fun CompressContextDialog(
+    initialKeepRecentMessages: Int,
     onDismiss: () -> Unit,
     onConfirm: (additionalPrompt: String, targetTokens: Int, keepRecentMessages: Int) -> Job
 ) {
     var additionalPrompt by remember { mutableStateOf("") }
-    var targetTokensText by remember { mutableStateOf("2000") }
-    var keepRecentMessagesText by remember { mutableStateOf("32") }
+    var targetTokensText by remember { mutableStateOf(DEFAULT_MANUAL_COMPRESSION_TARGET_TOKENS.toString()) }
+    var keepRecentMessagesText by remember(initialKeepRecentMessages) {
+        mutableStateOf(initialKeepRecentMessages.toString())
+    }
     var currentJob by remember { mutableStateOf<Job?>(null) }
     val isLoading = currentJob?.isActive == true
     val parsedInput = parseCompressContextInput(

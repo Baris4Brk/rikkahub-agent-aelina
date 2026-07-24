@@ -6,6 +6,7 @@ import kotlin.uuid.Uuid
 enum class SystemAssistantHostKind {
     VOICE_SESSION,
     ACTIVITY_OVERLAY,
+    QUICK_CAPTURE_OVERLAY,
 }
 
 enum class InvocationSurfacePresence {

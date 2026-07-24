@@ -585,6 +585,7 @@ private fun MemoryAutoSaveMode.title(): String = when (this) {
 private fun MemoryCaptureOrigin.title(): String = when (this) {
     MemoryCaptureOrigin.APP_UI -> stringResource(R.string.memory_v2_origin_app)
     MemoryCaptureOrigin.SYSTEM_ASSISTANT -> stringResource(R.string.memory_v2_origin_system_entry)
+    MemoryCaptureOrigin.QUICK_CAPTURE -> stringResource(R.string.memory_v2_origin_quick_capture)
     MemoryCaptureOrigin.TELEGRAM -> stringResource(R.string.memory_v2_origin_telegram)
     MemoryCaptureOrigin.WEB_API -> stringResource(R.string.memory_v2_origin_web)
     else -> name

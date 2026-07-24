@@ -54,6 +54,14 @@ object InvocationSurfacePolicy {
             requiresVisibleForegroundSurface = true,
             allowsForegroundOnlyTools = false,
         )
+        ToolCallOrigin.QuickCapture -> InvocationSurfaceDecision(
+            allowsToolExecution = true,
+            allowsPrivilegedToolInjection = true,
+            allowsAutoApproval = true,
+            allowsSelectedConversationUnrestricted = true,
+            requiresVisibleForegroundSurface = true,
+            allowsForegroundOnlyTools = false,
+        )
         ToolCallOrigin.SystemAssistantKeyguard -> InvocationSurfaceDecision(
             allowsToolExecution = false,
             allowsPrivilegedToolInjection = false,
@@ -105,10 +113,10 @@ object InvocationSurfacePolicy {
         hasAuthorizedInvocation: Boolean,
     ): String? = when {
         !forOrigin(origin).requiresVisibleForegroundSurface -> null
-        origin != ToolCallOrigin.SystemAssistant -> null
+        origin != ToolCallOrigin.SystemAssistant && origin != ToolCallOrigin.QuickCapture -> null
         deviceLocked -> "Unlock the device and invoke the system assistant again."
         !hasAuthorizedInvocation ->
-            "The system-assistant overlay is no longer visible for this conversation. Invoke it again."
+            "The trusted assistant overlay is no longer visible for this conversation. Invoke it again."
         else -> null
     }
 

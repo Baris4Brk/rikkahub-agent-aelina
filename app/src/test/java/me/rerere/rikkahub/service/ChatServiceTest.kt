@@ -23,6 +23,7 @@ class ChatServiceTest {
 
         assertEquals(model, params.model)
         assertEquals(ReasoningLevel.OFF, params.reasoningLevel)
+        assertEquals(true, params.omitReasoningConfigurationWhenOff)
         assertEquals(headers, params.customHeaders)
         assertEquals(bodies, params.customBody)
     }

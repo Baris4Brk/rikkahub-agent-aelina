@@ -41,6 +41,7 @@ import me.rerere.rikkahub.data.datastore.migration.PreferenceStoreV1Migration
 import me.rerere.rikkahub.data.datastore.migration.PreferenceStoreV2Migration
 import me.rerere.rikkahub.data.datastore.migration.PreferenceStoreV3Migration
 import me.rerere.rikkahub.data.datastore.migration.PreferenceStoreV4Migration
+import me.rerere.rikkahub.data.datastore.migration.PreferenceStoreV5Migration
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.data.model.Avatar
 import me.rerere.rikkahub.data.model.InjectionPosition
@@ -59,6 +60,7 @@ import me.rerere.tts.provider.TTSProviderSetting
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.get
 import kotlin.uuid.Uuid
+import me.rerere.rikkahub.quickcapture.QuickCaptureSettings
 
 private const val TAG = "PreferencesStore"
 
@@ -101,6 +103,7 @@ private val Context.settingsStore by preferencesDataStore(
             PreferenceStoreV2Migration(),
             PreferenceStoreV3Migration(),
             PreferenceStoreV4Migration(),
+            PreferenceStoreV5Migration(),
         )
     }
 )
@@ -152,6 +155,7 @@ class SettingsStore(
         val ASSISTANTS = stringPreferencesKey("assistants")
         val ASSISTANT_TAGS = stringPreferencesKey("assistant_tags")
         val SYSTEM_ASSISTANT_TARGET_ASSISTANT = stringPreferencesKey("system_assistant_target_assistant")
+        val QUICK_CAPTURE_SETTINGS = stringPreferencesKey("quick_capture_settings")
 
         // 搜索
         val SEARCH_SERVICES = stringPreferencesKey("search_services")
@@ -242,6 +246,12 @@ class SettingsStore(
                     ?: DEFAULT_ASSISTANT_ID,
                 systemAssistantTargetAssistantId = preferences[SYSTEM_ASSISTANT_TARGET_ASSISTANT]
                     ?.let { value -> runCatching { Uuid.parse(value) }.getOrNull() },
+                quickCaptureSettings = preferences[QUICK_CAPTURE_SETTINGS]
+                    ?.let { value ->
+                        runCatching {
+                            JsonInstant.decodeFromString<QuickCaptureSettings>(value).normalized()
+                        }.getOrNull()
+                    } ?: QuickCaptureSettings(),
                 assistantTags = preferences[ASSISTANT_TAGS]?.let {
                     JsonInstant.decodeFromString(it)
                 } ?: emptyList(),
@@ -518,6 +528,9 @@ class SettingsStore(
             settings.systemAssistantTargetAssistantId?.let { assistantId ->
                 preferences[SYSTEM_ASSISTANT_TARGET_ASSISTANT] = assistantId.toString()
             } ?: preferences.remove(SYSTEM_ASSISTANT_TARGET_ASSISTANT)
+            preferences[QUICK_CAPTURE_SETTINGS] = JsonInstant.encodeToString(
+                settings.quickCaptureSettings.normalized()
+            )
             preferences[ASSISTANT_TAGS] = JsonInstant.encodeToString(settings.assistantTags)
 
             preferences[SEARCH_SERVICES] = JsonInstant.encodeToString(settings.searchServices)
@@ -687,6 +700,7 @@ data class Settings(
     val finalAnswerReminderPrompt: String = DEFAULT_FINAL_ANSWER_REMINDER_PROMPT,
     val assistantId: Uuid = DEFAULT_ASSISTANT_ID,
     val systemAssistantTargetAssistantId: Uuid? = null,
+    val quickCaptureSettings: QuickCaptureSettings = QuickCaptureSettings(),
     val providers: List<ProviderSetting> = DEFAULT_PROVIDERS,
     /**
      * IDs of built-in providers the user explicitly removed via long-press. The re-seed
@@ -846,6 +860,12 @@ fun List<ProviderSetting>.findModelById(uuid: Uuid): Model? {
 
 fun Settings.getCurrentChatModel(): Model? {
     return findModelById(this.getCurrentAssistant().chatModelId ?: this.chatModelId)
+}
+
+/** Resolve the model actually bound to a conversation's assistant, rather than the global picker. */
+fun Settings.getChatModelForAssistant(assistantId: Uuid): Model? {
+    val assistant = getAssistantById(assistantId) ?: getCurrentAssistant()
+    return findModelById(assistant.chatModelId ?: chatModelId)
 }
 
 fun Settings.getCurrentAssistant(): Assistant {

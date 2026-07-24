@@ -2,6 +2,7 @@ package me.rerere.rikkahub.data.files
 
 import android.content.Context
 import android.graphics.BitmapFactory
+import android.graphics.Bitmap
 import android.net.Uri
 import android.util.Log
 import androidx.core.net.toFile
@@ -92,6 +93,30 @@ class FilesManager(
         )
     }
 
+    /** Writes a screenshot directly into the managed upload store without retaining a PNG byte array. */
+    suspend fun saveUploadPng(
+        bitmap: Bitmap,
+        displayName: String,
+    ): ManagedFileEntity = withContext(Dispatchers.IO) {
+        val target = createTargetFile(FileFolders.UPLOAD, displayName, "image/png")
+        try {
+            target.outputStream().use { output ->
+                check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)) {
+                    "Unable to encode PNG"
+                }
+            }
+            createManagedFileEntity(
+                folder = FileFolders.UPLOAD,
+                file = target,
+                displayName = displayName,
+                mimeType = "image/png",
+            )
+        } catch (failure: Throwable) {
+            runCatching { target.delete() }
+            throw failure
+        }
+    }
+
     suspend fun saveManagedText(
         folder: String,
         text: String,
@@ -120,6 +145,16 @@ class FilesManager(
 
     fun getFile(entity: ManagedFileEntity): File =
         File(context.filesDir, entity.relativePath)
+
+    /** Removes one app-private managed file and its index row. Used for abandoned QuickCaptures. */
+    suspend fun deleteManagedFile(entity: ManagedFileEntity): Boolean = withContext(Dispatchers.IO) {
+        val file = getFile(entity)
+        val relativePath = getRelativePathInFilesDir(file) ?: return@withContext false
+        if (relativePath != entity.relativePath) return@withContext false
+        val removed = !file.exists() || runCatching { file.delete() }.getOrDefault(false)
+        if (removed) repository.deleteByPath(relativePath)
+        removed
+    }
 
     fun createChatFilesByContents(uris: List<Uri>): List<Uri> {
         val newUris = mutableListOf<Uri>()

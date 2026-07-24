@@ -17,6 +17,7 @@ enum class MemoryAutoSaveMode {
 enum class MemoryCaptureOrigin {
     APP_UI,
     SYSTEM_ASSISTANT,
+    QUICK_CAPTURE,
     TELEGRAM,
     WEB_API,
     SYSTEM_ASSISTANT_KEYGUARD,

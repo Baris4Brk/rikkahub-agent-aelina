@@ -57,6 +57,27 @@ import me.rerere.rikkahub.ui.pages.setting.SearchAbilityTagLine
 import me.rerere.search.SearchServiceOptions
 import org.koin.compose.koinInject
 
+internal data class SearchPickerVisibility(
+    val showBuiltInSearchSetting: Boolean,
+    val showAppSearchSettings: Boolean,
+)
+
+/**
+ * A model can retain the built-in Search flag after its identifier changes to a model family that
+ * does not advertise native search. Keep the off-switch visible in that case; otherwise the chat
+ * search sheet is blank even though the user's Exa/Bing configurations are still stored.
+ */
+internal fun searchPickerVisibility(model: Model?): SearchPickerVisibility {
+    val supportsBuiltInSearch = model != null && (
+        ModelRegistry.GEMINI_SERIES.match(model.modelId) || model.modelId.contains("gpt-")
+    )
+    val hasBuiltInSearchEnabled = model?.tools?.contains(BuiltInTools.Search) == true
+    return SearchPickerVisibility(
+        showBuiltInSearchSetting = model != null && (supportsBuiltInSearch || hasBuiltInSearchEnabled),
+        showAppSearchSettings = !hasBuiltInSearchEnabled,
+    )
+}
+
 @Composable
 fun SearchPickerButton(
     enableSearch: Boolean,
@@ -157,14 +178,13 @@ private fun SearchPicker(
     onDismiss: () -> Unit
 ) {
     val navBackStack = LocalNavController.current
+    val visibility = searchPickerVisibility(model)
 
-    // 模型内置搜索
-    if (model != null && (ModelRegistry.GEMINI_SERIES.match(model.modelId) || model.modelId.contains("gpt-"))) {
+    if (visibility.showBuiltInSearchSetting && model != null) {
         BuiltInSearchSetting(model = model)
     }
 
-    // 如果没有开启内置搜索，显示搜索服务选择
-    if (model?.tools?.contains(BuiltInTools.Search) != true) {
+    if (visibility.showAppSearchSettings) {
         AppSearchSettings(
             enableSearch = enableSearch,
             onDismiss = onDismiss,

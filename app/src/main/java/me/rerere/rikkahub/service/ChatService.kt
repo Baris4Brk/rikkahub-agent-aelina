@@ -88,11 +88,13 @@ import me.rerere.rikkahub.data.ai.transformers.ThinkTagTransformer
 import me.rerere.rikkahub.data.ai.transformers.TimeReminderTransformer
 import me.rerere.rikkahub.data.ai.transformers.WorkspaceReminderTransformer
 import me.rerere.rikkahub.data.datastore.SettingsStore
+import me.rerere.rikkahub.data.datastore.DEFAULT_AUTO_MODEL_ID
 import me.rerere.rikkahub.data.datastore.findModelById
 import me.rerere.rikkahub.data.datastore.findProvider
 import me.rerere.rikkahub.data.datastore.getAssistantById
 import me.rerere.rikkahub.data.datastore.getCurrentAssistant
 import me.rerere.rikkahub.data.datastore.getCurrentChatModel
+import me.rerere.rikkahub.data.datastore.getChatModelForAssistant
 import me.rerere.rikkahub.data.files.FilesManager
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.data.model.Conversation
@@ -167,6 +169,10 @@ internal fun backgroundTextGenerationParams(
 ): TextGenerationParams = TextGenerationParams(
     model = model,
     reasoningLevel = reasoningLevel,
+    // Compression/title/suggestion calls are non-interactive. On generic OpenAI-compatible
+    // gateways, an explicit disabled reasoning field (for example `reasoning_effort: low`) can
+    // itself be rejected with HTTP 400. Keep ordinary chat behavior unchanged, but omit it here.
+    omitReasoningConfigurationWhenOff = true,
     customHeaders = model.customHeaders,
     customBody = model.customBodies,
 )
@@ -198,6 +204,23 @@ data class ChatEmergencyStopResult(
 ) {
     val ok: Boolean get() = failures.isEmpty() &&
         stoppedRuntimeCount == runtimeCount && clearedQueueCount == runtimeCount
+}
+
+private fun List<UIMessage>.withQuickCaptureCorrelation(
+    annotation: UIMessageAnnotation.QuickCapture?,
+): List<UIMessage> {
+    annotation ?: return this
+    val sourceIndex = indexOfLast { message ->
+        message.role == MessageRole.USER && annotation in message.annotations
+    }
+    if (sourceIndex < 0) return this
+    return mapIndexed { index, message ->
+        if (index > sourceIndex && message.role == MessageRole.ASSISTANT && annotation !in message.annotations) {
+            message.copy(annotations = message.annotations + annotation)
+        } else {
+            message
+        }
+    }
 }
 
 internal data class ChatEmergencyRuntimeTarget(
@@ -600,6 +623,7 @@ class ChatService(
             CommandOrigin.CRON -> ToolCallOrigin.TrustedWorkflow
             CommandOrigin.SYSTEM_ASSISTANT -> ToolCallOrigin.SystemAssistant
             CommandOrigin.SYSTEM_ASSISTANT_KEYGUARD -> ToolCallOrigin.SystemAssistantKeyguard
+            CommandOrigin.QUICK_CAPTURE -> ToolCallOrigin.QuickCapture
             // Approval continuation is an internal command, but it must retain the
             // surface that created the pending tool call. If no in-memory provenance is
             // available (for example after process death), fail closed as a workflow.
@@ -727,6 +751,7 @@ class ChatService(
         me.rerere.rikkahub.service.chat.SystemAssistantCommandSecurityPolicy
             .commandBlockReason(origin, command)
             ?.let { reason -> return rejectedTrackedCommand(reason) }
+        val resolvedCommandId = commandId ?: Uuid.random()
         if (origin == CommandOrigin.SYSTEM_ASSISTANT && command !is StopCommand) {
             val validation = me.rerere.rikkahub.service.chat.SystemAssistantCommandSecurityPolicy
                 .validateAdmissionTarget(
@@ -739,8 +764,21 @@ class ChatService(
                 return rejectedTrackedCommand(validation.reason)
             }
         }
+        if (origin == CommandOrigin.QUICK_CAPTURE && command !is StopCommand) {
+            val validation = me.rerere.rikkahub.service.chat.QuickCaptureCommandSecurityPolicy
+                .validateAdmission(
+                    commandId = resolvedCommandId,
+                    command = command,
+                    conversationId = conversationId,
+                    settings = settingsStore.settingsFlow.first(),
+                    persistedConversation = conversationRepo.getConversationById(conversationId),
+                )
+            if (validation is me.rerere.rikkahub.service.chat.QuickCaptureTargetValidation.Invalid) {
+                return rejectedTrackedCommand(validation.reason)
+            }
+        }
         val envelope = CommandEnvelope(
-            id = commandId ?: Uuid.random(),
+            id = resolvedCommandId,
             conversationId = conversationId,
             command = command,
             origin = origin,
@@ -783,6 +821,7 @@ class ChatService(
         annotations: List<UIMessageAnnotation> = emptyList(),
         assistantIdSnapshot: Uuid? = null,
         commandId: Uuid? = null,
+        quickCaptureSessionId: Uuid? = null,
     ): TrackedCommandSubmission {
         if (content.isEmptyInputMessage()) {
             return TrackedCommandSubmission(
@@ -795,6 +834,7 @@ class ChatService(
             command = SendMessageCommand(
                 content = RawUserContent(content, answer, annotations),
                 assistantIdSnapshot = assistantIdSnapshot,
+                quickCaptureSessionId = quickCaptureSessionId,
             ),
             origin = origin,
             dedupeKey = dedupeKey,
@@ -1105,6 +1145,25 @@ class ChatService(
         } else {
             null
         }
+        val acceptedQuickCaptureTarget = if (
+            envelope.origin == CommandOrigin.QUICK_CAPTURE && command !is StopCommand
+        ) {
+            when (val validation = me.rerere.rikkahub.service.chat.QuickCaptureCommandSecurityPolicy
+                .validateAccepted(
+                    command = command,
+                    conversationId = envelope.conversationId,
+                    settings = settingsStore.settingsFlow.first(),
+                    persistedConversation = conversationRepo.getConversationById(envelope.conversationId),
+                )
+            ) {
+                is me.rerere.rikkahub.service.chat.QuickCaptureTargetValidation.Invalid ->
+                    return RunOutcome.Rejected(validation.reason)
+                is me.rerere.rikkahub.service.chat.QuickCaptureTargetValidation.Valid -> validation
+            }
+        } else {
+            null
+        }
+        val acceptedAssistantSnapshot = acceptedSystemAssistantTarget?.assistant ?: acceptedQuickCaptureTarget?.assistant
 
         return when (command) {
             is SendMessageCommand -> executeSendMessageLegacy(
@@ -1113,7 +1172,7 @@ class ChatService(
                 conversationId = envelope.conversationId,
                 content = command.content,
                 control = control,
-                acceptedSystemAssistantTarget = acceptedSystemAssistantTarget,
+                acceptedAssistantSnapshot = acceptedAssistantSnapshot,
             )
 
             is InterruptCommand -> executeSendMessageLegacy(
@@ -1122,7 +1181,7 @@ class ChatService(
                 conversationId = envelope.conversationId,
                 content = command.replacement.content,
                 control = control,
-                acceptedSystemAssistantTarget = acceptedSystemAssistantTarget,
+                acceptedAssistantSnapshot = acceptedAssistantSnapshot,
             )
 
             is InterruptRegenerateCommand -> executeRegenerateInline(
@@ -1187,7 +1246,7 @@ class ChatService(
         conversationId: Uuid,
         content: RawUserContent,
         control: GenerationRunControl,
-        acceptedSystemAssistantTarget: me.rerere.rikkahub.service.chat.SystemAssistantTargetValidation.Valid?,
+        acceptedAssistantSnapshot: Assistant?,
     ): RunOutcome = withCommandHeadlessScope(conversationId, origin, control) {
         executeSendMessageScoped(
             commandId = commandId,
@@ -1195,7 +1254,7 @@ class ChatService(
             conversationId = conversationId,
             content = content,
             control = control,
-            acceptedSystemAssistantTarget = acceptedSystemAssistantTarget,
+            acceptedAssistantSnapshot = acceptedAssistantSnapshot,
         )
     }
 
@@ -1205,24 +1264,23 @@ class ChatService(
         conversationId: Uuid,
         content: RawUserContent,
         control: GenerationRunControl,
-        acceptedSystemAssistantTarget: me.rerere.rikkahub.service.chat.SystemAssistantTargetValidation.Valid?,
+        acceptedAssistantSnapshot: Assistant?,
     ): RunOutcome {
         try {
             val session = getOrCreateSession(conversationId)
             val targetBeforeMutation = session.state.value
-            if (acceptedSystemAssistantTarget != null &&
+            if (acceptedAssistantSnapshot != null &&
                 (targetBeforeMutation.id != conversationId ||
-                    targetBeforeMutation.assistantId != acceptedSystemAssistantTarget.assistant.id)
+                    targetBeforeMutation.assistantId != acceptedAssistantSnapshot.id)
             ) {
                 return RunOutcome.Rejected(
-                    me.rerere.rikkahub.service.chat
-                        .SYSTEM_ASSISTANT_TARGET_CONVERSATION_MISMATCH_REJECTION,
+                    "The accepted assistant target no longer matches this conversation.",
                 )
             }
             finishInterruptedPendingTools(conversationId)
             val currentConversation = session.state.value
             val settings = settingsStore.settingsFlow.first()
-            val assistant = acceptedSystemAssistantTarget?.assistant
+            val assistant = acceptedAssistantSnapshot
                 ?: settings.getAssistantById(currentConversation.assistantId)
                 ?: settings.getCurrentAssistant()
             val processedContent = preprocessUserInputParts(content.parts, assistant)
@@ -1250,6 +1308,9 @@ class ChatService(
                 parts = userContent,
                 annotations = content.annotations,
             ).toMessageNode()
+            val quickCaptureAnnotation = content.annotations
+                .filterIsInstance<UIMessageAnnotation.QuickCapture>()
+                .singleOrNull()
             val withUser = currentConversation.copy(
                 messageNodes = currentConversation.messageNodes + userMessage,
             )
@@ -1261,6 +1322,7 @@ class ChatService(
                             messageNodes = withUser.messageNodes + UIMessage(
                                 role = MessageRole.ASSISTANT,
                                 parts = fastPathPlan.assistantContent,
+                                annotations = listOfNotNull(quickCaptureAnnotation),
                             ).toMessageNode()
                         )
                     )
@@ -1287,7 +1349,8 @@ class ChatService(
                             origin = origin,
                             runControl = control,
                             activeCommandId = commandId,
-                            acceptedAssistantSnapshot = acceptedSystemAssistantTarget?.assistant,
+                            acceptedAssistantSnapshot = acceptedAssistantSnapshot,
+                            quickCaptureAnnotation = quickCaptureAnnotation,
                             propagateFailure = true,
                         )
                     }
@@ -1687,6 +1750,7 @@ class ChatService(
         activeCommandId: Uuid? = null,
         propagateFailure: Boolean = false,
         acceptedAssistantSnapshot: Assistant? = null,
+        quickCaptureAnnotation: UIMessageAnnotation.QuickCapture? = null,
     ) {
         suspend fun applyRunUpdate(block: suspend () -> Unit): Boolean =
             runControl?.runIfUpdatesAllowed(block) ?: run {
@@ -1703,7 +1767,7 @@ class ChatService(
         val initialConversation = getConversationFlow(conversationId).value
         val baseAssistant = acceptedAssistantSnapshot
             ?: settings.getAssistantById(initialConversation.assistantId)
-            ?: if (callOrigin == ToolCallOrigin.SystemAssistant) {
+            ?: if (callOrigin == ToolCallOrigin.SystemAssistant || callOrigin == ToolCallOrigin.QuickCapture) {
                 throw IllegalStateException(
                     me.rerere.rikkahub.service.chat
                         .SYSTEM_ASSISTANT_TARGET_ASSISTANT_MISSING_REJECTION,
@@ -1797,11 +1861,14 @@ class ChatService(
             val privilegedBridgeStatus = shizukuBridgeManager.status()
             val deviceLocked = (context.getSystemService(Context.KEYGUARD_SERVICE) as? android.app.KeyguardManager)
                 ?.let { it.isDeviceLocked || it.isKeyguardLocked } == true
-            val hasAuthorizedInvocation = me.rerere.rikkahub.assistant
-                .SystemAssistantInvocationRegistry
-                .hasAuthorizedUnlockedInvocation(conversationId, activeCommandId)
-            val invocationSurfaceContext = me.rerere.rikkahub.assistant
-                .SystemAssistantInvocationRegistry
+            val hasAuthorizedInvocation = when (callOrigin) {
+                ToolCallOrigin.QuickCapture -> me.rerere.rikkahub.quickcapture
+                    .QuickCaptureInvocationRegistry
+                    .hasAuthorizedRun(conversationId, activeCommandId)
+                else -> me.rerere.rikkahub.assistant.SystemAssistantInvocationRegistry
+                    .hasAuthorizedUnlockedInvocation(conversationId, activeCommandId)
+            }
+            val invocationSurfaceContext = me.rerere.rikkahub.quickcapture.InvocationSurfaceContexts
                 .currentContext(callOrigin, conversationId, activeCommandId)
             val toolExposurePlan = me.rerere.rikkahub.data.ai.ToolExposurePlan.create(
                 origin = callOrigin,
@@ -2022,7 +2089,7 @@ class ChatService(
                 maxSteps = subAgentProfile?.generationMaxSteps() ?: 32,
                 memoryToolAllowed = subAgentProfile?.allowsTool("memory_tool") ?: true,
                 invocationSurfaceContextProvider =
-                    me.rerere.rikkahub.assistant.SystemAssistantInvocationRegistry,
+                    me.rerere.rikkahub.quickcapture.InvocationSurfaceContexts,
                 isEmergencyStopActive = {
                     agentSafetySettings.emergencyStopFlow.first()
                 },
@@ -2187,6 +2254,9 @@ class ChatService(
                     .filter { tool -> canExposeTool(tool.name) }
                     .filter { tool -> subAgentProfile?.allowsTool(tool.name) ?: true }
                     .toList()
+                    .let { definitions ->
+                        me.rerere.rikkahub.data.ai.stableProviderToolOrder(definitions)
+                    }
                     .also { definitions ->
                         val memoryToolAvailable = assistant.enableMemory &&
                             (subAgentProfile?.allowsTool("memory_tool") ?: true)
@@ -2237,8 +2307,11 @@ class ChatService(
                 if (runControl?.isUpdateFenced() == true) return@collect
                 when (chunk) {
                     is GenerationChunk.Messages -> {
+                        val correlatedMessages = chunk.messages.withQuickCaptureCorrelation(
+                            quickCaptureAnnotation,
+                        )
                         val updatedConversation = getConversationFlow(conversationId).value
-                            .updateCurrentMessages(chunk.messages)
+                            .updateCurrentMessages(correlatedMessages)
                         if (!applyRunUpdate {
                                 updateConversation(conversationId, updatedConversation)
                             }
@@ -2252,7 +2325,7 @@ class ChatService(
                         // interrupted_unknown_outcome). Without this, the marker stays in
                         // memory only and replay can't distinguish "freshly approved,
                         // never tried" from "interrupted mid-execute" �?silent re-run.
-                        val latestMessage = chunk.messages.lastOrNull()
+                        val latestMessage = correlatedMessages.lastOrNull()
                         val needsImmediatePersist = latestMessage?.parts?.any { p ->
                             p is UIMessagePart.Tool &&
                                 p.executionStartedAt != null &&
@@ -2353,6 +2426,7 @@ class ChatService(
                 me.rerere.rikkahub.memory.MemoryCaptureOrigin.SYSTEM_ASSISTANT
             ToolCallOrigin.SystemAssistantKeyguard ->
                 me.rerere.rikkahub.memory.MemoryCaptureOrigin.SYSTEM_ASSISTANT_KEYGUARD
+            ToolCallOrigin.QuickCapture -> me.rerere.rikkahub.memory.MemoryCaptureOrigin.QUICK_CAPTURE
             ToolCallOrigin.Telegram -> me.rerere.rikkahub.memory.MemoryCaptureOrigin.TELEGRAM
             ToolCallOrigin.WebServer -> me.rerere.rikkahub.memory.MemoryCaptureOrigin.WEB_API
             ToolCallOrigin.TrustedWorkflow -> if (commandOrigin == CommandOrigin.CRON) {
@@ -2707,51 +2781,38 @@ class ChatService(
         additionalPrompt: String,
         targetTokens: Int,
         keepRecentMessages: Int = 32
-    ): Result<Unit> = runCatching {
+    ): Result<Unit> = try {
+        require(targetTokens in 100..32_000) { "Compression target must be between 100 and 32,000 tokens." }
+        require(keepRecentMessages >= 0) { "Messages to keep cannot be negative." }
+
         val settings = settingsStore.settingsFlow.first()
-        val model = settings.findModelById(settings.compressModelId)
-            ?: settings.getCurrentChatModel()
-            ?: throw IllegalStateException("No model available for compression")
-        val provider = model.findProvider(settings.providers)
-            ?: throw IllegalStateException("Provider not found")
-        // Same defence as handleLlmTurn �?refuse to compress against a disabled provider.
-        if (!provider.enabled) {
-            throw IllegalStateException(
-                "Provider '${provider.name}' is disabled �?cannot compress. " +
-                    "Re-enable it in Settings �?Providers, or set a different compression model."
-            )
-        }
+        val configuredModel = settings.findModelById(settings.compressModelId)
+        val configuredProvider = configuredModel?.findProvider(settings.providers)
+        val conversationModel = settings.getChatModelForAssistant(conversation.assistantId)
+        val conversationProvider = conversationModel?.findProvider(settings.providers)
+        val binding = resolveCompressionModelBinding(
+            configuredModel = configuredModel,
+            configuredProvider = configuredProvider,
+            configuredModelIsImplicitDefault = settings.compressModelId == DEFAULT_AUTO_MODEL_ID,
+            conversationModel = conversationModel,
+            conversationProvider = conversationProvider,
+        )
+        val model = binding.model
+        val provider = binding.provider
 
         val providerHandler = providerManager.getProviderByType(provider)
-
-        val maxMessagesPerChunk = 256
         val allMessages = conversation.currentMessages
 
         // Split messages into those to compress and those to keep
-        val messagesToCompress: List<UIMessage>
-        val messagesToKeep: List<UIMessage>
-
-        if (keepRecentMessages > 0 && allMessages.size > keepRecentMessages) {
-            messagesToCompress = allMessages.dropLast(keepRecentMessages)
-            messagesToKeep = allMessages.takeLast(keepRecentMessages)
-        } else if (keepRecentMessages > 0) {
-            // Not enough messages to compress while keeping recent ones
+        val retainedCount = keepRecentMessages.coerceAtMost(allMessages.size)
+        val messagesToCompress = allMessages.dropLast(retainedCount)
+        val messagesToKeep = allMessages.takeLast(retainedCount)
+        if (messagesToCompress.isEmpty()) {
             throw IllegalStateException(context.getString(R.string.chat_page_compress_not_enough_messages))
-        } else {
-            messagesToCompress = allMessages
-            messagesToKeep = emptyList()
-        }
-
-        fun splitMessages(messages: List<UIMessage>): List<List<UIMessage>> {
-            if (messages.size <= maxMessagesPerChunk) return listOf(messages)
-            val mid = messages.size / 2
-            val left = splitMessages(messages.subList(0, mid))
-            val right = splitMessages(messages.subList(mid, messages.size))
-            return left + right
         }
 
         suspend fun compressMessages(messages: List<UIMessage>): String {
-            val contentToCompress = messages.joinToString("\n\n") { it.summaryAsText(maxLength = 2000) }
+            val contentToCompress = messages.joinToString("\n\n") { it.summaryAsText() }
             val prompt = settings.compressPrompt.applyPlaceholders(
                 "content" to contentToCompress,
                 "target_tokens" to targetTokens.toString(),
@@ -2764,32 +2825,42 @@ class ChatService(
             val result = providerHandler.generateText(
                 providerSetting = provider,
                 messages = listOf(UIMessage.user(prompt)),
-                params = backgroundTextGenerationParams(model),
+                params = backgroundTextGenerationParams(model).copy(maxTokens = targetTokens),
             )
 
-            return result.choices[0].message?.toText()?.trim()
-                ?: throw IllegalStateException("Failed to generate compressed summary")
+            return result.choices.firstOrNull()?.message?.toText()?.trim()
+                ?.takeIf { it.isNotEmpty() }
+                ?: throw IllegalStateException("Compression model returned no usable summary.")
         }
 
-        val compressedSummaries = coroutineScope {
-            splitMessages(messagesToCompress)
-                .map { chunk -> async { compressMessages(chunk) } }
-                .awaitAll()
-        }
-
-        // Create new conversation with compressed history as multiple user messages + kept messages
-        val newMessageNodes = buildList {
-            compressedSummaries.forEach { summary ->
-                add(UIMessage.user(summary).toMessageNode())
+        // Do not fan out manual compression requests concurrently. Some OpenAI-compatible
+        // gateways accept ordinary chat but reject parallel large summary requests with 400/429.
+        val compressedSummaries = buildList {
+            splitManualCompressionMessages(
+                messages = messagesToCompress,
+                contextWindowTokens = model.userContextWindowTokens,
+                targetTokens = targetTokens,
+            ).forEach { chunk ->
+                add(compressMessages(chunk))
             }
-            addAll(messagesToKeep.map { it.toMessageNode() })
         }
+
+        // Create a stable manual-compression prefix followed by the exact requested tail.
+        val newMessageNodes = buildManualCompressionMessages(
+            compressedSummaries = compressedSummaries,
+            messagesToKeep = messagesToKeep,
+        ).map { it.toMessageNode() }
         val newConversation = conversation.copy(
             messageNodes = newMessageNodes,
             chatSuggestions = emptyList(),
         )
 
         saveConversation(conversationId, newConversation)
+        Result.success(Unit)
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (error: Throwable) {
+        Result.failure(error)
     }
 
     // ---- 通知 ----

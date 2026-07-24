@@ -139,6 +139,9 @@ internal class FakePendingChatCommandDao(
     override suspend fun findActiveByDedupeKey(conversationId: String, dedupeKey: String) = null
     override fun observe(conversationId: String): Flow<List<PendingChatCommandEntity>> = flow
     override fun observePending(): Flow<List<PendingChatCommandEntity>> = flow
+    override suspend fun listActive(): List<PendingChatCommandEntity> = rows.values.filter {
+        it.state in setOf("PENDING", "INTERRUPTED", "RUNNING", "WAITING_APPROVAL")
+    }
 
     override suspend fun claim(id: String, workerId: String, leaseUntil: Long, now: Long): Int {
         val row = rows[id] ?: return 0

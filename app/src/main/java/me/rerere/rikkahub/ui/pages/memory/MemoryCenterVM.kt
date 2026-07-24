@@ -493,6 +493,7 @@ class MemoryCenterVM(
         val USER_CONFIGURABLE_ORIGINS = setOf(
             MemoryCaptureOrigin.APP_UI,
             MemoryCaptureOrigin.SYSTEM_ASSISTANT,
+            MemoryCaptureOrigin.QUICK_CAPTURE,
             MemoryCaptureOrigin.TELEGRAM,
             MemoryCaptureOrigin.WEB_API,
         )

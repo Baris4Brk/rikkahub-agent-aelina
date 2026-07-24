@@ -434,6 +434,9 @@ private fun captureSkipReason(turn: CompletedMemoryTurn): MemoryCaptureSkipReaso
 private val INTERACTIVE_CAPTURE_ORIGINS = setOf(
     MemoryCaptureOrigin.APP_UI,
     MemoryCaptureOrigin.SYSTEM_ASSISTANT,
+    // Defaults still omit this origin in Assistant.memoryCaptureOrigins. Including it here makes
+    // a deliberate per-assistant opt-in effective without treating QuickCapture as APP_UI.
+    MemoryCaptureOrigin.QUICK_CAPTURE,
     MemoryCaptureOrigin.TELEGRAM,
     MemoryCaptureOrigin.WEB_API,
 )

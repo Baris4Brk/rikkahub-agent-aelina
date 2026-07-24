@@ -583,23 +583,36 @@ class ChatCompletionsAPI(
     }
 
     // Mirrors the native ClaudeProvider's breakpoint placement, but in OpenAI message
-    // shape: mark the static system prefix and the cacheable conversation prefix (the
-    // second-to-last user turn). Two of OpenRouter's four allowed breakpoints.
+    // shape: mark the static system prefix and the cacheable conversation prefix. When
+    // RikkaHub appends a provider-only runtime system message after the latest user turn,
+    // that latest user turn is itself the reusable boundary; the tail system text is not
+    // persisted and must never become the cache breakpoint. Two of OpenRouter's four allowed
+    // breakpoints are enough here.
     private fun insertOpenRouterCacheControl(messages: JsonArray): JsonArray {
-        val systemIndex = messages.indexOfLast {
-            it.jsonObject["role"]?.jsonPrimitive?.contentOrNull == "system"
+        val systemIndices = messages.mapIndexedNotNull { index, message ->
+            index.takeIf {
+                message.jsonObject["role"]?.jsonPrimitive?.contentOrNull == "system"
+            }
         }
+        val systemIndex = systemIndices.firstOrNull() ?: -1
+        val lastSystemIndex = systemIndices.lastOrNull() ?: -1
         val userIndices = messages.mapIndexedNotNull { index, msg ->
             if (msg.jsonObject["role"]?.jsonPrimitive?.contentOrNull == "user") index else null
         }
-        val userTarget = if (userIndices.size >= 2) userIndices[userIndices.size - 2] else -1
+        val lastUserIndex = userIndices.lastOrNull() ?: -1
+        val hasTrailingRuntimeSystem = lastSystemIndex > lastUserIndex && lastUserIndex >= 0
+        val userTarget = when {
+            hasTrailingRuntimeSystem -> lastUserIndex
+            userIndices.size >= 2 -> userIndices[userIndices.size - 2]
+            else -> -1
+        }
 
         if (systemIndex < 0 && userTarget < 0) return messages
 
         return JsonArray(messages.mapIndexed { index, msg ->
             when (index) {
-                // System: breakpoint on the FIRST (stable) block so the volatile block
-                // (memory / recent chats) after it does not invalidate the cached prefix.
+                // System: only the first system message is the stable instruction prefix.
+                // A provider-only runtime system message, if any, is deliberately left alone.
                 systemIndex -> msg.jsonObject.withCacheControlOnFirstBlock()
                 userTarget -> msg.jsonObject.withCacheControlOnLastBlock()
                 else -> msg
@@ -1091,17 +1104,7 @@ class ChatCompletionsAPI(
     }
 
     private fun parseTokenUsage(jsonObject: JsonObject?): TokenUsage? {
-        if (jsonObject == null) return null
-        return TokenUsage(
-            promptTokens = jsonObject["prompt_tokens"]?.jsonPrimitive?.intOrNull ?: 0,
-            completionTokens = jsonObject["completion_tokens"]?.jsonPrimitive?.intOrNull ?: 0,
-            totalTokens = jsonObject["total_tokens"]?.jsonPrimitive?.intOrNull ?: 0,
-            cachedTokens = jsonObject["prompt_tokens_details"]?.jsonObjectOrNull?.get("cached_tokens")?.jsonPrimitive?.intOrNull
-                ?: 0,
-            // OpenRouter reports the generation cost (USD) here when the request asks for it
-            // via usage:{include:true}. Other OpenAI-compatible providers omit it -> null.
-            cost = jsonObject["cost"]?.jsonPrimitive?.doubleOrNull
-        )
+        return parseChatCompletionsTokenUsage(jsonObject)
     }
 
     private fun List<UIMessagePart>.isOnlyTextPart(): Boolean {
@@ -1109,4 +1112,55 @@ class ChatCompletionsAPI(
         val texts = filter { it is UIMessagePart.Text }.size
         return gonnaSend == texts && texts == 1
     }
+}
+
+/**
+ * Parses usage returned by OpenAI-compatible chat-completions gateways.
+ *
+ * DeepSeek's native response uses top-level `prompt_cache_hit_tokens` / `_miss_tokens`, while
+ * OpenAI and several proxies use `prompt_tokens_details.cached_tokens`. Gateways can expose both
+ * with different values, so the largest non-negative cache count is the least lossy value.
+ */
+internal fun parseChatCompletionsTokenUsage(jsonObject: JsonObject?): TokenUsage? {
+    jsonObject ?: return null
+
+    fun intField(name: String): Int = jsonObject[name]
+        ?.jsonPrimitive
+        ?.intOrNull
+        ?.coerceAtLeast(0)
+        ?: 0
+
+    val deepSeekHitTokens = intField("prompt_cache_hit_tokens")
+    val deepSeekMissTokens = intField("prompt_cache_miss_tokens")
+    val cachedTokens = listOf(
+        deepSeekHitTokens,
+        jsonObject["prompt_tokens_details"]
+            ?.jsonObjectOrNull
+            ?.get("cached_tokens")
+            ?.jsonPrimitive
+            ?.intOrNull
+            ?.coerceAtLeast(0)
+            ?: 0,
+        intField("cache_read_input_tokens"),
+        intField("cache_read_tokens"),
+        intField("cached_input_tokens"),
+    ).maxOrNull() ?: 0
+    val completionTokens = intField("completion_tokens")
+    val promptTokens = listOf(
+        intField("prompt_tokens"),
+        deepSeekHitTokens + deepSeekMissTokens,
+        cachedTokens,
+    ).maxOrNull() ?: 0
+    val computedTotal = promptTokens + completionTokens
+    val totalTokens = maxOf(intField("total_tokens"), computedTotal)
+
+    return TokenUsage(
+        promptTokens = promptTokens,
+        completionTokens = completionTokens,
+        totalTokens = totalTokens,
+        cachedTokens = cachedTokens,
+        // OpenRouter reports the generation cost (USD) here when requested. Other compatible
+        // providers omit it, so retaining null distinguishes "not reported" from zero cost.
+        cost = jsonObject["cost"]?.jsonPrimitive?.doubleOrNull,
+    )
 }

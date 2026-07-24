@@ -611,7 +611,9 @@ private fun MessagePartsBlock(
     val recovery = annotations.filterIsInstance<UIMessageAnnotation.FinalAnswerRecovery>()
         .lastOrNull()
     val referenceAnnotations = annotations.filterNot {
-        it is UIMessageAnnotation.FinalAnswerRecovery
+        it is UIMessageAnnotation.FinalAnswerRecovery ||
+            it is UIMessageAnnotation.QuickCapture ||
+            it is UIMessageAnnotation.ManualCompressionSummary
     }
 
     if (recovery != null && recovery.status != FinalAnswerRecoveryStatus.SUCCEEDED) {
@@ -716,6 +718,8 @@ private fun MessagePartsBlock(
                                     )
                                 }
                                 is UIMessageAnnotation.FinalAnswerRecovery -> Unit
+                                is UIMessageAnnotation.QuickCapture -> Unit
+                                is UIMessageAnnotation.ManualCompressionSummary -> Unit
                             }
                         }
                     }

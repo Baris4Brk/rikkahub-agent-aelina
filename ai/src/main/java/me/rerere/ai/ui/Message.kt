@@ -861,6 +861,26 @@ sealed class UIMessageAnnotation {
         val displayName: String,
     ) : UIMessageAnnotation()
 
+    /**
+     * Marks provider-visible history produced by the explicit manual-compression command.
+     * The marker is internal and is not rendered in chat; it keeps the resulting summary and
+     * retained tail as one stable prefix instead of applying a per-turn sliding message window.
+     */
+    @Serializable
+    @SerialName("manual_compression_summary")
+    data class ManualCompressionSummary(
+        val batchIndex: Int,
+        val batchCount: Int,
+    ) : UIMessageAnnotation()
+
+    /** Internal correlation marker for a QuickCapture user message and its generated answer. */
+    @Serializable
+    @SerialName("quick_capture")
+    data class QuickCapture(
+        val commandId: String,
+        val captureSessionId: String,
+    ) : UIMessageAnnotation()
+
     @Serializable
     @SerialName("final_answer_recovery")
     data class FinalAnswerRecovery(
