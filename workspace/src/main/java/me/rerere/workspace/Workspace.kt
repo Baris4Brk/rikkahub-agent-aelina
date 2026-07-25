@@ -4,11 +4,18 @@ data class Workspace(
     val id: String,
     val name: String,
     val root: String,
+    val storageMode: WorkspaceStorageMode = WorkspaceStorageMode.PRIVATE,
     val shellStatus: WorkspaceShellStatus = WorkspaceShellStatus.DISABLED,
     val createdAt: Long,
     val updatedAt: Long,
     val lastAccessAt: Long? = null,
 )
+
+/** Where the user-visible /workspace tree is physically stored. The Linux rootfs remains private. */
+enum class WorkspaceStorageMode {
+    PRIVATE,
+    SHARED,
+}
 
 enum class WorkspaceShellStatus {
     DISABLED,

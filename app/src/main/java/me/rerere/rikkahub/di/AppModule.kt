@@ -407,6 +407,10 @@ val appModule = module {
             apkInstallController = get(),
             managedExecutionCoordinator = get(),
             displayAutomationRuntime = get(),
+            capabilityGrantRepository = get(),
+            workspaceRepository = get(),
+            workspaceProcessManager = get(),
+            termuxSessionEmergencyController = get(),
         )
     }
 
@@ -436,7 +440,13 @@ val appModule = module {
 
     // P0: Agent safety and security gate
     single { AgentSafetySettings(context = get()) }
-    single { ToolExecutionGate(context = get(), safetySettings = get()) }
+    single {
+        ToolExecutionGate(
+            context = get(),
+            safetySettings = get(),
+            capabilityPolicyEngine = get(),
+        )
+    }
     single<me.rerere.rikkahub.data.ai.execution.ToolRunPreflight> {
         me.rerere.rikkahub.data.ai.execution.DefaultToolRunPreflight(get())
     }
@@ -551,6 +561,15 @@ val appModule = module {
         )
     }
     single {
+        me.rerere.rikkahub.execution.LinuxManagedStartableFactory(
+            appContext = get(),
+            termuxFactory = get(),
+            workspaceRepository = get(),
+            settingsStore = get(),
+            scope = get<me.rerere.rikkahub.AppScope>(),
+        )
+    }
+    single {
         me.rerere.rikkahub.execution.SshManagedStartableFactory(
             context = get(),
             repository = get(),
@@ -563,6 +582,7 @@ val appModule = module {
         me.rerere.rikkahub.data.ai.execution.DefaultToolStartableResolver(
             termuxFactory = get(),
             sshFactory = get(),
+            linuxFactory = get(),
         )
     }
     single<me.rerere.rikkahub.data.ai.execution.ToolRuntime> {
@@ -571,7 +591,10 @@ val appModule = module {
             policyResolver = get(),
             securityDescriptorResolver = get(),
             interceptors = listOf(pluginHooks),
-            observers = listOf(pluginHooks),
+            observers = listOf(
+                pluginHooks,
+                get<me.rerere.rikkahub.data.ai.execution.ToolLifecycleObserver>(),
+            ),
         )
     }
     single<me.rerere.rikkahub.execution.ManagedExecutionCoordinator> {
@@ -721,6 +744,8 @@ val appModule = module {
             // decision so a silent GPU -> CPU fallback is visible.
             localRuntimePreferences = get(),
             runtimeDiagnosticsProvider = get(),
+            workspaceRepository = get(),
+            capabilityGrantRepository = get(),
         )
     }
 }

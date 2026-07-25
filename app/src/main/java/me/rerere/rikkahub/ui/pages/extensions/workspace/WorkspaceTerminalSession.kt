@@ -19,6 +19,8 @@ import me.rerere.rikkahub.data.files.FileFolders
 import me.rerere.workspace.RootfsPatchOptions
 import me.rerere.workspace.RootfsPatcher
 import java.io.File
+import me.rerere.workspace.WorkspaceStorageMode
+import me.rerere.rikkahub.data.files.SharedExchangeDirectory
 
 internal fun createWorkspaceTerminalSession(
     context: Context,
@@ -27,7 +29,7 @@ internal fun createWorkspaceTerminalSession(
 ): TerminalSession {
     val appContext = context.applicationContext
     val workspaceDir = File(File(appContext.filesDir, "workspaces"), root)
-    val filesDir = File(workspaceDir, "files")
+    val filesDir = resolveWorkspaceTerminalFilesDir(appContext, root)
     val linuxDir = File(workspaceDir, "linux")
     val tempDir = File(workspaceDir, "tmp")
     val skillsDir = File(appContext.filesDir, FileFolders.SKILLS).apply { mkdirs() }
@@ -89,13 +91,27 @@ internal fun prepareWorkspaceTerminalSession(context: Context, root: String) {
     val appContext = context.applicationContext
     val workspaceDir = File(File(appContext.filesDir, "workspaces"), root)
     val linuxDir = File(workspaceDir, "linux")
-    File(workspaceDir, "files").mkdirs()
+    resolveWorkspaceTerminalFilesDir(appContext, root).mkdirs()
     File(workspaceDir, "tmp").mkdirs()
     File(appContext.filesDir, FileFolders.SKILLS).mkdirs()
     RootfsPatcher().patch(
         linuxDir,
         RootfsPatchOptions(nameservers = appContext.activeDnsServers())
     )
+}
+
+private fun resolveWorkspaceTerminalFilesDir(context: Context, root: String): File {
+    val workspaceDir = File(File(context.filesDir, "workspaces"), root)
+    val mode = File(workspaceDir, ".storage-mode").takeIf(File::isFile)
+        ?.readText()?.trim()
+    return if (mode == WorkspaceStorageMode.SHARED.name) {
+        File(
+            android.os.Environment.getExternalStorageDirectory(),
+            "${SharedExchangeDirectory.DIRECTORY_NAME}/workspaces/$root",
+        )
+    } else {
+        File(workspaceDir, "files")
+    }
 }
 
 internal fun workspaceRootfsReady(context: Context, root: String): Boolean {

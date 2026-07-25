@@ -4,6 +4,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Deferred
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.rikkahub.data.ai.ToolCallOrigin
+import me.rerere.rikkahub.data.capability.CapabilitySubject
+import me.rerere.rikkahub.data.capability.CapabilityKey
 import kotlin.time.Duration
 import kotlin.uuid.Uuid
 
@@ -38,6 +40,12 @@ data class ToolExecutionContext(
     val conversationId: Uuid,
     val assistantId: String,
     val callOrigin: ToolCallOrigin,
+    /** Optional policy principal. Absent means the pre-existing local assistant policy. */
+    val capabilitySubject: CapabilitySubject? = null,
+    /** True only when the invocation is bound to the selected second-user conversation. */
+    val selectedPrivilegedConversation: Boolean = false,
+    /** Capability snapshot for a headless workflow; empty for ordinary tool calls. */
+    val frozenCapabilities: Set<CapabilityKey> = emptySet(),
 )
 
 sealed interface CancelRequestResult {

@@ -20,11 +20,14 @@ import me.rerere.rikkahub.data.ai.execution.ToolStartableResolver
 import me.rerere.rikkahub.data.ai.tools.HardlineCommandGuard
 import me.rerere.rikkahub.data.ai.tools.LocalTools
 import me.rerere.rikkahub.data.ai.tools.ToolExecutionContext
+import me.rerere.rikkahub.data.capability.CapabilitySubject
+import me.rerere.rikkahub.data.capability.SubjectType
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.workflow.condition.ConditionEvaluator
 import me.rerere.rikkahub.workflow.condition.ContextProvider
 import me.rerere.rikkahub.workflow.model.WorkflowAction
 import me.rerere.rikkahub.workflow.model.WorkflowDefinition
+import me.rerere.rikkahub.workflow.model.WorkflowCapabilitySnapshot
 import me.rerere.rikkahub.workflow.model.WorkflowRunStatus
 import me.rerere.rikkahub.workflow.repository.WorkflowRepository
 import me.rerere.rikkahub.workflow.trigger.TriggerFireCallback
@@ -221,11 +224,24 @@ class WorkflowEngine(
         // Headless context — sub-agent recursion guard fires from workflow-action
         // dispatch so a workflow's actions can't spawn a sub-agent that re-fires another
         // workflow_run that re-spawns ad infinitum.
+        val frozenCapabilities = WorkflowCapabilitySnapshot.parse(
+            def.capabilitySnapshot.ifEmpty {
+                // Legacy definitions have no persisted snapshot. Derive the narrowest snapshot
+                // from their already-persisted actions rather than granting the author's whole
+                // current tool surface; workflow_update will persist it explicitly.
+                WorkflowCapabilitySnapshot.capture(def.actions)
+            },
+        )
         val executionContext = ToolExecutionContext(
             runId = kotlin.uuid.Uuid.random(),
             conversationId = kotlin.uuid.Uuid.random(),
             assistantId = authoringAssistant.id.toString(),
             callOrigin = ToolCallOrigin.TrustedWorkflow,
+            capabilitySubject = CapabilitySubject(
+                id = "workflow:${def.id}",
+                type = SubjectType.WORKFLOW,
+            ),
+            frozenCapabilities = frozenCapabilities,
         )
         val tools = localTools.getTools(
             authoringAssistant.localTools,
@@ -247,7 +263,9 @@ class WorkflowEngine(
             availableTools = tools,
             invocation = ToolRuntimeInvocation(
                 executionContext = executionContext,
-                unrestrictedOverride = authoringAssistant.unrestricted,
+                // Workflow permissions are intentionally independent of the assistant's
+                // legacy unrestricted marker. Future scoped workflow grants plug in here.
+                unrestrictedOverride = false,
             ),
         )
         val status = if (result.success) WorkflowRunStatus.SUCCESS else WorkflowRunStatus.FAILED

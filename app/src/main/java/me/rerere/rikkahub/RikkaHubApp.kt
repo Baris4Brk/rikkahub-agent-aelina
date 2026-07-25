@@ -188,6 +188,8 @@ class RikkaHubApp : Application() {
         // cross-pillar generalisation of the Phase 9.5 cron stranded-row sweep and is what
         // makes background sub-agents survivable across process death.
         runAgentRunBootRecovery()
+        runExecutionBootRecovery()
+        refreshCapabilityPolicyGrants()
         reconcileMemoryV2Metadata()
 
         // Auto-recover from a prior native crash inside a local-runtime JNI lib
@@ -308,6 +310,32 @@ class RikkaHubApp : Application() {
                 get<me.rerere.rikkahub.data.agentrun.AgentRunBootRecovery>().runRecovery()
             }.onFailure {
                 Log.w(TAG, "runAgentRunBootRecovery failed", it)
+            }
+        }
+    }
+
+    /**
+     * Per-handle recovery never retries a model action. It only classifies managed runtimes that
+     * can still be verified from their durable PID/process ledger; every other in-flight record
+     * becomes an honest orphan for later review.
+     */
+    private fun runExecutionBootRecovery() {
+        get<AppScope>().launch(Dispatchers.IO) {
+            runCatching {
+                get<me.rerere.rikkahub.data.execution.ExecutionBootRecovery>().runRecovery()
+            }.onFailure {
+                Log.w(TAG, "runExecutionBootRecovery failed", it)
+            }
+        }
+    }
+
+    /** Load durable remote/plugin/workflow grants before new inbound work is admitted. */
+    private fun refreshCapabilityPolicyGrants() {
+        get<AppScope>().launch(Dispatchers.IO) {
+            runCatching {
+                get<me.rerere.rikkahub.data.capability.CapabilityGrantRepository>().refresh()
+            }.onFailure {
+                Log.w(TAG, "refreshCapabilityPolicyGrants failed; policy remains fail-closed", it)
             }
         }
     }
@@ -514,11 +542,26 @@ class RikkaHubApp : Application() {
         get<AppScope>().launch(Dispatchers.IO) {
             runCatching {
                 val dir = File(filesDir, FileFolders.TOOL_OUTPUTS)
-                if (dir.exists()) {
-                    dir.deleteRecursively()
+                if (!dir.exists()) return@runCatching
+                val cutoff = System.currentTimeMillis() - TOOL_ARTIFACT_RETENTION_MS
+                dir.walkBottomUp()
+                    .filter { it != dir && it.lastModified() < cutoff }
+                    .forEach { file -> if (file.isDirectory) file.delete() else file.delete() }
+                val remaining = dir.walkTopDown().filter(File::isFile)
+                    .sortedBy(File::lastModified).toMutableList()
+                var total = remaining.sumOf(File::length)
+                for (file in remaining) {
+                    if (total <= TOOL_ARTIFACT_MAX_BYTES) break
+                    val length = file.length()
+                    if (file.delete()) total -= length
                 }
             }
         }
+    }
+
+    private companion object {
+        const val TOOL_ARTIFACT_RETENTION_MS = 7L * 24 * 60 * 60 * 1_000
+        const val TOOL_ARTIFACT_MAX_BYTES = 512L * 1024 * 1024
     }
 
     private fun syncManagedFiles() {
@@ -556,23 +599,10 @@ class RikkaHubApp : Application() {
                         Log.w(TAG, "startWebServerIfEnabled: notification permission not granted, skipping")
                         return@launch
                     }
-                    // Android 17 (API 37) requires ACCESS_LOCAL_NETWORK to bind to LAN
-                    // interfaces. localhost-only mode does not need it because traffic stays
-                    // within the app's UID. Cherry-picked from upstream 80186f5d.
-                    if (Build.VERSION.SDK_INT >= 37 &&
-                        !settings.webServerLocalhostOnly &&
-                        ContextCompat.checkSelfPermission(
-                            this@RikkaHubApp,
-                            android.Manifest.permission.ACCESS_LOCAL_NETWORK
-                        ) != PackageManager.PERMISSION_GRANTED
-                    ) {
-                        Log.w(TAG, "startWebServerIfEnabled: local network permission not granted, skipping")
-                        return@launch
-                    }
                     val intent = Intent(this@RikkaHubApp, WebServerService::class.java).apply {
                         action = WebServerService.ACTION_START
                         putExtra(WebServerService.EXTRA_PORT, settings.webServerPort)
-                        putExtra(WebServerService.EXTRA_LOCALHOST_ONLY, settings.webServerLocalhostOnly)
+                        putExtra(WebServerService.EXTRA_LOCALHOST_ONLY, true)
                     }
                     startForegroundService(intent)
                 }

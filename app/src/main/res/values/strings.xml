@@ -1681,6 +1681,14 @@
   <string name="workspace_page_empty">No workspaces yet</string>
   <string name="workspace_page_empty_desc">Create one to use file tools and sandbox environments</string>
   <string name="workspace_page_name">Name</string>
+  <string name="workspace_page_storage_mode">File storage</string>
+  <string name="workspace_page_storage_private">Private</string>
+  <string name="workspace_page_storage_shared">Shared</string>
+  <string name="workspace_page_storage_private_desc">App-private files. Best for secrets; Termux cannot read them directly.</string>
+  <string name="workspace_page_storage_shared_desc">Zero-copy files shared by RikkaHub, Termux, and PRoot under RikkaHubExchange/workspaces.</string>
+  <string name="workspace_page_change_storage">Change file storage</string>
+  <string name="workspace_page_change_storage_shared_confirm">Move this workspace file tree to shared storage. RikkaHub, Termux, and PRoot will then use the same files.</string>
+  <string name="workspace_page_change_storage_private_confirm">Move this workspace file tree back to app-private storage. Termux will no longer be able to read it directly.</string>
   <string name="workspace_detail_title">Workspace Details</string>
   <string name="workspace_detail_tab_basic">Basic</string>
   <string name="workspace_detail_tab_files">Files</string>
@@ -2116,6 +2124,9 @@
   <string name="browser_next_external_app_confirm">Open app</string>
   <string name="assistant_unrestricted_mode">Unrestricted mode</string>
   <string name="assistant_unrestricted_mode_desc">Allows this assistant to bypass only the configurable approval checks. Emergency Stop, lock-screen restrictions, sensitive-action blocks, and bounded invocation surfaces still apply.</string>
+  <string name="assistant_second_user_local_policy">Second-user local policy</string>
+  <string name="assistant_second_user_local_policy_desc">For the selected second-user conversation only, allow automatic approvals on unlocked local surfaces. Remote, Web, Telegram, plugins, MCP, safety controls, and permanent safety boundaries remain separate.</string>
+  <string name="assistant_second_user_local_policy_migration_desc">This assistant used the legacy unrestricted setting. Confirm the selected local second-user conversation to migrate it; the legacy setting no longer grants runtime bypasses.</string>
   <string name="setting_page_alarm">Alarms</string>
   <string name="setting_page_alarm_desc">Manage alarms created by the assistant.</string>
   <string name="setting_page_emergency_stop">Safety &amp; Emergency Stop</string>

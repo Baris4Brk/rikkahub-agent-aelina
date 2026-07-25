@@ -20,7 +20,6 @@ import me.rerere.rikkahub.web.startWebServer
 import java.net.ServerSocket
 
 private const val TAG = "WebServerManager"
-private const val HOST_ALL_INTERFACES = "0.0.0.0"
 private const val HOST_LOOPBACK = "127.0.0.1"
 
 data class WebServerState(
@@ -78,7 +77,7 @@ class WebServerManager(
     fun start(
         port: Int = 8080,
         serviceName: String = DEFAULT_SERVICE_NAME,
-        localhostOnly: Boolean = false
+        localhostOnly: Boolean = true
     ) {
         if (server != null) {
             Log.w(TAG, "Server already running")
@@ -86,12 +85,18 @@ class WebServerManager(
         }
 
         appScope.launch {
-            // 仅本机模式绑定回环地址
-            val host = if (localhostOnly) HOST_LOOPBACK else HOST_ALL_INTERFACES
+            // LAN pairing/TLS is intentionally not silently downgraded to plaintext. Until a
+            // verified paired HTTPS transport is supplied, every request binds loopback even if
+            // an older preference or an external intent requested all interfaces.
+            val effectiveLocalhostOnly = true
+            if (!localhostOnly) {
+                Log.w(TAG, "Rejected plaintext LAN web-server request; using localhost only")
+            }
+            val host = HOST_LOOPBACK
             val baseState = WebServerState(
                 port = port,
                 serviceName = serviceName,
-                localhostOnly = localhostOnly
+                localhostOnly = effectiveLocalhostOnly
             )
             try {
                 _state.value = baseState.beginStart()
@@ -107,7 +112,7 @@ class WebServerManager(
 
                 _state.value = baseState.copy(isRunning = true)
                 // 仅局域网模式注册 mDNS
-                if (!localhostOnly) {
+                if (!effectiveLocalhostOnly) {
                     runCatching {
                         nsdRegistrar.register(
                             port = port,

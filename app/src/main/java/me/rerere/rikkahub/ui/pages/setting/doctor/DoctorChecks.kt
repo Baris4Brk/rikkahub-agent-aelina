@@ -165,6 +165,8 @@ class DoctorChecks(
     // Nullable + defaulted same as the others above for legacy test path compatibility.
     private val localRuntimePreferences: me.rerere.locallm.LocalRuntimePreferences? = null,
     private val runtimeDiagnosticsProvider: RuntimeDiagnosticsProvider? = null,
+    private val workspaceRepository: me.rerere.rikkahub.data.repository.WorkspaceRepository? = null,
+    private val capabilityGrantRepository: me.rerere.rikkahub.data.capability.CapabilityGrantRepository? = null,
 ) {
     suspend fun runAll(): List<DoctorCheck> = withContext(Dispatchers.IO) {
         // Aggregate enabled tools across every assistant. A tool is "in use" if at least
@@ -185,7 +187,66 @@ class DoctorChecks(
             addAll(maintenanceChecks())
             addAll(diagnosticsChecks(enabled))
             addAll(runtimeDiagnosticsChecks())
+            addAll(linuxRuntimeStateChecks())
         }
+    }
+
+    private suspend fun linuxRuntimeStateChecks(): List<DoctorCheck> = buildList {
+        val exchange = me.rerere.rikkahub.data.files.SharedExchangeDirectory.ensure(context)
+        add(DoctorCheck(
+            id = "linux.shared_storage",
+            category = DoctorCategory.Permissions,
+            label = "Linux shared workspace storage",
+            detail = when (exchange) {
+                is me.rerere.rikkahub.data.files.SharedExchangeDirectory.Status.Ready ->
+                    "Ready: ${exchange.directory.absolutePath}/workspaces"
+                is me.rerere.rikkahub.data.files.SharedExchangeDirectory.Status.PermissionRequired ->
+                    "All-files access is required for ${exchange.directory.absolutePath}"
+                is me.rerere.rikkahub.data.files.SharedExchangeDirectory.Status.Unavailable ->
+                    "Shared exchange is not readable and writable: ${exchange.directory.absolutePath}"
+            },
+            severity = when (exchange) {
+                is me.rerere.rikkahub.data.files.SharedExchangeDirectory.Status.Ready -> Severity.OK
+                is me.rerere.rikkahub.data.files.SharedExchangeDirectory.Status.PermissionRequired -> Severity.WARN
+                is me.rerere.rikkahub.data.files.SharedExchangeDirectory.Status.Unavailable -> Severity.FAIL
+            },
+        ))
+        workspaceRepository?.let { repository ->
+            val workspaces = runCatching { repository.getAll() }.getOrDefault(emptyList())
+            val shared = workspaces.count { it.storageMode == me.rerere.workspace.WorkspaceStorageMode.SHARED.name }
+            add(DoctorCheck(
+                id = "linux.workspace_profiles",
+                category = DoctorCategory.Services,
+                label = "Workspace PRoot profiles",
+                detail = "${workspaces.size} total; $shared shared and ${workspaces.size - shared} private",
+                severity = if (workspaces.isEmpty()) Severity.INFO else Severity.OK,
+            ))
+        }
+        capabilityGrantRepository?.let { repository ->
+            val grants = repository.current().count {
+                it.subjectType == me.rerere.rikkahub.data.capability.SubjectType.LOCAL_SECOND_USER &&
+                    (it.capability.value.startsWith("linux.") || it.capability.value.startsWith("phone.shared."))
+            }
+            add(DoctorCheck(
+                id = "linux.second_user_grants",
+                category = DoctorCategory.AssistantInfo,
+                label = "Second-user Linux grants",
+                detail = "$grants active scoped grants; grants are conversation-bound and rechecked while unlocked",
+                severity = if (grants == 0) Severity.INFO else Severity.OK,
+            ))
+        }
+        val artifactRoot = java.io.File(
+            context.filesDir,
+            me.rerere.rikkahub.data.files.FileFolders.TOOL_OUTPUTS,
+        )
+        val bytes = artifactRoot.walkTopDown().filter(java.io.File::isFile).sumOf(java.io.File::length)
+        add(DoctorCheck(
+            id = "linux.artifacts",
+            category = DoctorCategory.Maintenance,
+            label = "Tool artifacts",
+            detail = "${bytes / (1024 * 1024)} MiB used; retention target 7 days / 512 MiB",
+            severity = if (bytes > 512L * 1024 * 1024) Severity.WARN else Severity.OK,
+        ))
     }
 
     private suspend fun runtimeDiagnosticsChecks(): List<DoctorCheck> {

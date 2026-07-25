@@ -45,6 +45,9 @@ class DefaultToolRunPreflight(
             conversationId = context.conversationId,
             commandId = context.runId,
             arguments = args,
+            capabilitySubject = context.capabilitySubject,
+            selectedPrivilegedConversation = context.selectedPrivilegedConversation,
+            frozenCapabilities = context.frozenCapabilities,
             unrestrictedOverride = unrestrictedOverride,
         )
     ) {

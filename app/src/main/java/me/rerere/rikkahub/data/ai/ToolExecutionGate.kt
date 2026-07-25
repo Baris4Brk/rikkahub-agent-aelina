@@ -11,6 +11,13 @@ import me.rerere.rikkahub.data.ai.tools.ToolApprovalDefaults
 import me.rerere.rikkahub.data.capability.CapabilityCatalog
 import me.rerere.rikkahub.data.capability.CapabilityDescriptor
 import me.rerere.rikkahub.data.capability.CapabilityId
+import me.rerere.rikkahub.data.capability.CapabilityKey
+import me.rerere.rikkahub.data.capability.CapabilityPolicyEngine
+import me.rerere.rikkahub.data.capability.CapabilityRequest
+import me.rerere.rikkahub.data.capability.CapabilitySubject
+import me.rerere.rikkahub.data.capability.DefaultCapabilityPolicyEngine
+import me.rerere.rikkahub.data.capability.PolicyDecision
+import me.rerere.rikkahub.data.capability.ToolCapabilityResolver
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.JsonArray
@@ -25,6 +32,9 @@ import me.rerere.rikkahub.privilege.STRUCTURED_PRIVILEGED_WRITE_TOOL_NAMES
 import me.rerere.rikkahub.privilege.STRUCTURED_PRIVILEGED_V2_TOOL_NAMES
 import me.rerere.rikkahub.privilege.STRUCTURED_PRIVILEGED_V2_WRITE_TOOL_NAMES
 import me.rerere.rikkahub.data.ai.tools.local.VERIFIED_ACCESSIBILITY_TOOL_NAMES
+import me.rerere.rikkahub.privilege.DefaultHardDenyPolicy
+import me.rerere.rikkahub.privilege.HardDenyDecision
+import me.rerere.rikkahub.privilege.HardDenyPolicy
 import me.rerere.rikkahub.data.ai.tools.local.VERIFIED_ACCESSIBILITY_WRITE_TOOL_NAMES
 import kotlin.uuid.Uuid
 
@@ -200,6 +210,8 @@ internal fun systemAssistantSensitivePathBlockReason(
 class ToolExecutionGate(
     private val context: Context,
     private val safetySettings: AgentSafetySettings,
+    private val hardDenyPolicy: HardDenyPolicy = DefaultHardDenyPolicy(context.packageName),
+    private val capabilityPolicyEngine: CapabilityPolicyEngine = DefaultCapabilityPolicyEngine(),
 ) {
     private val selfPreservationPolicy by lazy {
         SelfPreservationPolicy.forApplication(context.packageName)
@@ -222,6 +234,12 @@ class ToolExecutionGate(
             "external_bridge_run_command",
             "external_bridge_grant_appop",
             "termux_run_command",
+            "linux_run",
+            "linux_session_create",
+            "linux_session_exec",
+            "linux_session_close",
+            "linux_grant_request",
+            "linux_grant_revoke",
             "eval_javascript",
             "ssh_exec",
             "ssh_exec_saved",
@@ -378,8 +396,17 @@ class ToolExecutionGate(
         conversationId: Uuid? = null,
         commandId: Uuid? = null,
         arguments: JsonObject? = null,
-        /** When true, ALL security gates are bypassed (only emergency stop still applies).
-         *  Used by assistants with `unrestricted = true`. */
+        /** Explicit principal for the new scoped-policy path; null preserves legacy callers. */
+        capabilitySubject: CapabilitySubject? = null,
+        /** Bound second-user conversation proof captured at command admission time. */
+        selectedPrivilegedConversation: Boolean = false,
+        /** Immutable workflow capability snapshot, empty for ordinary requests. */
+        frozenCapabilities: Set<CapabilityKey> = emptySet(),
+        /**
+         * Compatibility approval override. Permanent denial, origin, lock-screen, Android
+         * permission and protected-runtime checks still run first. Assistant.unrestricted is
+         * never permitted to populate this value.
+         */
         unrestrictedOverride: Boolean = false,
     ): GateResult {
         // ── Level 1: Emergency stop ────────────────────────────────────────────────
@@ -395,7 +422,47 @@ class ToolExecutionGate(
             return GateResult.Denied(reason)
         }
 
+        // The shared permanent floor intentionally runs before every approval or unrestricted
+        // decision. GenerationHandler and workflow still invoke it defensively, but putting it
+        // here gives every ToolRuntime caller the same outcome.
+        when (val hardDeny = hardDenyPolicy.checkTool(toolName, arguments)) {
+            HardDenyDecision.Allowed -> Unit
+            is HardDenyDecision.Denied -> {
+                return GateResult.Denied("${hardDeny.code}: ${hardDeny.message}")
+            }
+        }
+
         val deviceLocked = isDeviceLocked()
+        capabilitySubject?.let { subject ->
+            val resolved = ToolCapabilityResolver.resolve(
+                toolName = toolName,
+                args = arguments ?: JsonObject(emptyMap()),
+            )
+            when (
+                val decision = capabilityPolicyEngine.evaluate(
+                    CapabilityRequest(
+                        subject = subject,
+                        origin = origin,
+                        capabilities = resolved.capabilities,
+                        resource = resolved.resource,
+                        catalogCapability = resolved.catalogCapability,
+                        conversationId = conversationId?.toString(),
+                        executionId = commandId?.toString(),
+                        deviceUnlocked = !deviceLocked,
+                        selectedPrivilegedConversation = selectedPrivilegedConversation,
+                        frozenCapabilities = frozenCapabilities,
+                    ),
+                )
+            ) {
+                is PolicyDecision.Denied -> {
+                    return GateResult.Denied("${decision.code}: ${decision.message}")
+                }
+
+                PolicyDecision.Abstain,
+                is PolicyDecision.Allowed,
+                -> Unit
+            }
+        }
         val hasAuthorizedInvocation = conversationId?.let { id ->
             when (origin) {
                 ToolCallOrigin.QuickCapture -> QuickCaptureInvocationRegistry.hasAuthorizedRun(id, commandId)

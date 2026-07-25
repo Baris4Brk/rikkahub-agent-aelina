@@ -459,6 +459,10 @@ class ChatService(
     private val privilegedActionGuard = me.rerere.rikkahub.privilege.DefaultPrivilegedActionGuard(
         context.packageName
     )
+    private val hardDenyPolicy = me.rerere.rikkahub.privilege.DefaultHardDenyPolicy(
+        context.packageName,
+        privilegedActionGuard,
+    )
     private val privilegedManagementBackend by lazy {
         me.rerere.rikkahub.privilege.RepositoryPrivilegedManagementBackend(
             settingsStore = settingsStore,
@@ -632,6 +636,47 @@ class ChatService(
         }
         activeToolOrigins[conversationId] = resolved
         return resolved
+    }
+
+    /**
+     * Origins and principals are separate: a remote request can carry the same assistant id as
+     * a local conversation, but it never becomes that assistant's local second-user profile.
+     */
+    private fun capabilitySubjectFor(
+        assistant: Assistant,
+        conversationId: Uuid,
+        origin: ToolCallOrigin,
+        privilege: me.rerere.rikkahub.privilege.PrivilegedSessionContext? = null,
+    ): me.rerere.rikkahub.data.capability.CapabilitySubject {
+        if (privilege?.isPrivileged == true && privilege.expandLocalTools) {
+            return me.rerere.rikkahub.data.capability.CapabilitySubject(
+                id = "${assistant.id}:$conversationId",
+                type = me.rerere.rikkahub.data.capability.SubjectType.LOCAL_SECOND_USER,
+                privilegedConversationId = privilege.conversationId.toString(),
+            )
+        }
+        val type = when (origin) {
+            ToolCallOrigin.Telegram -> me.rerere.rikkahub.data.capability.SubjectType.TELEGRAM
+            ToolCallOrigin.WebServer -> me.rerere.rikkahub.data.capability.SubjectType.WEB
+            ToolCallOrigin.MCP -> me.rerere.rikkahub.data.capability.SubjectType.MCP
+            ToolCallOrigin.ExternalIntent ->
+                me.rerere.rikkahub.data.capability.SubjectType.EXTERNAL_AUTOMATION
+            // Workflow snapshots are introduced independently; do not claim a grant exists
+            // until the authoring path freezes it. Existing local workflows retain their
+            // current gate while this migration is rolled out.
+            ToolCallOrigin.TrustedWorkflow,
+            ToolCallOrigin.LocalChat,
+            ToolCallOrigin.SystemAssistant,
+            ToolCallOrigin.SystemAssistantKeyguard,
+            ToolCallOrigin.QuickCapture,
+            -> me.rerere.rikkahub.data.capability.SubjectType.LOCAL_ASSISTANT
+        }
+        val id = if (type == me.rerere.rikkahub.data.capability.SubjectType.LOCAL_ASSISTANT) {
+            assistant.id.toString()
+        } else {
+            "${type.name.lowercase()}:${assistant.id}:$conversationId"
+        }
+        return me.rerere.rikkahub.data.capability.CapabilitySubject(id = id, type = type)
     }
 
     private fun getOrCreateRuntime(conversationId: Uuid): ConversationRuntime =
@@ -1419,6 +1464,17 @@ class ChatService(
         if (hardlineReason != null) return@FastPathRouter FastPathDecision.NotMatched
         val rendered = try {
             val callOrigin = resolveToolOrigin(context.conversation.id, context.origin)
+            val privilege = me.rerere.rikkahub.privilege.DefaultPrivilegedSessionResolver.resolve(
+                assistant = context.assistant,
+                conversation = context.conversation,
+                origin = callOrigin,
+            )
+            val capabilitySubject = capabilitySubjectFor(
+                assistant = context.assistant,
+                conversationId = context.conversation.id,
+                origin = callOrigin,
+                privilege = privilege,
+            )
             val runtimeResult = toolRuntime.execute(
                 me.rerere.rikkahub.data.ai.execution.ToolExecutionPlanRequest(
                     toolCallId = "fast-${context.commandId}",
@@ -1429,6 +1485,8 @@ class ChatService(
                         conversationId = context.conversation.id,
                         assistantId = context.assistant.id.toString(),
                         callOrigin = callOrigin,
+                        capabilitySubject = capabilitySubject,
+                        selectedPrivilegedConversation = privilege.isPrivileged,
                     ),
                     startableTool = null,
                     legacyExecute = { input -> tool.execute(input.jsonObject) },
@@ -1441,7 +1499,9 @@ class ChatService(
                             conversationId = context.conversation.id,
                             commandId = context.commandId,
                             arguments = match.args,
-                            unrestrictedOverride = context.assistant.unrestricted,
+                            capabilitySubject = capabilitySubject,
+                            selectedPrivilegedConversation = privilege.isPrivileged,
+                            unrestrictedOverride = false,
                         )) {
                             me.rerere.rikkahub.data.ai.ToolExecutionGate.GateResult.Allowed ->
                                 me.rerere.rikkahub.data.ai.execution.ToolPreExecutionDecision.Allow
@@ -2049,9 +2109,16 @@ class ChatService(
                     // envelope instead of hanging the turn.
                     if (me.rerere.rikkahub.plugin.isPluginModelToolName(toolName)) {
                         false
+                    } else if (toolName == "linux_grant_request" || toolName == "linux_grant_revoke") {
+                        false
                     } else if (toolName == "ask_user") {
                         me.rerere.rikkahub.data.ai.tools.HeadlessConversations
                             .shouldAutoApprove(conversationId)
+                    } else if (callOrigin in me.rerere.rikkahub.data.ai.InvocationSurfacePolicy.REMOTE) {
+                        // Telegram/Web/MCP/external origins are separate principals. They never
+                        // inherit second-user, YOLO, or local allow-list decisions. A future
+                        // scoped AccessGrant is the only path that may pre-authorize them.
+                        false
                     } else {
                         privilegeContext.autoApproveTools ||
                             (toolName == "call_phone" && privilegeContext.unrestrictedOverride &&
@@ -2075,6 +2142,13 @@ class ChatService(
                 },
                 assistant = assistant,
                 unrestrictedOverride = privilegeContext.unrestrictedOverride,
+                capabilitySubject = capabilitySubjectFor(
+                    assistant = assistant,
+                    conversationId = conversationId,
+                    origin = callOrigin,
+                    privilege = privilegeContext,
+                ),
+                selectedPrivilegedConversation = privilegeContext.isPrivileged,
                 conversationSystemPrompt = conversation.customSystemPrompt,
                 conversationModeInjectionIds = conversation.modeInjectionIds,
                 conversationLorebookIds = conversation.lorebookIds,
@@ -2169,6 +2243,7 @@ class ChatService(
                                 invocationContext = invocationCtx,
                                 guard = privilegedActionGuard,
                                 backend = privilegedManagementBackend,
+                                hardDenyPolicy = hardDenyPolicy,
                             )
                         )
                         if (me.rerere.rikkahub.setup.isSetupToolSurfaceAvailable(invocationCtx)) {

@@ -20,6 +20,10 @@ object InternalToolSecurityCatalog {
         "execution_list",
         "execution_status",
         "execution_logs",
+        "linux_profile_list",
+        "linux_grant_list",
+        "linux_session_inspect",
+        "linux_session_list",
     )
 
     val MUTATING: Set<String> = setOf(
@@ -40,6 +44,12 @@ object InternalToolSecurityCatalog {
         "display_session_create",
         "display_session_close",
         "execution_stop",
+        "linux_run",
+        "linux_grant_request",
+        "linux_grant_revoke",
+        "linux_session_create",
+        "linux_session_exec",
+        "linux_session_close",
     )
 
     val ARGUMENT_DEPENDENT: Set<String> = setOf("memory_tool")

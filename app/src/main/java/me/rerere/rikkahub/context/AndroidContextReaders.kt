@@ -17,6 +17,18 @@ import java.security.MessageDigest
 import me.rerere.rikkahub.service.RikkaAccessibilityService
 import me.rerere.rikkahub.service.RikkaNotificationListenerService
 
+internal const val BATTERY_REMINDER_THRESHOLD_PERCENT = 20
+
+/**
+ * Battery data is useful only when it calls for action. Do not put a normal charge level into
+ * automatic model context: otherwise the model tends to turn an observation such as "93% and
+ * charging" into an unsolicited reminder on every turn.
+ */
+internal fun shouldExposeBatteryReminder(
+    percent: Int?,
+    charging: Boolean,
+): Boolean = percent != null && percent <= BATTERY_REMINDER_THRESHOLD_PERCENT && !charging
+
 class AndroidAccessibilityContextReader(
     context: Context,
 ) : ContextSourceReader {
@@ -180,9 +192,10 @@ class AndroidDeviceStatusContextReader(
         val interactive = appContext.getSystemService(PowerManager::class.java)?.isInteractive
         val locked = appContext.getSystemService(KeyguardManager::class.java)?.isDeviceLocked
         val text = buildString {
-            percent?.let { append("battery=").append(it).append("%; ") }
-            append("charging=").append(charging)
-            append("; network=").append(network)
+            if (shouldExposeBatteryReminder(percent, charging)) {
+                append("battery_warning=low; battery=").append(percent).append("%; charging=false; ")
+            }
+            append("network=").append(network)
             interactive?.let { append("; screen_interactive=").append(it) }
             locked?.let { append("; device_locked=").append(it) }
         }
@@ -318,4 +331,3 @@ class AndroidOcrContextReader(
         .take(8)
         .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
 }
-

@@ -2,6 +2,8 @@ package me.rerere.rikkahub.workflow.model
 
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
+import me.rerere.rikkahub.data.capability.CapabilityKey
+import me.rerere.rikkahub.data.capability.ToolCapabilityResolver
 
 /**
  * Single action in a workflow. Identical wire shape to scheduled-jobs direct-mode actions —
@@ -62,7 +64,24 @@ data class WorkflowDefinition(
      * always have this set via the ToolInvocationContext propagation in workflow_create.
      */
     val authoringAssistantId: String? = null,
+    /**
+     * Capability keys captured when the workflow was created or updated. Runtime execution may
+     * only use this fixed set; editing actions through workflow_update produces a new reviewed
+     * snapshot rather than silently inheriting all of the author's current tools.
+     */
+    val capabilitySnapshot: Set<String> = emptySet(),
 )
+
+object WorkflowCapabilitySnapshot {
+    fun capture(actions: List<WorkflowAction>): Set<String> = actions
+        .flatMap { action -> ToolCapabilityResolver.resolve(action.tool, action.args).capabilities }
+        .map(CapabilityKey::value)
+        .toSortedSet()
+
+    fun parse(snapshot: Set<String>): Set<CapabilityKey> = snapshot.mapNotNull { raw ->
+        runCatching { CapabilityKey.of(raw) }.getOrNull()
+    }.toSet()
+}
 
 /**
  * One row of fire history.

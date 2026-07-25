@@ -89,6 +89,7 @@ import me.rerere.rikkahub.data.ai.execution.ToolBatchCandidate
 import me.rerere.rikkahub.data.ai.execution.ToolBatchExecutionOutcome
 import me.rerere.rikkahub.data.ai.execution.ToolExecutionBatchCoordinator
 import me.rerere.rikkahub.data.ai.tools.ToolExecutionContext
+import me.rerere.rikkahub.data.capability.CapabilitySubject
 import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.datastore.findModelById
 import me.rerere.rikkahub.data.datastore.findProvider
@@ -415,9 +416,11 @@ class GenerationHandler(
         inputTransformers: List<InputMessageTransformer> = emptyList(),
         outputTransformers: List<OutputMessageTransformer> = emptyList(),
         assistant: Assistant,
-        // Privilege / surface overrides from ChatService (kept for API compatibility).
-        // Gate evaluation still prefers assistant.unrestricted when this is not used below.
+        // Privilege / surface override from ChatService. It is deliberately never sourced from
+        // Assistant.unrestricted; that field is now a migration marker only.
         unrestrictedOverride: Boolean = false,
+        capabilitySubject: CapabilitySubject? = null,
+        selectedPrivilegedConversation: Boolean = false,
         memories: List<AssistantMemory>? = null,
         tools: List<Tool> = emptyList(),
         /** False for a restricted child profile that did not inherit `memory_tool`. */
@@ -1433,6 +1436,8 @@ class GenerationHandler(
                                     conversationId = conversationId,
                                     assistantId = assistant.id.toString(),
                                     callOrigin = callOrigin,
+                                    capabilitySubject = capabilitySubject,
+                                    selectedPrivilegedConversation = selectedPrivilegedConversation,
                                 )
                             } else {
                                 null
@@ -1460,8 +1465,12 @@ class GenerationHandler(
                                             conversationId = conversationId,
                                             commandId = commandId,
                                             arguments = args as? JsonObject,
-                                            unrestrictedOverride = unrestrictedOverride ||
-                                                assistant.unrestricted,
+                                            capabilitySubject = executionContext?.capabilitySubject,
+                                            selectedPrivilegedConversation =
+                                                executionContext?.selectedPrivilegedConversation == true,
+                                            frozenCapabilities =
+                                                executionContext?.frozenCapabilities.orEmpty(),
+                                            unrestrictedOverride = unrestrictedOverride,
                                         )) {
                                             ToolExecutionGate.GateResult.Allowed ->
                                                 ToolPreExecutionDecision.Allow
@@ -1629,8 +1638,11 @@ class GenerationHandler(
                                     conversationId = conversationId,
                                     commandId = commandId,
                                     arguments = ready.args,
-                                    unrestrictedOverride = unrestrictedOverride ||
-                                        assistant.unrestricted,
+                                    capabilitySubject = ready.executionContext.capabilitySubject,
+                                    selectedPrivilegedConversation =
+                                        ready.executionContext.selectedPrivilegedConversation,
+                                    frozenCapabilities = ready.executionContext.frozenCapabilities,
+                                    unrestrictedOverride = unrestrictedOverride,
                                 )) {
                                     ToolExecutionGate.GateResult.Allowed ->
                                         ToolPreExecutionDecision.Allow
@@ -1915,6 +1927,8 @@ class GenerationHandler(
                                     conversationId = conversationId,
                                     assistantId = assistant.id.toString(),
                                     callOrigin = callOrigin,
+                                    capabilitySubject = capabilitySubject,
+                                    selectedPrivilegedConversation = selectedPrivilegedConversation,
                                 )
                             } else {
                                 null

@@ -13,12 +13,22 @@ data class TermuxStopAllResult(
 
 interface TermuxSessionEmergencyController {
     suspend fun stopAllAgentSessions(): TermuxStopAllResult
+    suspend fun stopOwnedSessions(sessionPrefix: String): TermuxStopAllResult
 }
 
 class AndroidTermuxSessionEmergencyController(
     private val context: Context,
 ) : TermuxSessionEmergencyController {
     override suspend fun stopAllAgentSessions(): TermuxStopAllResult {
+        return stopMatchingSessions { true }
+    }
+
+    override suspend fun stopOwnedSessions(sessionPrefix: String): TermuxStopAllResult {
+        require(sessionPrefix.startsWith("rk_su_")) { "Invalid owned-session prefix" }
+        return stopMatchingSessions { it.startsWith(sessionPrefix) }
+    }
+
+    private suspend fun stopMatchingSessions(matches: (String) -> Boolean): TermuxStopAllResult {
         return when (TermuxIntegration.state(context)) {
             TermuxIntegration.State.NOT_INSTALLED -> TermuxStopAllResult(
                 ok = true,
@@ -37,7 +47,7 @@ class AndroidTermuxSessionEmergencyController(
             TermuxIntegration.State.READY -> stopAgentTermuxSessions(
                 listSessions = {
                     when (val result = tmux(context, TmuxOps.listArgv())) {
-                        is CaptureResult.Success -> parseSessions(result.stdout).map { it.name }
+                        is CaptureResult.Success -> parseSessions(result.stdout).map { it.name }.filter(matches)
                         is CaptureResult.OtherError -> if (isSessionNotFound(result.message)) emptyList() else error(result.message)
                         CaptureResult.Denied -> error("Termux RUN_COMMAND permission denied")
                         CaptureResult.Timeout -> error("Timed out listing Termux sessions")

@@ -10,6 +10,7 @@ import me.rerere.rikkahub.data.repository.FilesRepository
 import me.rerere.rikkahub.data.repository.GenMediaRepository
 import me.rerere.rikkahub.data.repository.MemoryRepository
 import me.rerere.rikkahub.data.repository.WorkspaceRepository
+import me.rerere.rikkahub.data.files.SharedExchangeDirectory
 import me.rerere.workspace.ProotShellRunner
 import me.rerere.workspace.RootfsInstaller
 import me.rerere.workspace.WorkspaceBindMount
@@ -47,14 +48,14 @@ val repositoryModule = module {
         val context: Context = get()
         ProotShellRunner(
             nativeLibraryDir = File(context.applicationInfo.nativeLibraryDir),
+            sharedStorageBindMount = WorkspaceBindMount(
+                source = android.os.Environment.getExternalStorageDirectory(),
+                target = "/sdcard",
+            ),
             extraBindMounts = listOf(
                 WorkspaceBindMount(
                     source = File(context.filesDir, FileFolders.SKILLS).apply { mkdirs() },
                     target = "/skills",
-                ),
-                WorkspaceBindMount(
-                    source = android.os.Environment.getExternalStorageDirectory(),
-                    target = "/sdcard",
                 ),
                 WorkspaceBindMount(
                     source = File(context.filesDir, FileFolders.TOOL_OUTPUTS).apply { mkdirs() },
@@ -68,6 +69,10 @@ val repositoryModule = module {
         val context: Context = get()
         WorkspaceManager(
             baseDir = File(context.filesDir, "workspaces"),
+            sharedFilesBaseDir = File(
+                android.os.Environment.getExternalStorageDirectory(),
+                "${SharedExchangeDirectory.DIRECTORY_NAME}/workspaces",
+            ),
             shellRunner = get<ProotShellRunner>(),
         )
     }

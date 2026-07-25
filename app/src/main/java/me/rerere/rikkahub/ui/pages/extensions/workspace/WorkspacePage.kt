@@ -22,6 +22,8 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LargeFlexibleTopAppBar
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Button
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -54,6 +56,7 @@ import me.rerere.rikkahub.ui.context.LocalNavController
 import me.rerere.rikkahub.ui.theme.CustomColors
 import me.rerere.rikkahub.utils.plus
 import org.koin.androidx.compose.koinViewModel
+import me.rerere.workspace.WorkspaceStorageMode
 
 @Composable
 fun WorkspacePage(vm: WorkspaceVM = koinViewModel()) {
@@ -63,6 +66,7 @@ fun WorkspacePage(vm: WorkspaceVM = koinViewModel()) {
     var showAddDialog by rememberSaveable { mutableStateOf(false) }
     var editTarget by remember { mutableStateOf<WorkspaceEntity?>(null) }
     var deleteTarget by remember { mutableStateOf<WorkspaceEntity?>(null) }
+    var storageToggleTarget by remember { mutableStateOf<WorkspaceEntity?>(null) }
 
     Scaffold(
         topBar = {
@@ -97,6 +101,7 @@ fun WorkspacePage(vm: WorkspaceVM = koinViewModel()) {
                     workspace = workspace,
                     onRename = { editTarget = workspace },
                     onDelete = { deleteTarget = workspace },
+                    onToggleStorage = { storageToggleTarget = workspace },
                     onOpen = { navController.navigate(Screen.WorkspaceDetail(workspace.id)) },
                 )
             }
@@ -107,10 +112,11 @@ fun WorkspacePage(vm: WorkspaceVM = koinViewModel()) {
         EditWorkspaceDialog(
             title = stringResource(R.string.workspace_page_create),
             initialName = "",
+            allowStorageMode = true,
             existingNames = workspaces.map { it.name.trim() }.toSet(),
             onDismiss = { showAddDialog = false },
-            onConfirm = { name ->
-                vm.create(name)
+            onConfirm = { name, storageMode ->
+                vm.create(name, storageMode)
                 showAddDialog = false
             },
         )
@@ -122,7 +128,7 @@ fun WorkspacePage(vm: WorkspaceVM = koinViewModel()) {
             initialName = workspace.name,
             existingNames = workspaces.filter { it.id != workspace.id }.map { it.name.trim() }.toSet(),
             onDismiss = { editTarget = null },
-            onConfirm = { name ->
+            onConfirm = { name, _ ->
                 vm.rename(workspace, name)
                 editTarget = null
             },
@@ -141,6 +147,32 @@ fun WorkspacePage(vm: WorkspaceVM = koinViewModel()) {
         onDismiss = { deleteTarget = null },
     ) {
         Text(stringResource(R.string.workspace_page_delete_confirm))
+    }
+
+    val storageTarget = storageToggleTarget
+    val targetMode = if (storageTarget?.storageMode == WorkspaceStorageMode.SHARED.name) {
+        WorkspaceStorageMode.PRIVATE
+    } else {
+        WorkspaceStorageMode.SHARED
+    }
+    RikkaConfirmDialog(
+        show = storageTarget != null,
+        title = stringResource(R.string.workspace_page_change_storage),
+        confirmText = stringResource(R.string.common_save),
+        dismissText = stringResource(R.string.common_cancel),
+        onConfirm = {
+            storageTarget?.let { vm.changeStorageMode(it, targetMode) }
+            storageToggleTarget = null
+        },
+        onDismiss = { storageToggleTarget = null },
+    ) {
+        Text(stringResource(
+            if (targetMode == WorkspaceStorageMode.SHARED) {
+                R.string.workspace_page_change_storage_shared_confirm
+            } else {
+                R.string.workspace_page_change_storage_private_confirm
+            },
+        ))
     }
 }
 
@@ -177,6 +209,7 @@ private fun WorkspaceCard(
     workspace: WorkspaceEntity,
     onRename: () -> Unit,
     onDelete: () -> Unit,
+    onToggleStorage: () -> Unit,
     onOpen: () -> Unit,
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
@@ -231,6 +264,14 @@ private fun WorkspaceCard(
                         onDismissRequest = { menuExpanded = false },
                     ) {
                         DropdownMenuItem(
+                            text = { Text(stringResource(R.string.workspace_page_change_storage)) },
+                            leadingIcon = { Icon(HugeIcons.File02, contentDescription = null) },
+                            onClick = {
+                                menuExpanded = false
+                                onToggleStorage()
+                            },
+                        )
+                        DropdownMenuItem(
                             text = { Text(stringResource(R.string.common_rename)) },
                             leadingIcon = { Icon(HugeIcons.Edit01, contentDescription = null) },
                             onClick = {
@@ -263,11 +304,14 @@ private fun WorkspaceCard(
 private fun EditWorkspaceDialog(
     title: String,
     initialName: String,
+    allowStorageMode: Boolean = false,
     existingNames: Set<String>,
     onDismiss: () -> Unit,
-    onConfirm: (String) -> Unit,
+    onConfirm: (String, WorkspaceStorageMode) -> Unit,
 ) {
     var name by rememberSaveable(initialName) { mutableStateOf(initialName) }
+    var storageModeName by rememberSaveable { mutableStateOf(WorkspaceStorageMode.PRIVATE.name) }
+    val storageMode = WorkspaceStorageMode.valueOf(storageModeName)
     val trimmedName = name.trim()
     val isDuplicate = trimmedName.isNotEmpty() && trimmedName in existingNames
 
@@ -275,21 +319,29 @@ private fun EditWorkspaceDialog(
         onDismissRequest = onDismiss,
         title = { Text(title) },
         text = {
-            OutlinedTextField(
-                value = name,
-                onValueChange = { name = it },
-                modifier = Modifier.fillMaxWidth(),
-                label = { Text(stringResource(R.string.workspace_page_name)) },
-                singleLine = true,
-                isError = isDuplicate,
-                supportingText = if (isDuplicate) {
-                    { Text(stringResource(R.string.workspace_page_name_duplicate)) }
-                } else null,
-            )
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text(stringResource(R.string.workspace_page_name)) },
+                    singleLine = true,
+                    isError = isDuplicate,
+                    supportingText = if (isDuplicate) {
+                        { Text(stringResource(R.string.workspace_page_name_duplicate)) }
+                    } else null,
+                )
+                if (allowStorageMode) {
+                    WorkspaceStorageModeSelector(
+                        selected = storageMode,
+                        onSelected = { storageModeName = it.name },
+                    )
+                }
+            }
         },
         confirmButton = {
             TextButton(
-                onClick = { onConfirm(trimmedName) },
+                onClick = { onConfirm(trimmedName, storageMode) },
                 enabled = name.isNotBlank() && !isDuplicate,
             ) {
                 Text(stringResource(R.string.common_save))
@@ -301,4 +353,47 @@ private fun EditWorkspaceDialog(
             }
         },
     )
+}
+
+@Composable
+private fun WorkspaceStorageModeSelector(
+    selected: WorkspaceStorageMode,
+    onSelected: (WorkspaceStorageMode) -> Unit,
+) {
+    Text(stringResource(R.string.workspace_page_storage_mode))
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        StorageModeButton(
+            label = stringResource(R.string.workspace_page_storage_private),
+            selected = selected == WorkspaceStorageMode.PRIVATE,
+            onClick = { onSelected(WorkspaceStorageMode.PRIVATE) },
+        )
+        StorageModeButton(
+            label = stringResource(R.string.workspace_page_storage_shared),
+            selected = selected == WorkspaceStorageMode.SHARED,
+            onClick = { onSelected(WorkspaceStorageMode.SHARED) },
+        )
+    }
+    Text(
+        text = stringResource(
+            if (selected == WorkspaceStorageMode.PRIVATE) {
+                R.string.workspace_page_storage_private_desc
+            } else {
+                R.string.workspace_page_storage_shared_desc
+            },
+        ),
+        style = MaterialTheme.typography.bodySmall,
+    )
+}
+
+@Composable
+private fun StorageModeButton(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    if (selected) {
+        Button(onClick = onClick) { Text(label) }
+    } else {
+        OutlinedButton(onClick = onClick) { Text(label) }
+    }
 }

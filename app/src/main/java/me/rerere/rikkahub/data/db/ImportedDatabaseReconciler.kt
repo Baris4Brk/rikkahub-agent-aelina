@@ -47,12 +47,35 @@ object ImportedDatabaseReconciler {
 
     /**
      * Room's schema version and identity hash for [AppDatabase]. Both are copied verbatim
-     * from app/schemas/me.rerere.rikkahub.data.db.AppDatabase/34.json. When the schema
+     * from app/schemas/me.rerere.rikkahub.data.db.AppDatabase/35.json. When the schema
      * version is bumped, update BOTH constants (and the table DDL below if the fork-only
      * tables changed) or this reconciliation will silently stop matching.
      */
-    internal const val EXPECTED_VERSION = 34
-    internal const val EXPECTED_IDENTITY_HASH = "48ec748cc533a47fb0dbcd3431c17ebe"
+    internal const val EXPECTED_VERSION = 35
+    internal const val EXPECTED_IDENTITY_HASH = "53663bb60a5992f648e8aa97364d1b07"
+    internal const val PRE_STORAGE_MODE_V35_IDENTITY_HASH = "2a74d694211f0df9f9094c7571ec71dd"
+
+    internal enum class ReconcilePlan {
+        SKIP,
+        CURRENT_V35_DELTA,
+        FULL_COMPATIBILITY,
+    }
+
+    /**
+     * Same-version development builds cannot use a Room migration. Recognise the one v35
+     * schema that was installed before workspace storage_mode was added and apply only that
+     * additive delta. This path must not touch MemoryEntity: its FTS5 triggers are backed by
+     * the bundled requery SQLite runtime, while this pre-Room reconciler necessarily opens the
+     * file through the device framework SQLite (which does not provide FTS5 on some devices).
+     */
+    internal fun reconcilePlan(version: Int, identityHash: String?): ReconcilePlan = when {
+        version > EXPECTED_VERSION -> ReconcilePlan.SKIP
+        version == EXPECTED_VERSION && identityHash == EXPECTED_IDENTITY_HASH ->
+            ReconcilePlan.SKIP
+        version == EXPECTED_VERSION && identityHash == PRE_STORAGE_MODE_V35_IDENTITY_HASH ->
+            ReconcilePlan.CURRENT_V35_DELTA
+        else -> ReconcilePlan.FULL_COMPATIBILITY
+    }
 
     /**
      * Fork-only tables absent from an upstream backup, with their exact current create + index
@@ -72,6 +95,15 @@ object ImportedDatabaseReconciler {
         "CREATE INDEX IF NOT EXISTS `idx_runs_kind_dom` ON `agent_runs` (`kind`, `domain_id`)",
         "CREATE INDEX IF NOT EXISTS `idx_runs_parent` ON `agent_runs` (`parent_run_id`)",
         "CREATE INDEX IF NOT EXISTS `idx_runs_updated_at` ON `agent_runs` (`updated_at_ms`)",
+        "CREATE TABLE IF NOT EXISTS `execution_records` (`id` TEXT NOT NULL, `trace_id` TEXT NOT NULL, `parent_execution_id` TEXT, `command_id` TEXT, `conversation_id` TEXT, `subject_id` TEXT NOT NULL, `subject_type` TEXT NOT NULL, `origin` TEXT NOT NULL, `capability_keys` TEXT NOT NULL, `resource_summary` TEXT NOT NULL, `runtime` TEXT NOT NULL, `idempotency_key` TEXT, `runtime_handle_summary` TEXT, `status` TEXT NOT NULL, `created_at_ms` INTEGER NOT NULL, `updated_at_ms` INTEGER NOT NULL, `started_at_ms` INTEGER, `heartbeat_at_ms` INTEGER, `finished_at_ms` INTEGER, `cancellation_result` TEXT, `terminal_detail` TEXT, PRIMARY KEY(`id`))",
+        "CREATE INDEX IF NOT EXISTS `idx_execution_records_status` ON `execution_records` (`status`)",
+        "CREATE INDEX IF NOT EXISTS `idx_execution_records_trace` ON `execution_records` (`trace_id`)",
+        "CREATE INDEX IF NOT EXISTS `idx_execution_records_parent` ON `execution_records` (`parent_execution_id`)",
+        "CREATE INDEX IF NOT EXISTS `idx_execution_records_idempotency` ON `execution_records` (`idempotency_key`)",
+        "CREATE INDEX IF NOT EXISTS `idx_execution_records_updated` ON `execution_records` (`updated_at_ms`)",
+        "CREATE TABLE IF NOT EXISTS `capability_grants` (`id` TEXT NOT NULL, `subject_id` TEXT NOT NULL, `subject_type` TEXT NOT NULL, `capability_key` TEXT NOT NULL, `resource_kind` TEXT NOT NULL, `resource_identifier` TEXT NOT NULL, `allowed_origins` TEXT NOT NULL, `scope` TEXT NOT NULL, `expires_at_ms` INTEGER, `revoked` INTEGER NOT NULL, `created_at_ms` INTEGER NOT NULL, `updated_at_ms` INTEGER NOT NULL, PRIMARY KEY(`id`))",
+        "CREATE INDEX IF NOT EXISTS `idx_capability_grants_subject` ON `capability_grants` (`subject_id`, `subject_type`)",
+        "CREATE INDEX IF NOT EXISTS `idx_capability_grants_active` ON `capability_grants` (`revoked`, `expires_at_ms`)",
         "CREATE TABLE IF NOT EXISTS `alarms` (`id` TEXT NOT NULL, `label` TEXT NOT NULL, `note` TEXT, `scheduleType` TEXT NOT NULL, `time` TEXT, `hour` INTEGER, `minute` INTEGER, `daysOfWeek` TEXT, `timezone` TEXT NOT NULL, `enabled` INTEGER NOT NULL, `vibrate` INTEGER NOT NULL, `createdAtMs` INTEGER NOT NULL, `updatedAtMs` INTEGER NOT NULL, `lastFiredAtMs` INTEGER, `nextFireAtMs` INTEGER, PRIMARY KEY(`id`))",
         "DROP INDEX IF EXISTS `index_alarms_enabled_nextFireAtMs`",
         "CREATE TABLE IF NOT EXISTS `pending_chat_commands` (" +
@@ -304,6 +336,25 @@ object ImportedDatabaseReconciler {
         ).forEach(db::execSQL)
     }
 
+    private fun ensureExecutionV35Schema(db: SQLiteDatabase) {
+        listOf(
+            "CREATE TABLE IF NOT EXISTS `execution_records` (`id` TEXT NOT NULL, `trace_id` TEXT NOT NULL, `parent_execution_id` TEXT, `command_id` TEXT, `conversation_id` TEXT, `subject_id` TEXT NOT NULL, `subject_type` TEXT NOT NULL, `origin` TEXT NOT NULL, `capability_keys` TEXT NOT NULL, `resource_summary` TEXT NOT NULL, `runtime` TEXT NOT NULL, `idempotency_key` TEXT, `runtime_handle_summary` TEXT, `status` TEXT NOT NULL, `created_at_ms` INTEGER NOT NULL, `updated_at_ms` INTEGER NOT NULL, `started_at_ms` INTEGER, `heartbeat_at_ms` INTEGER, `finished_at_ms` INTEGER, `cancellation_result` TEXT, `terminal_detail` TEXT, PRIMARY KEY(`id`))",
+            "CREATE INDEX IF NOT EXISTS `idx_execution_records_status` ON `execution_records` (`status`)",
+            "CREATE INDEX IF NOT EXISTS `idx_execution_records_trace` ON `execution_records` (`trace_id`)",
+            "CREATE INDEX IF NOT EXISTS `idx_execution_records_parent` ON `execution_records` (`parent_execution_id`)",
+            "CREATE INDEX IF NOT EXISTS `idx_execution_records_idempotency` ON `execution_records` (`idempotency_key`)",
+            "CREATE INDEX IF NOT EXISTS `idx_execution_records_updated` ON `execution_records` (`updated_at_ms`)",
+        ).forEach(db::execSQL)
+    }
+
+    private fun ensureCapabilityGrantsV35Schema(db: SQLiteDatabase) {
+        listOf(
+            "CREATE TABLE IF NOT EXISTS `capability_grants` (`id` TEXT NOT NULL, `subject_id` TEXT NOT NULL, `subject_type` TEXT NOT NULL, `capability_key` TEXT NOT NULL, `resource_kind` TEXT NOT NULL, `resource_identifier` TEXT NOT NULL, `allowed_origins` TEXT NOT NULL, `scope` TEXT NOT NULL, `expires_at_ms` INTEGER, `revoked` INTEGER NOT NULL, `created_at_ms` INTEGER NOT NULL, `updated_at_ms` INTEGER NOT NULL, PRIMARY KEY(`id`))",
+            "CREATE INDEX IF NOT EXISTS `idx_capability_grants_subject` ON `capability_grants` (`subject_id`, `subject_type`)",
+            "CREATE INDEX IF NOT EXISTS `idx_capability_grants_active` ON `capability_grants` (`revoked`, `expires_at_ms`)",
+        ).forEach(db::execSQL)
+    }
+
     private fun rebuildPortableMemoryFts(db: SQLiteDatabase) {
         db.execSQL("DROP TRIGGER IF EXISTS memory_fts_ai")
         db.execSQL("DROP TRIGGER IF EXISTS memory_fts_au")
@@ -330,6 +381,40 @@ object ImportedDatabaseReconciler {
         }
     }
 
+    private fun readRoomIdentityHash(db: SQLiteDatabase): String? = runCatching {
+        db.rawQuery(
+            "SELECT identity_hash FROM room_master_table WHERE id = 42",
+            null,
+        ).use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
+    }.getOrNull()
+
+    private fun stampCurrentIdentity(db: SQLiteDatabase) {
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY, identity_hash TEXT)",
+        )
+        db.execSQL(
+            "INSERT OR REPLACE INTO room_master_table (id, identity_hash) VALUES (42, ?)",
+            arrayOf(EXPECTED_IDENTITY_HASH),
+        )
+    }
+
+    private fun reconcileCurrentV35Delta(db: SQLiteDatabase) {
+        db.beginTransaction()
+        try {
+            ensureColumns(
+                db,
+                "workspaces",
+                listOf("storage_mode" to "TEXT NOT NULL DEFAULT 'PRIVATE'"),
+            )
+            ensureExecutionV35Schema(db)
+            ensureCapabilityGrantsV35Schema(db)
+            stampCurrentIdentity(db)
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
     /**
      * Call after a restore has written the database file, and only when the restore actually
      * included the database. Safe to call when the file is a genuine agent backup (every
@@ -348,9 +433,26 @@ object ImportedDatabaseReconciler {
                 SQLiteDatabase.OPEN_READWRITE,
             ).use { db ->
                 val version = db.version // PRAGMA user_version
-                if (version > EXPECTED_VERSION) {
-                    Log.w(TAG, "reconcile: backup db version $version is newer than $EXPECTED_VERSION; leaving untouched")
-                    return
+                val identityHash = readRoomIdentityHash(db)
+                when (reconcilePlan(version, identityHash)) {
+                    ReconcilePlan.SKIP -> {
+                        if (version > EXPECTED_VERSION) {
+                            Log.w(
+                                TAG,
+                                "reconcile: backup db version $version is newer than " +
+                                    "$EXPECTED_VERSION; leaving untouched",
+                            )
+                        } else {
+                            Log.i(TAG, "reconcile: current schema already verified; skipping")
+                        }
+                        return
+                    }
+                    ReconcilePlan.CURRENT_V35_DELTA -> {
+                        reconcileCurrentV35Delta(db)
+                        Log.i(TAG, "reconcile: applied same-version v35 workspace-storage delta")
+                        return
+                    }
+                    ReconcilePlan.FULL_COMPATIBILITY -> Unit
                 }
 
                 db.beginTransaction()
@@ -368,6 +470,15 @@ object ImportedDatabaseReconciler {
                     if (version >= 32) ensureMemoryV32Schema(db)
                     if (version >= 33) ensureMemoryV33Schema(db)
                     if (version >= 34) ensureBrowserV34Schema(db)
+                    if (version >= 35) {
+                        ensureColumns(
+                            db,
+                            "workspaces",
+                            listOf("storage_mode" to "TEXT NOT NULL DEFAULT 'PRIVATE'"),
+                        )
+                        ensureExecutionV35Schema(db)
+                        ensureCapabilityGrantsV35Schema(db)
+                    }
 
                     // Older backups must keep their original user_version so Room can run
                     // every real migration (including 28→29). Precreating fork-only tables
@@ -376,13 +487,7 @@ object ImportedDatabaseReconciler {
                     // database already at the current Room version receives the fork identity
                     // hash, because Room will not run a migration in that case.
                     if (version == EXPECTED_VERSION) {
-                        db.execSQL(
-                            "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY, identity_hash TEXT)"
-                        )
-                        db.execSQL(
-                            "INSERT OR REPLACE INTO room_master_table (id, identity_hash) VALUES (42, ?)",
-                            arrayOf(EXPECTED_IDENTITY_HASH),
-                        )
+                        stampCurrentIdentity(db)
                     } else {
                         Log.i(TAG, "reconcile: kept older user_version=$version for Room migrations")
                     }

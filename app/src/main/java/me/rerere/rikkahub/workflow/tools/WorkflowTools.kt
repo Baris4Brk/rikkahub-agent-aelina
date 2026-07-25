@@ -14,6 +14,7 @@ import me.rerere.ai.core.Tool
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.rikkahub.workflow.execution.WorkflowEngine
 import me.rerere.rikkahub.workflow.model.WorkflowDefinition
+import me.rerere.rikkahub.workflow.model.WorkflowCapabilitySnapshot
 import me.rerere.rikkahub.workflow.model.WorkflowJson
 import me.rerere.rikkahub.workflow.repository.WorkflowRepository
 import me.rerere.rikkahub.workflow.trigger.TriggerRegistry
@@ -120,6 +121,7 @@ fun workflowCreateTool(
                 val def = parsed.definition.copy(
                     authoringAssistantId = parsed.definition.authoringAssistantId
                         ?: callerContext.callerAssistantId,
+                    capabilitySnapshot = WorkflowCapabilitySnapshot.capture(parsed.definition.actions),
                 )
                 runCatching { repository.upsert(def) }.fold(
                     onSuccess = {
@@ -267,6 +269,7 @@ fun workflowUpdateTool(
                     authoringAssistantId = existing.definition.authoringAssistantId
                         ?: parsed.definition.authoringAssistantId
                         ?: callerContext.callerAssistantId,
+                    capabilitySnapshot = WorkflowCapabilitySnapshot.capture(parsed.definition.actions),
                 )
                 runCatching { repository.upsert(def) }.fold(
                     onSuccess = {

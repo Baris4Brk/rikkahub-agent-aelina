@@ -9,6 +9,7 @@ data class ManagedWorkspaceProcessContext(
     val filesDir: File,
     val linuxDir: File,
     val tempDir: File,
+    val allowSharedStorage: Boolean = false,
 )
 
 interface ManagedWorkspaceProcessLauncher {

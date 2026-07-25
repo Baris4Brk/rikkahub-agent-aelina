@@ -1604,6 +1604,14 @@ mDNS 地址：使用 .local 主机名，同一网络中的其他设备可通过�
   <string name="workspace_page_empty">暂无工作区</string>
   <string name="workspace_page_empty_desc">创建一个以使用文件工具和沙箱环境</string>
   <string name="workspace_page_name">名称</string>
+  <string name="workspace_page_storage_mode">文件存储</string>
+  <string name="workspace_page_storage_private">私有</string>
+  <string name="workspace_page_storage_shared">共享</string>
+  <string name="workspace_page_storage_private_desc">文件保存在应用私有目录，适合密钥；Termux 不能直接读取。</string>
+  <string name="workspace_page_storage_shared_desc">文件位于 RikkaHubExchange/workspaces，RikkaHub、Termux 和 PRoot 零复制共用。</string>
+  <string name="workspace_page_change_storage">切换文件存储</string>
+  <string name="workspace_page_change_storage_shared_confirm">把工作区文件树移动到共享存储；此后 RikkaHub、Termux 和 PRoot 将直接使用同一份文件。</string>
+  <string name="workspace_page_change_storage_private_confirm">把工作区文件树移回应用私有存储；此后 Termux 将不能直接读取这些文件。</string>
   <string name="workspace_detail_title">工作区详情</string>
   <string name="workspace_detail_tab_basic">基本</string>
   <string name="workspace_detail_tab_files">文件</string>
@@ -2034,6 +2042,9 @@ mDNS 地址：使用 .local 主机名，同一网络中的其他设备可通过�
   <string name="browser_next_external_app_confirm">打开应用</string>
   <string name="assistant_unrestricted_mode">不受限模式</string>
   <string name="assistant_unrestricted_mode_desc">仅允许该助手绕过可配置的审批检查；紧急停止、锁屏限制、敏感动作拦截和受限调用面仍然有效。</string>
+  <string name="assistant_second_user_local_policy">第二用户本机策略</string>
+  <string name="assistant_second_user_local_policy_desc">仅对选定的第二用户会话，在已解锁的本机入口自动通过审批。远程、Web、Telegram、插件、MCP、安全控制和永久安全边界仍彼此独立。</string>
+  <string name="assistant_second_user_local_policy_migration_desc">此助手曾使用旧版“不受限”设置。请确认选定的本机第二用户会话以完成迁移；旧设置不再提供运行时绕过。</string>
   <string name="setting_page_alarm">闹钟</string>
   <string name="setting_page_alarm_desc">管理由助手创建的闹钟。</string>
   <string name="setting_page_emergency_stop">安全与紧急停止</string>

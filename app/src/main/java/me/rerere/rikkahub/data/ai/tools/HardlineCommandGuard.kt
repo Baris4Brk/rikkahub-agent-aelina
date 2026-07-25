@@ -184,7 +184,9 @@ object HardlineCommandGuard {
         selfPreservationPolicy: SelfPreservationPolicy,
     ): String? {
         return when {
-            toolName == "termux_run_command" -> {
+            toolName == "termux_run_command" ||
+                toolName == "external_bridge_run_command" ||
+                toolName == "privileged_run_command" -> {
                 val cmd = input["command"]?.jsonPrimitive?.contentOrNull
                 checkCommand(cmd, selfPreservationPolicy)?.let { return it }
                 val exe = input["executable"]?.jsonPrimitive?.contentOrNull
@@ -197,6 +199,11 @@ object HardlineCommandGuard {
             }
             toolName == "workspace_shell" ->
                 checkCommand(input["command"]?.jsonPrimitive?.contentOrNull, selfPreservationPolicy)
+            // An interactive Termux session still executes arbitrary shell text. It is not a
+            // sandbox escape hatch: inspect the exact input field rather than pretending it is
+            // a structured command. Starting a session itself carries no command payload.
+            toolName == "termux_session_send" ->
+                checkCommand(input["input"]?.jsonPrimitive?.contentOrNull, selfPreservationPolicy)
             toolName == "ssh_exec" || toolName == "ssh_exec_saved" ->
                 checkCommand(input["command"]?.jsonPrimitive?.contentOrNull, selfPreservationPolicy)
             // Sub-agent dispatch — the spawned LLM gets the parent's full tool surface

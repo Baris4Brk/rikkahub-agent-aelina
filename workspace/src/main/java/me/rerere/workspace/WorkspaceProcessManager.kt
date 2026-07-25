@@ -57,6 +57,7 @@ class WorkspaceProcessManager(
             command = request.command.trim(),
             cwd = request.cwd.trim(),
             keepAwake = request.keepAwake,
+            allowSharedStorage = request.allowSharedStorage,
             restartPolicy = request.restartPolicy,
             desiredState = WorkspaceDesiredState.RUNNING,
             createdAt = now,
@@ -444,6 +445,7 @@ class WorkspaceProcessManager(
                         filesDir = workspaceManager.filesDir(reservation.workspaceRoot),
                         linuxDir = workspaceManager.linuxDir(reservation.workspaceRoot),
                         tempDir = persistence.processTempDirectory(reservation.workspaceRoot, processId),
+                        allowSharedStorage = reservation.definition.allowSharedStorage,
                     ),
                 )
             }

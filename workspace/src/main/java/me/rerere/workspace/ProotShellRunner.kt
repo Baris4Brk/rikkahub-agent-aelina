@@ -14,6 +14,7 @@ data class WorkspaceBindMount(
 class ProotShellRunner(
     private val nativeLibraryDir: File,
     private val extraBindMounts: List<WorkspaceBindMount> = emptyList(),
+    private val sharedStorageBindMount: WorkspaceBindMount? = null,
     private val patcher: RootfsPatcher = RootfsPatcher(),
 ) : WorkspaceShellRunner, ManagedWorkspaceProcessLauncher {
     private val patchLock = Any()
@@ -53,6 +54,7 @@ class ProotShellRunner(
                 linuxDir = context.linuxDir,
                 cwd = context.prootCwd(),
                 commandText = context.command,
+                allowSharedStorage = context.allowSharedStorage,
             ),
         )
             .directory(context.filesDir)
@@ -87,6 +89,7 @@ class ProotShellRunner(
                 linuxDir = context.linuxDir,
                 cwd = managedProotCwd(context.cwd),
                 commandText = context.command,
+                allowSharedStorage = context.allowSharedStorage,
             ),
         )
             .directory(context.filesDir)
@@ -105,6 +108,7 @@ class ProotShellRunner(
         linuxDir: File,
         cwd: String,
         commandText: String,
+        allowSharedStorage: Boolean = false,
     ): List<String> {
         val command = mutableListOf(
             proot.absolutePath,
@@ -121,6 +125,12 @@ class ProotShellRunner(
 
         extraBindMounts.forEach { mount ->
             if (mount.source.exists()) {
+                command += "-b"
+                command += "${mount.source.absolutePath}:${mount.target.trimEnd('/')}"
+            }
+        }
+        if (allowSharedStorage) {
+            sharedStorageBindMount?.takeIf { it.source.exists() }?.let { mount ->
                 command += "-b"
                 command += "${mount.source.absolutePath}:${mount.target.trimEnd('/')}"
             }

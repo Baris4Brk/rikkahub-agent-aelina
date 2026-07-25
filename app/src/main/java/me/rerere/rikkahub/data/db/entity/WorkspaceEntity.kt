@@ -7,6 +7,7 @@ import androidx.room.PrimaryKey
 import me.rerere.rikkahub.utils.JsonInstant
 import me.rerere.workspace.Workspace
 import me.rerere.workspace.WorkspaceShellStatus
+import me.rerere.workspace.WorkspaceStorageMode
 
 @Entity(
     tableName = "workspaces",
@@ -22,6 +23,8 @@ data class WorkspaceEntity(
     val name: String,
     @ColumnInfo("root")
     val root: String,
+    @ColumnInfo("storage_mode", defaultValue = "'PRIVATE'")
+    val storageMode: String = WorkspaceStorageMode.PRIVATE.name,
     @ColumnInfo("shell_status")
     val shellStatus: String = WorkspaceShellStatus.DISABLED.name,
     @ColumnInfo("created_at")
@@ -42,6 +45,8 @@ data class WorkspaceEntity(
         id = id,
         name = name,
         root = root,
+        storageMode = runCatching { WorkspaceStorageMode.valueOf(storageMode) }
+            .getOrDefault(WorkspaceStorageMode.PRIVATE),
         shellStatus = runCatching { WorkspaceShellStatus.valueOf(shellStatus) }
             .getOrDefault(WorkspaceShellStatus.DISABLED),
         createdAt = createdAt,

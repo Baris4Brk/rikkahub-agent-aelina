@@ -8,6 +8,7 @@ import java.nio.charset.StandardCharsets
 
 class WorkspaceManager(
     private val baseDir: File,
+    private val sharedFilesBaseDir: File? = null,
     private val config: WorkspaceConfig = WorkspaceConfig(),
     private val shellRunner: WorkspaceShellRunner = HostShellRunner(),
 ) {
@@ -17,9 +18,14 @@ class WorkspaceManager(
         baseDir.mkdirs()
     }
 
-    fun ensureWorkspace(root: String): File {
+    fun ensureWorkspace(
+        root: String,
+        storageMode: WorkspaceStorageMode = storageMode(root),
+    ): File {
         val dir = workspaceDir(root)
-        filesDir(root).mkdirs()
+        dir.mkdirs()
+        writeStorageMode(root, storageMode)
+        filesDir(root, storageMode).mkdirs()
         linuxDir(root).mkdirs()
         tempDir(root).mkdirs()
         return dir
@@ -30,7 +36,29 @@ class WorkspaceManager(
         return File(baseDir, root)
     }
 
-    fun filesDir(root: String): File = File(workspaceDir(root), FILES_DIR)
+    fun filesDir(root: String): File = filesDir(root, storageMode(root))
+
+    fun filesDir(root: String, storageMode: WorkspaceStorageMode): File = when (storageMode) {
+        WorkspaceStorageMode.PRIVATE -> File(workspaceDir(root), FILES_DIR)
+        WorkspaceStorageMode.SHARED -> File(
+            requireNotNull(sharedFilesBaseDir) { "Shared workspace storage is not configured" },
+            root,
+        )
+    }
+
+    fun storageMode(root: String): WorkspaceStorageMode {
+        requireValidRoot(root)
+        val raw = File(workspaceDir(root), STORAGE_MODE_FILE).takeIf(File::isFile)?.readText()?.trim()
+        return WorkspaceStorageMode.entries.firstOrNull { it.name == raw }
+            ?: WorkspaceStorageMode.PRIVATE
+    }
+
+    /** Changes only the resolver marker. Callers must move or validate files before invoking it. */
+    fun setStorageMode(root: String, storageMode: WorkspaceStorageMode) {
+        workspaceDir(root).mkdirs()
+        writeStorageMode(root, storageMode)
+        filesDir(root, storageMode).mkdirs()
+    }
 
     fun linuxDir(root: String): File = File(workspaceDir(root), LINUX_DIR)
 
@@ -41,7 +69,13 @@ class WorkspaceManager(
 
     fun hasRootfs(root: String): Boolean = File(linuxDir(root), "bin/sh").isFile
 
-    fun deleteWorkspace(root: String): Boolean = workspaceDir(root).deleteRecursively()
+    fun deleteWorkspace(root: String): Boolean {
+        val files = filesDir(root)
+        val metadata = workspaceDir(root)
+        val filesDeleted = !files.exists() || files.deleteRecursively()
+        val metadataDeleted = !metadata.exists() || metadata.deleteRecursively()
+        return filesDeleted && metadataDeleted
+    }
 
     fun listFiles(
         root: String,
@@ -129,6 +163,7 @@ class WorkspaceManager(
         cwd: String = "",
         timeoutMillis: Long = DEFAULT_COMMAND_TIMEOUT_MS,
         stdin: ByteArray? = null,
+        allowSharedStorage: Boolean = false,
     ): WorkspaceCommandResult {
         require(command.isNotBlank()) { "Command is required" }
         val workingDir = fileSystem.resolve(filesDir(root), cwd)
@@ -146,6 +181,7 @@ class WorkspaceManager(
                 workingDir = workingDir,
                 timeoutMillis = timeoutMillis,
                 stdin = stdin,
+                allowSharedStorage = allowSharedStorage,
             )
         )
     }
@@ -153,6 +189,13 @@ class WorkspaceManager(
     private fun requireValidRoot(root: String) {
         require(root.matches(ROOT_NAME_REGEX)) {
             "Invalid workspace root name: $root"
+        }
+    }
+
+    private fun writeStorageMode(root: String, storageMode: WorkspaceStorageMode) {
+        val marker = File(workspaceDir(root), STORAGE_MODE_FILE)
+        if (!marker.isFile || marker.readText().trim() != storageMode.name) {
+            marker.writeText(storageMode.name)
         }
     }
 
@@ -179,6 +222,7 @@ class WorkspaceManager(
         private const val LINUX_DIR = "linux"
         private const val TEMP_DIR = "tmp"
         private const val MANAGED_PROCESSES_DIR = "managed-processes"
+        private const val STORAGE_MODE_FILE = ".storage-mode"
         const val DEFAULT_COMMAND_TIMEOUT_MS = 30_000L
         private val ROOT_NAME_REGEX = Regex("[A-Za-z0-9._-]+")
     }

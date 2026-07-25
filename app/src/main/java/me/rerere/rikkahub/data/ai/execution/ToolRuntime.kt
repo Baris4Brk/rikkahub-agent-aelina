@@ -19,6 +19,7 @@ import kotlinx.serialization.json.put
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.rikkahub.data.ai.GenerationRunControl
 import me.rerere.rikkahub.data.ai.ToolCallOrigin
+import me.rerere.rikkahub.data.capability.SubjectType
 import me.rerere.rikkahub.data.ai.tools.LegacyToolExecutionHandle
 import me.rerere.rikkahub.data.ai.tools.StartableTool
 import me.rerere.rikkahub.data.ai.tools.ToolCancelReason
@@ -105,6 +106,8 @@ sealed interface ToolExecutionPlanResult {
 }
 
 data class RedactedToolCallContext(
+    /** Model-provided call id, used only to correlate a host-side execution record. */
+    val toolCallId: String = "",
     val toolName: String,
     val effects: Set<ToolEffect>,
     val resourceNamespaces: Set<String>,
@@ -114,6 +117,11 @@ data class RedactedToolCallContext(
     val assistantId: String,
     val conversationId: String,
     val runId: String,
+    /** Principal metadata is host-only; PluginHookBridge intentionally does not serialize it. */
+    val subjectId: String = "",
+    val subjectType: SubjectType? = null,
+    /** Legacy paths can cancel local waiting only and must never be reported as managed. */
+    val legacyExecution: Boolean = false,
 )
 
 sealed interface ToolHookDecision {
@@ -134,8 +142,19 @@ data class RedactedToolLifecycleEvent(
     val context: RedactedToolCallContext,
     val executionId: String? = null,
     val terminationState: ToolTerminationState? = null,
+    /** Stable, non-secret runtime reason (never tool input, output, or exception text). */
+    val detail: String? = null,
 ) {
-    enum class Phase { STARTING, COMPLETED, TIMED_OUT, CANCELLED, FAILED }
+    enum class Phase {
+        STARTING,
+        RUNNING,
+        CANCEL_REQUESTED,
+        TERMINATING,
+        COMPLETED,
+        TIMED_OUT,
+        CANCELLED,
+        FAILED,
+    }
 }
 
 class DefaultToolRuntime(
@@ -180,37 +199,65 @@ class DefaultToolRuntime(
             errorCode = "tool_execution_context_missing",
             detail = "Tool execution requires assistant, conversation, run, and origin identity.",
         )
-        when (val gate = request.preExecutionGate()) {
-            ToolPreExecutionDecision.Allow -> Unit
-            is ToolPreExecutionDecision.Deny -> return ToolExecutionPlanResult.Rejected(
-                errorCode = gate.errorCode,
-                detail = gate.reason,
-            )
-        }
-        val argsObject = request.args as? JsonObject ?: JsonObject(emptyMap())
-        val assessment = assess(ToolAssessmentRequest(request.toolName, argsObject, context))
-        if (!assessment.accepted) {
-            return ToolExecutionPlanResult.Rejected(
-                errorCode = checkNotNull(assessment.errorCode),
-                detail = "No runtime security descriptor exists for this tool.",
-            )
-        }
-        if (request.wallClockBudgetMs == 0L) {
-            return ToolExecutionPlanResult.TimedOut(assessment.policy, executionId = null)
-        }
-
-        val redacted = RedactedToolCallContext(
+        val provisionalRedacted = RedactedToolCallContext(
+            toolCallId = request.toolCallId,
             toolName = request.toolName,
-            effects = assessment.policy.effects,
-            resourceNamespaces = assessment.policy.resourceKeys.mapTo(linkedSetOf()) { it.namespace },
+            effects = setOf(ToolEffect.UNKNOWN),
+            resourceNamespaces = emptySet(),
             origin = context.callOrigin,
             hasConversationOwner = true,
             assistantId = context.assistantId,
             conversationId = context.conversationId.toString(),
             runId = context.runId.toString(),
+            subjectId = context.capabilitySubject?.id.orEmpty(),
+            subjectType = context.capabilitySubject?.type,
+            legacyExecution = request.startableTool == null,
         )
+        when (val gate = request.preExecutionGate()) {
+            ToolPreExecutionDecision.Allow -> Unit
+            is ToolPreExecutionDecision.Deny -> {
+                notifyRejected(provisionalRedacted, gate.errorCode)
+                return ToolExecutionPlanResult.Rejected(
+                    errorCode = gate.errorCode,
+                    detail = gate.reason,
+                )
+            }
+        }
+        val argsObject = request.args as? JsonObject ?: JsonObject(emptyMap())
+        val assessment = assess(ToolAssessmentRequest(request.toolName, argsObject, context))
+        if (!assessment.accepted) {
+            notifyRejected(provisionalRedacted, checkNotNull(assessment.errorCode))
+            return ToolExecutionPlanResult.Rejected(
+                errorCode = checkNotNull(assessment.errorCode),
+                detail = "No runtime security descriptor exists for this tool.",
+            )
+        }
+
+        val redacted = provisionalRedacted.copy(
+            effects = assessment.policy.effects,
+            resourceNamespaces = assessment.policy.resourceKeys.mapTo(linkedSetOf()) { it.namespace },
+        )
+        if (request.wallClockBudgetMs == 0L) {
+            notifyObservers(
+                RedactedToolLifecycleEvent(
+                    phase = RedactedToolLifecycleEvent.Phase.STARTING,
+                    context = redacted,
+                )
+            )
+            notifyObservers(
+                RedactedToolLifecycleEvent(
+                    phase = RedactedToolLifecycleEvent.Phase.TIMED_OUT,
+                    context = redacted,
+                    detail = "wall_clock_timeout_before_start",
+                )
+            )
+            return ToolExecutionPlanResult.TimedOut(assessment.policy, executionId = null)
+        }
         val hookRejection = runInterceptors(redacted)
-        if (hookRejection != null) return hookRejection
+        if (hookRejection != null) {
+            notifyRejected(redacted, hookRejection.errorCode)
+            return hookRejection
+        }
 
         val effectivePolicy = if (request.startableTool == null) {
             assessment.policy.copy(
@@ -221,6 +268,7 @@ class DefaultToolRuntime(
         }
 
         var executionId: String? = null
+        var timeoutTerminationState: ToolTerminationState? = null
         val completed = withTimeoutOrNull(request.wallClockBudgetMs) {
             withPolicyLocks(effectivePolicy) {
                 notifyObservers(
@@ -235,6 +283,13 @@ class DefaultToolRuntime(
                         LegacyToolExecutionHandle(result = deferred)
                     }
                     executionId = handle.executionId
+                    notifyObservers(
+                        RedactedToolLifecycleEvent(
+                            phase = RedactedToolLifecycleEvent.Phase.RUNNING,
+                            context = redacted,
+                            executionId = handle.executionId,
+                        )
+                    )
                     request.runControl?.registerTool(request.toolCallId, handle)
                     try {
                         val output = handle.awaitResult()
@@ -256,15 +311,37 @@ class DefaultToolRuntime(
                             request.runControl?.stoppedBy != null -> ToolCancelReason.USER_STOPPED
                             else -> ToolCancelReason.USER_INTERRUPTED
                         }
-                        val state = cancelHandle(handle, cancelReason)
-                        notifyObservers(
-                            RedactedToolLifecycleEvent(
-                                phase = RedactedToolLifecycleEvent.Phase.CANCELLED,
-                                context = redacted,
-                                executionId = handle.executionId,
-                                terminationState = state,
+                        withContext(NonCancellable) {
+                            notifyObservers(
+                                RedactedToolLifecycleEvent(
+                                    phase = RedactedToolLifecycleEvent.Phase.CANCEL_REQUESTED,
+                                    context = redacted,
+                                    executionId = handle.executionId,
+                                    detail = cancelReason.message,
+                                )
                             )
-                        )
+                            notifyObservers(
+                                RedactedToolLifecycleEvent(
+                                    phase = RedactedToolLifecycleEvent.Phase.TERMINATING,
+                                    context = redacted,
+                                    executionId = handle.executionId,
+                                )
+                            )
+                            val state = cancelHandle(handle, cancelReason)
+                            if (cancelReason == ToolCancelReason.TIMEOUT) {
+                                timeoutTerminationState = state
+                            } else {
+                                notifyObservers(
+                                    RedactedToolLifecycleEvent(
+                                        phase = RedactedToolLifecycleEvent.Phase.CANCELLED,
+                                        context = redacted,
+                                        executionId = handle.executionId,
+                                        terminationState = state,
+                                        detail = cancelReason.message,
+                                    )
+                                )
+                            }
+                        }
                         throw cancelled
                     } catch (failure: Throwable) {
                         notifyObservers(
@@ -272,6 +349,7 @@ class DefaultToolRuntime(
                                 phase = RedactedToolLifecycleEvent.Phase.FAILED,
                                 context = redacted,
                                 executionId = handle.executionId,
+                                detail = failure.javaClass.simpleName,
                             )
                         )
                         throw failure
@@ -288,6 +366,8 @@ class DefaultToolRuntime(
                 phase = RedactedToolLifecycleEvent.Phase.TIMED_OUT,
                 context = redacted,
                 executionId = executionId,
+                terminationState = timeoutTerminationState,
+                detail = "wall_clock_timeout",
             )
         )
         return ToolExecutionPlanResult.TimedOut(effectivePolicy, executionId)
@@ -336,6 +416,25 @@ class DefaultToolRuntime(
                 withTimeoutOrNull(observerTimeoutMs) { observer.onEvent(event) }
             }
         }
+    }
+
+    private suspend fun notifyRejected(
+        context: RedactedToolCallContext,
+        code: String,
+    ) {
+        notifyObservers(
+            RedactedToolLifecycleEvent(
+                phase = RedactedToolLifecycleEvent.Phase.STARTING,
+                context = context,
+            )
+        )
+        notifyObservers(
+            RedactedToolLifecycleEvent(
+                phase = RedactedToolLifecycleEvent.Phase.FAILED,
+                context = context,
+                detail = code.take(120),
+            )
+        )
     }
 
     private suspend fun <T> withPolicyLocks(

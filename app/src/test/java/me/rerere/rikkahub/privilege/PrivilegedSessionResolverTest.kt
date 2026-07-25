@@ -16,10 +16,11 @@ class PrivilegedSessionResolverTest {
         unrestricted = true,
         privilegedConversationId = privilegedConversationId,
         privilegedIdentityName = "第二用户",
+        secondUserPolicyConfirmed = true,
     )
 
     @Test
-    fun `selected local conversation gets expanded tools auto approval and unrestricted execution`() {
+    fun `confirmed selected local conversation gets expanded tools and auto approval without bypass`() {
         val context = DefaultPrivilegedSessionResolver.resolve(
             assistant = assistant,
             conversation = conversation(privilegedConversationId),
@@ -29,11 +30,11 @@ class PrivilegedSessionResolverTest {
         assertTrue(context.isPrivileged)
         assertTrue(context.expandLocalTools)
         assertTrue(context.autoApproveTools)
-        assertTrue(context.unrestrictedOverride)
+        assertFalse(context.unrestrictedOverride)
     }
 
     @Test
-    fun `selected unlocked system assistant conversation gets local second user elevation`() {
+    fun `confirmed system assistant conversation gets local second user elevation without bypass`() {
         val context = DefaultPrivilegedSessionResolver.resolve(
             assistant = assistant,
             conversation = conversation(privilegedConversationId),
@@ -43,11 +44,11 @@ class PrivilegedSessionResolverTest {
         assertTrue(context.isPrivileged)
         assertTrue(context.expandLocalTools)
         assertTrue(context.autoApproveTools)
-        assertTrue(context.unrestrictedOverride)
+        assertFalse(context.unrestrictedOverride)
     }
 
     @Test
-    fun `selected remote conversation keeps privilege but not unrestricted execution`() {
+    fun `selected remote conversation does not inherit local second user tools or approval`() {
         val context = DefaultPrivilegedSessionResolver.resolve(
             assistant = assistant,
             conversation = conversation(privilegedConversationId),
@@ -55,8 +56,8 @@ class PrivilegedSessionResolverTest {
         )
 
         assertTrue(context.isPrivileged)
-        assertTrue(context.expandLocalTools)
-        assertTrue(context.autoApproveTools)
+        assertFalse(context.expandLocalTools)
+        assertFalse(context.autoApproveTools)
         assertFalse(context.unrestrictedOverride)
     }
 
@@ -89,7 +90,7 @@ class PrivilegedSessionResolverTest {
     }
 
     @Test
-    fun `legacy unrestricted behavior remains when no privileged conversation is selected`() {
+    fun `legacy unrestricted behavior is migration-only when no privileged conversation is selected`() {
         val context = DefaultPrivilegedSessionResolver.resolve(
             assistant = assistant.copy(privilegedConversationId = null),
             conversation = conversation(Uuid.random()),
@@ -97,7 +98,21 @@ class PrivilegedSessionResolverTest {
         )
 
         assertFalse(context.isPrivileged)
-        assertTrue(context.unrestrictedOverride)
+        assertFalse(context.unrestrictedOverride)
+    }
+
+    @Test
+    fun `selected session requires explicit local policy confirmation`() {
+        val context = DefaultPrivilegedSessionResolver.resolve(
+            assistant = assistant.copy(secondUserPolicyConfirmed = false),
+            conversation = conversation(privilegedConversationId),
+            origin = ToolCallOrigin.LocalChat,
+        )
+
+        assertTrue(context.isPrivileged)
+        assertFalse(context.expandLocalTools)
+        assertFalse(context.autoApproveTools)
+        assertFalse(context.unrestrictedOverride)
     }
 
     @Test

@@ -18,7 +18,7 @@ Run all reads in parallel where the tool surface allows; assemble at the end.
 
 1. **Time anchor.** `get_time_info` — confirm the local date / weekday. The greeting depends on it ("Friday morning" vs "Saturday morning" vs holiday-named).
 2. **Device hygiene.**
-   - `get_battery_status` — call out only if level < 30% or charging is off when the user normally plugs in overnight.
+   - `get_battery_status` — call out only if level <= 20% and the device is not charging.
    - `get_storage_info` — call out only if free < 5%.
 3. **Communications.**
    - `list_active_notifications` filtered to packages the user has whitelisted in `notification_listener` settings — group by package, count unread.

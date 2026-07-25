@@ -46,6 +46,7 @@ import me.rerere.rikkahub.data.db.migrations.MIGRATION_30_31
 import me.rerere.rikkahub.data.db.migrations.MIGRATION_31_32
 import me.rerere.rikkahub.data.db.migrations.MIGRATION_32_33
 import me.rerere.rikkahub.data.db.migrations.MIGRATION_33_34
+import me.rerere.rikkahub.data.db.migrations.MIGRATION_34_35
 import me.rerere.rikkahub.data.repository.MemorySearchIndex
 import me.rerere.rikkahub.data.repository.MemoryRetriever
 import me.rerere.rikkahub.memory.AndroidMemoryWorkScheduler
@@ -105,6 +106,7 @@ val dataSourceModule = module {
                 MIGRATION_31_32,
                 MIGRATION_32_33,
                 MIGRATION_33_34,
+                MIGRATION_34_35,
             )
             .addCallback(object : RoomDatabase.Callback() {
                 override fun onOpen(db: SupportSQLiteDatabase) {
@@ -218,6 +220,34 @@ val dataSourceModule = module {
     single { get<AppDatabase>().agentRunDao() }
     single { AgentRunRepository(get()) }
     single { AgentRunBootRecovery(context = get(), repository = get()) }
+
+    // Authoritative per-execution ledger. This is intentionally distinct from AgentRun: one
+    // AgentRun may own many runtime handles, each with its own cancellation/recovery outcome.
+    single { get<AppDatabase>().executionRecordDao() }
+    single { me.rerere.rikkahub.data.execution.ExecutionRepository(get()) }
+    single { get<AppDatabase>().capabilityGrantDao() }
+    single { me.rerere.rikkahub.data.capability.CapabilityGrantRepository(get()) }
+    single<me.rerere.rikkahub.data.capability.CapabilityPolicyEngine> {
+        me.rerere.rikkahub.data.capability.DefaultCapabilityPolicyEngine(
+            grants = { get<me.rerere.rikkahub.data.capability.CapabilityGrantRepository>().current() },
+        )
+    }
+    single<me.rerere.rikkahub.data.execution.ManagedExecutionVerifier> {
+        me.rerere.rikkahub.data.execution.LiveManagedExecutionVerifier(
+            ledgerVerifier = me.rerere.rikkahub.data.execution.LedgerManagedExecutionVerifier(get()),
+            termuxSupervisor = get(),
+            tokenProvider = get(),
+        )
+    }
+    single {
+        me.rerere.rikkahub.data.execution.ExecutionBootRecovery(
+            repository = get(),
+            verifier = get(),
+        )
+    }
+    single<me.rerere.rikkahub.data.ai.execution.ToolLifecycleObserver> {
+        me.rerere.rikkahub.data.execution.ExecutionRecordToolLifecycleObserver(get())
+    }
 
     // Alarm
     single { get<AppDatabase>().alarmDao() }

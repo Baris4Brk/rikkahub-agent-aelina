@@ -321,6 +321,8 @@ object ToolApprovalDefaults {
         "keystore_decrypt",
         "nfc_write_tag",
         "grant_directory_access",
+        "linux_grant_request",
+        "linux_grant_revoke",
         "call_phone",
         "force_stop_app",
         "clear_app_cache",

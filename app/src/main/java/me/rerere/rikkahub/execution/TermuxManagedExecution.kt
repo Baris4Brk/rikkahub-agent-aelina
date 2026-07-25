@@ -285,7 +285,7 @@ class TermuxManagedStartableTool(
                 pgid = status.identity.processGroupId,
                 startTimeMillis = status.identity.processStartTicks,
                 running = status.running,
-                cancellationConfirmed = !status.running && status.identityVerified.not(),
+                cancellationConfirmed = !status.running && status.identityVerified,
             )
         }
     }

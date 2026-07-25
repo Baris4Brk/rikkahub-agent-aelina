@@ -93,12 +93,16 @@ data class Assistant(
     val allowConversationSystemPrompt: Boolean = false, // 允许对话单独重写 system prompt
     val allowConversationPromptInjection: Boolean = false, // 允许对话单独绑定提示词注入
     // P2: 不受限模式 — 开启后 ToolExecutionGate 只检查紧急停止，跳过所有其他安全门
+    // Legacy migration marker. It remains readable for existing exports, but it no longer
+    // grants runtime bypasses. A user must confirm the selected local second-user session.
     val unrestricted: Boolean = false,
     // A user-selected conversation that runs as the high-autonomy "second user". Keeping
     // this on Assistant (DataStore JSON) avoids a Room migration and keeps old settings
     // readable because both fields have defaults.
     val privilegedConversationId: Uuid? = null,
     val privilegedIdentityName: String = "第二用户",
+    /** Local UI confirmation for the selected second-user conversation. Reset on reassignment. */
+    val secondUserPolicyConfirmed: Boolean = false,
 )
 
 @Serializable

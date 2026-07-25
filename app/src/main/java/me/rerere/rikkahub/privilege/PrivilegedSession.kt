@@ -58,17 +58,13 @@ object DefaultPrivilegedSessionResolver : PrivilegedSessionResolver {
             conversation.assistantId == assistant.id
         val identityName = assistant.privilegedIdentityName.trim()
             .ifEmpty { DEFAULT_PRIVILEGED_IDENTITY_NAME }
-        val surface = InvocationSurfacePolicy.forOrigin(origin)
-
-        // Once a privileged conversation is selected it becomes the only place where the
-        // legacy unrestricted flag can take effect. Remote privileged runs get the expanded
-        // tool surface and approval behavior, but still pass through every normal remote,
-        // background and lock-screen gate.
-        val unrestrictedOverride = if (selectedId != null) {
-            isPrivileged && surface.allowsSelectedConversationUnrestricted
-        } else {
-            assistant.unrestricted && surface.allowsToolExecution
-        }
+        // A selected conversation identifies the second user, but it does not itself grant
+        // authority. The local user must confirm the migration in the foreground UI, and no
+        // remote origin is allowed to inherit this profile. `Assistant.unrestricted` is kept
+        // only as an on-disk migration marker and deliberately has no runtime effect.
+        val localSecondUser = isPrivileged &&
+            assistant.secondUserPolicyConfirmed &&
+            origin in LOCAL_SECOND_USER_ORIGINS
 
         return PrivilegedSessionContext(
             assistantId = assistant.id,
@@ -77,11 +73,17 @@ object DefaultPrivilegedSessionResolver : PrivilegedSessionResolver {
             privilegedConversationId = selectedId,
             identityName = identityName,
             isPrivileged = isPrivileged,
-            expandLocalTools = isPrivileged && surface.allowsToolExecution,
-            autoApproveTools = isPrivileged && surface.allowsAutoApproval,
-            unrestrictedOverride = unrestrictedOverride,
+            expandLocalTools = localSecondUser,
+            autoApproveTools = localSecondUser,
+            unrestrictedOverride = false,
         )
     }
+
+    private val LOCAL_SECOND_USER_ORIGINS = setOf(
+        ToolCallOrigin.LocalChat,
+        ToolCallOrigin.SystemAssistant,
+        ToolCallOrigin.QuickCapture,
+    )
 }
 
 const val DEFAULT_PRIVILEGED_IDENTITY_NAME = "第二用户"

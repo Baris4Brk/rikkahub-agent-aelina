@@ -386,7 +386,8 @@ class CronJobWorker(
             availableTools = tools,
             invocation = ToolRuntimeInvocation(
                 executionContext = executionContext,
-                unrestrictedOverride = assistant.unrestricted,
+                // Cron jobs never inherit a local second-user policy or the legacy marker.
+                unrestrictedOverride = false,
             ),
         )
         return Triple(seq.finalOutcome, seq.errorMessage, null)

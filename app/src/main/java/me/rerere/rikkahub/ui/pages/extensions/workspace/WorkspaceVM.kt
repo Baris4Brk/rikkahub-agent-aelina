@@ -12,6 +12,7 @@ import kotlinx.coroutines.launch
 import me.rerere.rikkahub.data.db.entity.WorkspaceEntity
 import me.rerere.rikkahub.data.repository.WorkspaceRepository
 import me.rerere.workspace.RootfsInstallProgress
+import me.rerere.workspace.WorkspaceStorageMode
 
 class WorkspaceVM(
     private val repository: WorkspaceRepository,
@@ -19,9 +20,9 @@ class WorkspaceVM(
     val workspaces = repository.listFlow()
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
-    fun create(name: String) {
+    fun create(name: String, storageMode: WorkspaceStorageMode = WorkspaceStorageMode.PRIVATE) {
         viewModelScope.launch {
-            runCatching { repository.create(name) }
+            runCatching { repository.create(name, storageMode) }
         }
     }
 
@@ -34,6 +35,12 @@ class WorkspaceVM(
     fun delete(workspace: WorkspaceEntity) {
         viewModelScope.launch {
             repository.delete(workspace.id)
+        }
+    }
+
+    fun changeStorageMode(workspace: WorkspaceEntity, storageMode: WorkspaceStorageMode) {
+        viewModelScope.launch {
+            runCatching { repository.changeStorageMode(workspace.id, storageMode) }
         }
     }
 }

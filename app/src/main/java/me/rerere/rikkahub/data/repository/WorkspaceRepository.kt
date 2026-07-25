@@ -21,6 +21,7 @@ import me.rerere.workspace.WorkspaceManager
 import me.rerere.workspace.WorkspaceProcessManager
 import me.rerere.workspace.WorkspaceShellStatus
 import me.rerere.workspace.WorkspaceStorageArea
+import me.rerere.workspace.WorkspaceStorageMode
 import java.io.InputStream
 import java.io.OutputStream
 import java.io.ByteArrayOutputStream
@@ -57,6 +58,7 @@ class WorkspaceRepository(
                 cleanupAssistantReferences(workspace.id)
                 continue
             }
+            manager.ensureWorkspace(workspace.root, workspace.storageModeValue())
             val statusName = workspace.shellStatus
             if ((statusName == WorkspaceShellStatus.READY.name || statusName == WorkspaceShellStatus.INSTALLING.name)
                 && !manager.hasRootfs(workspace.root)
@@ -69,7 +71,10 @@ class WorkspaceRepository(
 
     suspend fun getById(id: String): WorkspaceEntity? = dao.getById(id)
 
-    suspend fun create(name: String): WorkspaceEntity {
+    suspend fun create(
+        name: String,
+        storageMode: WorkspaceStorageMode = WorkspaceStorageMode.PRIVATE,
+    ): WorkspaceEntity {
         val id = Uuid.random().toString()
         val now = System.currentTimeMillis()
         val finalName = name.trim().ifBlank { "Workspace" }
@@ -80,13 +85,58 @@ class WorkspaceRepository(
             id = id,
             name = finalName,
             root = id,
+            storageMode = storageMode.name,
             createdAt = now,
             updatedAt = now,
             lastAccessAt = null,
         )
-        manager.ensureWorkspace(workspace.root)
+        manager.ensureWorkspace(workspace.root, storageMode)
         dao.upsert(workspace)
         return workspace
+    }
+
+    /** Move the visible workspace tree once; private rootfs and process metadata never move. */
+    suspend fun changeStorageMode(id: String, targetMode: WorkspaceStorageMode): Boolean {
+        val workspace = dao.getById(id) ?: return false
+        val sourceMode = workspace.storageModeValue()
+        if (sourceMode == targetMode) return true
+        val stopped = processManager.stopByWorkspace(id, force = true)
+        if (!stopped.ok) return false
+        return withContext(Dispatchers.IO + NonCancellable) {
+            val source = manager.filesDir(workspace.root, sourceMode)
+            val target = manager.filesDir(workspace.root, targetMode)
+            require(!target.exists() || target.listFiles().isNullOrEmpty()) {
+                "Target workspace storage is not empty"
+            }
+            val staging = File(target.parentFile, ".${workspace.root}.migrating")
+            if (staging.exists()) staging.deleteRecursively()
+            staging.mkdirs()
+            if (source.exists() && !source.copyRecursively(staging, overwrite = false)) {
+                staging.deleteRecursively()
+                return@withContext false
+            }
+            if (target.exists()) target.deleteRecursively()
+            if (!staging.renameTo(target)) {
+                staging.deleteRecursively()
+                return@withContext false
+            }
+            val updated = workspace.copy(
+                storageMode = targetMode.name,
+                updatedAt = System.currentTimeMillis(),
+            )
+            try {
+                dao.upsert(updated)
+                manager.setStorageMode(workspace.root, targetMode)
+            } catch (error: Throwable) {
+                runCatching { dao.upsert(workspace) }
+                target.deleteRecursively()
+                throw error
+            }
+            // Delete only after both durable resolvers point at the completed target. A failed
+            // cleanup may leave a private duplicate, but never loses or splits the live tree.
+            if (source.exists()) source.deleteRecursively()
+            true
+        }
     }
 
     suspend fun rename(id: String, name: String): Boolean {
@@ -159,7 +209,7 @@ class WorkspaceRepository(
         path: String,
     ): List<WorkspaceFileEntry> = withContext(Dispatchers.IO) {
         val workspace = dao.getById(id) ?: return@withContext emptyList()
-        manager.ensureWorkspace(workspace.root)
+        manager.ensureWorkspace(workspace.root, workspace.storageModeValue())
         manager.listFiles(workspace.root, path, area)
     }
 
@@ -168,7 +218,7 @@ class WorkspaceRepository(
         path: String,
     ): String = withContext(Dispatchers.IO) {
         val workspace = dao.getById(id) ?: error("Workspace not found: $id")
-        manager.ensureWorkspace(workspace.root)
+        manager.ensureWorkspace(workspace.root, workspace.storageModeValue())
         manager.readText(workspace.root, path)
     }
 
@@ -212,7 +262,7 @@ class WorkspaceRepository(
         overwrite: Boolean,
     ): WorkspaceFileEntry = withContext(Dispatchers.IO) {
         val workspace = dao.getById(id) ?: error("Workspace not found: $id")
-        manager.ensureWorkspace(workspace.root)
+        manager.ensureWorkspace(workspace.root, workspace.storageModeValue())
         manager.writeText(workspace.root, path, text, overwrite)
     }
 
@@ -224,7 +274,7 @@ class WorkspaceRepository(
         inputStream: InputStream,
     ): WorkspaceFileEntry = withContext(Dispatchers.IO) {
         val workspace = dao.getById(id) ?: error("Workspace not found: $id")
-        manager.ensureWorkspace(workspace.root)
+        manager.ensureWorkspace(workspace.root, workspace.storageModeValue())
         manager.importFile(workspace.root, destinationPath, area, fileName, inputStream)
     }
 
@@ -267,7 +317,7 @@ class WorkspaceRepository(
         overwrite: Boolean,
     ): WorkspaceFileEntry = withContext(Dispatchers.IO) {
         val workspace = dao.getById(id) ?: error("Workspace not found: $id")
-        manager.ensureWorkspace(workspace.root)
+        manager.ensureWorkspace(workspace.root, workspace.storageModeValue())
         manager.moveFile(workspace.root, source, target, overwrite)
     }
 
@@ -277,12 +327,20 @@ class WorkspaceRepository(
         cwd: String = "",
         timeoutMillis: Long = WorkspaceManager.DEFAULT_COMMAND_TIMEOUT_MS,
         stdin: ByteArray? = null,
+        allowSharedStorage: Boolean = false,
     ): WorkspaceCommandResult {
         val workspace = dao.getById(id) ?: error("Workspace not found: $id")
         // runInterruptible 让协程取消转化为线程中断，从而打断阻塞的 Process.waitFor 并杀掉进程
         return runInterruptible(Dispatchers.IO) {
-            manager.ensureWorkspace(workspace.root)
-            manager.executeCommand(workspace.root, command, cwd, timeoutMillis, stdin)
+            manager.ensureWorkspace(workspace.root, workspace.storageModeValue())
+            manager.executeCommand(
+                workspace.root,
+                command,
+                cwd,
+                timeoutMillis,
+                stdin,
+                allowSharedStorage,
+            )
         }
     }
 
@@ -361,6 +419,7 @@ class WorkspaceRepository(
         }
         if (normalized.contains('\u0000')) return@runCatching null
         val relative = normalized.removePrefix("/workspace").trimStart('/')
+        manager.ensureWorkspace(workspace.root, workspace.storageModeValue())
         val root = manager.filesDir(workspace.root).canonicalFile
         val target = if (relative.isEmpty()) root else File(root, relative).canonicalFile
         if (target.path == root.path || target.path.startsWith(root.path + File.separator)) {
@@ -373,6 +432,10 @@ class WorkspaceRepository(
     companion object {
         private const val TAG = "WorkspaceRepository"
     }
+
+    private fun WorkspaceEntity.storageModeValue(): WorkspaceStorageMode =
+        WorkspaceStorageMode.entries.firstOrNull { it.name == storageMode }
+            ?: WorkspaceStorageMode.PRIVATE
 }
 
 data class WorkspaceDeleteResult(

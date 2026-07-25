@@ -57,7 +57,6 @@ import me.rerere.rikkahub.service.WebServerService
 import me.rerere.rikkahub.ui.components.nav.BackButton
 import me.rerere.rikkahub.ui.components.ui.CardGroup
 import me.rerere.rikkahub.ui.components.ui.permission.PermissionManager
-import me.rerere.rikkahub.ui.components.ui.permission.PermissionLocalNetwork
 import me.rerere.rikkahub.ui.components.ui.permission.PermissionNotification
 import me.rerere.rikkahub.ui.components.ui.permission.rememberPermissionState
 import me.rerere.rikkahub.ui.context.LocalSettings
@@ -95,11 +94,6 @@ fun SettingWebPage() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 add(PermissionNotification)
             }
-            // Android 17 gates LAN sockets behind ACCESS_LOCAL_NETWORK; only
-            // request when the user has chosen non-localhost mode.
-            if (Build.VERSION.SDK_INT >= 37 && !settings.webServerLocalhostOnly) {
-                add(PermissionLocalNetwork)
-            }
         },
     )
     PermissionManager(permissionState = permissionState)
@@ -110,7 +104,7 @@ fun SettingWebPage() {
         val intent = Intent(context, WebServerService::class.java).apply {
             action = WebServerService.ACTION_START
             putExtra(WebServerService.EXTRA_PORT, settings.webServerPort)
-            putExtra(WebServerService.EXTRA_LOCALHOST_ONLY, settings.webServerLocalhostOnly)
+            putExtra(WebServerService.EXTRA_LOCALHOST_ONLY, true)
         }
         runCatching {
             context.startForegroundService(intent)
@@ -246,16 +240,11 @@ fun SettingWebPage() {
                         supportingContent = { Text(stringResource(R.string.setting_page_web_server_localhost_only_desc)) },
                         trailingContent = {
                             Switch(
-                                checked = settings.webServerLocalhostOnly,
-                                onCheckedChange = { checked ->
-                                    scope.launch {
-                                        settingsStore.update {
-                                            it.copy(webServerLocalhostOnly = checked)
-                                        }
-                                    }
-                                },
-                                // 运行中不允许切换 需重启服务生效
-                                enabled = !serverState.isRunning,
+                                checked = true,
+                                onCheckedChange = {},
+                                // LAN pairing and TLS have not been provisioned yet. Keeping
+                                // this visibly locked avoids a misleading plaintext-LAN switch.
+                                enabled = false,
                             )
                         },
                     )

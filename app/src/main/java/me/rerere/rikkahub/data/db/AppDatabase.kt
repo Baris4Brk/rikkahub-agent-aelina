@@ -8,6 +8,10 @@ import androidx.room.TypeConverters
 import me.rerere.ai.core.TokenUsage
 import me.rerere.rikkahub.data.agentrun.AgentRun
 import me.rerere.rikkahub.data.agentrun.AgentRunDao
+import me.rerere.rikkahub.data.execution.ExecutionRecord
+import me.rerere.rikkahub.data.execution.ExecutionRecordDao
+import me.rerere.rikkahub.data.capability.CapabilityGrantDao
+import me.rerere.rikkahub.data.capability.CapabilityGrantEntity
 import me.rerere.rikkahub.data.db.dao.AlarmDao
 import me.rerere.rikkahub.data.db.dao.ConversationDAO
 import me.rerere.rikkahub.data.db.dao.BrowserLibraryDao
@@ -83,12 +87,14 @@ import me.rerere.rikkahub.workflow.db.WorkflowRunEntity
         WorkflowEntity::class,
         WorkflowRunEntity::class,
         AgentRun::class,
+        ExecutionRecord::class,
+        CapabilityGrantEntity::class,
         WorkspaceEntity::class,
         PendingChatCommandEntity::class,
     ],
     // v33 freezes the conversation-context limit with each queued capture so changing the
     // setting later cannot split or enlarge a batch that has already been accepted.
-    version = 34,
+    version = 35,
     autoMigrations = [
         AutoMigration(from = 1, to = 2),
         AutoMigration(from = 2, to = 3),
@@ -148,6 +154,10 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun workflowRunDao(): WorkflowRunDao
 
     abstract fun agentRunDao(): AgentRunDao
+
+    abstract fun executionRecordDao(): ExecutionRecordDao
+
+    abstract fun capabilityGrantDao(): CapabilityGrantDao
 
     abstract fun workspaceDao(): WorkspaceDAO
 

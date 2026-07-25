@@ -178,7 +178,13 @@ internal fun AssistantBasicContent(
                     selectedOption = selectedConversation,
                     onOptionSelected = { conversation ->
                         vm.updateAssistant { current ->
-                            current.copy(privilegedConversationId = conversation?.id)
+                            current.copy(
+                                privilegedConversationId = conversation?.id,
+                                // Confirmation belongs to the selected session, not merely to
+                                // this assistant. Choosing another session requires a new local
+                                // confirmation before automatic approvals can be used.
+                                secondUserPolicyConfirmed = false,
+                            )
                         }
                     },
                     modifier = Modifier.fillMaxWidth(),
@@ -491,12 +497,32 @@ internal fun AssistantBasicContent(
             HorizontalDivider()
             FormItem(
                 modifier = Modifier.padding(8.dp),
-                label = { Text(stringResource(R.string.assistant_unrestricted_mode)) },
-                description = { Text(stringResource(R.string.assistant_unrestricted_mode_desc)) },
+                label = { Text(stringResource(R.string.assistant_second_user_local_policy)) },
+                description = {
+                    Text(
+                        stringResource(
+                            if (assistant.unrestricted && !assistant.secondUserPolicyConfirmed) {
+                                R.string.assistant_second_user_local_policy_migration_desc
+                            } else {
+                                R.string.assistant_second_user_local_policy_desc
+                            },
+                        ),
+                    )
+                },
                 tail = {
                     Switch(
-                        checked = assistant.unrestricted,
-                        onCheckedChange = { onUpdate(assistant.copy(unrestricted = it)) },
+                        checked = assistant.secondUserPolicyConfirmed,
+                        enabled = assistant.privilegedConversationId != null,
+                        onCheckedChange = { confirmed ->
+                            onUpdate(
+                                assistant.copy(
+                                    secondUserPolicyConfirmed = confirmed,
+                                    // Clear the legacy bypass marker only after a deliberate
+                                    // local confirmation (or opt-out) in this UI.
+                                    unrestricted = false,
+                                ),
+                            )
+                        },
                     )
                 },
             )

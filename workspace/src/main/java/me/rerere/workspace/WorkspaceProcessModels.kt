@@ -76,6 +76,7 @@ data class WorkspaceProcessDefinition(
     val command: String,
     val cwd: String = "",
     val keepAwake: Boolean = false,
+    val allowSharedStorage: Boolean = false,
     val restartPolicy: WorkspaceRestartPolicy = WorkspaceRestartPolicy.NEVER,
     val desiredState: WorkspaceDesiredState = WorkspaceDesiredState.RUNNING,
     val createdAt: Long,
@@ -103,6 +104,7 @@ data class WorkspaceProcessStartRequest(
     val command: String,
     val cwd: String = "",
     val keepAwake: Boolean = false,
+    val allowSharedStorage: Boolean = false,
     val restartPolicy: WorkspaceRestartPolicy = WorkspaceRestartPolicy.NEVER,
 )
 

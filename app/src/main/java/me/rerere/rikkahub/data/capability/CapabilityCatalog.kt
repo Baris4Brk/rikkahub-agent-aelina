@@ -142,6 +142,10 @@ object CapabilityCatalog {
             "termux_run_command", "termux_session_start", "termux_session_send",
             "termux_session_read", "termux_session_kill", "termux_session_list",
             "transcribe_audio_file", "whisper_status",
+            "linux_profile_list", "linux_run",
+            "linux_session_create", "linux_session_exec", "linux_session_inspect",
+            "linux_session_list", "linux_session_close",
+            "linux_grant_request", "linux_grant_list", "linux_grant_revoke",
         ),
         LocalToolOption.TelegramBot to setOf(
             "telegram_set_token", "telegram_status", "telegram_enable", "telegram_disable",

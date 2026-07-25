@@ -13,6 +13,8 @@ import kotlinx.serialization.json.put
 import me.rerere.ai.core.InputSchema
 import me.rerere.ai.core.Tool
 import me.rerere.rikkahub.privilege.CollectionOperation
+import me.rerere.rikkahub.privilege.HardDenyDecision
+import me.rerere.rikkahub.privilege.HardDenyPolicy
 import me.rerere.rikkahub.privilege.MutationOperation
 import me.rerere.rikkahub.privilege.PrivilegedAction
 import me.rerere.rikkahub.privilege.PrivilegedActionDecision
@@ -33,6 +35,8 @@ fun createPrivilegedManagementTools(
     invocationContext: ToolInvocationContext,
     guard: PrivilegedActionGuard,
     backend: PrivilegedManagementBackend,
+    /** Preferred shared permanent-denial layer; guard remains for compatible callers/tests. */
+    hardDenyPolicy: HardDenyPolicy? = null,
 ): List<Tool> = managementToolSpecs().map { spec ->
     Tool(
         name = spec.name,
@@ -70,6 +74,14 @@ fun createPrivilegedManagementTools(
                 else -> null
             }
             if (guardedAction != null) {
+                val hardDeny = hardDenyPolicy?.checkPrivilegedAction(guardedAction, context)
+                if (hardDeny is HardDenyDecision.Denied) {
+                    return@Tool privilegedToolResult(
+                        false,
+                        hardDeny.code,
+                        hardDeny.message,
+                    )
+                }
                 when (val decision = guard.check(guardedAction, context)) {
                     PrivilegedActionDecision.Allowed -> Unit
                     is PrivilegedActionDecision.Denied -> return@Tool privilegedToolResult(
