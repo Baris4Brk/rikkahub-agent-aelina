@@ -1,5 +1,6 @@
 package me.rerere.rikkahub.quickcapture
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -22,5 +23,25 @@ class QuickCaptureStateMachineTest {
         assertFalse(QuickCaptureStateMachine.allows(QuickCaptureStage.IDLE, QuickCaptureStage.COMPLETED))
         assertFalse(QuickCaptureStateMachine.allows(QuickCaptureStage.FAILED, QuickCaptureStage.RUNNING))
         assertFalse(QuickCaptureStateMachine.allows(QuickCaptureStage.COMPLETED, QuickCaptureStage.SUBMITTING))
+    }
+
+    @Test
+    fun `single tap never opens a conversation implicitly`() {
+        assertEquals(
+            QuickCaptureSingleTapAction.CAPTURE_SINGLE,
+            decideQuickCaptureSingleTap(QuickCaptureStage.IDLE),
+        )
+        assertEquals(
+            QuickCaptureSingleTapAction.RESET_AND_CAPTURE,
+            decideQuickCaptureSingleTap(QuickCaptureStage.COMPLETED),
+        )
+        assertEquals(
+            QuickCaptureSingleTapAction.RESET_AND_CAPTURE,
+            decideQuickCaptureSingleTap(QuickCaptureStage.FAILED),
+        )
+        assertEquals(
+            QuickCaptureSingleTapAction.IGNORE_WHILE_BUSY,
+            decideQuickCaptureSingleTap(QuickCaptureStage.RUNNING),
+        )
     }
 }

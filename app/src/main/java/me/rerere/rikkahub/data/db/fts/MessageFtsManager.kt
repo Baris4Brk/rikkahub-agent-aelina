@@ -125,6 +125,41 @@ class MessageFtsManager(private val database: AppDatabase) {
         }
         results
     }
+
+    suspend fun searchInConversation(
+        keyword: String,
+        conversationId: String,
+        sort: MessageSearchSort = MessageSearchSort.RELEVANCE,
+        limit: Int = 20,
+        offset: Int = 0,
+    ): List<MessageSearchResult> = withContext(Dispatchers.IO) {
+        val results = mutableListOf<MessageSearchResult>()
+        val cursor = db.query(
+            """
+            SELECT node_id, message_id, conversation_id, title, update_at,
+                   simple_snippet(message_fts, 0, '[', ']', '...', 30) AS snippet
+            FROM message_fts
+            WHERE text MATCH jieba_query(?) AND conversation_id = ?
+            ORDER BY ${sort.orderBy}
+            LIMIT ? OFFSET ?
+            """.trimIndent(),
+            arrayOf<Any>(keyword, conversationId, limit.coerceIn(1, 50), offset.coerceAtLeast(0)),
+        )
+        Log.i(TAG, "searchInConversation: conversation=${conversationId.take(8)}, queryChars=${keyword.length}")
+        cursor.use {
+            while (it.moveToNext()) {
+                results += MessageSearchResult(
+                    nodeId = it.getString(0),
+                    messageId = it.getString(1),
+                    conversationId = it.getString(2),
+                    title = it.getString(3),
+                    updateAt = Instant.ofEpochMilli(it.getLong(4)),
+                    snippet = it.getString(5),
+                )
+            }
+        }
+        results
+    }
 }
 
 private fun UIMessage.extractFtsText(): String =

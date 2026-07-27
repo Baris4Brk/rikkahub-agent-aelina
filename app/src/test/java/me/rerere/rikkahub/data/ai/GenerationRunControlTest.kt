@@ -13,11 +13,35 @@ import me.rerere.rikkahub.service.chat.CommandOrigin
 import me.rerere.rikkahub.service.chat.SteeringHistoryMode
 import me.rerere.rikkahub.service.chat.SteeringScope
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import kotlin.uuid.Uuid
 
 class GenerationRunControlTest {
+    @Test
+    fun `cancelled steering is forgotten and never reaches another checkpoint`() {
+        val control = GenerationRunControl(Uuid.random())
+        val commandId = Uuid.random()
+        val note = SteeringNote(
+            commandId = commandId,
+            runId = control.runId,
+            text = "do not use this anymore",
+            source = CommandOrigin.APP_UI,
+            scope = SteeringScope.REMAINDER_OF_RUN,
+        )
+
+        assertEquals(SteeringRegistrationResult.Accepted, control.submitSteering(note))
+        control.takeSteeringForCheckpoint(1).also(control::markSteeringProviderStarted)
+        assertTrue(control.cancelSteering(commandId))
+
+        assertTrue(control.takeSteeringForCheckpoint(2).isEmpty())
+        assertFalse(control.wasApplied(note.id))
+        assertTrue(commandId !in control.steeringNotes())
+        assertTrue(commandId !in control.steeringStates())
+        assertFalse(control.cancelSteering(commandId))
+    }
+
     @Test
     fun `persistent steering stays visible in UI but is not an unanswered provider user turn`() {
         val previousReply = UIMessage(

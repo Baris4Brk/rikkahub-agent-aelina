@@ -260,6 +260,12 @@ class ChatVM(
         chatService.updateSteeringHistoryMode(_conversationId, commandId, next)
     }
 
+    fun cancelSteering(commandId: Uuid) {
+        viewModelScope.launch {
+            reportSubmitResult(chatService.cancelSteering(_conversationId, commandId))
+        }
+    }
+
     fun handleInterrupt(content: List<UIMessagePart>, answer: Boolean = true) {
         if (content.isEmptyInputMessage()) return
         reportSubmitResult(chatService.submitInterrupt(_conversationId, content, answer, CommandOrigin.APP_UI))

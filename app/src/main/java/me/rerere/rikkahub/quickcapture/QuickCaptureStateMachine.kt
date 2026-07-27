@@ -73,6 +73,32 @@ object QuickCaptureStateMachine {
     }
 }
 
+/** A tap on the bubble always means capture; opening a conversation is an explicit menu action. */
+enum class QuickCaptureSingleTapAction {
+    CAPTURE_SINGLE,
+    CAPTURE_FOR_BATCH,
+    RESET_AND_CAPTURE,
+    IGNORE_WHILE_BUSY,
+}
+
+fun decideQuickCaptureSingleTap(stage: QuickCaptureStage): QuickCaptureSingleTapAction = when (stage) {
+    QuickCaptureStage.IDLE -> QuickCaptureSingleTapAction.CAPTURE_SINGLE
+    QuickCaptureStage.COLLECTING -> QuickCaptureSingleTapAction.CAPTURE_FOR_BATCH
+    QuickCaptureStage.COMPLETED,
+    QuickCaptureStage.FAILED,
+    -> QuickCaptureSingleTapAction.RESET_AND_CAPTURE
+    QuickCaptureStage.VALIDATING_TARGET,
+    QuickCaptureStage.HIDING_OVERLAY,
+    QuickCaptureStage.CAPTURING,
+    QuickCaptureStage.SELECTING_REGION,
+    QuickCaptureStage.PERSISTING,
+    QuickCaptureStage.SUBMITTING,
+    QuickCaptureStage.QUEUED,
+    QuickCaptureStage.RUNNING,
+    QuickCaptureStage.WAITING_APPROVAL,
+    -> QuickCaptureSingleTapAction.IGNORE_WHILE_BUSY
+}
+
 sealed interface QuickCaptureBatchDecision {
     data class Accepted(val totalCount: Int, val totalBytes: Long) : QuickCaptureBatchDecision
     data object TooManyImages : QuickCaptureBatchDecision

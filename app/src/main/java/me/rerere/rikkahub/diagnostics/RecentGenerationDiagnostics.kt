@@ -1,5 +1,6 @@
 package me.rerere.rikkahub.diagnostics
 
+import java.io.File
 import java.util.concurrent.atomic.AtomicLong
 import me.rerere.ai.ui.GenerationTerminal
 import me.rerere.ai.ui.GenerationOutcome
@@ -22,6 +23,7 @@ data class RecentGenerationDiagnostic(
     val completionOutcome: String? = null,
     val recoveryAttempt: Int? = null,
     val recoveryStatus: String? = null,
+    val requestBreakdown: RequestBreakdownDiagnostic? = null,
 ) {
     fun redactedDetail(): String = buildString {
         append("model=").append(modelId.take(80))
@@ -37,6 +39,7 @@ data class RecentGenerationDiagnostic(
         append("; historicalReasoningRemoved=").append(historicalReasoningRemoved)
         completionOutcome?.let { append("; outcome=").append(it) }
         recoveryAttempt?.let { append("; recovery=").append(it).append("/10:").append(recoveryStatus) }
+        requestBreakdown?.let { append("; ").append(it.redactedSummary()) }
     }
 }
 
@@ -56,6 +59,32 @@ class GenerationDiagnosticHandle internal constructor(
     internal var completionOutcome: String? = null
     internal var recoveryAttempt: Int? = null
     internal var recoveryStatus: String? = null
+    internal var requestBreakdown: RequestBreakdownDiagnostic? = null
+    internal var providerCallCount: Int = 0
+
+    fun nextProviderCallIndex(): Int = synchronized(this) {
+        providerCallCount += 1
+        providerCallCount
+    }
+
+    fun recordRequestBreakdown(filesDir: File, breakdown: RequestBreakdownDiagnostic) {
+        RecentGenerationDiagnostics.recordRequestBreakdown(this, filesDir, breakdown)
+    }
+
+    fun recordProviderUsage(
+        filesDir: File,
+        promptTokens: Int,
+        cachedTokens: Int,
+        completionTokens: Int,
+    ) {
+        RecentGenerationDiagnostics.recordProviderUsage(
+            this,
+            filesDir,
+            promptTokens,
+            cachedTokens,
+            completionTokens,
+        )
+    }
 
     fun record(
         terminal: GenerationTerminal,
@@ -141,6 +170,7 @@ object RecentGenerationDiagnostics {
                 completionOutcome = handle.completionOutcome,
                 recoveryAttempt = handle.recoveryAttempt,
                 recoveryStatus = handle.recoveryStatus,
+                requestBreakdown = handle.requestBreakdown,
             )
         }
         publishIfNewest(handle)
@@ -160,6 +190,40 @@ object RecentGenerationDiagnostics {
                 recoveryStatus = handle.recoveryStatus,
             )
         }
+    }
+
+    internal fun recordRequestBreakdown(
+        handle: GenerationDiagnosticHandle,
+        filesDir: File,
+        breakdown: RequestBreakdownDiagnostic,
+    ) {
+        synchronized(handle) {
+            handle.requestBreakdown = breakdown
+            handle.diagnostic = handle.diagnostic?.copy(
+                recordedAtEpochMs = System.currentTimeMillis(),
+                requestBreakdown = breakdown,
+            )
+        }
+        RequestBreakdownDiagnosticsStore.write(filesDir, breakdown)
+    }
+
+    internal fun recordProviderUsage(
+        handle: GenerationDiagnosticHandle,
+        filesDir: File,
+        promptTokens: Int,
+        cachedTokens: Int,
+        completionTokens: Int,
+    ) {
+        val updated = synchronized(handle) {
+            handle.requestBreakdown?.withProviderUsage(promptTokens, cachedTokens, completionTokens)?.also {
+                handle.requestBreakdown = it
+                handle.diagnostic = handle.diagnostic?.copy(
+                    recordedAtEpochMs = System.currentTimeMillis(),
+                    requestBreakdown = it,
+                )
+            }
+        } ?: return
+        RequestBreakdownDiagnosticsStore.write(filesDir, updated)
     }
 
     internal fun markOutcome(

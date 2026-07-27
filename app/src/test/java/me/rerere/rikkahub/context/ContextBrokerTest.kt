@@ -149,6 +149,59 @@ class ContextBrokerTest {
         assertTrue(addendum.contains("trust=\"untrusted_observation\""))
     }
 
+    @Test
+    fun `same notification is injected once per conversation`() = runBlocking {
+        val broker = DefaultContextBroker(
+            readers = mapOf(
+                ContextSource.NOTIFICATIONS to ContextSourceReader { _, source ->
+                    ContextReadResult.Available(
+                        ContextFragment(source, "Telegram: Alice - same private message"),
+                    )
+                },
+            ),
+        )
+        val firstRequest = request().copy(
+            allowedSources = setOf(ContextSource.NOTIFICATIONS),
+        )
+        val secondRequest = firstRequest.copy(
+            runId = Uuid.random().toString(),
+            commandId = Uuid.random().toString(),
+        )
+
+        val first = broker.collect(firstRequest)
+        val second = broker.collect(secondRequest)
+
+        assertEquals(1, first.fragments.count { it.source == ContextSource.NOTIFICATIONS })
+        assertFalse(second.fragments.any { it.source == ContextSource.NOTIFICATIONS })
+        assertTrue(second.omissions.any { it.detailCode == "notifications_already_seen" })
+    }
+
+    @Test
+    fun `changed notification is injected again`() = runBlocking {
+        var text = "WeChat: Alice - first message"
+        val broker = DefaultContextBroker(
+            readers = mapOf(
+                ContextSource.NOTIFICATIONS to ContextSourceReader { _, source ->
+                    ContextReadResult.Available(ContextFragment(source, text))
+                },
+            ),
+        )
+        val firstRequest = request().copy(
+            allowedSources = setOf(ContextSource.NOTIFICATIONS),
+        )
+        broker.collect(firstRequest)
+        text = "WeChat: Alice - second message"
+
+        val second = broker.collect(
+            firstRequest.copy(
+                runId = Uuid.random().toString(),
+                commandId = Uuid.random().toString(),
+            ),
+        )
+
+        assertEquals("WeChat: Alice - second message", second.fragments.single().text)
+    }
+
     private fun request(
         toolOrigin: ToolCallOrigin = ToolCallOrigin.LocalChat,
         isSubAgent: Boolean = false,

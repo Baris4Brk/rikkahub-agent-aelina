@@ -1,5 +1,6 @@
 package me.rerere.rikkahub.context
 
+import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -9,6 +10,8 @@ import me.rerere.rikkahub.service.chat.CommandOrigin
 
 private const val OCR_TIMEOUT_MS = 20_000L
 private const val MAX_FROZEN_RUNS = 32
+private const val MAX_NOTIFICATION_CONVERSATIONS = 64
+private const val MAX_NOTIFICATION_HASHES_PER_CONVERSATION = 128
 
 class DefaultContextBroker(
     private val readers: Map<ContextSource, ContextSourceReader>,
@@ -16,6 +19,8 @@ class DefaultContextBroker(
 ) : ContextBroker {
     private val frozen = ConcurrentHashMap<String, CompletableDeferred<ContextSnapshot>>()
     private val insertionOrder = java.util.concurrent.ConcurrentLinkedQueue<String>()
+    private val seenNotifications = ConcurrentHashMap<String, NotificationHistory>()
+    private val notificationConversationOrder = java.util.concurrent.ConcurrentLinkedQueue<String>()
 
     override suspend fun collect(request: ContextRequest): ContextSnapshot {
         val created = CompletableDeferred<ContextSnapshot>()
@@ -78,7 +83,14 @@ class DefaultContextBroker(
 
         for (source in PRIMARY_ORDER) {
             if (source !in planned) continue
-            readSource(request, source, omissions)?.let(collected::add)
+            readSource(request, source, omissions)?.let { fragment ->
+                val filtered = if (source == ContextSource.NOTIFICATIONS) {
+                    filterSeenNotifications(request, fragment, omissions)
+                } else {
+                    fragment
+                }
+                filtered?.let(collected::add)
+            }
         }
 
         val uiTree = collected.firstOrNull { it.source == ContextSource.UI_TREE }
@@ -254,8 +266,66 @@ class DefaultContextBroker(
         }
     }
 
+    /**
+     * Active Android notifications remain visible for many turns. Inject each exact notification
+     * line once per conversation, while allowing changed/new notification content through.
+     * Only hashes are retained in memory; notification text is not persisted.
+     */
+    private fun filterSeenNotifications(
+        request: ContextRequest,
+        fragment: ContextFragment,
+        omissions: MutableList<ContextOmission>,
+    ): ContextFragment? {
+        val scope = "${request.assistantId}:${request.conversationId}"
+        val created = NotificationHistory()
+        val history = seenNotifications.putIfAbsent(scope, created) ?: created.also {
+            notificationConversationOrder.add(scope)
+            trimNotificationConversations()
+        }
+        val unseenLines = synchronized(history) {
+            fragment.text.lineSequence()
+                .map(String::trim)
+                .filter(String::isNotEmpty)
+                .filter { line -> history.hashes.add(line.sha256()) }
+                .toList()
+                .also {
+                    while (history.hashes.size > MAX_NOTIFICATION_HASHES_PER_CONVERSATION) {
+                        val iterator = history.hashes.iterator()
+                        if (iterator.hasNext()) {
+                            iterator.next()
+                            iterator.remove()
+                        }
+                    }
+                }
+        }
+        if (unseenLines.isEmpty()) {
+            omissions += ContextOmission(
+                ContextSource.NOTIFICATIONS,
+                ContextOmissionReason.EMPTY,
+                "notifications_already_seen",
+            )
+            return null
+        }
+        val text = unseenLines.joinToString("\n")
+        return fragment.copy(
+            text = text,
+            nonSensitiveCharacterCount = minOf(fragment.nonSensitiveCharacterCount, text.length),
+        )
+    }
+
+    private fun trimNotificationConversations() {
+        while (seenNotifications.size > MAX_NOTIFICATION_CONVERSATIONS) {
+            val oldest = notificationConversationOrder.poll() ?: return
+            seenNotifications.remove(oldest)
+        }
+    }
+
     private companion object {
         data class OcrAttempt(val fragment: ContextFragment?)
+
+        class NotificationHistory {
+            val hashes = LinkedHashSet<String>()
+        }
 
         val PRIMARY_ORDER = listOf(
             ContextSource.FOREGROUND_WINDOW,
@@ -266,6 +336,10 @@ class DefaultContextBroker(
         )
     }
 }
+
+private fun String.sha256(): String = MessageDigest.getInstance("SHA-256")
+    .digest(toByteArray(Charsets.UTF_8))
+    .joinToString("") { byte -> "%02x".format(byte) }
 
 internal object ContextTextSanitizer {
     private val secretAssignment = Regex(

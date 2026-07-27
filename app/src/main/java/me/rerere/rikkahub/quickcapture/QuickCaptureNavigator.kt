@@ -3,6 +3,7 @@ package me.rerere.rikkahub.quickcapture
 import android.content.Context
 import android.content.Intent
 import me.rerere.rikkahub.RouteActivity
+import me.rerere.rikkahub.utils.base64Encode
 import kotlin.uuid.Uuid
 
 /** Navigation stays outside the capture/service state machine so it is testable without Android. */
@@ -28,7 +29,9 @@ class AndroidQuickCaptureNavigator(
     override fun openDraft(conversationId: Uuid, prompt: String, imageUris: List<String>) {
         appContext.startActivity(baseIntent().apply {
             putExtra(RouteActivity.EXTRA_CONVERSATION_ID, conversationId.toString())
-            putExtra(RouteActivity.EXTRA_QUICK_CAPTURE_DRAFT_TEXT, prompt)
+            // Screen.Chat has historically carried draft text as Base64 so Navigation can
+            // preserve arbitrary Unicode and punctuation. Keep the overlay on that contract.
+            putExtra(RouteActivity.EXTRA_QUICK_CAPTURE_DRAFT_TEXT, prompt.base64Encode())
             putStringArrayListExtra(
                 RouteActivity.EXTRA_QUICK_CAPTURE_DRAFT_FILES,
                 ArrayList(imageUris),

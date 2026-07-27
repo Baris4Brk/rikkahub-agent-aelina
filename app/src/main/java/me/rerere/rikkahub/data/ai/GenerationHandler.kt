@@ -74,6 +74,7 @@ import me.rerere.rikkahub.data.ai.prompts.DEFAULT_FINAL_ANSWER_REMINDER_PROMPT
 import me.rerere.rikkahub.data.files.FileFolders
 import me.rerere.rikkahub.diagnostics.RecentGenerationDiagnostics
 import me.rerere.rikkahub.diagnostics.GenerationDiagnosticHandle
+import me.rerere.rikkahub.diagnostics.RequestBreakdownDiagnostic
 import java.io.File
 import me.rerere.rikkahub.data.ai.transformers.onGenerationFinish
 import me.rerere.rikkahub.data.ai.transformers.transforms
@@ -89,6 +90,7 @@ import me.rerere.rikkahub.data.ai.execution.ToolBatchCandidate
 import me.rerere.rikkahub.data.ai.execution.ToolBatchExecutionOutcome
 import me.rerere.rikkahub.data.ai.execution.ToolExecutionBatchCoordinator
 import me.rerere.rikkahub.data.ai.tools.ToolExecutionContext
+import me.rerere.rikkahub.data.ai.tools.TRANSIENT_CONVERSATION_READER_TOOL_NAMES
 import me.rerere.rikkahub.data.capability.CapabilitySubject
 import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.datastore.findModelById
@@ -105,6 +107,13 @@ import kotlin.uuid.Uuid
 private const val TAG = "GenerationHandler"
 private const val MAX_TOOL_OUTPUT_CHARS = 32 * 1024
 private const val TOOL_OUTPUT_PREVIEW_CHARS = 4 * 1024
+
+internal fun shouldSpillToolOutputToFile(
+    toolName: String,
+    totalChars: Int,
+    hasShellAccess: Boolean,
+): Boolean = toolName !in TRANSIENT_CONVERSATION_READER_TOOL_NAMES &&
+    totalChars > MAX_TOOL_OUTPUT_CHARS && hasShellAccess
 private const val FINAL_ANSWER_MAX_TOKENS = 4096
 private const val FINAL_ANSWER_MAX_ATTEMPTS = 10
 private const val FINAL_ANSWER_RESERVE_MS = 45_000L
@@ -1504,7 +1513,12 @@ class GenerationHandler(
                             // the context window.
                             val hasShellAccess = toolsInternal.any { it.name == "workspace_shell" }
                             executedTools += markedTool.copy(
-                                output = maybeTruncateToolOutput(tool.toolCallId, result, hasShellAccess)
+                                output = maybeTruncateToolOutput(
+                                    tool.toolCallId,
+                                    tool.toolName,
+                                    result,
+                                    hasShellAccess,
+                                )
                             )
                         }.also {
                             if (executionBoundaryStarted) {
@@ -1672,6 +1686,7 @@ class GenerationHandler(
                     markedTool.copy(
                         output = maybeTruncateToolOutput(
                             ready.tool.toolCallId,
+                            ready.tool.toolName,
                             runtimeResult.output,
                             hasShellAccess,
                         ),
@@ -2106,6 +2121,11 @@ class GenerationHandler(
         // preserving the long history prefix across tasks and the exact prefix inside tool loops.
         // Responses/native providers keep the established combined system layout.
         val useAnchoredVolatileContext = provider is ProviderSetting.OpenAI && !provider.useResponseApi
+        var breakdownAssistantPrompt = ""
+        var breakdownUserIdentityPrompt = ""
+        var breakdownMemoryPrompt = ""
+        var breakdownRecentChatsPrompt = ""
+        var breakdownToolPrompts = emptyList<String>()
         val systemPromptLayout = run {
             // Conversation-level system prompt override (upstream): when the assistant
             // allows it and the conversation supplies one, it replaces the assistant prompt.
@@ -2127,14 +2147,20 @@ class GenerationHandler(
                 buildRecentChatsPrompt(assistant, conversationRepo)
             } else ""
             val toolPrompts = tools.map { tool -> tool.systemPrompt(model, messages) }
+            val userIdentityPrompt = buildUserIdentityPrompt(
+                settings.displaySetting.userNickname,
+            )
+            breakdownAssistantPrompt = effectiveSystemPrompt
+            breakdownUserIdentityPrompt = userIdentityPrompt
+            breakdownMemoryPrompt = memoryPrompt
+            breakdownRecentChatsPrompt = recentChatsPrompt
+            breakdownToolPrompts = toolPrompts
             // Split stable instructions from runtime data. Chat Completions anchor runtime data
             // to the current user turn (below); otherwise an ever-changing device/memory
             // addendum can cut the reusable prefix after only the system prompt.
             val (stableSystem, volatileSystem) = systemPromptBuilder.buildSections(
                 assistantPrompt = effectiveSystemPrompt,
-                userIdentityPrompt = buildUserIdentityPrompt(
-                    settings.displaySetting.userNickname,
-                ),
+                userIdentityPrompt = userIdentityPrompt,
                 memoryPrompt = memoryPrompt,
                 recentChatsPrompt = recentChatsPrompt,
                 toolPrompts = toolPrompts,
@@ -2230,6 +2256,25 @@ class GenerationHandler(
                 stream = stream,
             )
         )
+        val requestMode = "${requestPurpose.name.lowercase()}:${if (stream) "stream" else "single"}"
+        val breakdown = RequestBreakdownDiagnostic.create(
+            generationId = diagnosticHandle.generationId,
+            providerCallIndex = diagnosticHandle.nextProviderCallIndex(),
+            modelId = model.modelId,
+            providerType = provider::class.simpleName ?: "unknown",
+            requestMode = requestMode,
+            finalMessages = internalMessages,
+            tools = tools,
+            assistantPrompt = breakdownAssistantPrompt,
+            userIdentityPrompt = breakdownUserIdentityPrompt,
+            toolSystemPrompts = breakdownToolPrompts,
+            memoryPrompt = breakdownMemoryPrompt,
+            recentChatsPrompt = breakdownRecentChatsPrompt,
+            dynamicSystemAddendum = providerSystemAddendum,
+            memoryCount = memories.size,
+            enabledSkillNames = assistant.enabledSkills,
+        )
+        diagnosticHandle.recordRequestBreakdown(context.filesDir, breakdown)
         val providerOutcome = try {
             DefaultProviderTurnRunner(runControl).run(
                 ProviderTurnRequest(
@@ -2276,11 +2321,19 @@ class GenerationHandler(
         val trackedTerminal = terminalTracker.finish()
         val terminal = messages.lastOrNull()?.let(trackedTerminal::withMessageStats)
             ?: trackedTerminal
+        messages.lastOrNull()?.usage?.let { usage ->
+            diagnosticHandle.recordProviderUsage(
+                filesDir = context.filesDir,
+                promptTokens = usage.promptTokens,
+                cachedTokens = usage.cachedTokens,
+                completionTokens = usage.completionTokens,
+            )
+        }
         diagnosticHandle.record(
             terminal = terminal,
             modelId = model.modelId,
             providerType = provider::class.simpleName ?: "unknown",
-            requestMode = "${requestPurpose.name.lowercase()}:${if (stream) "stream" else "single"}",
+            requestMode = requestMode,
             contextOriginalTokens = maxOf(
                 initialContextPreparation.estimatedRequestTokens,
                 contextPreparation.estimatedRequestTokens,
@@ -2295,6 +2348,7 @@ class GenerationHandler(
 
     private fun maybeTruncateToolOutput(
         toolCallId: String,
+        toolName: String,
         output: List<UIMessagePart>,
         hasShellAccess: Boolean,
     ): List<UIMessagePart> {
@@ -2302,7 +2356,9 @@ class GenerationHandler(
         val nonTextParts = output.filter { it !is UIMessagePart.Text }
         val totalChars = textParts.sumOf { it.text.length }
 
-        if (totalChars <= MAX_TOOL_OUTPUT_CHARS || !hasShellAccess) return output
+        // Cross-conversation excerpts are memory-only. Their Reader enforces a 40k text budget,
+        // and the generic /tool_outputs spill would violate the single-command lifetime.
+        if (!shouldSpillToolOutputToFile(toolName, totalChars, hasShellAccess)) return output
 
         Log.i(TAG, "maybeTruncateToolOutput: truncating tool $toolCallId output ($totalChars chars)")
 

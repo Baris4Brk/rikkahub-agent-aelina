@@ -256,6 +256,10 @@ object CapabilityCatalog {
         "keyboard_set_cursor",
         "keyboard_select_range",
         "privileged_send_broadcast",
+        "linux_run",
+        "linux_session_create",
+        "linux_session_exec",
+        "linux_session_close",
     )
 
     private val deferredExecutionToolNames: Set<String> = setOf(
@@ -361,6 +365,8 @@ object CapabilityCatalog {
         "calendar_create",
         "calendar_delete",
         "calendar_update",
+        "linux_grant_request",
+        "linux_grant_revoke",
     )
 
     private val phase1UnavailableToolNames: Set<String> = setOf(
@@ -469,6 +475,13 @@ object CapabilityCatalog {
         "ui_wait_for_window",
         "ui_wait_for_node",
         "workspace_read_file",
+        "conversation_list_recent",
+        "conversation_read_recent",
+        "conversation_search",
+        "linux_profile_list",
+        "linux_grant_list",
+        "linux_session_inspect",
+        "linux_session_list",
     )
 
     private val registry: Map<CapabilityId, CapabilityDescriptor> = buildRegistry()
@@ -1083,6 +1096,22 @@ object CapabilityCatalog {
             riskLevel = RiskLevel.Low,
             approvalPolicy = ApprovalPolicy.AlwaysAsk,
             allowedOrigins = InvocationSurfacePolicy.LOCAL_UNLOCKED,
+        ))
+
+        reg(CapabilityDescriptor(
+            id = CapabilityId.ConversationHistoryRead,
+            localToolOption = null,
+            toolNames = me.rerere.rikkahub.data.ai.tools.TRANSIENT_CONVERSATION_READER_TOOL_NAMES,
+            requirements = emptyList(),
+            implementationState = ImplementationState.Implemented,
+            riskLevel = RiskLevel.Medium,
+            approvalPolicy = ApprovalPolicy.Default,
+            allowedOrigins = setOf(
+                ToolCallOrigin.LocalChat,
+                ToolCallOrigin.SystemAssistant,
+                ToolCallOrigin.QuickCapture,
+            ),
+            requiresUnlockedDevice = true,
         ))
 
         // ═══════════════════════════════════════════════════════════════════════════

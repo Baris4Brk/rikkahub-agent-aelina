@@ -33,6 +33,12 @@ private const val TAG = "OcrTransformer"
 // sends /new — the symptom this bound exists to prevent.
 private const val OCR_TIMEOUT_MS = 60_000L
 
+internal fun latestUserTurnIndex(messages: List<UIMessage>): Int =
+    messages.indexOfLast { it.role == MessageRole.USER }
+
+internal fun shouldRunOcrForMessage(messageIndex: Int, latestUserMessageIndex: Int): Boolean =
+    messageIndex == latestUserMessageIndex
+
 object OcrTransformer : InputMessageTransformer, KoinComponent {
     private val cache by lazy {
         val context = get<Context>()
@@ -60,20 +66,32 @@ object OcrTransformer : InputMessageTransformer, KoinComponent {
             return messages
         }
 
-        val hasImages = messages.any { message ->
-            message.parts.any { it is UIMessagePart.Image && it.url.startsWith("file:") }
+        val latestUserMessageIndex = latestUserTurnIndex(messages)
+        if (latestUserMessageIndex < 0) return messages
+
+        // OCR belongs to the current user turn only. Historical images must never start a new
+        // network request: doing so made one stale image delay every later text-only turn.
+        val currentTurnHasImages = messages[latestUserMessageIndex].parts.any {
+            it is UIMessagePart.Image && it.url.startsWith("file:")
         }
-        if (!hasImages) return messages
 
         return withContext(Dispatchers.IO) {
             try {
-                ctx.processingStatus.value = ctx.context.getString(R.string.ocr_status_recognizing)
-                messages.map { message ->
+                if (currentTurnHasImages) {
+                    ctx.processingStatus.value = ctx.context.getString(R.string.ocr_status_recognizing)
+                }
+                messages.mapIndexed { messageIndex, message ->
                     message.copy(
                         parts = message.parts.map { part ->
                             when {
                                 part is UIMessagePart.Image && part.url.startsWith("file:") -> {
-                                    UIMessagePart.Text(performOcr(part))
+                                    val text = if (shouldRunOcrForMessage(messageIndex, latestUserMessageIndex)) {
+                                        performOcr(part)
+                                    } else {
+                                        cache.get(part.url)
+                                            ?: "[Image from an earlier turn; OCR not available]"
+                                    }
+                                    UIMessagePart.Text(text)
                                 }
 
                                 else -> part
@@ -95,8 +113,14 @@ object OcrTransformer : InputMessageTransformer, KoinComponent {
         }
 
         val settings = get<SettingsStore>().settingsFlow.value
-        val model = settings.findModelById(settings.ocrModelId) ?: return "[Image]"
-        val providerSetting = model.findProvider(settings.providers) ?: return "[Image]"
+        val model = settings.findModelById(settings.ocrModelId) ?: return cacheResult(
+            part.url,
+            "[Image: OCR model is not configured]",
+        )
+        val providerSetting = model.findProvider(settings.providers) ?: return cacheResult(
+            part.url,
+            "[Image: OCR provider is not configured]",
+        )
         val provider = get<ProviderManager>().getProviderByType(providerSetting)
         val result = withTimeoutOrNull(OCR_TIMEOUT_MS) {
             provider.generateText(
@@ -115,9 +139,10 @@ object OcrTransformer : InputMessageTransformer, KoinComponent {
         }
         if (result == null) {
             Log.w(TAG, "performOcr: timed out after ${OCR_TIMEOUT_MS}ms for ${part.url}")
-            // Not cached: a timeout is usually transient/config-related, so a later retry
-            // should be allowed to reach the model again.
-            return "[Image: could not be read — the OCR model did not respond in time]"
+            return cacheResult(
+                part.url,
+                "[Image: could not be read - the OCR model did not respond in time]",
+            )
         }
         val content = result.choices[0].message?.toText() ?: "[ERROR, OCR failed]"
         Log.i(TAG, "performOcr: $content")
@@ -135,6 +160,11 @@ object OcrTransformer : InputMessageTransformer, KoinComponent {
         // Let a real cancellation (e.g. the user's /stop) propagate instead of swallowing
         // it into a fake OCR-failure string, which would defeat cooperative cancellation.
         if (it is kotlinx.coroutines.CancellationException) throw it
-        "[ERROR, OCR failed: $it]"
+        cacheResult(part.url, "[ERROR, OCR failed: $it]")
+    }
+
+    private fun cacheResult(url: String, result: String): String {
+        cache.put(url, result)
+        return result
     }
 }

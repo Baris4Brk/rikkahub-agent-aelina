@@ -149,36 +149,17 @@ class QuickCaptureCoordinator(
     }
 
     fun onSingleTap() {
-        when (_state.value.stage) {
-            QuickCaptureStage.HIDING_OVERLAY,
-            QuickCaptureStage.CAPTURING,
-            QuickCaptureStage.SELECTING_REGION,
-            QuickCaptureStage.PERSISTING,
-            QuickCaptureStage.SUBMITTING,
-            QuickCaptureStage.QUEUED,
-            QuickCaptureStage.RUNNING,
-            QuickCaptureStage.WAITING_APPROVAL,
-            QuickCaptureStage.COMPLETED,
-            -> openCurrentConversation()
-            QuickCaptureStage.FAILED -> {
-                // A command failure belongs to the fixed target conversation. Do not silently
-                // submit a second screenshot when the user is trying to inspect that failure.
-                if (_state.value.target != null) {
-                    openCurrentConversation()
-                } else {
-                    launchOverlayOperation {
-                        resetToIdle()
-                        captureSingle()
-                    }
+        when (decideQuickCaptureSingleTap(_state.value.stage)) {
+            QuickCaptureSingleTapAction.CAPTURE_SINGLE ->
+                launchOverlayOperation { captureSingle() }
+            QuickCaptureSingleTapAction.CAPTURE_FOR_BATCH ->
+                launchOverlayOperation { captureForBatch() }
+            QuickCaptureSingleTapAction.RESET_AND_CAPTURE ->
+                launchOverlayOperation {
+                    resetToIdle()
+                    captureSingle()
                 }
-            }
-            else -> launchOverlayOperation {
-                when (_state.value.stage) {
-                    QuickCaptureStage.IDLE -> captureSingle()
-                    QuickCaptureStage.COLLECTING -> captureForBatch()
-                    else -> Unit
-                }
-            }
+            QuickCaptureSingleTapAction.IGNORE_WHILE_BUSY -> Unit
         }
     }
 

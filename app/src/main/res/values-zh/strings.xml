@@ -552,6 +552,9 @@
   <string name="reasoning_xhigh">超高</string>
   <string name="regenerate">重新生成</string>
   <string name="regenerate_confirm_message">确定要重新生成此消息吗？</string>
+  <string name="chat_cancel_guidance">取消引导</string>
+  <string name="assistant_second_user_history_read">读取其他会话</string>
+  <string name="assistant_second_user_history_read_desc">允许已确认的第二用户列出会话，并临时读取或搜索指定会话。原始消息仅当前任务可用，不会保存。</string>
   <string name="render_with_webview">网页视图渲染</string>
   <string name="rikkahub_provider_description">官方免费 AI 服务，使用用户赞助资金为新用户提供部分免费模型作为备用，无需 API 密钥。有严格速率限制，如已购买自有服务商，请尽量使用自有服务商。</string>
   <string name="safe_mode_assistants">助手</string>
@@ -2134,6 +2137,7 @@ mDNS 地址：使用 .local 主机名，同一网络中的其他设备可通过�
   <string name="quick_capture_projection_notification_title">快速看屏屏幕共享</string>
   <string name="quick_capture_projection_notification_starting">正在准备截屏…</string>
   <string name="quick_capture_projection_notification_ready">已准备好截取 %1$d × %2$d 屏幕</string>
+  <string name="quick_capture_menu_open_conversation">打开当前会话</string>
   <string name="quick_capture_menu_assistant">下次使用其他助手</string>
   <string name="quick_capture_menu_settings">打开设置</string>
   <string name="quick_capture_menu_stop">停止悬浮球</string>

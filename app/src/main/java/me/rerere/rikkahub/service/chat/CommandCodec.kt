@@ -74,6 +74,7 @@ object CommandCodec {
         }.toString()
         is ClearPendingQueueCommand -> "clear_queue" to buildJsonObject { put("reason", command.reason) }.toString()
         is CancelQueuedCommand -> "cancel_queued" to buildJsonObject { put("targetCommandId", command.targetCommandId.toString()) }.toString()
+        is CancelSteeringCommand -> "cancel_steering" to buildJsonObject { put("targetCommandId", command.targetCommandId.toString()) }.toString()
         is UpdateQueuedMessageCommand -> "update_queued_message" to buildJsonObject {
             put("targetCommandId", command.targetCommandId.toString())
             put("content", json.encodeToString(RawUserContent.serializer(), command.content))
@@ -159,6 +160,7 @@ object CommandCodec {
             "resume_queue" -> ResumeQueueCommand(root["startNextImmediately"]?.jsonPrimitive?.content?.toBooleanStrictOrNull() ?: true)
             "clear_queue" -> ClearPendingQueueCommand(root["reason"]?.jsonPrimitive?.content ?: "Cleared by user")
             "cancel_queued" -> CancelQueuedCommand(Uuid.parse(root["targetCommandId"]?.jsonPrimitive?.content ?: return@runCatching null))
+            "cancel_steering" -> CancelSteeringCommand(Uuid.parse(root["targetCommandId"]?.jsonPrimitive?.content ?: return@runCatching null))
             "update_queued_message" -> UpdateQueuedMessageCommand(
                 targetCommandId = Uuid.parse(root["targetCommandId"]?.jsonPrimitive?.content ?: return@runCatching null),
                 content = root["content"]?.jsonPrimitive?.content?.let {

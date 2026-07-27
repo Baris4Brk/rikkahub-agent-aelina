@@ -95,6 +95,11 @@ data class CancelQueuedCommand(
     val targetCommandId: Uuid,
 ) : NormalCommand
 
+/** Permanently removes one guidance item from the active run or its queue fallback. */
+data class CancelSteeringCommand(
+    val targetCommandId: Uuid,
+) : NormalCommand
+
 data class UpdateQueuedMessageCommand(
     val targetCommandId: Uuid,
     val content: RawUserContent,

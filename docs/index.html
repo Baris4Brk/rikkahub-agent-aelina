@@ -3,23 +3,23 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>RikkaHub Agent · Tell your phone what to do.</title>
-  <meta name="description" content="A native Android LLM agent with 70+ device tools, an in-app browser the AI drives, AI-authored workflows, scheduled jobs, SSH, music + media, screen automation, file manager, and a remote Telegram bot. All opt-in. Open source." />
+  <title>RikkaHub Agent · Second-user enhanced fork</title>
+  <meta name="description" content="A personal RikkaHub Agent fork with a scoped second-user assistant, quick screenshot Q&A, cross-conversation read tools, stronger run control, and deep Android diagnostics." />
   <meta name="theme-color" content="#1a1b26" />
   <meta name="color-scheme" content="dark" />
 
-  <meta property="og:title" content="RikkaHub Agent · Tell your phone what to do." />
-  <meta property="og:description" content="A native Android LLM agent with 70+ device tools, in-app browser, workflows, scheduled jobs, SSH, music, file manager, and a Telegram bot. Open source. Android 8+." />
+  <meta property="og:title" content="RikkaHub Agent · Second-user enhanced fork" />
+  <meta property="og:description" content="The full Android agent, extended with second-user isolation, quick capture, scoped conversation reading, and hardened diagnostics." />
   <meta property="og:type" content="website" />
-  <meta property="og:url" content="https://extv.github.io/rikkahub-agent/" />
-  <meta property="og:image" content="https://raw.githubusercontent.com/ExTV/rikkahub-agent/master/docs/icon.png" />
+  <meta property="og:url" content="https://aaaelina.github.io/rikkahub-agent/" />
+  <meta property="og:image" content="https://raw.githubusercontent.com/AAAelina/rikkahub-agent/feature/second-user-linux-runtime/docs/icon.png" />
   <meta property="og:image:width" content="512" />
   <meta property="og:image:height" content="512" />
 
   <meta name="twitter:card" content="summary_large_image" />
   <meta name="twitter:title" content="RikkaHub Agent" />
   <meta name="twitter:description" content="Tell your phone what to do. It does it." />
-  <meta name="twitter:image" content="https://raw.githubusercontent.com/ExTV/rikkahub-agent/master/docs/icon.png" />
+  <meta name="twitter:image" content="https://raw.githubusercontent.com/AAAelina/rikkahub-agent/feature/second-user-linux-runtime/docs/icon.png" />
 
   <link rel="icon" type="image/png" href="icon.png" />
 
@@ -35,10 +35,10 @@
     "applicationCategory": "ProductivityApplication",
     "operatingSystem": "Android 8+",
     "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
-    "url": "https://extv.github.io/rikkahub-agent/",
-    "downloadUrl": "https://github.com/ExTV/rikkahub-agent/releases/latest",
-    "description": "On-device LLM agent for Android with 70+ device tools, in-app browser, workflows, scheduled jobs, SSH, music, file manager, and a Telegram bot.",
-    "author": { "@type": "Person", "name": "ExTV", "url": "https://github.com/ExTV" }
+    "url": "https://aaaelina.github.io/rikkahub-agent/",
+    "downloadUrl": "https://github.com/AAAelina/rikkahub-agent/releases/latest",
+    "description": "Personal Android agent fork with second-user isolation, quick screenshot Q&A, scoped conversation reading, and hardened diagnostics.",
+    "author": { "@type": "Person", "name": "AAAelina", "url": "https://github.com/AAAelina" }
   }
   </script>
 
@@ -74,6 +74,11 @@
 
     html, body { background: var(--bg); }
 
+    html,
+    body {
+      overflow-x: hidden;
+    }
+
     body {
       font-family: 'Inter', system-ui, -apple-system, sans-serif;
       color: var(--text);
@@ -81,7 +86,6 @@
       letter-spacing: -0.005em;
       -webkit-font-smoothing: antialiased;
       font-feature-settings: 'cv11','ss01';
-      overflow-x: hidden;
       position: relative;
     }
 
@@ -1030,17 +1034,18 @@
 
 <!-- NAV -->
 <nav id="nav">
-  <a href="https://github.com/ExTV/rikkahub-agent" class="nav-logo">
+  <a href="https://github.com/AAAelina/rikkahub-agent" class="nav-logo">
     <img src="icon.png" alt="" class="nav-logo-img" />
     <span>RikkaHub Agent</span>
   </a>
   <ul class="nav-links">
     <li><a href="#features">Features</a></li>
+    <li><a href="#fork-differences">This fork</a></li>
     <li><a href="#quickstart">Quick start</a></li>
     <li><a href="#faq">FAQ</a></li>
-    <li><a href="https://github.com/ExTV/rikkahub-agent">GitHub</a></li>
+    <li><a href="https://github.com/AAAelina/rikkahub-agent">GitHub</a></li>
   </ul>
-  <a href="https://github.com/ExTV/rikkahub-agent/releases/latest" class="nav-cta">
+  <a href="https://github.com/AAAelina/rikkahub-agent/releases/latest" class="nav-cta">
     <svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.4" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
     Download
   </a>
@@ -1050,19 +1055,19 @@
 <section id="hero">
   <div class="hero-glow"></div>
   <div class="hero-inner">
-    <span class="hero-pill"><span class="dot"></span>Open source · Built for Android</span>
-    <h1>Tell it once.<br /><em>Walk away.</em></h1>
+    <span class="hero-pill"><span class="dot"></span>Personal enhanced fork · Built for Android</span>
+    <h1>One phone.<br /><em>Two agent surfaces.</em></h1>
     <p class="hero-sub">
-      A fork of <a href="https://github.com/rikkahub/rikkahub">RikkaHub</a> that turns the native Android LLM chat client into a real on-device agent.<br />
-      <strong>70+ device tools</strong>, an in-app browser the AI drives, AI-authored workflows, scheduled jobs, SSH, music, file manager, and a remote Telegram bot.<br />
-      All opt-in. Tell it what to do in plain language; it runs in the background, on your phone, on your terms.
+      Built on <a href="https://github.com/ExTV/rikkahub-agent">RikkaHub Agent</a> and <a href="https://github.com/rikkahub/rikkahub">RikkaHub</a>.<br />
+      Keep the complete Android agent, then add a <strong>scoped second-user assistant</strong>, quick screenshot Q&amp;A, transient cross-conversation reading, stronger live-run control, and request diagnostics.<br />
+      Every privileged surface remains opt-in and command-scoped.
     </p>
     <div class="hero-actions">
-      <a href="https://github.com/ExTV/rikkahub-agent/releases/latest" class="btn btn-primary">
+      <a href="https://github.com/AAAelina/rikkahub-agent/releases/latest" class="btn btn-primary">
         <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
         Download APK
       </a>
-      <a href="https://github.com/ExTV/rikkahub-agent" class="btn btn-ghost">
+      <a href="https://github.com/AAAelina/rikkahub-agent" class="btn btn-ghost">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/></svg>
         Star on GitHub
       </a>
@@ -1078,6 +1083,44 @@
     </div>
   </div>
 
+</section>
+
+<!-- FORK DIFFERENCES -->
+<section id="fork-differences">
+  <div class="container">
+    <div class="reveal">
+      <span class="section-label">Different from the original</span>
+      <h2>Focused extensions for a real primary phone.</h2>
+      <p class="section-sub">This fork follows the original Agent edition while adding device-specific interaction, isolation, and recovery paths.</p>
+    </div>
+
+    <div class="features-grid">
+      <div class="feature-card reveal">
+        <h3>Second-user assistant</h3>
+        <p>A dedicated privileged conversation with explicit local-device policy, stable run identity, and a scoped Linux/runtime capability surface.</p>
+      </div>
+      <div class="feature-card reveal">
+        <h3>Quick screenshot Q&amp;A</h3>
+        <p>Capture the full screen or a region from a floating control. Auto-send stays in the background; manual mode opens a draft with the screenshot attached.</p>
+      </div>
+      <div class="feature-card reveal">
+        <h3>Scoped conversation reading</h3>
+        <p>Opt-in tools list, read, and search other conversations. Raw text is transient, tied to the current command, sanitized, and excluded from persistent tool history.</p>
+      </div>
+      <div class="feature-card reveal">
+        <h3>Live run steering</h3>
+        <p>Guide an active generation, cancel stale guidance, and continue or regenerate without losing the command identity used by permissions and tool budgets.</p>
+      </div>
+      <div class="feature-card reveal">
+        <h3>Context and OCR control</h3>
+        <p>Improved turn selection, OCR attachment handling, context budgets, and request-size breakdowns keep large multimodal chats predictable.</p>
+      </div>
+      <div class="feature-card reveal">
+        <h3>Recovery and diagnostics</h3>
+        <p>Migration contracts, import reconciliation, FTS repair, Base64 draft compatibility, and targeted tests protect the customized data paths.</p>
+      </div>
+    </div>
+  </div>
 </section>
 
 <!-- STATS -->
@@ -1252,7 +1295,7 @@
       <div class="qs-steps reveal">
         <div class="qs-step">
           <div class="qs-step-num">1</div>
-          <p><strong>Install.</strong> Download the latest <code>*-universal-debug.apk</code> from <a href="https://github.com/ExTV/rikkahub-agent/releases/latest">Releases</a>, allow install from unknown sources, open.</p>
+          <p><strong>Install.</strong> Download the latest APK from <a href="https://github.com/AAAelina/rikkahub-agent/releases/latest">this fork's Releases</a>, allow install from unknown sources, and open it. Back up first if the APK signature differs from your installed build.</p>
         </div>
         <div class="qs-step">
           <div class="qs-step-num">2</div>
@@ -1294,7 +1337,7 @@
         </div>
         <div class="qs-tab-panel" data-tab="build" data-active="false">
 <pre><span class="c-comment"># Build the APK yourself</span>
-<span class="c-prompt">$ </span><span class="c-cmd">git clone</span> <span class="c-str">https://github.com/ExTV/rikkahub-agent.git</span>
+<span class="c-prompt">$ </span><span class="c-cmd">git clone</span> <span class="c-flag">--branch feature/second-user-linux-runtime</span> <span class="c-str">https://github.com/AAAelina/rikkahub-agent.git</span>
 <span class="c-prompt">$ </span><span class="c-cmd">cd</span> rikkahub-agent
 <span class="c-prompt">$ </span><span class="c-cmd">./gradlew</span> :app:installDebug
 
@@ -1317,11 +1360,11 @@
     <h2>Put your phone to work.</h2>
     <p>Free, open source, runs entirely on your device. The hard part is deciding what to delegate first.</p>
     <div class="cta-actions">
-      <a href="https://github.com/ExTV/rikkahub-agent/releases/latest" class="btn btn-primary">
+      <a href="https://github.com/AAAelina/rikkahub-agent/releases/latest" class="btn btn-primary">
         <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
         Download the latest APK
       </a>
-      <a href="https://github.com/ExTV/rikkahub-agent" class="btn btn-ghost">
+      <a href="https://github.com/AAAelina/rikkahub-agent" class="btn btn-ghost">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/></svg>
         Source on GitHub
       </a>
@@ -1399,7 +1442,7 @@
       <details>
         <summary>License?</summary>
         <div class="faq-answer">
-          AGPLv3, inherited from upstream. See the <a href="https://github.com/ExTV/rikkahub-agent/blob/master/LICENSE">LICENSE</a> file for the full text and the upstream segmented dual-licensing terms.
+          AGPLv3, inherited from upstream. See this fork's <a href="https://github.com/AAAelina/rikkahub-agent/blob/feature/second-user-linux-runtime/LICENSE">LICENSE</a> file for the full text and the upstream segmented dual-licensing terms.
         </div>
       </details>
 
@@ -1421,10 +1464,10 @@
     <div class="footer-col">
       <h4>Project</h4>
       <ul>
-        <li><a href="https://github.com/ExTV/rikkahub-agent">GitHub</a></li>
-        <li><a href="https://github.com/ExTV/rikkahub-agent/releases">Releases</a></li>
-        <li><a href="https://github.com/ExTV/rikkahub-agent/issues">Issues</a></li>
-        <li><a href="https://github.com/ExTV/rikkahub-agent/blob/master/LICENSE">License</a></li>
+        <li><a href="https://github.com/AAAelina/rikkahub-agent">GitHub</a></li>
+        <li><a href="https://github.com/AAAelina/rikkahub-agent/releases">Releases</a></li>
+        <li><a href="https://github.com/AAAelina/rikkahub-agent/issues">Issues</a></li>
+        <li><a href="https://github.com/AAAelina/rikkahub-agent/blob/feature/second-user-linux-runtime/LICENSE">License</a></li>
       </ul>
     </div>
 

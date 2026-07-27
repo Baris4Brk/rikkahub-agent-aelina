@@ -12,6 +12,26 @@ import me.rerere.rikkahub.data.db.entity.MessageNodeEntity
 
 @Dao
 interface MessageNodeDAO {
+    @Query(
+        "SELECT * FROM message_node WHERE conversation_id = :conversationId " +
+            "AND (:beforeNodeIndex IS NULL OR node_index < :beforeNodeIndex) " +
+            "ORDER BY node_index DESC LIMIT :limit"
+    )
+    suspend fun getRecentNodesBefore(
+        conversationId: String,
+        beforeNodeIndex: Int?,
+        limit: Int,
+    ): List<MessageNodeEntity>
+
+    @Query("SELECT * FROM message_node WHERE conversation_id = :conversationId AND id IN (:nodeIds)")
+    suspend fun getNodesByIds(conversationId: String, nodeIds: List<String>): List<MessageNodeEntity>
+
+    @Query(
+        "SELECT EXISTS(SELECT 1 FROM message_node WHERE conversation_id = :conversationId " +
+            "AND node_index < :beforeNodeIndex)"
+    )
+    suspend fun hasNodeBefore(conversationId: String, beforeNodeIndex: Int): Boolean
+
     @Query("SELECT * FROM message_node WHERE conversation_id = :conversationId ORDER BY node_index ASC")
     suspend fun getNodesOfConversation(conversationId: String): List<MessageNodeEntity>
 
@@ -81,4 +101,3 @@ suspend fun MessageNodeDAO.getMessageCountPerDay(startDate: String): List<Messag
             arrayOf(startDate)
         )
     )
-

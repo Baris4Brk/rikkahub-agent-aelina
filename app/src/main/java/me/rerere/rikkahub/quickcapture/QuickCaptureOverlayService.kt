@@ -298,6 +298,10 @@ class QuickCaptureOverlayService : Service(), QuickCaptureOverlayHost {
             this.text = text
             setOnClickListener { action() }
         }
+        layout.addView(item(getString(R.string.quick_capture_menu_open_conversation)) {
+            hideMenu()
+            coordinator.openCurrentConversation()
+        })
         layout.addView(item(getString(R.string.quick_capture_menu_assistant)) {
             hideMenu()
             showTemporaryAssistantMenu()

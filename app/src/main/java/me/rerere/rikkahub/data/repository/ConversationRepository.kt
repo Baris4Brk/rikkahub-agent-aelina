@@ -42,6 +42,50 @@ class ConversationRepository(
         private const val INITIAL_LOAD_SIZE = 40
     }
 
+    suspend fun listRecentConversationSummaries(
+        excludeConversationId: Uuid,
+        limit: Int = 20,
+    ): List<LightConversationEntity> = conversationDAO.getRecentConversationSummaries(
+        excludeConversationId = excludeConversationId.toString(),
+        limit = limit.coerceIn(1, 50),
+    )
+
+    suspend fun getConversationSummaryById(conversationId: Uuid): LightConversationEntity? =
+        conversationDAO.getConversationSummaryById(conversationId.toString())
+
+    suspend fun getRecentNodeEntitiesBefore(
+        conversationId: Uuid,
+        beforeNodeIndex: Int?,
+        limit: Int,
+    ): List<MessageNodeEntity> = messageNodeDAO.getRecentNodesBefore(
+        conversationId = conversationId.toString(),
+        beforeNodeIndex = beforeNodeIndex,
+        limit = limit.coerceIn(1, 64),
+    )
+
+    suspend fun getNodeEntitiesByIds(
+        conversationId: Uuid,
+        nodeIds: List<String>,
+    ): List<MessageNodeEntity> = if (nodeIds.isEmpty()) emptyList() else
+        messageNodeDAO.getNodesByIds(conversationId.toString(), nodeIds.distinct().take(50))
+
+    suspend fun hasNodeBefore(conversationId: Uuid, beforeNodeIndex: Int): Boolean =
+        messageNodeDAO.hasNodeBefore(conversationId.toString(), beforeNodeIndex)
+
+    suspend fun searchMessagesInConversation(
+        keyword: String,
+        conversationId: Uuid,
+        sort: MessageSearchSort = MessageSearchSort.RELEVANCE,
+        limit: Int = 20,
+        offset: Int = 0,
+    ) = messageFtsManager.searchInConversation(
+        keyword = keyword,
+        conversationId = conversationId.toString(),
+        sort = sort,
+        limit = limit,
+        offset = offset,
+    )
+
     suspend fun getRecentConversations(assistantId: Uuid, limit: Int = 10): List<Conversation> {
         return conversationDAO.getRecentConversationsOfAssistant(
             assistantId = assistantId.toString(),

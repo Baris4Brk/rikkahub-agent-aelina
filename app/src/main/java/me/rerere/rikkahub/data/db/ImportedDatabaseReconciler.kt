@@ -47,12 +47,12 @@ object ImportedDatabaseReconciler {
 
     /**
      * Room's schema version and identity hash for [AppDatabase]. Both are copied verbatim
-     * from app/schemas/me.rerere.rikkahub.data.db.AppDatabase/35.json. When the schema
+     * from app/schemas/me.rerere.rikkahub.data.db.AppDatabase/36.json. When the schema
      * version is bumped, update BOTH constants (and the table DDL below if the fork-only
      * tables changed) or this reconciliation will silently stop matching.
      */
-    internal const val EXPECTED_VERSION = 35
-    internal const val EXPECTED_IDENTITY_HASH = "53663bb60a5992f648e8aa97364d1b07"
+    internal const val EXPECTED_VERSION = 36
+    internal const val EXPECTED_IDENTITY_HASH = "efb4f396f5f1d0fcce7479fbf5ef9238"
     internal const val PRE_STORAGE_MODE_V35_IDENTITY_HASH = "2a74d694211f0df9f9094c7571ec71dd"
 
     internal enum class ReconcilePlan {
@@ -72,7 +72,7 @@ object ImportedDatabaseReconciler {
         version > EXPECTED_VERSION -> ReconcilePlan.SKIP
         version == EXPECTED_VERSION && identityHash == EXPECTED_IDENTITY_HASH ->
             ReconcilePlan.SKIP
-        version == EXPECTED_VERSION && identityHash == PRE_STORAGE_MODE_V35_IDENTITY_HASH ->
+        version == 35 && identityHash == PRE_STORAGE_MODE_V35_IDENTITY_HASH ->
             ReconcilePlan.CURRENT_V35_DELTA
         else -> ReconcilePlan.FULL_COMPATIBILITY
     }
@@ -478,6 +478,12 @@ object ImportedDatabaseReconciler {
                         )
                         ensureExecutionV35Schema(db)
                         ensureCapabilityGrantsV35Schema(db)
+                    }
+                    if (version >= 36) {
+                        db.execSQL(
+                            "CREATE INDEX IF NOT EXISTS `index_message_node_conversation_id_node_index` " +
+                                "ON `message_node` (`conversation_id`, `node_index`)",
+                        )
                     }
 
                     // Older backups must keep their original user_version so Room can run

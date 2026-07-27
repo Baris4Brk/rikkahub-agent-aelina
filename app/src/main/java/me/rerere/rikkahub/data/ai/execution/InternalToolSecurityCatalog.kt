@@ -9,6 +9,8 @@ object InternalToolSecurityCatalog {
     val READ_ONLY: Set<String> = setOf(
         "recent_chats",
         "conversation_search",
+        "conversation_list_recent",
+        "conversation_read_recent",
         "memory_query",
         "skill_get_content",
         "use_skill",

@@ -68,6 +68,7 @@ import me.rerere.rikkahub.R
 import me.rerere.rikkahub.RouteActivity
 import me.rerere.rikkahub.data.ai.GenerationChunk
 import me.rerere.rikkahub.data.ai.GenerationHandler
+import me.rerere.rikkahub.data.ai.sanitizeTransientConversationToolResults
 import me.rerere.rikkahub.data.ai.ToolCallOrigin
 import me.rerere.rikkahub.data.ai.mcp.McpManager
 import me.rerere.rikkahub.data.ai.tools.LocalTools
@@ -154,6 +155,7 @@ import me.rerere.rikkahub.service.chat.ResumeAfterApprovalCommand
 import me.rerere.rikkahub.service.chat.ResumeQueueCommand
 import me.rerere.rikkahub.service.chat.ClearPendingQueueCommand
 import me.rerere.rikkahub.service.chat.CancelQueuedCommand
+import me.rerere.rikkahub.service.chat.CancelSteeringCommand
 import me.rerere.rikkahub.service.chat.UpdateQueuedMessageCommand
 import me.rerere.rikkahub.service.chat.PromoteQueuedMessageToSteeringCommand
 import me.rerere.rikkahub.service.chat.QueuedMessageUiEntry
@@ -205,6 +207,11 @@ data class ChatEmergencyStopResult(
     val ok: Boolean get() = failures.isEmpty() &&
         stoppedRuntimeCount == runtimeCount && clearedQueueCount == runtimeCount
 }
+
+internal fun resolveGenerationCommandId(
+    activeCommandId: Uuid?,
+    runId: Uuid?,
+): Uuid? = activeCommandId ?: runId
 
 private fun List<UIMessage>.withQuickCaptureCorrelation(
     annotation: UIMessageAnnotation.QuickCapture?,
@@ -454,6 +461,8 @@ class ChatService(
         me.rerere.rikkahub.setup.SetupTransactionCoordinator,
     private val displayAutomationRuntime: me.rerere.rikkahub.display.DisplayAutomationRuntime? = null,
 ) {
+    private val conversationLibraryReader =
+        me.rerere.rikkahub.data.ai.tools.ConversationLibraryReader(conversationRepo)
     // workspace 系统提示注入 (依赖 workspaceRepository, 故在类内构�?
     private val workspaceReminderTransformer = WorkspaceReminderTransformer(workspaceRepository)
     private val privilegedActionGuard = me.rerere.rikkahub.privilege.DefaultPrivilegedActionGuard(
@@ -953,6 +962,9 @@ class ChatService(
 
     suspend fun cancelQueuedCommand(conversationId: Uuid, commandId: Uuid): SubmitResult =
         submitCommand(conversationId, CancelQueuedCommand(commandId), CommandOrigin.APP_UI)
+
+    suspend fun cancelSteering(conversationId: Uuid, commandId: Uuid): SubmitResult =
+        submitCommand(conversationId, CancelSteeringCommand(commandId), CommandOrigin.APP_UI)
 
     suspend fun updateQueuedMessage(
         conversationId: Uuid,
@@ -1812,6 +1824,14 @@ class ChatService(
         acceptedAssistantSnapshot: Assistant? = null,
         quickCaptureAnnotation: UIMessageAnnotation.QuickCapture? = null,
     ) {
+        // Some continuation paths (regenerate, resume-after-approval) do not carry the
+        // original command id into this method, but every live generation still owns a
+        // stable run id. Resolve the identity once and use it consistently for surface
+        // authorization, capability checks, tool budgets, and transient history access.
+        val effectiveCommandId = resolveGenerationCommandId(
+            activeCommandId = activeCommandId,
+            runId = runControl?.runId,
+        )
         suspend fun applyRunUpdate(block: suspend () -> Unit): Boolean =
             runControl?.runIfUpdatesAllowed(block) ?: run {
                 block()
@@ -1924,12 +1944,12 @@ class ChatService(
             val hasAuthorizedInvocation = when (callOrigin) {
                 ToolCallOrigin.QuickCapture -> me.rerere.rikkahub.quickcapture
                     .QuickCaptureInvocationRegistry
-                    .hasAuthorizedRun(conversationId, activeCommandId)
+                    .hasAuthorizedRun(conversationId, effectiveCommandId)
                 else -> me.rerere.rikkahub.assistant.SystemAssistantInvocationRegistry
-                    .hasAuthorizedUnlockedInvocation(conversationId, activeCommandId)
+                    .hasAuthorizedUnlockedInvocation(conversationId, effectiveCommandId)
             }
             val invocationSurfaceContext = me.rerere.rikkahub.quickcapture.InvocationSurfaceContexts
-                .currentContext(callOrigin, conversationId, activeCommandId)
+                .currentContext(callOrigin, conversationId, effectiveCommandId)
             val toolExposurePlan = me.rerere.rikkahub.data.ai.ToolExposurePlan.create(
                 origin = callOrigin,
                 deviceLocked = deviceLocked,
@@ -2156,7 +2176,7 @@ class ChatService(
                 callOrigin = callOrigin,
                 commandOrigin = origin,
                 conversationId = conversationId,
-                commandId = activeCommandId,
+                commandId = effectiveCommandId,
                 runControl = runControl,
                 isHeadless = isHeadless,
                 isSubAgent = subAgentProfile != null,
@@ -2214,7 +2234,23 @@ class ChatService(
                     if (webSearchToolsEnabled) {
                         addAll(createSearchTools(settings))
                     }
-                    addAll(createConversationTools(conversationRepo, assistant.id))
+                    if (!privilegeContext.isPrivileged) {
+                        addAll(
+                            createConversationTools(conversationRepo, assistant.id).filter { tool ->
+                                callOrigin == ToolCallOrigin.LocalChat || tool.name != "conversation_search"
+                            }
+                        )
+                    } else if (assistant.allowConversationHistoryRead) {
+                        addAll(
+                            me.rerere.rikkahub.data.ai.tools.createSecondUserConversationReaderTools(
+                                reader = conversationLibraryReader,
+                                invocationContext = invocationCtx,
+                                commandId = effectiveCommandId,
+                                historyReadEnabled = true,
+                                deviceUnlocked = { !deviceLocked },
+                            )
+                        )
+                    }
                     addAll(localToolDefinitions)
                     addAll(pluginToolRegistrations.map { it.definition })
                     privilegedShellRegistration?.let { add(it.definition) }
@@ -2384,7 +2420,7 @@ class ChatService(
                     is GenerationChunk.Messages -> {
                         val correlatedMessages = chunk.messages.withQuickCaptureCorrelation(
                             quickCaptureAnnotation,
-                        )
+                        ).sanitizeTransientConversationToolResults()
                         val updatedConversation = getConversationFlow(conversationId).value
                             .updateCurrentMessages(correlatedMessages)
                         if (!applyRunUpdate {

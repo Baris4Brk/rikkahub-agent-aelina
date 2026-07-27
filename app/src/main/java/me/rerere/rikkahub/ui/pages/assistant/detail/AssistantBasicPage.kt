@@ -184,6 +184,7 @@ internal fun AssistantBasicContent(
                                 // this assistant. Choosing another session requires a new local
                                 // confirmation before automatic approvals can be used.
                                 secondUserPolicyConfirmed = false,
+                                allowConversationHistoryRead = false,
                             )
                         }
                     },
@@ -517,11 +518,32 @@ internal fun AssistantBasicContent(
                             onUpdate(
                                 assistant.copy(
                                     secondUserPolicyConfirmed = confirmed,
+                                    allowConversationHistoryRead = if (confirmed) {
+                                        assistant.allowConversationHistoryRead
+                                    } else {
+                                        false
+                                    },
                                     // Clear the legacy bypass marker only after a deliberate
                                     // local confirmation (or opt-out) in this UI.
                                     unrestricted = false,
                                 ),
                             )
+                        },
+                    )
+                },
+            )
+            HorizontalDivider()
+            FormItem(
+                modifier = Modifier.padding(8.dp),
+                label = { Text(stringResource(R.string.assistant_second_user_history_read)) },
+                description = { Text(stringResource(R.string.assistant_second_user_history_read_desc)) },
+                tail = {
+                    Switch(
+                        checked = assistant.allowConversationHistoryRead,
+                        enabled = assistant.privilegedConversationId != null &&
+                            assistant.secondUserPolicyConfirmed,
+                        onCheckedChange = { enabled ->
+                            onUpdate(assistant.copy(allowConversationHistoryRead = enabled))
                         },
                     )
                 },

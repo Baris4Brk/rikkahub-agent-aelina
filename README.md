@@ -6,22 +6,40 @@
 
 **Your phone, automated.**
 
-A fork of [RikkaHub](https://github.com/rikkahub/rikkahub) that turns the native Android LLM chat client into a real on-device agent: 80+ device tools, AI-authored workflows, scheduled jobs, an in-app browser the AI drives, SSH, screen automation, file manager, music player, voice transcription, downloadable on-device LLMs, and a remote Telegram bot. All opt-in.
+A personal enhanced fork of [RikkaHub Agent](https://github.com/ExTV/rikkahub-agent), built on [RikkaHub](https://github.com/rikkahub/rikkahub). It keeps the full on-device agent toolset and adds a dedicated second-user assistant runtime, quick screenshot Q&A, scoped cross-conversation reading, stronger run control, and deeper diagnostics.
 
 <p>
-  <a href="https://github.com/ExTV/rikkahub-agent/releases"><img src="https://img.shields.io/github/v/release/ExTV/rikkahub-agent?include_prereleases&style=flat-square&label=release&color=blue" alt="Release" /></a>
-  <a href="https://github.com/ExTV/rikkahub-agent/releases"><img src="https://img.shields.io/github/downloads/ExTV/rikkahub-agent/total?style=flat-square&color=brightgreen" alt="Downloads" /></a>
-  <a href="https://github.com/ExTV/rikkahub-agent/stargazers"><img src="https://img.shields.io/github/stars/ExTV/rikkahub-agent?style=flat-square&color=yellow" alt="Stars" /></a>
+  <a href="https://github.com/AAAelina/rikkahub-agent/releases"><img src="https://img.shields.io/github/v/release/AAAelina/rikkahub-agent?include_prereleases&style=flat-square&label=release&color=blue" alt="Release" /></a>
+  <a href="https://github.com/AAAelina/rikkahub-agent/releases"><img src="https://img.shields.io/github/downloads/AAAelina/rikkahub-agent/total?style=flat-square&color=brightgreen" alt="Downloads" /></a>
+  <a href="https://github.com/AAAelina/rikkahub-agent/stargazers"><img src="https://img.shields.io/github/stars/AAAelina/rikkahub-agent?style=flat-square&color=yellow" alt="Stars" /></a>
   <img src="https://img.shields.io/badge/platform-Android%208%2B-3DDC84?style=flat-square&logo=android&logoColor=white" alt="Android 8+" />
 </p>
 
-<a href="https://extv.github.io/rikkahub-agent/"><strong>Website</strong></a> ·
-<a href="https://github.com/ExTV/rikkahub-agent/releases/latest"><strong>Download</strong></a> ·
+<a href="https://aaaelina.github.io/rikkahub-agent/"><strong>Website</strong></a> ·
+<a href="https://github.com/AAAelina/rikkahub-agent/releases/latest"><strong>Download</strong></a> ·
+<a href="#what-this-fork-adds"><strong>Fork differences</strong></a> ·
 <a href="#-features"><strong>Features</strong></a> ·
 <a href="#-quick-start"><strong>Quick Start</strong></a> ·
 <a href="#-building-from-source"><strong>Build</strong></a>
 
 </div>
+
+---
+
+## What this fork adds
+
+This repository follows the original [ExTV/RikkaHub Agent](https://github.com/ExTV/rikkahub-agent) while carrying a focused set of device-specific and agent-runtime extensions:
+
+| Area | Added in this fork |
+| --- | --- |
+| Second-user assistant | A scoped privileged conversation with explicit local-device policy, isolated run identity, and a dedicated Linux/runtime capability surface. |
+| Quick screenshot Q&A | A floating quick-capture flow with region capture, background auto-send, draft hand-off when auto-send is disabled, and an explicit “open current conversation” action. |
+| Cross-conversation reading | Opt-in, read-only tools for listing, reading, and searching other conversations. Raw content is transient, command-scoped, and sanitized before persistence. |
+| Run control | Steering messages can be applied during a live generation and cancelled cleanly; continuation and regenerate paths preserve a stable command identity. |
+| Context and OCR | Better turn selection, OCR attachment handling, context budgeting, and request-size diagnostics for large multimodal conversations. |
+| Reliability | Database migration safeguards, import reconciliation, FTS recovery, Base64 draft compatibility, and targeted regression tests for the customized paths. |
+
+The security model remains opt-in. The second-user and cross-conversation features stay disabled until they are explicitly enabled for an assistant. This fork is independently maintained; report fork-specific issues in [AAAelina/rikkahub-agent](https://github.com/AAAelina/rikkahub-agent/issues), not to either upstream project.
 
 ---
 
@@ -189,7 +207,7 @@ Plus: passwords and API keys never make it into log files. The Telegram bot igno
 
 ## 🚀 Quick Start
 
-1. **Install**: download the latest **`*-release.apk`** from [Releases](https://github.com/ExTV/rikkahub-agent/releases/latest). Allow install from unknown sources, then open. (One-time note: if you still have an old debug build of RikkaHub Agent installed, uninstall it first — the release build is signed differently and won't upgrade over it.)
+1. **Install**: download the latest APK from [this fork's Releases](https://github.com/AAAelina/rikkahub-agent/releases/latest). Allow install from unknown sources, then open. Match the APK signature with your installed build before upgrading; changing signatures requires uninstalling and therefore loses app-local data unless you back it up first.
    - **Upgrading from a build before `2.3.1-agent.0`?** The app id changed to `excp.rikkahub` so the fork installs alongside upstream RikkaHub instead of clashing with it. Android treats the new id as a separate app, so it won't update over an older agent build automatically. To carry your data across: open the old app, make a backup (Settings → Backup), install this release, then restore that backup. Once you've confirmed everything moved over, uninstall the old build.
 2. **Add an LLM provider**: Settings, then Providers, pick one, paste your API key. **OpenRouter** is first-class (auto-detected model capabilities and pricing, provider routing controls), and you can sign in to **Codex** with your ChatGPT account to use your OpenAI plan through OAuth instead of an API key. For fully on-device inference with no key and no network, open the **Local · LiteRT** provider and download a local model (Gemma, Qwen) — it runs on any device and uses the GPU automatically where supported. Multimodal Gemma builds can also read images you attach, decoded on-device where the device's vision encoder is supported (otherwise the model replies from text only). Pixel 8/9/10 users can also flip on the built-in **AICore** card for Gemini Nano.
 3. **Turn on what you want**: Settings, then Assistants, tap your assistant, then **Local Tools**, and flip the categories you want enabled.
@@ -223,7 +241,7 @@ runs `bun install` and `bun run build` in `web-ui/` to produce the in-app web
 UI bundle before packaging the APK.
 
 ```bash
-git clone https://github.com/ExTV/rikkahub-agent.git
+git clone --branch feature/second-user-linux-runtime https://github.com/AAAelina/rikkahub-agent.git
 
 cd rikkahub-agent
 

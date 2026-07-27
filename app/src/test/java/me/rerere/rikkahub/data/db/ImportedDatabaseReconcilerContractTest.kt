@@ -5,10 +5,10 @@ import org.junit.Test
 
 class ImportedDatabaseReconcilerContractTest {
     @Test
-    fun `reconciler current version and identity match Room schema 35`() {
-        assertEquals(35, ImportedDatabaseReconciler.EXPECTED_VERSION)
+    fun `reconciler current version and identity match Room schema 36`() {
+        assertEquals(36, ImportedDatabaseReconciler.EXPECTED_VERSION)
         assertEquals(
-            "53663bb60a5992f648e8aa97364d1b07",
+            "efb4f396f5f1d0fcce7479fbf5ef9238",
             ImportedDatabaseReconciler.EXPECTED_IDENTITY_HASH,
         )
     }
@@ -25,12 +25,12 @@ class ImportedDatabaseReconcilerContractTest {
     }
 
     @Test
-    fun `current v35 skips raw framework SQLite reconciliation`() {
+    fun `current v36 skips raw framework SQLite reconciliation`() {
         assertEquals(
             ImportedDatabaseReconciler.ReconcilePlan.SKIP,
             ImportedDatabaseReconciler.reconcilePlan(
-                version = 35,
-                identityHash = "53663bb60a5992f648e8aa97364d1b07",
+                version = 36,
+                identityHash = "efb4f396f5f1d0fcce7479fbf5ef9238",
             ),
         )
     }
@@ -39,7 +39,7 @@ class ImportedDatabaseReconcilerContractTest {
     fun `unknown current schema still uses compatibility reconciliation`() {
         assertEquals(
             ImportedDatabaseReconciler.ReconcilePlan.FULL_COMPATIBILITY,
-            ImportedDatabaseReconciler.reconcilePlan(version = 35, identityHash = "upstream"),
+            ImportedDatabaseReconciler.reconcilePlan(version = 36, identityHash = "upstream"),
         )
     }
 }

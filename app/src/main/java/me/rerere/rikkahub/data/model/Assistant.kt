@@ -103,6 +103,8 @@ data class Assistant(
     val privilegedIdentityName: String = "第二用户",
     /** Local UI confirmation for the selected second-user conversation. Reset on reassignment. */
     val secondUserPolicyConfirmed: Boolean = false,
+    /** Explicit opt-in for temporary read-only access to other local conversation histories. */
+    val allowConversationHistoryRead: Boolean = false,
 )
 
 @Serializable

@@ -310,6 +310,8 @@ object ToolCapabilityResolver {
     private fun resourceFor(toolName: String, args: JsonObject): ResourceScope = when {
         toolName == "conversation_send_message" ->
             ResourceScope.Conversation(args.string("conversation_id") ?: "unspecified")
+        toolName.startsWith("conversation_") ->
+            ResourceScope.Conversation(args.string("conversation_id") ?: "*")
         toolName.startsWith("ssh_") -> ResourceScope.Connection(
             args.string("profile_name") ?: args.string("host") ?: "unspecified",
         )

@@ -286,6 +286,7 @@ class ConversationRuntime(
             is ResumeQueueCommand,
             is ClearPendingQueueCommand,
             is CancelQueuedCommand,
+            is CancelSteeringCommand,
             is UpdateQueuedMessageCommand,
             is PromoteQueuedMessageToSteeringCommand ->
                 tryEnqueue(
@@ -651,6 +652,7 @@ class ConversationRuntime(
                     is ResumeQueueCommand,
                     is ClearPendingQueueCommand,
                     is CancelQueuedCommand,
+                    is CancelSteeringCommand,
                     is UpdateQueuedMessageCommand,
                     is PromoteQueuedMessageToSteeringCommand ->
                         tryEnqueue(
@@ -1000,6 +1002,13 @@ class ConversationRuntime(
                     complete(envelope, CommandOutcome.Rejected("Queued command not found"))
                 }
             }
+            is CancelSteeringCommand -> {
+                if (cancelSteeringCommand(command.targetCommandId)) {
+                    complete(envelope, CommandOutcome.Completed)
+                } else {
+                    complete(envelope, CommandOutcome.Rejected("Guidance not found"))
+                }
+            }
             is UpdateQueuedMessageCommand -> {
                 val failure = updateQueuedMessage(command)
                 complete(
@@ -1040,6 +1049,40 @@ class ConversationRuntime(
         val removed = pendingNormalIndex.remove(targetId) ?: return false
         complete(removed, CommandOutcome.Cancelled)
         return true
+    }
+
+    private fun cancelSteeringCommand(targetId: Uuid): Boolean {
+        var found = false
+
+        // A steer that missed its run is rewritten to a normal queued message with the same ID.
+        // Remove that replacement first so cancelling the card cannot later start a new turn.
+        pendingNormalIndex.remove(targetId)?.let { queuedFallback ->
+            complete(queuedFallback, CommandOutcome.Cancelled)
+            found = true
+        }
+
+        if (softSteeringTarget.get()?.cancelSteering(targetId) == true) {
+            found = true
+        }
+
+        val accepted = acceptedCommands[targetId]
+        if (accepted?.command is SteerCommand) {
+            complete(accepted, CommandOutcome.Cancelled)
+            found = true
+        }
+
+        if (steeringFallbackCommands.remove(targetId) != null) found = true
+        _steeringEntries.update { entries ->
+            if (targetId !in entries) entries else {
+                found = true
+                entries - targetId
+            }
+        }
+        _steeringStatus.update { states ->
+            if (targetId !in states) states else states - targetId
+        }
+        refreshQueueStatus()
+        return found
     }
 
     private suspend fun updateQueuedMessage(command: UpdateQueuedMessageCommand): String? {

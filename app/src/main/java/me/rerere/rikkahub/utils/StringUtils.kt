@@ -24,6 +24,13 @@ fun String.base64Decode(): String {
     return String(Base64.decode(this))
 }
 
+/**
+ * Decode navigation text without allowing a malformed or legacy raw draft to crash the UI.
+ * Quick Capture briefly sent plain text through a route whose established contract is Base64;
+ * returning the original value preserves those already-created drafts.
+ */
+fun String.base64DecodeOrOriginal(): String = runCatching { base64Decode() }.getOrElse { this }
+
 fun String.escapeHtml(): String {
     return StringEscapeUtils.escapeHtml4(this)
 }

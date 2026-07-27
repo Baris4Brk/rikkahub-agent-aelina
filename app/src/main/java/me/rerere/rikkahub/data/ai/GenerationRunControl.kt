@@ -335,6 +335,22 @@ class GenerationRunControl(
         return updated
     }
 
+    /**
+     * Forgets guidance so it cannot be delivered at another checkpoint or persisted when the
+     * run finishes. A provider request that already left the process cannot be recalled, but
+     * cancelling while it is DELIVERING prevents that delivery from being committed as applied.
+     */
+    fun cancelSteering(commandId: Uuid): Boolean = synchronized(steeringLock) {
+        val note = steeringNotes.remove(commandId) ?: return@synchronized false
+        steering.removeAll { it.commandId == commandId }
+        steeringStates.remove(commandId)
+        appliedSteering.remove(note.id)
+        steeringTokens = steering.sumOf { queued ->
+            estimateTokens((steeringNotes[queued.commandId] ?: queued).text)
+        }
+        true
+    }
+
     fun pendingSteering(): List<SteeringNote> = synchronized(steeringLock) {
         steering.map { steeringNotes[it.commandId] ?: it }
     }

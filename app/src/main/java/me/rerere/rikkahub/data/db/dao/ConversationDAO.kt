@@ -12,6 +12,16 @@ import me.rerere.rikkahub.data.repository.LightConversationEntity
 
 @Dao
 interface ConversationDAO {
+    @Query(
+        "SELECT id, assistant_id as assistantId, title, is_pinned as isPinned, " +
+            "create_at as createAt, update_at as updateAt FROM conversationentity " +
+            "WHERE id != :excludeConversationId ORDER BY update_at DESC LIMIT :limit"
+    )
+    suspend fun getRecentConversationSummaries(
+        excludeConversationId: String,
+        limit: Int,
+    ): List<LightConversationEntity>
+
     @Query("SELECT * FROM conversationentity ORDER BY is_pinned DESC, update_at DESC")
     fun getAll(): Flow<List<ConversationEntity>>
 
@@ -47,6 +57,12 @@ interface ConversationDAO {
 
     @Query("SELECT * FROM conversationentity WHERE id = :id")
     suspend fun getConversationById(id: String): ConversationEntity?
+
+    @Query(
+        "SELECT id, assistant_id as assistantId, title, is_pinned as isPinned, " +
+            "create_at as createAt, update_at as updateAt FROM conversationentity WHERE id = :id"
+    )
+    suspend fun getConversationSummaryById(id: String): LightConversationEntity?
 
     @Query("SELECT EXISTS(SELECT 1 FROM conversationentity WHERE id = :id)")
     suspend fun existsById(id: String): Boolean

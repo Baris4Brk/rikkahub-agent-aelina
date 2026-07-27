@@ -1659,6 +1659,66 @@ class ConversationRuntimeTest {
     }
 
     @Test
+    fun `cancelling applied steering removes its card and prevents persistence`() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val runStarted = CompletableDeferred<Unit>()
+        val allowCheckpoint = CompletableDeferred<Unit>()
+        val checkpointApplied = CompletableDeferred<Unit>()
+        val releaseRun = CompletableDeferred<Unit>()
+        val persistedCount = java.util.concurrent.atomic.AtomicInteger(0)
+        val runtime = ConversationRuntime(
+            appScope = scope,
+            conversationId = Uuid.random(),
+            executor = RuntimeCommandExecutor { _, control ->
+                runStarted.complete(Unit)
+                allowCheckpoint.await()
+                control.takeSteeringForCheckpoint(1).also(control::markSteeringProviderStarted)
+                checkpointApplied.complete(Unit)
+                releaseRun.await()
+                RunOutcome.Completed()
+            },
+            onPersistSteering = { persistedCount.incrementAndGet() },
+        )
+        val message = CommandEnvelope(
+            conversationId = runtime.conversationId,
+            command = messageCommand("active"),
+            origin = CommandOrigin.APP_UI,
+            sequence = 1,
+        )
+        val steer = CommandEnvelope(
+            conversationId = runtime.conversationId,
+            command = SteerCommand("forget this guidance"),
+            origin = CommandOrigin.APP_UI,
+            sequence = 2,
+        )
+        val cancel = CommandEnvelope(
+            conversationId = runtime.conversationId,
+            command = CancelSteeringCommand(steer.id),
+            origin = CommandOrigin.APP_UI,
+            sequence = 3,
+        )
+
+        assertTrue(runtime.enqueueEnvelope(message) is SubmitResult.Accepted)
+        withTimeout(5_000) { runStarted.await() }
+        assertTrue(runtime.enqueueEnvelope(steer) is SubmitResult.Accepted)
+        allowCheckpoint.complete(Unit)
+        withTimeout(5_000) { checkpointApplied.await() }
+        assertEquals(CommandOutcome.Completed, withTimeout(5_000) { steer.result.await() })
+        assertTrue(steer.id in runtime.steeringEntries.value)
+
+        assertTrue(runtime.enqueueEnvelope(cancel) is SubmitResult.Accepted)
+        assertEquals(CommandOutcome.Completed, withTimeout(5_000) { cancel.result.await() })
+        assertTrue(steer.id !in runtime.steeringEntries.value)
+        assertTrue(steer.id !in runtime.steeringStatus.value)
+
+        releaseRun.complete(Unit)
+        assertEquals(CommandOutcome.Completed, withTimeout(5_000) { message.result.await() })
+        assertEquals(0, persistedCount.get())
+        runtime.close()
+        scope.cancel()
+    }
+
+    @Test
     fun `transient applied steering is written as audit history and removed from temporary UI`() = runBlocking {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val runStarted = CompletableDeferred<Unit>()

@@ -96,7 +96,7 @@ import me.rerere.rikkahub.ui.context.Navigator
 import me.rerere.rikkahub.ui.hooks.ChatInputState
 import me.rerere.rikkahub.ui.hooks.EditStateContent
 import me.rerere.rikkahub.ui.hooks.useEditState
-import me.rerere.rikkahub.utils.base64Decode
+import me.rerere.rikkahub.utils.base64DecodeOrOriginal
 import me.rerere.rikkahub.utils.isAllowedFileType
 import me.rerere.rikkahub.utils.navigateToChatPage
 import org.koin.androidx.compose.koinViewModel
@@ -169,7 +169,7 @@ fun ChatPage(id: Uuid, text: String?, files: List<Uri>, nodeId: Uuid? = null) {
             }
             inputState.messageContent = parts
         }
-        text?.base64Decode()?.let { decodedText ->
+        text?.base64DecodeOrOriginal()?.let { decodedText ->
             if (decodedText.isNotEmpty()) {
                 inputState.setMessageText(decodedText)
             }
@@ -416,6 +416,16 @@ private fun ChatPageContent(
                                             },
                                             style = MaterialTheme.typography.labelSmall,
                                         )
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.End,
+                                        ) {
+                                            TextButton(
+                                                onClick = { vm.cancelSteering(entry.commandId) },
+                                            ) {
+                                                Text(stringResource(R.string.chat_cancel_guidance))
+                                            }
+                                        }
                                     }
                                 }
                             }
