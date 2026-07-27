@@ -1953,4 +1953,16 @@
   <string name="runtime_diagnostic_tool_policy_coverage_title">工具政策覆蓋率</string>
   <string name="runtime_diagnostic_tool_policy_coverage_summary">固定安全政策覆蓋率：%1$d/%2$d；已核准外掛程式覆蓋率：%3$d/%4$d；MCP：每次呼叫檢查</string>
   <string name="runtime_diagnostic_none">無</string>
+  <string name="system_assistant_execution_safety_blocked">執行已被安全設定封鎖</string>
+  <string name="system_assistant_execution_waiting_approval">等待授權</string>
+  <string name="system_assistant_execution_cancel_requested">正在停止…</string>
+  <string name="system_assistant_execution_terminating">正在強制停止…</string>
+  <string name="system_assistant_execution_tool_running">正在執行…</string>
+  <string name="system_assistant_execution_queued">已排入佇列</string>
+  <string name="system_assistant_execution_recovering">正在恢復狀態…</string>
+  <string name="system_assistant_execution_stale">狀態等待確認</string>
+  <string name="system_assistant_execution_failed_recently">執行失敗</string>
+  <string name="system_assistant_execution_succeeded_recently">執行完成</string>
+  <string name="system_assistant_execution_background_service_running">背景服務執行中</string>
+  <string name="system_assistant_view_approval">查看授權</string>
 </resources>

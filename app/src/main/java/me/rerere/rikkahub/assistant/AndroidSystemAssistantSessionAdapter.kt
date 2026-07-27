@@ -178,7 +178,15 @@ class AndroidSystemAssistantSessionAdapter(
             View.GONE
         }
         if (hostKind == SystemAssistantHostKind.ACTIVITY_OVERLAY) {
-            val commandRunning = state.runtimeState == RuntimeState.Running ||
+            val commandRunning = state.presentation?.status in setOf(
+                SecondUserPresentationStatus.WAITING_APPROVAL,
+                SecondUserPresentationStatus.CANCEL_REQUESTED,
+                SecondUserPresentationStatus.TERMINATING,
+                SecondUserPresentationStatus.TOOL_RUNNING,
+                SecondUserPresentationStatus.MODEL_GENERATING,
+                SecondUserPresentationStatus.QUEUED,
+                SecondUserPresentationStatus.RECOVERING,
+            ) || state.runtimeState == RuntimeState.Running ||
                 state.submission is SystemAssistantSubmissionUiState.Submitting ||
                 state.submission is SystemAssistantSubmissionUiState.Accepted
             views.surface.text = appContext.getString(
@@ -197,7 +205,7 @@ class AndroidSystemAssistantSessionAdapter(
             views.latestUser.visibility = View.GONE
             views.latestAssistant.text = ""
             views.latestAssistant.visibility = View.GONE
-            views.status.text = appContext.getString(R.string.system_assistant_unlock_required)
+            views.status.text = statusText(state, deviceLocked = true)
             views.input.visibility = View.GONE
             views.input.isEnabled = false
             views.send.visibility = View.GONE
@@ -212,6 +220,15 @@ class AndroidSystemAssistantSessionAdapter(
         views.send.visibility = View.VISIBLE
         views.openChat.visibility = View.VISIBLE
         views.configure.visibility = View.VISIBLE
+        val waitingApproval = state.presentation?.status ==
+            SecondUserPresentationStatus.WAITING_APPROVAL
+        views.openChat.text = appContext.getString(
+            if (waitingApproval) {
+                R.string.system_assistant_view_approval
+            } else {
+                R.string.system_assistant_open_chat
+            }
+        )
         views.identity.text = when (val target = state.target) {
             is SystemAssistantTargetUiState.Ready -> "${target.assistantName} · ${target.displayName}"
             is SystemAssistantTargetUiState.Unavailable -> targetResolutionMessage(target.resolution)
@@ -227,14 +244,17 @@ class AndroidSystemAssistantSessionAdapter(
         views.latestAssistant.visibility =
             if (state.latestAssistantText.isNullOrBlank()) View.GONE else View.VISIBLE
         views.status.text = statusText(state, deviceLocked)
-        views.input.isEnabled = state.canSubmit && !deviceLocked
-        views.send.isEnabled = state.canSubmit && !deviceLocked &&
+        views.input.isEnabled = state.canSubmit && !deviceLocked && !waitingApproval
+        views.send.isEnabled = state.canSubmit && !deviceLocked && !waitingApproval &&
             state.target is SystemAssistantTargetUiState.Ready
         views.openChat.isEnabled = state.conversationId != null
         views.configure.isEnabled = true
     }
 
     private fun statusText(state: SystemAssistantUiState, deviceLocked: Boolean): String = when {
+        deviceLocked && state.presentation?.status != null &&
+            state.presentation.status != SecondUserPresentationStatus.IDLE ->
+            presentationStatusText(state.presentation.status)
         state.inputAvailability == SystemAssistantInputAvailability.InvokedFromKeyguard ->
             appContext.getString(R.string.system_assistant_unlock_required)
         state.inputAvailability == SystemAssistantInputAvailability.UnsupportedAndroidUser ->
@@ -245,6 +265,7 @@ class AndroidSystemAssistantSessionAdapter(
         state.target == SystemAssistantTargetUiState.NotResolved ||
             state.target == SystemAssistantTargetUiState.Resolving ->
             appContext.getString(R.string.system_assistant_loading)
+        state.presentation != null -> presentationStatusText(state.presentation.status)
         state.answer is SystemAssistantAnswerUiState.Recovering -> {
             val recovery = state.answer
             appContext.getString(
@@ -278,6 +299,34 @@ class AndroidSystemAssistantSessionAdapter(
             appContext.getString(R.string.system_assistant_error_request_failed)
         else -> appContext.getString(R.string.system_assistant_ready)
     }
+
+    private fun presentationStatusText(status: SecondUserPresentationStatus): String =
+        appContext.getString(
+            when (status) {
+                SecondUserPresentationStatus.SAFETY_BLOCKED ->
+                    R.string.system_assistant_execution_safety_blocked
+                SecondUserPresentationStatus.WAITING_APPROVAL ->
+                    R.string.system_assistant_execution_waiting_approval
+                SecondUserPresentationStatus.CANCEL_REQUESTED ->
+                    R.string.system_assistant_execution_cancel_requested
+                SecondUserPresentationStatus.TERMINATING ->
+                    R.string.system_assistant_execution_terminating
+                SecondUserPresentationStatus.TOOL_RUNNING ->
+                    R.string.system_assistant_execution_tool_running
+                SecondUserPresentationStatus.MODEL_GENERATING -> R.string.system_assistant_generating
+                SecondUserPresentationStatus.QUEUED -> R.string.system_assistant_execution_queued
+                SecondUserPresentationStatus.RECOVERING ->
+                    R.string.system_assistant_execution_recovering
+                SecondUserPresentationStatus.STALE -> R.string.system_assistant_execution_stale
+                SecondUserPresentationStatus.FAILED_RECENTLY ->
+                    R.string.system_assistant_execution_failed_recently
+                SecondUserPresentationStatus.SUCCEEDED_RECENTLY ->
+                    R.string.system_assistant_execution_succeeded_recently
+                SecondUserPresentationStatus.BACKGROUND_SERVICE_RUNNING ->
+                    R.string.system_assistant_execution_background_service_running
+                SecondUserPresentationStatus.IDLE -> R.string.system_assistant_ready
+            }
+        )
 
     private fun submissionErrorText(error: SystemAssistantSubmissionUiState.Error): String =
         when (error.code) {

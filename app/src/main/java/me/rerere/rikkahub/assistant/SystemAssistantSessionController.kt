@@ -212,6 +212,7 @@ data class SystemAssistantUiState(
     val submission: SystemAssistantSubmissionUiState = SystemAssistantSubmissionUiState.Idle,
     val answer: SystemAssistantAnswerUiState = SystemAssistantAnswerUiState.Ready,
     val history: SystemAssistantHistoryUiState = SystemAssistantHistoryUiState.NotLoaded,
+    val presentation: SecondUserPresentationState? = null,
 ) {
     val canSubmit: Boolean
         get() = inputAvailability == SystemAssistantInputAvailability.Available &&

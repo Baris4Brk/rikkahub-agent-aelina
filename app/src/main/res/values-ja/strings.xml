@@ -1956,4 +1956,16 @@ mDNSアドレス: .localホスト名を使用し、IPを知らなくても同じ
   <string name="runtime_diagnostic_tool_policy_coverage_title">ツールポリシーのカバレッジ</string>
   <string name="runtime_diagnostic_tool_policy_coverage_summary">固定セキュリティポリシーのカバレッジ: %1$d/%2$d、承認済みプラグインのカバレッジ: %3$d/%4$d、MCP: 呼び出しごとに確認</string>
   <string name="runtime_diagnostic_none">なし</string>
+  <string name="system_assistant_execution_safety_blocked">安全設定により実行がブロックされています</string>
+  <string name="system_assistant_execution_waiting_approval">承認待ち</string>
+  <string name="system_assistant_execution_cancel_requested">停止中…</string>
+  <string name="system_assistant_execution_terminating">強制停止中…</string>
+  <string name="system_assistant_execution_tool_running">実行中…</string>
+  <string name="system_assistant_execution_queued">キューに追加済み</string>
+  <string name="system_assistant_execution_recovering">状態を復元中…</string>
+  <string name="system_assistant_execution_stale">状態の確認待ち</string>
+  <string name="system_assistant_execution_failed_recently">実行に失敗しました</string>
+  <string name="system_assistant_execution_succeeded_recently">実行が完了しました</string>
+  <string name="system_assistant_execution_background_service_running">バックグラウンドサービス実行中</string>
+  <string name="system_assistant_view_approval">承認を確認</string>
 </resources>

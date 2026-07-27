@@ -1955,4 +1955,16 @@ mDNS 주소: .local 호스트네임을 사용하며, IP를 몰라도 같은 네�
   <string name="runtime_diagnostic_tool_policy_coverage_title">도구 정책 적용 범위</string>
   <string name="runtime_diagnostic_tool_policy_coverage_summary">고정 보안 정책 적용 범위: %1$d/%2$d, 승인된 플러그인 적용 범위: %3$d/%4$d, MCP: 호출마다 확인</string>
   <string name="runtime_diagnostic_none">없음</string>
+  <string name="system_assistant_execution_safety_blocked">안전 설정으로 실행이 차단됨</string>
+  <string name="system_assistant_execution_waiting_approval">승인 대기 중</string>
+  <string name="system_assistant_execution_cancel_requested">중지 중…</string>
+  <string name="system_assistant_execution_terminating">강제 중지 중…</string>
+  <string name="system_assistant_execution_tool_running">실행 중…</string>
+  <string name="system_assistant_execution_queued">대기열에 추가됨</string>
+  <string name="system_assistant_execution_recovering">상태 복구 중…</string>
+  <string name="system_assistant_execution_stale">상태 확인 대기 중</string>
+  <string name="system_assistant_execution_failed_recently">실행 실패</string>
+  <string name="system_assistant_execution_succeeded_recently">실행 완료</string>
+  <string name="system_assistant_execution_background_service_running">백그라운드 서비스 실행 중</string>
+  <string name="system_assistant_view_approval">승인 보기</string>
 </resources>

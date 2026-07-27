@@ -2288,4 +2288,16 @@
   <string name="quick_capture_bubble_waiting_approval">AI · approval</string>
   <string name="quick_capture_bubble_completed">AI · done</string>
   <string name="quick_capture_bubble_failed">AI · retry</string>
+  <string name="system_assistant_execution_safety_blocked">Execution blocked by safety settings</string>
+  <string name="system_assistant_execution_waiting_approval">Waiting for authorization</string>
+  <string name="system_assistant_execution_cancel_requested">Stopping...</string>
+  <string name="system_assistant_execution_terminating">Forcing stop...</string>
+  <string name="system_assistant_execution_tool_running">Executing...</string>
+  <string name="system_assistant_execution_queued">Queued</string>
+  <string name="system_assistant_execution_recovering">Recovering status...</string>
+  <string name="system_assistant_execution_stale">Status awaiting confirmation</string>
+  <string name="system_assistant_execution_failed_recently">Execution failed</string>
+  <string name="system_assistant_execution_succeeded_recently">Execution completed</string>
+  <string name="system_assistant_execution_background_service_running">Background service running</string>
+  <string name="system_assistant_view_approval">View authorization</string>
 </resources>

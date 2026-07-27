@@ -1955,4 +1955,16 @@
   <string name="runtime_diagnostic_tool_policy_coverage_title">Покрытие политик инструментов</string>
   <string name="runtime_diagnostic_tool_policy_coverage_summary">Покрытие фиксированных политик безопасности: %1$d/%2$d; покрытие одобренных плагинов: %3$d/%4$d; MCP: проверяется при каждом вызове</string>
   <string name="runtime_diagnostic_none">нет</string>
+  <string name="system_assistant_execution_safety_blocked">Выполнение заблокировано настройками безопасности</string>
+  <string name="system_assistant_execution_waiting_approval">Ожидание разрешения</string>
+  <string name="system_assistant_execution_cancel_requested">Остановка…</string>
+  <string name="system_assistant_execution_terminating">Принудительная остановка…</string>
+  <string name="system_assistant_execution_tool_running">Выполнение…</string>
+  <string name="system_assistant_execution_queued">В очереди</string>
+  <string name="system_assistant_execution_recovering">Восстановление состояния…</string>
+  <string name="system_assistant_execution_stale">Ожидание подтверждения состояния</string>
+  <string name="system_assistant_execution_failed_recently">Ошибка выполнения</string>
+  <string name="system_assistant_execution_succeeded_recently">Выполнение завершено</string>
+  <string name="system_assistant_execution_background_service_running">Фоновая служба работает</string>
+  <string name="system_assistant_view_approval">Просмотреть разрешение</string>
 </resources>

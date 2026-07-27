@@ -2206,4 +2206,16 @@ mDNS 地址：使用 .local 主机名，同一网络中的其他设备可通过�
   <string name="quick_capture_bubble_waiting_approval">AI · 等待批准</string>
   <string name="quick_capture_bubble_completed">AI · 已完成</string>
   <string name="quick_capture_bubble_failed">AI · 可重试</string>
+  <string name="system_assistant_execution_safety_blocked">安全设置已阻止执行</string>
+  <string name="system_assistant_execution_waiting_approval">等待授权</string>
+  <string name="system_assistant_execution_cancel_requested">正在停止…</string>
+  <string name="system_assistant_execution_terminating">正在强制停止…</string>
+  <string name="system_assistant_execution_tool_running">正在执行…</string>
+  <string name="system_assistant_execution_queued">已排队</string>
+  <string name="system_assistant_execution_recovering">正在恢复状态…</string>
+  <string name="system_assistant_execution_stale">状态等待确认</string>
+  <string name="system_assistant_execution_failed_recently">执行失败</string>
+  <string name="system_assistant_execution_succeeded_recently">执行完成</string>
+  <string name="system_assistant_execution_background_service_running">后台服务运行中</string>
+  <string name="system_assistant_view_approval">查看授权</string>
 </resources>

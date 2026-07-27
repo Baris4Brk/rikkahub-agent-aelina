@@ -37,6 +37,7 @@ class DefaultSystemAssistantSessionControllerFactory(
     private val emergencyStopState: SystemAssistantEmergencyStopState,
     private val parentScope: CoroutineScope,
     private val recentMessageLimit: Int = DEFAULT_RECENT_MESSAGE_LIMIT,
+    private val presentationSource: SecondUserPresentationSource? = null,
 ) : SystemAssistantSessionControllerFactory {
     override fun create(
         invokedFromKeyguard: Boolean,
@@ -51,6 +52,7 @@ class DefaultSystemAssistantSessionControllerFactory(
             hostKind = hostKind,
             parentScope = parentScope,
             recentMessageLimit = recentMessageLimit,
+            presentationSource = presentationSource,
         )
 }
 
@@ -69,6 +71,7 @@ class DefaultSystemAssistantSessionController(
     private val hostKind: SystemAssistantHostKind = SystemAssistantHostKind.VOICE_SESSION,
     parentScope: CoroutineScope,
     private val recentMessageLimit: Int = DEFAULT_RECENT_MESSAGE_LIMIT,
+    private val presentationSource: SecondUserPresentationSource? = null,
 ) : SystemAssistantSessionController {
     constructor(
         targetResolver: SecondUserTargetResolver,
@@ -79,6 +82,7 @@ class DefaultSystemAssistantSessionController(
         hostKind: SystemAssistantHostKind = SystemAssistantHostKind.VOICE_SESSION,
         parentScope: CoroutineScope,
         recentMessageLimit: Int = DEFAULT_RECENT_MESSAGE_LIMIT,
+        presentationSource: SecondUserPresentationSource? = null,
     ) : this(
         targetResolutionSource = SystemAssistantTargetResolutionSource(targetResolver::resolve),
         chatBackend = chatBackend,
@@ -88,6 +92,7 @@ class DefaultSystemAssistantSessionController(
         hostKind = hostKind,
         parentScope = parentScope,
         recentMessageLimit = recentMessageLimit,
+        presentationSource = presentationSource,
     )
 
     private val closed = AtomicBoolean(false)
@@ -116,12 +121,17 @@ class DefaultSystemAssistantSessionController(
     private var boundTarget: SecondUserTargetResolution.Resolved? = null
     private var bindingJob: Job? = null
     private var hydrationJob: Job? = null
+    private var presentationJob: Job? = null
 
     init {
         require(recentMessageLimit > 0) { "recentMessageLimit must be positive" }
         controllerJob.invokeOnCompletion { invocationToken.close() }
-        if (ownerUser && !invokedFromKeyguard) {
-            controllerScope.launch { resolveAndBindTarget() }
+        if (ownerUser) {
+            if (invokedFromKeyguard && presentationSource != null) {
+                controllerScope.launch { bindKeyguardPresentation() }
+            } else if (!invokedFromKeyguard) {
+                controllerScope.launch { resolveAndBindTarget() }
+            }
         }
     }
 
@@ -276,6 +286,18 @@ class DefaultSystemAssistantSessionController(
         }
     }
 
+    private suspend fun bindKeyguardPresentation() {
+        val target = runCatching { targetResolutionSource.resolve() }.getOrNull()
+            as? SecondUserTargetResolution.Resolved ?: return
+        val source = presentationSource ?: return
+        presentationJob = controllerScope.launch {
+            source.observe(SecondUserTarget(target.assistantId, target.conversationId))
+                .collect { presentation ->
+                    if (!closed.get()) _state.update { it.copy(presentation = presentation) }
+                }
+        }
+    }
+
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
         invocationToken.unbindConversation()
@@ -283,6 +305,7 @@ class DefaultSystemAssistantSessionController(
             state.copy(inputAvailability = SystemAssistantInputAvailability.Closed)
         }
         bindingJob?.cancel()
+        presentationJob?.cancel()
         controllerScope.cancel()
     }
 
@@ -366,6 +389,8 @@ class DefaultSystemAssistantSessionController(
         bindingJob = null
         hydrationJob?.cancel()
         hydrationJob = null
+        presentationJob?.cancel()
+        presentationJob = null
         boundTarget = null
         invocationToken.unbindConversation()
 
@@ -379,6 +404,7 @@ class DefaultSystemAssistantSessionController(
                     runtimeState = null,
                     queueStatus = null,
                     answer = SystemAssistantAnswerUiState.Ready,
+                    presentation = null,
                 )
             }
             return TargetBindingResult.Failed(
@@ -425,6 +451,19 @@ class DefaultSystemAssistantSessionController(
                 }
             }
         }
+        presentationJob = presentationSource?.let { source ->
+            controllerScope.launch {
+                source.observe(
+                    SecondUserTarget(
+                        assistantId = target.assistantId,
+                        conversationId = target.conversationId,
+                    )
+                ).collect { presentation ->
+                    if (closed.get() || boundTarget != target) return@collect
+                    _state.update { it.copy(presentation = presentation) }
+                }
+            }
+        }
         hydrationJob = controllerScope.launch {
             try {
                 chatBackend.hydrateConversation(target.conversationId)
@@ -452,6 +491,8 @@ class DefaultSystemAssistantSessionController(
         bindingJob = null
         hydrationJob?.cancel()
         hydrationJob = null
+        presentationJob?.cancel()
+        presentationJob = null
         boundTarget = null
         _state.update { state ->
             state.copy(
@@ -461,6 +502,7 @@ class DefaultSystemAssistantSessionController(
                 queueStatus = null,
                 answer = SystemAssistantAnswerUiState.Ready,
                 history = SystemAssistantHistoryUiState.NotLoaded,
+                presentation = null,
             )
         }
     }

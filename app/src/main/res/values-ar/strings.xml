@@ -1669,4 +1669,16 @@
   <string name="chat_page_compress_target_tokens_supporting">أدخل عددًا صحيحًا بين 100 و32,000.</string>
   <string name="assistant_unrestricted_mode">الوضع غير المقيّد</string>
   <string name="assistant_unrestricted_mode_desc">يسمح لهذا المساعد بتجاوز فحوصات الموافقة القابلة للتهيئة فقط. يظل الإيقاف الطارئ وقيود شاشة القفل وحظر الإجراءات الحساسة وواجهات الاستدعاء المحددة سارية.</string>
+  <string name="system_assistant_execution_safety_blocked">تم حظر التنفيذ بواسطة إعدادات الأمان</string>
+  <string name="system_assistant_execution_waiting_approval">في انتظار التفويض</string>
+  <string name="system_assistant_execution_cancel_requested">جارٍ الإيقاف…</string>
+  <string name="system_assistant_execution_terminating">جارٍ الإيقاف القسري…</string>
+  <string name="system_assistant_execution_tool_running">جارٍ التنفيذ…</string>
+  <string name="system_assistant_execution_queued">في قائمة الانتظار</string>
+  <string name="system_assistant_execution_recovering">جارٍ استعادة الحالة…</string>
+  <string name="system_assistant_execution_stale">الحالة بانتظار التأكيد</string>
+  <string name="system_assistant_execution_failed_recently">فشل التنفيذ</string>
+  <string name="system_assistant_execution_succeeded_recently">اكتمل التنفيذ</string>
+  <string name="system_assistant_execution_background_service_running">خدمة الخلفية قيد التشغيل</string>
+  <string name="system_assistant_view_approval">عرض التفويض</string>
 </resources>
