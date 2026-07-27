@@ -20,11 +20,19 @@ fun interface ManagedExecutionVerifier {
 class ExecutionBootRecovery(
     private val repository: ExecutionRepository,
     private val verifier: ManagedExecutionVerifier,
+    private val approvalDao: PendingToolApprovalDao,
 ) {
     suspend fun runRecovery(): ExecutionRecoverySummary {
         var verified = 0
         var orphaned = 0
         repository.getInFlight().forEach { record ->
+            if (ExecutionStatus.fromWire(record.status) == ExecutionStatus.waiting_approval &&
+                approvalDao.getByExecutionId(record.id)?.status == ApprovalStatus.PENDING.name
+            ) {
+                // Pending approvals are intentionally durable and never expire. Their executable
+                // payload is reconciled against the conversation graph before this sweep.
+                return@forEach
+            }
             if (record.runtime.isManagedRuntime() && verifier.isVerifiable(record)) {
                 val current = ExecutionStatus.fromWire(record.status)
                 repository.transition(

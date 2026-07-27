@@ -52,6 +52,8 @@ data class ToolApprovalCommand(
     val decision: ToolDecision,
     val toolName: String? = null,
     val scope: String = "Once",
+    val expectedStateVersion: Long? = null,
+    val resolutionRequestId: String? = null,
 ) : ControlCommand
 
 data class SteerCommand(

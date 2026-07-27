@@ -942,6 +942,7 @@ class TelegramBotService : Service() {
                                 approved = false,
                                 reason = "aborted_repeated_failure: ${tool.toolName} returned an error $recentFailures times in this turn — stop retrying and report to the user.",
                                 toolName = tool.toolName,
+                                origin = me.rerere.rikkahub.service.chat.CommandOrigin.TELEGRAM,
                             )
                             try {
                                 client.sendMessage(
@@ -1460,6 +1461,7 @@ class TelegramBotService : Service() {
                 approved = false,
                 reason = "ask_user could not be rendered over Telegram. Ask your question in plain reply text instead.",
                 toolName = "ask_user",
+                origin = me.rerere.rikkahub.service.chat.CommandOrigin.TELEGRAM,
             )
             return
         }
@@ -1564,6 +1566,7 @@ class TelegramBotService : Service() {
             approved = true,
             answer = answerJson,
             toolName = "ask_user",
+            origin = me.rerere.rikkahub.service.chat.CommandOrigin.TELEGRAM,
         )
     }
 
@@ -1931,6 +1934,7 @@ class TelegramBotService : Service() {
                 reason = if (!approved) "Denied by user via Telegram" else "",
                 scope = scope,
                 toolName = toolName,
+                origin = me.rerere.rikkahub.service.chat.CommandOrigin.TELEGRAM,
             )
             // Fire the edit on a separate coroutine so handleCallbackQuery returns
             // immediately. Without this, the second tap arriving on a different card was

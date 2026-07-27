@@ -14,6 +14,24 @@ interface PendingToolApprovalDao {
     @Query("SELECT * FROM pending_tool_approvals WHERE approval_id = :approvalId LIMIT 1")
     suspend fun getById(approvalId: String): PendingToolApprovalRecord?
 
+    @Query("SELECT * FROM pending_tool_approvals WHERE execution_id = :executionId LIMIT 1")
+    suspend fun getByExecutionId(executionId: String): PendingToolApprovalRecord?
+
+    @Query(
+        "SELECT * FROM pending_tool_approvals WHERE conversation_id = :conversationId " +
+            "AND tool_call_id = :toolCallId ORDER BY requested_at_ms DESC LIMIT 1",
+    )
+    suspend fun getLatestForToolCall(
+        conversationId: String,
+        toolCallId: String,
+    ): PendingToolApprovalRecord?
+
+    @Query(
+        "SELECT * FROM pending_tool_approvals WHERE conversation_id = :conversationId " +
+            "AND status = 'PENDING' ORDER BY requested_at_ms ASC",
+    )
+    suspend fun getPendingForConversation(conversationId: String): List<PendingToolApprovalRecord>
+
     @Query(
         "SELECT * FROM pending_tool_approvals WHERE conversation_id = :conversationId " +
             "AND status = 'PENDING' ORDER BY requested_at_ms ASC",

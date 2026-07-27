@@ -252,6 +252,23 @@ val dataSourceModule = module {
             retention = get(),
         )
     }
+    single {
+        me.rerere.rikkahub.data.execution.SecondUserApprovalLifecycle(
+            database = get(),
+            conversationRepository = get(),
+            approvalDao = get(),
+            executionRepository = get(),
+            retentionManager = get(),
+        )
+    }
+    single {
+        me.rerere.rikkahub.data.execution.SecondUserApprovalRecovery(
+            settingsStore = get(),
+            conversationRepository = get(),
+            approvalDao = get(),
+            lifecycle = get(),
+        )
+    }
     single { get<AppDatabase>().capabilityGrantDao() }
     single { me.rerere.rikkahub.data.capability.CapabilityGrantRepository(get()) }
     single<me.rerere.rikkahub.data.capability.CapabilityPolicyEngine> {
@@ -270,6 +287,7 @@ val dataSourceModule = module {
         me.rerere.rikkahub.data.execution.ExecutionBootRecovery(
             repository = get(),
             verifier = get(),
+            approvalDao = get(),
         )
     }
     single<me.rerere.rikkahub.data.ai.execution.CriticalToolLifecycleSink> {

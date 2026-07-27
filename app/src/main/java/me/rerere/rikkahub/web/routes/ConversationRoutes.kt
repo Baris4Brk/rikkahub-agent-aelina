@@ -413,6 +413,7 @@ fun Route.conversationRoutes(
                 reason = request.reason,
                 answer = request.answer,
                 scope = scope,
+                origin = me.rerere.rikkahub.service.chat.CommandOrigin.WEB_API,
                 toolName = request.toolName,
             )
             call.respond(HttpStatusCode.Accepted, mapOf("status" to "accepted"))

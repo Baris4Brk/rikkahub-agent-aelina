@@ -261,23 +261,43 @@ class ConversationRepository(
 
     suspend fun insertConversation(conversation: Conversation) {
         database.withTransaction {
-            conversationDAO.insert(
-                conversationToConversationEntity(conversation)
-            )
-            saveMessageNodes(conversation.id.toString(), conversation.messageNodes)
+            persistConversationInCurrentTransaction(conversation, insert = true)
         }
         messageFtsManager.indexConversation(conversation)
     }
 
     suspend fun updateConversation(conversation: Conversation) {
         database.withTransaction {
-            conversationDAO.update(
-                conversationToConversationEntity(conversation)
-            )
-            // 删除旧的节点，插入新的节点
-            messageNodeDAO.deleteByConversation(conversation.id.toString())
-            saveMessageNodes(conversation.id.toString(), conversation.messageNodes)
+            persistConversationInCurrentTransaction(conversation, insert = false)
         }
+        messageFtsManager.indexConversation(conversation)
+    }
+
+    /**
+     * Persists the executable conversation graph inside an already-open Room transaction.
+     *
+     * Approval lifecycle code uses this narrow entry point so the message payload, redacted
+     * approval projection, execution snapshot, and execution event either commit together or
+     * all roll back. Search indexing is intentionally performed after that critical commit.
+     */
+    suspend fun persistConversationInCurrentTransaction(
+        conversation: Conversation,
+        insert: Boolean? = null,
+    ) {
+        check(database.inTransaction()) { "conversation_transaction_required" }
+        val entity = conversationToConversationEntity(conversation)
+        val shouldInsert = insert ?: !conversationDAO.existsById(conversation.id.toString())
+        if (shouldInsert) {
+            conversationDAO.insert(entity)
+        } else {
+            conversationDAO.update(entity)
+            messageNodeDAO.deleteByConversation(conversation.id.toString())
+        }
+        saveMessageNodes(conversation.id.toString(), conversation.messageNodes)
+    }
+
+    /** Refreshes the non-authoritative FTS projection after a critical transaction commits. */
+    suspend fun refreshSearchProjection(conversation: Conversation) {
         messageFtsManager.indexConversation(conversation)
     }
 

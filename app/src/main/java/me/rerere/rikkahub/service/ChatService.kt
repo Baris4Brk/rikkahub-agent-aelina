@@ -39,6 +39,7 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
 import kotlin.time.Duration.Companion.seconds
@@ -68,6 +69,7 @@ import me.rerere.rikkahub.R
 import me.rerere.rikkahub.RouteActivity
 import me.rerere.rikkahub.data.ai.GenerationChunk
 import me.rerere.rikkahub.data.ai.GenerationHandler
+import me.rerere.rikkahub.data.ai.GenerationPersistenceBarrier
 import me.rerere.rikkahub.data.ai.sanitizeTransientConversationToolResults
 import me.rerere.rikkahub.data.ai.ToolCallOrigin
 import me.rerere.rikkahub.data.ai.mcp.McpManager
@@ -446,6 +448,8 @@ class ChatService(
     private val workspaceRepository: WorkspaceRepository,
     private val workflowRepository: WorkflowRepository,
     private val durableCommandQueue: DurableCommandQueue,
+    private val secondUserApprovalLifecycle:
+        me.rerere.rikkahub.data.execution.SecondUserApprovalLifecycle,
     private val toolExecutionGate: me.rerere.rikkahub.data.ai.ToolExecutionGate,
     private val toolRuntime: me.rerere.rikkahub.data.ai.execution.ToolRuntime,
     private val pluginToolCatalog: me.rerere.rikkahub.plugin.PluginToolCatalog,
@@ -1005,6 +1009,15 @@ class ChatService(
      * from affecting a later replacement instance.
      */
     suspend fun stopAllActiveRuntimesForEmergency(): ChatEmergencyStopResult {
+        secondUserApprovalLifecycle.invalidateAllPending(
+            reasonCode = "emergency_stop",
+            orphaned = false,
+            source = me.rerere.rikkahub.data.execution.ExecutionStateSource.POLICY,
+        ).forEach { conversation ->
+            if (sessions.containsKey(conversation.id)) {
+                updateConversation(conversation.id, conversation)
+            }
+        }
         val targets = synchronized(sessionLifecycleLock) {
             runtimes.entries.map { (conversationId, runtime) ->
                 val stopEnvelope = CommandEnvelope(
@@ -1248,7 +1261,13 @@ class ChatService(
                 control,
             )
 
-            is ToolApprovalCommand -> executeToolApprovalInline(envelope.conversationId, command, control)
+            is ToolApprovalCommand -> executeToolApprovalInline(
+                conversationId = envelope.conversationId,
+                command = command,
+                control = control,
+                origin = envelope.origin,
+                envelopeId = envelope.id,
+            )
 
             is RegenerateCommand -> executeRegenerateInline(
                 envelope.conversationId,
@@ -1709,6 +1728,7 @@ class ChatService(
         answer: String? = null,
         scope: ApprovalScope = ApprovalScope.Once,
         toolName: String? = null,
+        origin: CommandOrigin = CommandOrigin.APP_UI,
     ) {
         val decision = when {
             answer != null -> ToolDecision.Answered(answer)
@@ -1716,10 +1736,21 @@ class ChatService(
             else -> ToolDecision.Denied(reason)
         }
         appScope.launch {
+            val projection = secondUserApprovalLifecycle.findLatest(
+                conversationId = conversationId.toString(),
+                toolCallId = toolCallId,
+            )
             submitCommand(
                 conversationId,
-                ToolApprovalCommand(toolCallId, decision, toolName, scope.name),
-                CommandOrigin.APP_UI,
+                ToolApprovalCommand(
+                    toolCallId = toolCallId,
+                    decision = decision,
+                    toolName = toolName,
+                    scope = scope.name,
+                    expectedStateVersion = projection?.stateVersion,
+                    resolutionRequestId = Uuid.random().toString(),
+                ),
+                origin,
             )
         }
     }
@@ -1728,6 +1759,8 @@ class ChatService(
         conversationId: Uuid,
         command: ToolApprovalCommand,
         control: GenerationRunControl,
+        origin: CommandOrigin,
+        envelopeId: Uuid,
     ): RunOutcome {
         val decision = command.decision
         val approved = decision is ToolDecision.Approved
@@ -1736,6 +1769,16 @@ class ChatService(
         ensureHydrated(conversationId)
         val session = getOrCreateSession(conversationId)
         val conversation = session.state.value
+        val approvalProjection = secondUserApprovalLifecycle.findLatest(
+            conversationId = conversationId.toString(),
+            toolCallId = command.toolCallId,
+        )
+        if (approvalProjection != null &&
+            decision !is ToolDecision.Denied &&
+            origin != CommandOrigin.APP_UI
+        ) {
+            return RunOutcome.Rejected("approval_requires_trusted_app")
+        }
         val newApprovalState = when {
             answer != null -> ToolApprovalState.Answered(answer)
             approved -> ToolApprovalState.Approved
@@ -1772,6 +1815,18 @@ class ChatService(
             })
         }
         if (!foundPending) {
+            if (foundSameTerminal && !foundConflictingTerminal && approvalProjection != null) {
+                val durable = conversationRepo.getConversationById(conversationId) ?: conversation
+                updateConversation(conversationId, durable)
+                val canResume = durable.messageNodes
+                    .flatMap { it.messages }
+                    .flatMap { it.parts }
+                    .filterIsInstance<UIMessagePart.Tool>()
+                    .any { it.toolCallId == command.toolCallId && it.canResumeExecution }
+                if (canResume) {
+                    enqueueApprovalResume(conversationId, approvalProjection)
+                }
+            }
             return when {
                 foundConflictingTerminal -> RunOutcome.Conflict("Tool approval already resolved with another decision")
                 foundSameTerminal -> RunOutcome.Completed()
@@ -1789,8 +1844,45 @@ class ChatService(
                 }
             }
         }
-        saveConversation(conversationId, conversation.copy(messageNodes = updatedNodes))
-        val hasPending = updatedNodes
+        val updatedConversation = conversation.copy(messageNodes = updatedNodes)
+        val resolvedProjection = if (approvalProjection == null) {
+            saveConversation(conversationId, updatedConversation)
+            null
+        } else {
+            val persistedDecision = when {
+                answer != null -> me.rerere.rikkahub.data.execution.PersistedApprovalDecision.ANSWERED
+                approved -> me.rerere.rikkahub.data.execution.PersistedApprovalDecision.APPROVED
+                else -> me.rerere.rikkahub.data.execution.PersistedApprovalDecision.DENIED
+            }
+            when (val result = secondUserApprovalLifecycle.resolve(
+                currentConversation = conversation,
+                updatedConversation = updatedConversation,
+                toolCallId = command.toolCallId,
+                decision = persistedDecision,
+                expectedStateVersion = command.expectedStateVersion,
+                resolutionRequestId = command.resolutionRequestId ?: envelopeId.toString(),
+                trustedAppApproval = origin == CommandOrigin.APP_UI,
+            )) {
+                is me.rerere.rikkahub.data.execution.ApprovalResolutionResult.Applied -> {
+                    updateConversation(conversationId, updatedConversation)
+                    result.projection
+                }
+                is me.rerere.rikkahub.data.execution.ApprovalResolutionResult.Idempotent -> {
+                    conversationRepo.getConversationById(conversationId)?.let {
+                        updateConversation(conversationId, it)
+                    }
+                    result.projection
+                }
+                is me.rerere.rikkahub.data.execution.ApprovalResolutionResult.Conflict ->
+                    return RunOutcome.Conflict(result.reasonCode)
+                me.rerere.rikkahub.data.execution.ApprovalResolutionResult.Missing ->
+                    return RunOutcome.Rejected("approval_projection_missing")
+                me.rerere.rikkahub.data.execution.ApprovalResolutionResult.TrustedAppRequired ->
+                    return RunOutcome.Rejected("approval_requires_trusted_app")
+            }
+        }
+        val committedNodes = getConversationFlow(conversationId).value.messageNodes
+        val hasPending = committedNodes
             .flatMap { it.messages }
             .flatMap { it.parts }
             .any { it is UIMessagePart.Tool && it.isPending }
@@ -1801,16 +1893,35 @@ class ChatService(
             // Resume through the runtime's dedicated approval lane. This keeps the
             // approval run single-owner and prevents a second model continuation
             // from racing ordinary queued messages.
-            submitCommand(
-                conversationId = conversationId,
-                command = ResumeAfterApprovalCommand,
-                origin = CommandOrigin.INTERNAL,
-            )
+            if (resolvedProjection == null) {
+                submitCommand(
+                    conversationId = conversationId,
+                    command = ResumeAfterApprovalCommand,
+                    origin = CommandOrigin.INTERNAL,
+                )
+            } else {
+                enqueueApprovalResume(conversationId, resolvedProjection)
+            }
         }
         _generationDoneFlow.emit(conversationId)
         return pendingToolIds(conversationId).takeIf { it.isNotEmpty() }
             ?.let { RunOutcome.WaitingApproval(it) }
             ?: RunOutcome.Completed()
+    }
+
+    private suspend fun enqueueApprovalResume(
+        conversationId: Uuid,
+        projection: me.rerere.rikkahub.data.execution.PendingToolApprovalRecord,
+    ) {
+        val requestId = projection.resolutionRequestId ?: "resolved"
+        submitCommand(
+            conversationId = conversationId,
+            command = ResumeAfterApprovalCommand,
+            origin = CommandOrigin.INTERNAL,
+            dedupeKey = "approval-resume:${projection.approvalId}:$requestId",
+            expiresAt = null,
+            dependencies = emptyList(),
+        )
     }
 
 
@@ -1866,6 +1977,12 @@ class ChatService(
             assistant = assistant,
             conversation = initialConversation,
             origin = callOrigin,
+        )
+        val capabilitySubject = capabilitySubjectFor(
+            assistant = assistant,
+            conversationId = conversationId,
+            origin = callOrigin,
+            privilege = privilegeContext,
         )
         val model = settings.findModelById(assistant.chatModelId ?: settings.chatModelId)
             ?: throw IllegalStateException(
@@ -2162,12 +2279,7 @@ class ChatService(
                 },
                 assistant = assistant,
                 unrestrictedOverride = privilegeContext.unrestrictedOverride,
-                capabilitySubject = capabilitySubjectFor(
-                    assistant = assistant,
-                    conversationId = conversationId,
-                    origin = callOrigin,
-                    privilege = privilegeContext,
-                ),
+                capabilitySubject = capabilitySubject,
                 selectedPrivilegedConversation = privilegeContext.isPrivileged,
                 conversationSystemPrompt = conversation.customSystemPrompt,
                 conversationModeInjectionIds = conversation.modeInjectionIds,
@@ -2424,6 +2536,38 @@ class ChatService(
                         val updatedConversation = getConversationFlow(conversationId).value
                             .updateCurrentMessages(correlatedMessages)
                         if (!applyRunUpdate {
+                                if (chunk.persistenceBarrier ==
+                                    GenerationPersistenceBarrier.PENDING_APPROVAL &&
+                                    capabilitySubject.type ==
+                                    me.rerere.rikkahub.data.capability.SubjectType.LOCAL_SECOND_USER
+                                ) {
+                                    val pendingTools = correlatedMessages
+                                        .lastOrNull()
+                                        ?.parts
+                                        ?.filterIsInstance<UIMessagePart.Tool>()
+                                        ?.filter { it.isPending }
+                                        ?.map { tool ->
+                                            me.rerere.rikkahub.data.execution.PendingApprovalTool(
+                                                toolCallId = tool.toolCallId,
+                                                toolName = tool.toolName,
+                                                arguments = tool.inputAsJson() as? JsonObject
+                                                    ?: JsonObject(emptyMap()),
+                                            )
+                                        }
+                                        .orEmpty()
+                                    secondUserApprovalLifecycle.persistPendingBarrier(
+                                        conversation = updatedConversation,
+                                        owner = me.rerere.rikkahub.data.execution.PendingApprovalOwner(
+                                            runId = (runControl?.runId ?: effectiveCommandId).toString(),
+                                            commandId = effectiveCommandId.toString(),
+                                            conversationId = conversationId.toString(),
+                                            subjectId = capabilitySubject.id,
+                                            subjectType = capabilitySubject.type,
+                                            origin = callOrigin,
+                                        ),
+                                        tools = pendingTools,
+                                    )
+                                }
                                 updateConversation(conversationId, updatedConversation)
                             }
                         ) return@collect

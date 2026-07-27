@@ -52,6 +52,8 @@ object CommandCodec {
             })
             command.toolName?.let { put("toolName", it) }
             put("scope", command.scope)
+            command.expectedStateVersion?.let { put("expectedStateVersion", it) }
+            command.resolutionRequestId?.let { put("resolutionRequestId", it) }
         }.toString()
         is SteerCommand -> "steer" to buildJsonObject {
             put("text", command.text)
@@ -137,6 +139,9 @@ object CommandCodec {
                     decision = decodedDecision,
                     toolName = root["toolName"]?.jsonPrimitive?.content,
                     scope = root["scope"]?.jsonPrimitive?.content ?: "Once",
+                    expectedStateVersion = root["expectedStateVersion"]?.jsonPrimitive?.content
+                        ?.toLongOrNull(),
+                    resolutionRequestId = root["resolutionRequestId"]?.jsonPrimitive?.content,
                 )
             }
             "steer" -> SteerCommand(

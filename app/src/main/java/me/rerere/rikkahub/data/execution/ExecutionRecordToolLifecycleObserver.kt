@@ -195,7 +195,9 @@ class ExecutionRecordCriticalToolLifecycleSink(
         event.executionId?.let { append(':').append(it) }
     }.take(500)
 
-    private fun ResourceScope.toAuditSummary(): String = "$kind:${identifier.take(120)}"
+    // Runtime arguments may contain commands, paths, hosts, or user text. The execution ledger
+    // stores only the stable resource class; the executable payload remains in the message graph.
+    private fun ResourceScope.toAuditSummary(): String = kind
 
     private fun runtimeFor(toolName: String, legacy: Boolean): ExecutionRuntime = when {
         legacy -> ExecutionRuntime.LEGACY

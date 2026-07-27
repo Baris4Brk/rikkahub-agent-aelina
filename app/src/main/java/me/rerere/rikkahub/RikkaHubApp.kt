@@ -323,6 +323,7 @@ class RikkaHubApp : Application() {
     private fun runExecutionBootRecovery() {
         get<AppScope>().launch(Dispatchers.IO) {
             runCatching {
+                get<me.rerere.rikkahub.data.execution.SecondUserApprovalRecovery>().runRecovery()
                 get<me.rerere.rikkahub.data.execution.ExecutionBootRecovery>().runRecovery()
             }.onFailure {
                 Log.w(TAG, "runExecutionBootRecovery failed", it)

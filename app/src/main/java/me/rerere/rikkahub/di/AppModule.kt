@@ -700,6 +700,7 @@ val appModule = module {
             workspaceRepository = get(),
             workflowRepository = get(),
             durableCommandQueue = get(),
+            secondUserApprovalLifecycle = get(),
             toolExecutionGate = get(),
             toolRuntime = get(),
             pluginToolCatalog = get(),

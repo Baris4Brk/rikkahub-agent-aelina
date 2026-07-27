@@ -269,8 +269,15 @@ private fun List<UIMessage>.ageOldToolImages(): List<UIMessage> {
 @Serializable
 sealed interface GenerationChunk {
     data class Messages(
-        val messages: List<UIMessage>
+        val messages: List<UIMessage>,
+        val persistenceBarrier: GenerationPersistenceBarrier = GenerationPersistenceBarrier.NONE,
     ) : GenerationChunk
+}
+
+@Serializable
+enum class GenerationPersistenceBarrier {
+    NONE,
+    PENDING_APPROVAL,
 }
 
 private const val TAG_GH_LOOP = "GenHandlerLoop"
@@ -1177,7 +1184,12 @@ class GenerationHandler(
                         }
                     }
                     messages = messages.dropLast(1) + lastMessage.copy(parts = updatedParts)
-                    emit(GenerationChunk.Messages(messages))
+                    emit(
+                        GenerationChunk.Messages(
+                            messages = messages,
+                            persistenceBarrier = GenerationPersistenceBarrier.PENDING_APPROVAL,
+                        ),
+                    )
                 }
 
                 // If there are pending approvals, break and wait for user
