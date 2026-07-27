@@ -167,6 +167,7 @@ class DoctorChecks(
     private val runtimeDiagnosticsProvider: RuntimeDiagnosticsProvider? = null,
     private val workspaceRepository: me.rerere.rikkahub.data.repository.WorkspaceRepository? = null,
     private val capabilityGrantRepository: me.rerere.rikkahub.data.capability.CapabilityGrantRepository? = null,
+    private val executionConsistencyDoctor: me.rerere.rikkahub.diagnostics.ExecutionConsistencyDoctor? = null,
 ) {
     suspend fun runAll(): List<DoctorCheck> = withContext(Dispatchers.IO) {
         // Aggregate enabled tools across every assistant. A tool is "in use" if at least
@@ -188,7 +189,129 @@ class DoctorChecks(
             addAll(diagnosticsChecks(enabled))
             addAll(runtimeDiagnosticsChecks())
             addAll(linuxRuntimeStateChecks())
+            addAll(executionConsistencyChecks())
         }
+    }
+
+    private suspend fun executionConsistencyChecks(): List<DoctorCheck> {
+        val doctor = executionConsistencyDoctor ?: return emptyList()
+        val snapshot = runCatching { doctor.inspect() }.getOrElse { error ->
+            return listOf(DoctorCheck(
+                id = "execution.consistency.unavailable",
+                category = DoctorCategory.Diagnostics,
+                label = "Execution consistency diagnostics",
+                detail = "Unable to read the redacted execution ledger: ${error::class.simpleName}",
+                severity = Severity.FAIL,
+            ))
+        }
+        return listOf(
+            DoctorCheck(
+                id = "execution.inflight_contract",
+                category = DoctorCategory.Database,
+                label = "Execution terminal-state query contract",
+                detail = "${snapshot.terminalReturnedAsInFlightCount} terminal rows were returned as in-flight.",
+                severity = if (snapshot.terminalReturnedAsInFlightCount == 0) Severity.OK else Severity.FAIL,
+            ),
+            DoctorCheck(
+                id = "execution.approval_projection",
+                category = DoctorCategory.Database,
+                label = "Second-user approval projection",
+                detail = "${snapshot.approvalProjectionMismatchCount} pending projections disagree with the conversation graph or execution ledger.",
+                severity = if (snapshot.approvalProjectionMismatchCount == 0) Severity.OK else Severity.FAIL,
+                fix = if (snapshot.approvalProjectionMismatchCount > 0) FixAction.AutoFix(
+                    label = "Rebuild projection",
+                    run = {
+                        val result = doctor.rebuildApprovalProjection()
+                        AutoFixResult(
+                            ok = true,
+                            message = "Restored ${result.restored}; invalidated ${result.invalidated}; retained ${result.retained}.",
+                        )
+                    },
+                ) else null,
+            ),
+            DoctorCheck(
+                id = "execution.runtime_handles",
+                category = DoctorCategory.Services,
+                label = "Managed runtime handles",
+                detail = "${snapshot.missingRuntimeHandleCount} active managed rows lack an exact native handle; " +
+                    "Workspace manager=${snapshot.workspaceManagerState.name.lowercase()}.",
+                severity = when {
+                    snapshot.missingRuntimeHandleCount > 0 -> Severity.FAIL
+                    snapshot.workspaceManagerNotReadyCount > 0 -> Severity.WARN
+                    else -> Severity.OK
+                },
+                fix = if (snapshot.missingRuntimeHandleCount > 0 ||
+                    snapshot.workspaceManagerNotReadyCount > 0
+                ) FixAction.AutoFix(
+                    label = "Probe runtimes",
+                    run = {
+                        val updates = doctor.reprobe()
+                        AutoFixResult(
+                            ok = updates.none { it.conflict },
+                            message = "Re-probed ${updates.size} managed executions; no process was replayed or stopped.",
+                        )
+                    },
+                ) else null,
+            ),
+            DoctorCheck(
+                id = "execution.probe_freshness",
+                category = DoctorCategory.Services,
+                label = "Runtime probe freshness",
+                detail = "${snapshot.staleProbeCount} active rows are stale; " +
+                    "CAS conflicts=${snapshot.casConflictCount}; discarded old probes=${snapshot.staleProbeDiscardCount}.",
+                severity = if (snapshot.staleProbeCount == 0) Severity.OK else Severity.WARN,
+                fix = if (snapshot.staleProbeCount > 0) FixAction.AutoFix(
+                    label = "Probe again",
+                    run = {
+                        val updates = doctor.reprobe()
+                        AutoFixResult(
+                            ok = updates.none { it.conflict },
+                            message = "Re-probed ${updates.size} managed executions from fresh versions.",
+                        )
+                    },
+                ) else null,
+            ),
+            DoctorCheck(
+                id = "execution.tracking_health",
+                category = DoctorCategory.Diagnostics,
+                label = "Critical execution tracking",
+                detail = if (snapshot.trackingDegraded) {
+                    "Tracking is degraded (${snapshot.trackingReasonCode ?: "unknown_reason"})."
+                } else {
+                    "Critical lifecycle persistence is healthy."
+                },
+                severity = if (snapshot.trackingDegraded) Severity.FAIL else Severity.OK,
+            ),
+            DoctorCheck(
+                id = "execution.parent_child",
+                category = DoctorCategory.Database,
+                label = "Execution parent-child completion",
+                detail = "${snapshot.activeChildUnderTerminalParentCount} invalid waiting children and " +
+                    "${snapshot.allowedDetachedChildCount} allowed detached/service children have terminal parents.",
+                severity = if (snapshot.activeChildUnderTerminalParentCount == 0) Severity.OK else Severity.FAIL,
+            ),
+            DoctorCheck(
+                id = "execution.presentation_redaction",
+                category = DoctorCategory.Diagnostics,
+                label = "Execution presentation redaction",
+                detail = "${snapshot.redactionViolationCount} command, path, credential, or output patterns were found in presentation-facing ledger fields.",
+                severity = if (snapshot.redactionViolationCount == 0) Severity.OK else Severity.FAIL,
+            ),
+            DoctorCheck(
+                id = "execution.retention",
+                category = DoctorCategory.Maintenance,
+                label = "Execution ledger retention",
+                detail = "Terminal executions and resolved approvals use the 30-day/count cap; pending approvals are never removed.",
+                severity = Severity.INFO,
+                fix = FixAction.AutoFix(
+                    label = "Run retention cleanup",
+                    run = {
+                        doctor.runRetentionCleanup()
+                        AutoFixResult(true, "Retention cleanup completed without touching pending approvals.")
+                    },
+                ),
+            ),
+        )
     }
 
     private suspend fun linuxRuntimeStateChecks(): List<DoctorCheck> = buildList {

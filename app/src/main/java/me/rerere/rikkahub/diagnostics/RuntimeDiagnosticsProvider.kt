@@ -44,6 +44,7 @@ class RuntimeDiagnosticsProvider(
     private val toolSecurityDescriptorResolver: ToolSecurityDescriptorResolver,
     private val toolExecutionPolicyResolver: ToolExecutionPolicyResolver,
     private val clockMillis: () -> Long = System::currentTimeMillis,
+    private val executionConsistencyDoctor: ExecutionConsistencyDoctor? = null,
 ) {
     private val appContext = context.applicationContext
 
@@ -117,6 +118,9 @@ class RuntimeDiagnosticsProvider(
             collectedAtMs,
         )
         val generation = RecentGenerationDiagnostics.snapshot()
+        val executionConsistency = executionConsistencyDoctor?.let { doctor ->
+            runCatching { doctor.inspect() }.getOrNull()
+        }
         val extraItems = buildList {
             generation?.let {
                 add(RuntimeDiagnosticItem(
@@ -143,6 +147,23 @@ class RuntimeDiagnosticsProvider(
                 detail = outputRegexSummary ?: "No conversation or fixed assistant was resolved.",
             ))
             addAll(buildP0RuntimeDiagnosticItems(p0Summary))
+            executionConsistency?.let { consistency ->
+                add(RuntimeDiagnosticItem(
+                    id = "execution_consistency",
+                    title = "Execution recovery consistency",
+                    status = if (consistency.healthy) {
+                        RuntimeDiagnosticStatus.READY
+                    } else {
+                        RuntimeDiagnosticStatus.SERVICE_OFFLINE
+                    },
+                    detail = "known=${consistency.knownExecutionCount}; " +
+                        "active=${consistency.activeExecutionCount}; " +
+                        "approvalMismatch=${consistency.approvalProjectionMismatchCount}; " +
+                        "missingHandle=${consistency.missingRuntimeHandleCount}; " +
+                        "staleProbe=${consistency.staleProbeCount}; " +
+                        "redactionViolation=${consistency.redactionViolationCount}",
+                ))
+            }
         }
         snapshot.copy(items = snapshot.items + extraItems)
     }

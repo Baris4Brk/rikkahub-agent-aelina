@@ -305,6 +305,16 @@ val appModule = module {
     single<me.rerere.rikkahub.assistant.SystemAssistantEmergencyStopState> {
         me.rerere.rikkahub.assistant.AndroidSystemAssistantEmergencyStopState(get())
     }
+    single<me.rerere.rikkahub.assistant.SecondUserPresentationSource> {
+        me.rerere.rikkahub.assistant.DefaultSecondUserPresentationSource(
+            chatService = get(),
+            executionRepository = get(),
+            approvalDao = get(),
+            subAgentRegistry = get(),
+            safetySettings = get(),
+            probeScheduler = get(),
+        )
+    }
     single<me.rerere.rikkahub.assistant.SystemAssistantSessionControllerFactory> {
         me.rerere.rikkahub.assistant.DefaultSystemAssistantSessionControllerFactory(
             targetResolver = get(),
@@ -312,6 +322,7 @@ val appModule = module {
             accessState = get(),
             emergencyStopState = get(),
             parentScope = get<AppScope>(),
+            presentationSource = get(),
         )
     }
     single {
@@ -360,6 +371,7 @@ val appModule = module {
             pluginRegistryStore = get(),
             toolSecurityDescriptorResolver = get(),
             toolExecutionPolicyResolver = get(),
+            executionConsistencyDoctor = get(),
         )
     }
     single {
@@ -411,6 +423,8 @@ val appModule = module {
             workspaceRepository = get(),
             workspaceProcessManager = get(),
             termuxSessionEmergencyController = get(),
+            executionTokenProvider = get(),
+            cancellationCoordinator = get(),
         )
     }
 
@@ -553,11 +567,26 @@ val appModule = module {
         me.rerere.rikkahub.execution.AndroidTermuxManagedSupervisor(get())
     }
     single {
+        me.rerere.rikkahub.execution.WorkspaceManagedProcessStarter(
+            manager = get(),
+            registration = get(),
+            scope = get<me.rerere.rikkahub.AppScope>(),
+        )
+    }
+    single {
+        me.rerere.rikkahub.execution.WorkspaceProcessStartableFactory(
+            starter = get(),
+            workspaceRepository = get(),
+            scope = get<me.rerere.rikkahub.AppScope>(),
+        )
+    }
+    single {
         me.rerere.rikkahub.execution.TermuxManagedStartableFactory(
             supervisor = get(),
             ledger = get(),
             tokenProvider = get(),
             scope = get<me.rerere.rikkahub.AppScope>(),
+            registration = get(),
         )
     }
     single {
@@ -566,6 +595,12 @@ val appModule = module {
             termuxFactory = get(),
             workspaceRepository = get(),
             settingsStore = get(),
+            scope = get<me.rerere.rikkahub.AppScope>(),
+            workspaceStarter = get(),
+        )
+    }
+    single {
+        me.rerere.rikkahub.execution.SshUnmanagedExecutionRegistry(
             scope = get<me.rerere.rikkahub.AppScope>(),
         )
     }
@@ -576,6 +611,8 @@ val appModule = module {
             scope = get<me.rerere.rikkahub.AppScope>(),
             ledger = get(),
             tokenProvider = get(),
+            registration = get(),
+            unmanagedRegistry = get(),
         )
     }
     single<me.rerere.rikkahub.data.ai.execution.ToolStartableResolver> {
@@ -583,6 +620,7 @@ val appModule = module {
             termuxFactory = get(),
             sshFactory = get(),
             linuxFactory = get(),
+            workspaceFactory = get(),
         )
     }
     single<me.rerere.rikkahub.data.ai.execution.ToolRuntime> {
@@ -615,6 +653,7 @@ val appModule = module {
                     profileResolver = me.rerere.rikkahub.execution
                         .RepositorySshSavedConnectionResolver(get()),
                     tokenProvider = tokenProvider,
+                    unmanagedRegistry = get(),
                 ),
             ),
         )
@@ -674,6 +713,8 @@ val appModule = module {
             workflowEmergencyController = get(),
             managedExecutionCoordinator = get(),
             displayAutomationRuntime = get(),
+            executionProbeScheduler = get(),
+            executionRepository = get(),
         )
     }
 
@@ -746,6 +787,7 @@ val appModule = module {
             runtimeDiagnosticsProvider = get(),
             workspaceRepository = get(),
             capabilityGrantRepository = get(),
+            executionConsistencyDoctor = get(),
         )
     }
 }

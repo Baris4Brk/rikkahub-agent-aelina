@@ -230,11 +230,13 @@ val dataSourceModule = module {
     single { get<AppDatabase>().executionRecordDao() }
     single { get<AppDatabase>().executionEventDao() }
     single { get<AppDatabase>().pendingToolApprovalDao() }
+    single { me.rerere.rikkahub.data.execution.ExecutionConsistencyMetrics() }
     single {
         me.rerere.rikkahub.data.execution.ExecutionStateTransaction(
             database = get(),
             recordDao = get(),
             eventDao = get(),
+            metrics = get(),
         )
     }
     single {
@@ -250,6 +252,12 @@ val dataSourceModule = module {
             dao = get(),
             transaction = get(),
             retention = get(),
+        )
+    }
+    single {
+        me.rerere.rikkahub.data.execution.ManagedExecutionRegistration(
+            repository = get(),
+            trackingHealth = get(),
         )
     }
     single {
@@ -286,8 +294,60 @@ val dataSourceModule = module {
     single {
         me.rerere.rikkahub.data.execution.ExecutionBootRecovery(
             repository = get(),
-            verifier = get(),
             approvalDao = get(),
+            reconciler = get(),
+        )
+    }
+    single {
+        me.rerere.rikkahub.data.execution.ManagedExecutionCallerResolver(
+            ledger = get(),
+            workspaceManager = get(),
+        )
+    }
+    single<me.rerere.rikkahub.data.execution.ExecutionRuntimeProbe> {
+        me.rerere.rikkahub.data.execution.DefaultExecutionRuntimeProbe(
+            workspaceManager = get(),
+            coordinator = get(),
+            callerResolver = get(),
+        )
+    }
+    single {
+        me.rerere.rikkahub.data.execution.ExecutionReconciler(
+            repository = get(),
+            probe = get(),
+            metrics = get(),
+        )
+    }
+    single {
+        me.rerere.rikkahub.data.execution.ExecutionProbeScheduler(
+            context = get(),
+            scope = get<AppScope>(),
+            repository = get(),
+            reconciler = get(),
+            workspaceManager = get(),
+        )
+    }
+    single {
+        me.rerere.rikkahub.data.execution.CancellationCoordinator(
+            scope = get<AppScope>(),
+            repository = get(),
+            runtimeProbe = get(),
+            callerResolver = get(),
+            managedCoordinator = get(),
+        )
+    }
+    single {
+        me.rerere.rikkahub.diagnostics.ExecutionConsistencyDoctor(
+            repository = get(),
+            eventDao = get(),
+            approvalDao = get(),
+            conversationRepository = get(),
+            workspaceManager = get(),
+            reconciler = get(),
+            approvalRecovery = get(),
+            retentionManager = get(),
+            trackingHealth = get(),
+            metrics = get(),
         )
     }
     single<me.rerere.rikkahub.data.ai.execution.CriticalToolLifecycleSink> {

@@ -41,6 +41,10 @@ class ExecutionRetentionManager(
         approvalDao.trimResolved(MAX_RESOLVED_APPROVALS)
     }
 
+    suspend fun cleanupForDoctor() {
+        cleanupMutex.withLock { cleanupNow() }
+    }
+
     companion object {
         const val MAX_TERMINAL_EXECUTIONS = 2_000
         const val MAX_EVENTS_PER_EXECUTION = 64
