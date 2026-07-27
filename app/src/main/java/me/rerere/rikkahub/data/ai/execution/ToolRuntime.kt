@@ -7,6 +7,7 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -76,6 +77,7 @@ sealed interface ToolExecutionPlanResult {
         override val output: ToolResult,
         val policy: ToolExecutionPolicy,
         val executionId: String,
+        val trackingState: ToolTrackingState = ToolTrackingState.TRACKED,
     ) : ToolExecutionPlanResult
 
     data class Rejected(
@@ -87,6 +89,7 @@ sealed interface ToolExecutionPlanResult {
     data class TimedOut(
         val policy: ToolExecutionPolicy,
         val executionId: String?,
+        val trackingState: ToolTrackingState = ToolTrackingState.TRACKED,
         override val output: ToolResult = errorResult(
             "tool_cancelled_wall_clock",
             "Tool execution exceeded the shared turn budget.",
@@ -161,11 +164,20 @@ class DefaultToolRuntime(
     private val policyResolver: ToolExecutionPolicyResolver,
     private val securityDescriptorResolver: ToolSecurityDescriptorResolver =
         DefaultToolSecurityDescriptorResolver(),
+    private val criticalSink: CriticalToolLifecycleSink = CriticalToolLifecycleSink { },
+    private val trackingHealth: ExecutionTrackingHealth = ExecutionTrackingHealth(),
     private val interceptors: List<ToolCallInterceptor> = emptyList(),
     private val observers: List<ToolLifecycleObserver> = emptyList(),
     private val interceptorTimeoutMs: Long = 2_000L,
     private val observerTimeoutMs: Long = 500L,
+    private val criticalRetryDelaysMs: LongArray = longArrayOf(0L, 100L, 500L),
 ) : ToolRuntime {
+    private enum class LifecycleDispatch {
+        TRACKED,
+        UNTRACKED,
+        BLOCKED,
+    }
+
     private val globalMutex = Mutex()
     private val resourceMutexes = ConcurrentHashMap<ToolResourceKey, Mutex>()
 
@@ -237,28 +249,6 @@ class DefaultToolRuntime(
             effects = assessment.policy.effects,
             resourceNamespaces = assessment.policy.resourceKeys.mapTo(linkedSetOf()) { it.namespace },
         )
-        if (request.wallClockBudgetMs == 0L) {
-            notifyObservers(
-                RedactedToolLifecycleEvent(
-                    phase = RedactedToolLifecycleEvent.Phase.STARTING,
-                    context = redacted,
-                )
-            )
-            notifyObservers(
-                RedactedToolLifecycleEvent(
-                    phase = RedactedToolLifecycleEvent.Phase.TIMED_OUT,
-                    context = redacted,
-                    detail = "wall_clock_timeout_before_start",
-                )
-            )
-            return ToolExecutionPlanResult.TimedOut(assessment.policy, executionId = null)
-        }
-        val hookRejection = runInterceptors(redacted)
-        if (hookRejection != null) {
-            notifyRejected(redacted, hookRejection.errorCode)
-            return hookRejection
-        }
-
         val effectivePolicy = if (request.startableTool == null) {
             assessment.policy.copy(
                 cancellationCapability = ToolCancellationCapability.LOCAL_WAIT_ONLY,
@@ -266,44 +256,89 @@ class DefaultToolRuntime(
         } else {
             assessment.policy
         }
+        val durableTrackingRequired = effectivePolicy.requiresDurableTracking(
+            hasManagedStartable = request.startableTool != null,
+        )
+        var trackingState = ToolTrackingState.TRACKED
+        if (request.wallClockBudgetMs == 0L) {
+            when (dispatchLifecycle(
+                RedactedToolLifecycleEvent(
+                    phase = RedactedToolLifecycleEvent.Phase.STARTING,
+                    context = redacted,
+                ),
+                durableTrackingRequired = durableTrackingRequired,
+                beforeSideEffect = true,
+            )) {
+                LifecycleDispatch.BLOCKED -> return trackingUnavailable()
+                LifecycleDispatch.UNTRACKED -> trackingState = ToolTrackingState.UNTRACKED
+                LifecycleDispatch.TRACKED -> Unit
+            }
+            dispatchLifecycle(
+                RedactedToolLifecycleEvent(
+                    phase = RedactedToolLifecycleEvent.Phase.TIMED_OUT,
+                    context = redacted,
+                    detail = "wall_clock_timeout_before_start",
+                ),
+                durableTrackingRequired = durableTrackingRequired,
+            )
+            return ToolExecutionPlanResult.TimedOut(
+                policy = effectivePolicy,
+                executionId = null,
+                trackingState = trackingState,
+            )
+        }
+        val hookRejection = runInterceptors(redacted)
+        if (hookRejection != null) {
+            notifyRejected(redacted, hookRejection.errorCode)
+            return hookRejection
+        }
 
         var executionId: String? = null
         var timeoutTerminationState: ToolTerminationState? = null
         val completed = withTimeoutOrNull(request.wallClockBudgetMs) {
             withPolicyLocks(effectivePolicy) {
-                notifyObservers(
+                when (dispatchLifecycle(
                     RedactedToolLifecycleEvent(
                         phase = RedactedToolLifecycleEvent.Phase.STARTING,
                         context = redacted,
-                    )
-                )
+                    ),
+                    durableTrackingRequired = durableTrackingRequired,
+                    beforeSideEffect = true,
+                )) {
+                    LifecycleDispatch.BLOCKED -> return@withPolicyLocks trackingUnavailable()
+                    LifecycleDispatch.UNTRACKED -> trackingState = ToolTrackingState.UNTRACKED
+                    LifecycleDispatch.TRACKED -> Unit
+                }
                 coroutineScope {
                     val handle = request.startableTool?.start(request.args, context) ?: run {
                         val deferred = async(Dispatchers.IO) { request.legacyExecute(request.args) }
                         LegacyToolExecutionHandle(result = deferred)
                     }
                     executionId = handle.executionId
-                    notifyObservers(
+                    dispatchLifecycle(
                         RedactedToolLifecycleEvent(
                             phase = RedactedToolLifecycleEvent.Phase.RUNNING,
                             context = redacted,
                             executionId = handle.executionId,
-                        )
+                        ),
+                        durableTrackingRequired = durableTrackingRequired,
                     )
                     request.runControl?.registerTool(request.toolCallId, handle)
                     try {
                         val output = handle.awaitResult()
-                        notifyObservers(
+                        dispatchLifecycle(
                             RedactedToolLifecycleEvent(
                                 phase = RedactedToolLifecycleEvent.Phase.COMPLETED,
                                 context = redacted,
                                 executionId = handle.executionId,
-                            )
+                            ),
+                            durableTrackingRequired = durableTrackingRequired,
                         )
                         ToolExecutionPlanResult.Completed(
                             output = output,
                             policy = effectivePolicy,
                             executionId = handle.executionId,
+                            trackingState = trackingState,
                         )
                     } catch (cancelled: CancellationException) {
                         val cancelReason = when {
@@ -312,45 +347,49 @@ class DefaultToolRuntime(
                             else -> ToolCancelReason.USER_INTERRUPTED
                         }
                         withContext(NonCancellable) {
-                            notifyObservers(
+                            dispatchLifecycle(
                                 RedactedToolLifecycleEvent(
                                     phase = RedactedToolLifecycleEvent.Phase.CANCEL_REQUESTED,
                                     context = redacted,
                                     executionId = handle.executionId,
                                     detail = cancelReason.message,
-                                )
+                                ),
+                                durableTrackingRequired = durableTrackingRequired,
                             )
-                            notifyObservers(
+                            dispatchLifecycle(
                                 RedactedToolLifecycleEvent(
                                     phase = RedactedToolLifecycleEvent.Phase.TERMINATING,
                                     context = redacted,
                                     executionId = handle.executionId,
-                                )
+                                ),
+                                durableTrackingRequired = durableTrackingRequired,
                             )
                             val state = cancelHandle(handle, cancelReason)
                             if (cancelReason == ToolCancelReason.TIMEOUT) {
                                 timeoutTerminationState = state
                             } else {
-                                notifyObservers(
+                                dispatchLifecycle(
                                     RedactedToolLifecycleEvent(
                                         phase = RedactedToolLifecycleEvent.Phase.CANCELLED,
                                         context = redacted,
                                         executionId = handle.executionId,
                                         terminationState = state,
                                         detail = cancelReason.message,
-                                    )
+                                    ),
+                                    durableTrackingRequired = durableTrackingRequired,
                                 )
                             }
                         }
                         throw cancelled
                     } catch (failure: Throwable) {
-                        notifyObservers(
+                        dispatchLifecycle(
                             RedactedToolLifecycleEvent(
                                 phase = RedactedToolLifecycleEvent.Phase.FAILED,
                                 context = redacted,
                                 executionId = handle.executionId,
                                 detail = failure.javaClass.simpleName,
-                            )
+                            ),
+                            durableTrackingRequired = durableTrackingRequired,
                         )
                         throw failure
                     } finally {
@@ -361,16 +400,17 @@ class DefaultToolRuntime(
         }
         if (completed != null) return completed
 
-        notifyObservers(
+        dispatchLifecycle(
             RedactedToolLifecycleEvent(
                 phase = RedactedToolLifecycleEvent.Phase.TIMED_OUT,
                 context = redacted,
                 executionId = executionId,
                 terminationState = timeoutTerminationState,
                 detail = "wall_clock_timeout",
-            )
+            ),
+            durableTrackingRequired = durableTrackingRequired,
         )
-        return ToolExecutionPlanResult.TimedOut(effectivePolicy, executionId)
+        return ToolExecutionPlanResult.TimedOut(effectivePolicy, executionId, trackingState)
     }
 
     private suspend fun runInterceptors(
@@ -418,6 +458,39 @@ class DefaultToolRuntime(
         }
     }
 
+    private suspend fun dispatchLifecycle(
+        event: RedactedToolLifecycleEvent,
+        durableTrackingRequired: Boolean,
+        beforeSideEffect: Boolean = false,
+    ): LifecycleDispatch {
+        val persisted = persistCritical(event)
+        notifyObservers(event)
+        if (persisted) {
+            trackingHealth.markRecovered()
+            return LifecycleDispatch.TRACKED
+        }
+        trackingHealth.markDegraded("critical_lifecycle_write_failed")
+        return when {
+            beforeSideEffect && durableTrackingRequired -> LifecycleDispatch.BLOCKED
+            beforeSideEffect -> LifecycleDispatch.UNTRACKED
+            else -> LifecycleDispatch.TRACKED
+        }
+    }
+
+    private suspend fun persistCritical(event: RedactedToolLifecycleEvent): Boolean {
+        criticalRetryDelaysMs.forEachIndexed { index, delayMs ->
+            if (index > 0) delay(delayMs)
+            if (runCatching { criticalSink.persist(event) }.isSuccess) return true
+        }
+        return false
+    }
+
+    private fun trackingUnavailable(): ToolExecutionPlanResult.Rejected =
+        ToolExecutionPlanResult.Rejected(
+            errorCode = "execution_tracking_unavailable",
+            detail = "Authoritative execution tracking is unavailable; the tool was not started.",
+        )
+
     private suspend fun notifyRejected(
         context: RedactedToolCallContext,
         code: String,
@@ -460,4 +533,5 @@ class DefaultToolRuntime(
     } else {
         locks[index].withLock { withLocks(locks, index + 1, block) }
     }
+
 }

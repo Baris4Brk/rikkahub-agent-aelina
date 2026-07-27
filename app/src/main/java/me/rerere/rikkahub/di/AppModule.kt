@@ -590,11 +590,10 @@ val appModule = module {
         me.rerere.rikkahub.data.ai.execution.DefaultToolRuntime(
             policyResolver = get(),
             securityDescriptorResolver = get(),
+            criticalSink = get(),
+            trackingHealth = get(),
             interceptors = listOf(pluginHooks),
-            observers = listOf(
-                pluginHooks,
-                get<me.rerere.rikkahub.data.ai.execution.ToolLifecycleObserver>(),
-            ),
+            observers = listOf(pluginHooks),
         )
     }
     single<me.rerere.rikkahub.execution.ManagedExecutionCoordinator> {

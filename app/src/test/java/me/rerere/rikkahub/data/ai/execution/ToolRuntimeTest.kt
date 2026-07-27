@@ -212,6 +212,128 @@ class ToolRuntimeTest {
         assertTrue(terminationAwaited)
     }
 
+    @Test
+    fun `critical tracking failure blocks a high risk tool before startup`() = runBlocking {
+        var startCalled = false
+        var attempts = 0
+        val runtime = DefaultToolRuntime(
+            policyResolver = resolver,
+            criticalSink = CriticalToolLifecycleSink {
+                attempts++
+                error("db unavailable")
+            },
+            criticalRetryDelaysMs = longArrayOf(0L, 0L, 0L),
+        )
+
+        val result = runtime.execute(
+            request(
+                startableTool = object : StartableTool {
+                    override suspend fun start(
+                        args: kotlinx.serialization.json.JsonElement,
+                        context: ToolExecutionContext,
+                    ): ToolExecutionHandle {
+                        startCalled = true
+                        return ImmediateHandle("must-not-start", emptyList())
+                    }
+                },
+            ),
+        )
+
+        assertEquals(3, attempts)
+        assertFalse(startCalled)
+        assertEquals(
+            "execution_tracking_unavailable",
+            (result as ToolExecutionPlanResult.Rejected).errorCode,
+        )
+    }
+
+    @Test
+    fun `known parallel read may continue explicitly untracked`() = runBlocking {
+        var executed = false
+        val readPolicy = ToolExecutionPolicy(
+            effects = setOf(ToolEffect.LOCAL_READ),
+            concurrency = ToolConcurrency.PARALLEL_SAFE,
+            cancellationCapability = ToolCancellationCapability.COOPERATIVE,
+        )
+        val runtime = DefaultToolRuntime(
+            policyResolver = ToolExecutionPolicyResolver { _, _, _ -> readPolicy },
+            securityDescriptorResolver = descriptorResolver(),
+            criticalSink = CriticalToolLifecycleSink { error("db unavailable") },
+            criticalRetryDelaysMs = longArrayOf(0L, 0L, 0L),
+        )
+
+        val result = runtime.execute(
+            request(
+                toolName = "safe_read",
+                startableTool = null,
+                legacyExecute = {
+                    executed = true
+                    listOf(UIMessagePart.Text("safe"))
+                },
+            ),
+        ) as ToolExecutionPlanResult.Completed
+
+        assertTrue(executed)
+        assertEquals(ToolTrackingState.UNTRACKED, result.trackingState)
+    }
+
+    @Test
+    fun `terminal tracking failure never asks the model to retry a started side effect`() = runBlocking {
+        val health = ExecutionTrackingHealth(nowMs = { 42L })
+        val runtime = DefaultToolRuntime(
+            policyResolver = resolver,
+            criticalSink = CriticalToolLifecycleSink { event ->
+                if (event.phase == RedactedToolLifecycleEvent.Phase.COMPLETED) {
+                    error("terminal write failed")
+                }
+            },
+            trackingHealth = health,
+            criticalRetryDelaysMs = longArrayOf(0L, 0L, 0L),
+        )
+
+        val result = runtime.execute(
+            request(
+                startableTool = object : StartableTool {
+                    override suspend fun start(
+                        args: kotlinx.serialization.json.JsonElement,
+                        context: ToolExecutionContext,
+                    ) = ImmediateHandle("side-effect", listOf(UIMessagePart.Text("done")))
+                },
+            ),
+        )
+
+        assertTrue(result is ToolExecutionPlanResult.Completed)
+        assertEquals("done", (result.output.single() as UIMessagePart.Text).text)
+        assertTrue(health.state.value.degraded)
+        assertEquals(42L, health.state.value.degradedSinceMs)
+    }
+
+    private fun request(
+        toolName: String = "privileged_run_command",
+        startableTool: StartableTool?,
+        legacyExecute: suspend (kotlinx.serialization.json.JsonElement) -> List<UIMessagePart> = {
+            error("legacy must not run")
+        },
+    ) = ToolExecutionPlanRequest(
+        toolCallId = "tracked-call",
+        toolName = toolName,
+        args = buildJsonObject {},
+        executionContext = executionContext(),
+        startableTool = startableTool,
+        legacyExecute = legacyExecute,
+        runControl = null,
+        wallClockBudgetMs = 5_000,
+    )
+
+    private fun descriptorResolver() = ToolSecurityDescriptorResolver { toolName, _ ->
+        ToolSecurityDescriptor(
+            toolName = toolName,
+            source = ToolDescriptorSource.INTERNAL,
+            approval = ToolDescriptorApproval.DEFAULT,
+            allowsPermanentApproval = true,
+        )
+    }
+
     private fun executionContext() = ToolExecutionContext(
         runId = Uuid.random(),
         conversationId = Uuid.random(),

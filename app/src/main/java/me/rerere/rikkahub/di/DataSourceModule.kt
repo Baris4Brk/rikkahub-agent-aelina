@@ -272,9 +272,10 @@ val dataSourceModule = module {
             verifier = get(),
         )
     }
-    single<me.rerere.rikkahub.data.ai.execution.ToolLifecycleObserver> {
-        me.rerere.rikkahub.data.execution.ExecutionRecordToolLifecycleObserver(get())
+    single<me.rerere.rikkahub.data.ai.execution.CriticalToolLifecycleSink> {
+        me.rerere.rikkahub.data.execution.ExecutionRecordCriticalToolLifecycleSink(get())
     }
+    single { me.rerere.rikkahub.data.ai.execution.ExecutionTrackingHealth() }
 
     // Alarm
     single { get<AppDatabase>().alarmDao() }
