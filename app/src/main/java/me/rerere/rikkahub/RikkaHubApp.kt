@@ -27,6 +27,8 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.collect
 import me.rerere.common.android.appTempFolder
 import com.whl.quickjs.android.QuickJSLoader
 import me.rerere.rikkahub.di.appModule
@@ -189,6 +191,7 @@ class RikkaHubApp : Application() {
         // makes background sub-agents survivable across process death.
         runAgentRunBootRecovery()
         get<me.rerere.rikkahub.data.execution.ExecutionRetentionManager>().requestCleanup()
+        startExecutionProbeScheduler()
         runExecutionBootRecovery()
         refreshCapabilityPolicyGrants()
         reconcileMemoryV2Metadata()
@@ -328,6 +331,21 @@ class RikkaHubApp : Application() {
             }.onFailure {
                 Log.w(TAG, "runExecutionBootRecovery failed", it)
             }
+        }
+    }
+
+    private fun startExecutionProbeScheduler() {
+        runCatching {
+            val scheduler = get<me.rerere.rikkahub.data.execution.ExecutionProbeScheduler>()
+            scheduler.start()
+            get<AppScope>().launch {
+                get<me.rerere.rikkahub.privilege.ShizukuBridgeManager>()
+                    .statusFlow
+                    .drop(1)
+                    .collect { scheduler.requestProbe() }
+            }
+        }.onFailure {
+            Log.w(TAG, "startExecutionProbeScheduler failed", it)
         }
     }
 

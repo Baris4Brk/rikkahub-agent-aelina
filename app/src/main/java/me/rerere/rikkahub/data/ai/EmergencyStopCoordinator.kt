@@ -75,16 +75,22 @@ class EmergencyStopCoordinator(
     private val workflowEmergencyController: WorkflowEmergencyController,
     private val managedExecutionCoordinator: ManagedExecutionCoordinator,
     private val displayAutomationRuntime: DisplayAutomationRuntime,
+    private val executionProbeScheduler: me.rerere.rikkahub.data.execution.ExecutionProbeScheduler? = null,
+    private val executionRepository: me.rerere.rikkahub.data.execution.ExecutionRepository? = null,
 ) {
     suspend fun setStopped(stopped: Boolean): EmergencyStopResult? {
         if (!stopped) {
             safetySettings.setEmergencyStop(false)
             researchCoordinator.resumeNewRuns()
             workflowEmergencyController.resumeNewRuns()
+            executionProbeScheduler?.requestProbe()
             return null
         }
-        return activateEmergencyStop(
-            persistStop = { safetySettings.setEmergencyStop(true) },
+        val result = activateEmergencyStop(
+            persistStop = {
+                safetySettings.setEmergencyStop(true)
+                markManagedExecutionsCancelling()
+            },
             cancelCommands = externalPrivilegeBridge::cancelAllCommands,
             stopWorkspaceProcesses = {
                 workspaceProcessManager.reconcileEmergencyStop(
@@ -211,6 +217,27 @@ class EmergencyStopCoordinator(
                 },
             ),
         )
+        executionProbeScheduler?.requestProbe()
+        return result
+    }
+
+    private suspend fun markManagedExecutionsCancelling() {
+        val repository = executionRepository ?: return
+        repository.getInFlight()
+            .filter {
+                me.rerere.rikkahub.data.execution.ExecutionKind.fromWire(it.executionKind) ==
+                    me.rerere.rikkahub.data.execution.ExecutionKind.MANAGED_PROCESS
+            }
+            .forEach { record ->
+                repository.transition(
+                    id = record.id,
+                    target = me.rerere.rikkahub.data.execution.ExecutionStatus.cancel_requested,
+                    verificationState = me.rerere.rikkahub.data.execution.VerificationState.DATABASE_CONFIRMED,
+                    mutationId = "emergency-stop:${record.id}:${record.stateVersion}",
+                    source = me.rerere.rikkahub.data.execution.ExecutionStateSource.POLICY,
+                    reasonCode = "emergency_stop_cancel_requested",
+                )
+            }
     }
 }
 

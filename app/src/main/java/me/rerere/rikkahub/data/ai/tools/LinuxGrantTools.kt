@@ -19,6 +19,9 @@ import me.rerere.rikkahub.execution.ManagedExecutionCoordinator
 import me.rerere.rikkahub.execution.ManagedExecutionRequest
 import me.rerere.rikkahub.execution.ManagedExecutionResult
 import me.rerere.rikkahub.execution.ManagedExecutionRuntime
+import me.rerere.rikkahub.execution.ExecutionTokenProvider
+import me.rerere.rikkahub.data.execution.CancellationCoordinator
+import me.rerere.rikkahub.data.execution.CancellationOutcome
 
 private val SECOND_USER_LINUX_CAPABILITIES = listOf(
     "phone.shared.read" to ("file_root" to ToolCapabilityResolver.SHARED_STORAGE_ROOT),
@@ -34,6 +37,8 @@ fun secondUserLinuxGrantTools(
     repository: CapabilityGrantRepository,
     coordinator: ManagedExecutionCoordinator,
     sessionController: me.rerere.rikkahub.data.ai.tools.local.TermuxSessionEmergencyController,
+    executionTokenProvider: ExecutionTokenProvider,
+    cancellationCoordinator: CancellationCoordinator,
 ): List<Tool> {
     val privilege = invocation.privilege ?: return emptyList()
     val assistantId = invocation.callerAssistantId?.takeIf(String::isNotBlank) ?: return emptyList()
@@ -115,22 +120,35 @@ fun secondUserLinuxGrantTools(
                 val active = coordinator.dispatch(ManagedExecutionRequest.List(expanded))
                 if (active is ManagedExecutionResult.Executions) {
                     active.executions.filter { it.alive }.forEach { execution ->
-                        val result = coordinator.dispatch(
-                            ManagedExecutionRequest.Stop(expanded, execution.executionId, force = true),
-                        )
-                        if (result !is ManagedExecutionResult.Error) stopped++
+                        when (cancellationCoordinator.cancelAndAwait(execution.executionId)) {
+                            is CancellationOutcome.Cancelled,
+                            is CancellationOutcome.AlreadyTerminal,
+                            -> stopped++
+                            CancellationOutcome.Missing,
+                            is CancellationOutcome.Unconfirmed,
+                            -> Unit
+                        }
                     }
                 }
             }
-            val ownerPrefix = "rk_su_" + Integer.toHexString(
-                "$assistantId:$conversationId".hashCode(),
+            val ownerPrefix = "rk_su_" + executionTokenProvider.ownerTokenFor(
+                domain = "termux_owner",
+                assistantId = assistantId,
+                conversationId = conversationId,
+                origin = origin.name,
             )
             val stoppedSessions = sessionController.stopOwnedSessions(ownerPrefix)
+            // Compatibility cleanup is scoped by the same full owner tuple that authorized
+            // this revoke; the 32-bit prefix is never accepted as an identity on its own.
+            val legacyOwnerPrefix = "rk_su_" + Integer.toHexString(
+                "$assistantId:$conversationId".hashCode(),
+            )
+            val stoppedLegacySessions = sessionController.stopOwnedSessions(legacyOwnerPrefix)
             listOf(UIMessagePart.Text(buildJsonObject {
                 put("revoked", true)
                 put("stopped_executions", stopped)
-                put("stopped_sessions", stoppedSessions.stoppedCount)
-                put("session_termination_confirmed", stoppedSessions.ok)
+                put("stopped_sessions", stoppedSessions.stoppedCount + stoppedLegacySessions.stoppedCount)
+                put("session_termination_confirmed", stoppedSessions.ok && stoppedLegacySessions.ok)
             }.toString()))
         },
     )

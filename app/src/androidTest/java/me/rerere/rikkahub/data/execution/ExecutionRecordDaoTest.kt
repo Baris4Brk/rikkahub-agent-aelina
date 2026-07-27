@@ -4,12 +4,19 @@ import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import me.rerere.rikkahub.data.db.AppDatabase
+import me.rerere.rikkahub.data.ai.ToolCallOrigin
+import me.rerere.rikkahub.data.ai.tools.ToolExecutionContext
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
+import kotlin.uuid.Uuid
 
 @RunWith(AndroidJUnit4::class)
 class ExecutionRecordDaoTest {
@@ -89,6 +96,132 @@ class ExecutionRecordDaoTest {
             resolutionRequestId = "request-1",
         ))
         assertEquals(ApprovalStatus.APPROVED.name, approvals.getById("approval-1")?.status)
+    }
+
+    @Test
+    fun managedRegistration_createsARealChildBeforeRuntimeStart() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            val transaction = ExecutionStateTransaction(
+                database = db,
+                recordDao = dao,
+                eventDao = db.executionEventDao(),
+            )
+            val repository = ExecutionRepository(
+                dao = dao,
+                transaction = transaction,
+                retention = ExecutionRetentionManager(
+                    recordDao = dao,
+                    eventDao = db.executionEventDao(),
+                    approvalDao = db.pendingToolApprovalDao(),
+                    scope = scope,
+                ),
+            )
+            val registration = ManagedExecutionRegistration(repository)
+            val runId = Uuid.random()
+
+            val record = registration.reserve(
+                context = ToolExecutionContext(
+                    runId = runId,
+                    conversationId = Uuid.random(),
+                    assistantId = "assistant",
+                    callOrigin = ToolCallOrigin.SystemAssistant,
+                    toolCallId = "call-1",
+                ),
+                reservation = ManagedExecutionReservation(
+                    executionId = "workspace:wp_12345678",
+                    runtime = ExecutionRuntime.WORKSPACE,
+                    completionPolicy = CompletionPolicy.DETACH_BACKGROUND,
+                ),
+            )
+
+            assertEquals("workspace:wp_12345678", record.id)
+            assertEquals(ExecutionRecordIds.tool(runId.toString(), "call-1"), record.parentExecutionId)
+            assertEquals(ExecutionKind.MANAGED_PROCESS.name, record.executionKind)
+            assertEquals(ExecutionStatus.starting.name, record.status)
+            assertEquals(1, db.executionEventDao().getEvents(record.id, 10).size)
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun reconciler_discardsOldProbeEvidenceAfterVersionConflict() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            val repository = repository(scope)
+            val opened = repository.open(
+                ExecutionRecordDraft(
+                    id = "workspace:wp_12345678",
+                    traceId = "run",
+                    conversationId = "conversation",
+                    subjectId = "assistant",
+                    subjectType = "LOCAL_SECOND_USER",
+                    origin = ToolCallOrigin.SystemAssistant.name,
+                    capabilityKeys = "linux.background",
+                    resourceSummary = "workspace",
+                    runtime = ExecutionRuntime.WORKSPACE,
+                    initialStatus = ExecutionStatus.running,
+                    executionKind = ExecutionKind.MANAGED_PROCESS,
+                    completionPolicy = CompletionPolicy.SERVICE_EXPECTED_TO_STAY_ALIVE,
+                    verificationState = VerificationState.RECONCILING,
+                    runtimeHandleSummary = "workspace:wp_12345678",
+                    runtimeInstanceMarker = "generation:old",
+                )
+            )
+            var probes = 0
+            val reconciler = ExecutionReconciler(
+                repository = repository,
+                probe = ExecutionRuntimeProbe {
+                    probes++
+                    if (probes == 1) {
+                        repository.transition(
+                            id = opened.id,
+                            target = ExecutionStatus.running,
+                            verificationState = VerificationState.RECONCILING,
+                            mutationId = "concurrent-runtime-update",
+                            reasonCode = "runtime_changed_while_probing",
+                        )
+                        RuntimeProbeResult.Alive("generation:stale")
+                    } else {
+                        RuntimeProbeResult.Alive("generation:fresh")
+                    }
+                },
+            )
+
+            val update = reconciler.reconcile(opened.id)
+            val final = requireNotNull(repository.get(opened.id))
+
+            assertEquals(2, probes)
+            assertEquals("generation:fresh", final.runtimeInstanceMarker)
+            assertEquals(RuntimeContinuity.RESTARTED, update.continuity)
+            assertEquals(
+                0,
+                db.executionEventDao().getEvents(opened.id, 20).count {
+                    it.eventId.contains("generation:stale")
+                },
+            )
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    private fun repository(scope: CoroutineScope): ExecutionRepository {
+        val transaction = ExecutionStateTransaction(
+            database = db,
+            recordDao = dao,
+            eventDao = db.executionEventDao(),
+        )
+        return ExecutionRepository(
+            dao = dao,
+            transaction = transaction,
+            retention = ExecutionRetentionManager(
+                recordDao = dao,
+                eventDao = db.executionEventDao(),
+                approvalDao = db.pendingToolApprovalDao(),
+                scope = scope,
+            ),
+        )
     }
 
     private fun row(id: String, status: ExecutionStatus, timestamp: Long) = ExecutionRecord(

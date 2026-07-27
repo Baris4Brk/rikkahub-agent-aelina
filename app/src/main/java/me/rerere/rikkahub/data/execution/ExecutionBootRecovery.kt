@@ -19,8 +19,8 @@ fun interface ManagedExecutionVerifier {
  */
 class ExecutionBootRecovery(
     private val repository: ExecutionRepository,
-    private val verifier: ManagedExecutionVerifier,
     private val approvalDao: PendingToolApprovalDao,
+    private val reconciler: ExecutionReconciler,
 ) {
     suspend fun runRecovery(): ExecutionRecoverySummary {
         var verified = 0
@@ -33,22 +33,18 @@ class ExecutionBootRecovery(
                 // payload is reconciled against the conversation graph before this sweep.
                 return@forEach
             }
-            if (record.runtime.isManagedRuntime() && verifier.isVerifiable(record)) {
-                val current = ExecutionStatus.fromWire(record.status)
-                repository.transition(
-                    id = record.id,
-                    target = if (current in setOf(ExecutionStatus.starting, ExecutionStatus.running)) {
-                        ExecutionStatus.running
-                    } else {
-                        ExecutionStatus.unknown
-                    },
-                    detail = if (current in setOf(ExecutionStatus.cancel_requested, ExecutionStatus.terminating)) {
-                        "managed_runtime_alive_after_restart_cancellation_not_replayed"
-                    } else {
-                        "managed_runtime_live_verified"
-                    },
-                )
-                verified++
+            if (record.runtime.isManagedRuntime()) {
+                val update = reconciler.reconcile(record.id)
+                if (update.record?.let { VerificationState.fromWire(it.verificationState) } ==
+                    VerificationState.RUNTIME_CONFIRMED
+                ) {
+                    verified++
+                }
+                if (update.record?.let { ExecutionStatus.fromWire(it.status) } ==
+                    ExecutionStatus.orphaned
+                ) {
+                    orphaned++
+                }
             } else {
                 repository.transition(
                     id = record.id,

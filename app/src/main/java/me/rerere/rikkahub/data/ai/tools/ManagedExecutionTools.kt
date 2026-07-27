@@ -18,19 +18,22 @@ import me.rerere.rikkahub.execution.ManagedExecutionLogs
 import me.rerere.rikkahub.execution.ManagedExecutionRequest
 import me.rerere.rikkahub.execution.ManagedExecutionResult
 import me.rerere.rikkahub.execution.ManagedExecutionSnapshot
+import me.rerere.rikkahub.data.execution.CancellationCoordinator
 
 internal fun managedExecutionToolsForInvocation(
     coordinator: ManagedExecutionCoordinator,
+    cancellationCoordinator: CancellationCoordinator? = null,
     options: List<LocalToolOption>,
     invocationContext: ToolInvocationContext,
 ): List<Tool> {
     val caller = invocationContext.toManagedExecutionCaller(options) ?: return emptyList()
-    return managedExecutionTools(coordinator, caller)
+    return managedExecutionTools(coordinator, caller, cancellationCoordinator)
 }
 
 fun managedExecutionTools(
     coordinator: ManagedExecutionCoordinator,
     caller: ManagedExecutionCaller,
+    cancellationCoordinator: CancellationCoordinator? = null,
 ): List<Tool> = listOf(
     Tool(
         name = "execution_list",
@@ -87,7 +90,13 @@ fun managedExecutionTools(
         includeForce = true,
         needsApproval = true,
     ) { id, force ->
-        coordinator.dispatch(ManagedExecutionRequest.Stop(caller, id, force))
+        val ownership = coordinator.dispatch(ManagedExecutionRequest.Status(caller, id))
+        if (ownership !is ManagedExecutionResult.Snapshot || cancellationCoordinator == null) {
+            coordinator.dispatch(ManagedExecutionRequest.Stop(caller, id, force))
+        } else {
+            cancellationCoordinator.cancelAndAwait(id)
+            coordinator.dispatch(ManagedExecutionRequest.Status(caller, id))
+        }
     },
 )
 

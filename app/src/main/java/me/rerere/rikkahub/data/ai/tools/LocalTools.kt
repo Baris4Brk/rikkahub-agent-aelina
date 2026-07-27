@@ -401,6 +401,8 @@ class LocalTools(
     private val workspaceRepository: me.rerere.rikkahub.data.repository.WorkspaceRepository,
     private val workspaceProcessManager: me.rerere.workspace.WorkspaceProcessManager,
     private val termuxSessionEmergencyController: me.rerere.rikkahub.data.ai.tools.local.TermuxSessionEmergencyController,
+    private val executionTokenProvider: me.rerere.rikkahub.execution.ExecutionTokenProvider,
+    private val cancellationCoordinator: me.rerere.rikkahub.data.execution.CancellationCoordinator,
 ) {
     private val displayTargetResolver by lazy {
         me.rerere.rikkahub.data.ai.tools.local.DisplayTargetResolver(displayAutomationRuntime)
@@ -951,12 +953,15 @@ class LocalTools(
                 invocation = invocationContext,
                 workspaceRepository = workspaceRepository,
                 processManager = workspaceProcessManager,
+                executionTokenProvider = executionTokenProvider,
             ))
             tools.addAll(secondUserLinuxGrantTools(
                 invocation = invocationContext,
                 repository = capabilityGrantRepository,
                 coordinator = managedExecutionCoordinator,
                 sessionController = termuxSessionEmergencyController,
+                executionTokenProvider = executionTokenProvider,
+                cancellationCoordinator = cancellationCoordinator,
             ))
             tools.add(me.rerere.rikkahub.data.ai.tools.local.termuxRunCommandTool(context))
             // Persistent interactive (tmux-backed) sessions: ssh-with-prompts, sudo, REPLs,
@@ -981,6 +986,7 @@ class LocalTools(
         tools.addAll(
             managedExecutionToolsForInvocation(
                 coordinator = managedExecutionCoordinator,
+                cancellationCoordinator = cancellationCoordinator,
                 options = options,
                 invocationContext = invocationContext,
             )

@@ -91,6 +91,7 @@ class ExecutionStateTransaction(
     private val recordDao: ExecutionRecordDao,
     private val eventDao: ExecutionEventDao,
     private val nowMs: () -> Long = System::currentTimeMillis,
+    private val metrics: ExecutionConsistencyMetrics? = null,
 ) {
     suspend fun open(
         draft: ExecutionRecordDraft,
@@ -133,6 +134,7 @@ class ExecutionStateTransaction(
                 return@withTransaction ExecutionMutationResult.Duplicate(existing)
             }
             if (existing.stateVersion != mutation.expectedVersion) {
+                metrics?.recordCasConflict()
                 return@withTransaction ExecutionMutationResult.Conflict(existing.stateVersion)
             }
             when (val reduced = ExecutionMutationReducer.reduce(existing, mutation, nowMs())) {
@@ -166,6 +168,7 @@ class ExecutionStateTransaction(
                         cancellationRequestedAtMs = next.cancellationRequestedAtMs,
                     )
                     if (updated != 1) {
+                        metrics?.recordCasConflict()
                         return@withTransaction ExecutionMutationResult.Conflict(
                             recordDao.getById(next.id)?.stateVersion ?: existing.stateVersion,
                         )
