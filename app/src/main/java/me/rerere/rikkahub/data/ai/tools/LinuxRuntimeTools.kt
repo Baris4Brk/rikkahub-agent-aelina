@@ -30,6 +30,7 @@ import me.rerere.workspace.WorkspaceProcessStartRequest
 import me.rerere.workspace.WorkspaceRestartPolicy
 import me.rerere.workspace.WorkspaceShellStatus
 import me.rerere.workspace.WorkspaceStorageMode
+import me.rerere.rikkahub.execution.ExecutionTokenProvider
 
 enum class LinuxProfileType { AUTO, TERMUX_NATIVE, WORKSPACE_PROOT }
 
@@ -57,6 +58,7 @@ fun linuxRuntimeTools(
     invocation: ToolInvocationContext,
     workspaceRepository: WorkspaceRepository,
     processManager: WorkspaceProcessManager,
+    executionTokenProvider: ExecutionTokenProvider,
 ): List<Tool> {
     if (invocation.privilege?.expandLocalTools != true) return emptyList()
     val defaultWorkspaceId = invocation.callerWorkspaceId
@@ -132,21 +134,43 @@ fun linuxRuntimeTools(
             )
         },
     )
-    val ownerPrefix = "su_" + Integer.toHexString(
-        "${invocation.callerAssistantId}:${invocation.callerConversationId}".hashCode(),
+    val ownerIdentity = listOfNotNull(
+        invocation.callerAssistantId?.takeIf(String::isNotBlank),
+        invocation.callerConversationId?.takeIf(String::isNotBlank),
+        invocation.callOrigin?.name,
     )
-    val sessions = listOf(
+    val ownerPrefix = ownerIdentity.takeIf { it.size == 3 }?.let { owner ->
+        "su_" + executionTokenProvider.ownerTokenFor(
+            domain = "termux_owner",
+            assistantId = owner[0],
+            conversationId = owner[1],
+            origin = owner[2],
+        )
+    }
+    // Read/stop compatibility only. New sessions always use the HMAC owner token above; the old
+    // 32-bit prefix is accepted solely on a tool surface already bound to this full owner tuple.
+    val legacyOwnerPrefix = ownerIdentity.takeIf { it.size == 3 }?.let {
+        "su_" + Integer.toHexString("${it[0]}:${it[1]}".hashCode())
+    }
+    val sessions = ownerPrefix?.let { prefix -> listOf(
         ownedTermuxSessionTool(
             delegate = termuxSessionStartTool(context),
             name = "linux_session_create",
-            ownerPrefix = ownerPrefix,
+            ownerPrefix = prefix,
+            legacyOwnerPrefix = legacyOwnerPrefix,
             create = true,
         ).copy(description = "Create an owned persistent TERMUX_NATIVE PTY session. Workspace PRoot interactive sessions remain UI-owned."),
-        ownedTermuxSessionTool(termuxSessionSendTool(context), "linux_session_exec", ownerPrefix),
-        ownedTermuxSessionTool(termuxSessionReadTool(context), "linux_session_inspect", ownerPrefix),
-        ownedTermuxSessionTool(termuxSessionListTool(context), "linux_session_list", ownerPrefix, list = true),
-        ownedTermuxSessionTool(termuxSessionKillTool(context), "linux_session_close", ownerPrefix),
-    )
+        ownedTermuxSessionTool(termuxSessionSendTool(context), "linux_session_exec", prefix, legacyOwnerPrefix),
+        ownedTermuxSessionTool(termuxSessionReadTool(context), "linux_session_inspect", prefix, legacyOwnerPrefix),
+        ownedTermuxSessionTool(
+            termuxSessionListTool(context),
+            "linux_session_list",
+            prefix,
+            legacyOwnerPrefix,
+            list = true,
+        ),
+        ownedTermuxSessionTool(termuxSessionKillTool(context), "linux_session_close", prefix, legacyOwnerPrefix),
+    ) }.orEmpty()
     return listOf(profileList, run) + sessions
 }
 
@@ -154,6 +178,7 @@ private fun ownedTermuxSessionTool(
     delegate: Tool,
     name: String,
     ownerPrefix: String,
+    legacyOwnerPrefix: String? = null,
     create: Boolean = false,
     list: Boolean = false,
 ): Tool = delegate.copy(
@@ -162,7 +187,9 @@ private fun ownedTermuxSessionTool(
         val args = input.jsonObject
         if (!create && !list) {
             val sessionId = args["session_id"]?.jsonPrimitive?.contentOrNull.orEmpty()
-            if (!sessionId.startsWith("rk_${ownerPrefix}")) {
+            val owned = sessionId.startsWith("rk_$ownerPrefix") ||
+                legacyOwnerPrefix?.let { sessionId.startsWith("rk_$it") } == true
+            if (!owned) {
                 return@execute linuxError("SESSION_NOT_OWNED", "The session does not belong to this selected conversation.")
             }
         }
@@ -180,8 +207,9 @@ private fun ownedTermuxSessionTool(
             val payload = runCatching { Json.parseToJsonElement(part.text).jsonObject }.getOrNull()
                 ?: return@map part
             val sessions = payload["sessions"]?.jsonArray.orEmpty().filter { session ->
-                session.jsonObject["session_id"]?.jsonPrimitive?.contentOrNull
-                    ?.startsWith("rk_${ownerPrefix}") == true
+                val sessionId = session.jsonObject["session_id"]?.jsonPrimitive?.contentOrNull
+                sessionId?.startsWith("rk_$ownerPrefix") == true ||
+                    legacyOwnerPrefix?.let { legacy -> sessionId?.startsWith("rk_$legacy") } == true
             }
             UIMessagePart.Text(buildJsonObject {
                 put("success", true)

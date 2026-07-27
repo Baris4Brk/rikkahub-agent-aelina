@@ -119,6 +119,7 @@ private fun WorkspaceProcessSnapshot.toManaged() = ManagedExecutionSnapshot(
     },
     alive = alive,
     startedAtMs = startedAt,
+    runtimeInstanceMarker = runtimeInstanceMarker,
     lastExitCode = lastExitCode,
     terminationUncertain = status == WorkspaceProcessStatus.FAILED && alive,
 )

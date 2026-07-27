@@ -40,6 +40,10 @@ data class ToolExecutionContext(
     val conversationId: Uuid,
     val assistantId: String,
     val callOrigin: ToolCallOrigin,
+    /** Stable model tool-call id used to link managed child records to their tool parent. */
+    val toolCallId: String = "",
+    val workspaceId: String? = null,
+    val workspaceCwd: String? = null,
     /** Optional policy principal. Absent means the pre-existing local assistant policy. */
     val capabilitySubject: CapabilitySubject? = null,
     /** True only when the invocation is bound to the selected second-user conversation. */

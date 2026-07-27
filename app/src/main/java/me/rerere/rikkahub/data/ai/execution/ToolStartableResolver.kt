@@ -6,6 +6,7 @@ import me.rerere.rikkahub.data.ai.tools.ToolExecutionContext
 import me.rerere.rikkahub.execution.SshManagedStartableFactory
 import me.rerere.rikkahub.execution.TermuxManagedStartableFactory
 import me.rerere.rikkahub.execution.LinuxManagedStartableFactory
+import me.rerere.rikkahub.execution.WorkspaceProcessStartableFactory
 
 /** Resolves the cancellable adapter for the exact tool definition exposed to a caller. */
 fun interface ToolStartableResolver {
@@ -20,12 +21,14 @@ class DefaultToolStartableResolver(
     private val termuxFactory: TermuxManagedStartableFactory,
     private val sshFactory: SshManagedStartableFactory,
     private val linuxFactory: LinuxManagedStartableFactory,
+    private val workspaceFactory: WorkspaceProcessStartableFactory,
 ) : ToolStartableResolver {
     override fun resolve(tool: Tool, context: ToolExecutionContext): StartableTool? = when (tool.name) {
         "termux_run_command" -> termuxFactory.create(tool)
         "linux_run" -> linuxFactory.create(tool)
         "ssh_exec" -> sshFactory.createInline(tool)
         "ssh_exec_saved" -> sshFactory.createSaved(tool)
+        "workspace_process_start" -> workspaceFactory.create(tool)
         else -> null
     }
 }

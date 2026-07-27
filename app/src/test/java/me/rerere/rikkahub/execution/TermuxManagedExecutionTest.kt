@@ -116,6 +116,23 @@ class TermuxManagedExecutionTest {
     }
 
     @Test
+    fun `managed adapter waits for coordinator before force escalation`() = runBlocking {
+        val supervisor = FakeSupervisor().apply { gracefulStopKeepsRunning = true }
+        val ledger = InMemoryLedger()
+        val token = tokenProvider.tokenFor("tx_12345678")
+        ledger.upsert(recordFor(token))
+        val adapter = TermuxManagedExecutionAdapter(ledger, supervisor, tokenProvider)
+
+        val graceful = adapter.stop(caller, "termux:tx_12345678", force = false)
+        assertTrue(graceful is ManagedExecutionResult.Snapshot)
+        assertEquals(listOf(false), supervisor.stopForces)
+
+        val forced = adapter.stop(caller, "termux:tx_12345678", force = true)
+        assertTrue(forced is ManagedExecutionResult.Stopped)
+        assertEquals(listOf(false, true), supervisor.stopForces)
+    }
+
+    @Test
     fun `fixed supervisor verifies identity before signalling process group`() {
         val script = AndroidTermuxManagedSupervisor.SUPERVISOR_SCRIPT
 

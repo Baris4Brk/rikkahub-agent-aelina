@@ -1457,6 +1457,9 @@ class GenerationHandler(
                                     conversationId = conversationId,
                                     assistantId = assistant.id.toString(),
                                     callOrigin = callOrigin,
+                                    toolCallId = tool.toolCallId,
+                                    workspaceId = assistant.workspaceId?.toString(),
+                                    workspaceCwd = workspaceCwd,
                                     capabilitySubject = capabilitySubject,
                                     selectedPrivilegedConversation = selectedPrivilegedConversation,
                                 )
@@ -1954,6 +1957,9 @@ class GenerationHandler(
                                     conversationId = conversationId,
                                     assistantId = assistant.id.toString(),
                                     callOrigin = callOrigin,
+                                    toolCallId = tool.toolCallId,
+                                    workspaceId = assistant.workspaceId?.toString(),
+                                    workspaceCwd = workspaceCwd,
                                     capabilitySubject = capabilitySubject,
                                     selectedPrivilegedConversation = selectedPrivilegedConversation,
                                 )

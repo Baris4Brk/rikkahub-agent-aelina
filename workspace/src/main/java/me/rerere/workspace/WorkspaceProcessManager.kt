@@ -44,8 +44,18 @@ class WorkspaceProcessManager(
     private val workspacesPendingDeletion = mutableSetOf<String>()
     private val _summary = MutableStateFlow(WorkspaceProcessSummary())
     val summary: StateFlow<WorkspaceProcessSummary> = _summary.asStateFlow()
+    private val _initializationState = MutableStateFlow(WorkspaceProcessManagerState.NOT_STARTED)
+    val initializationState: StateFlow<WorkspaceProcessManagerState> =
+        _initializationState.asStateFlow()
 
     suspend fun start(request: WorkspaceProcessStartRequest): WorkspaceProcessResult {
+        val reserved = reserveProcessId(request)
+        val processId = reserved.process?.processId ?: return reserved
+        return startReserved(processId)
+    }
+
+    /** Persists a real native process id without launching any process. */
+    suspend fun reserveProcessId(request: WorkspaceProcessStartRequest): WorkspaceProcessResult {
         val validation = validateStartRequest(request)
         if (validation != null) return validation
         val processId = requireValidWorkspaceProcessId(processIdFactory())
@@ -77,8 +87,19 @@ class WorkspaceProcessManager(
             )
             updateSummaryLocked()
         }
+        return success(
+            "PROCESS_RESERVED",
+            "Workspace process id reserved.",
+            mutex.withLock { entries[processId]?.let(::snapshot) },
+        )
+    }
+
+    /** Launches an existing reservation; callers can durably register it before this call. */
+    suspend fun startReserved(processId: String): WorkspaceProcessResult {
+        val validId = runCatching { requireValidWorkspaceProcessId(processId) }.getOrNull()
+            ?: return failure("INVALID_ARGUMENTS", "Invalid process id.")
         return withContext(NonCancellable) {
-            launchReserved(processId, automatic = false)
+            launchReserved(validId, automatic = false)
         }
     }
 
@@ -157,12 +178,14 @@ class WorkspaceProcessManager(
         val process = plan.process
         if (process != null && process.isAlive) {
             withContext(Dispatchers.IO) {
-                process.destroy()
-                if (force || !process.waitFor(STOP_GRACE_MILLIS, TimeUnit.MILLISECONDS)) {
+                if (force) {
                     process.destroyForcibly()
                     process.waitFor(FORCE_STOP_GRACE_MILLIS, TimeUnit.MILLISECONDS)
+                } else {
+                    process.destroy()
+                    process.waitFor(STOP_GRACE_MILLIS, TimeUnit.MILLISECONDS)
                 }
-                plan.logPumps?.awaitClosed()
+                if (!process.isAlive) plan.logPumps?.awaitClosed()
             }
         }
         val confirmedStopped = process?.isAlive != true
@@ -297,7 +320,9 @@ class WorkspaceProcessManager(
     }
 
     suspend fun restoreDesiredProcesses(validWorkspaces: Map<String, String>) = withContext(NonCancellable) {
-        restoreMutex.withLock {
+        _initializationState.value = WorkspaceProcessManagerState.LOADING
+        try {
+            restoreMutex.withLock {
             val toRestore = mutableListOf<String>()
             mutex.withLock {
                 var remainingSlots = (MAX_MANAGED_WORKSPACE_PROCESSES - activeEntryCountLocked()).coerceAtLeast(0)
@@ -352,6 +377,11 @@ class WorkspaceProcessManager(
                 launchReserved(processId, automatic = true)
             }
             stopHostIfIdle()
+            }
+            _initializationState.value = WorkspaceProcessManagerState.READY
+        } catch (failure: Throwable) {
+            _initializationState.value = WorkspaceProcessManagerState.FAILED
+            throw failure
         }
     }
 
@@ -712,6 +742,9 @@ class WorkspaceProcessManager(
         hostPid = entry.hostPid,
         alive = entry.process?.isAlive == true,
         startedAt = entry.definition.lastStartedAt,
+        runtimeInstanceMarker = entry.definition.lastStartedAt?.let { startedAt ->
+            "${entry.generation}:$startedAt"
+        },
         restartPolicy = entry.definition.restartPolicy,
         desiredState = entry.definition.desiredState,
         keepAwake = entry.definition.keepAwake,

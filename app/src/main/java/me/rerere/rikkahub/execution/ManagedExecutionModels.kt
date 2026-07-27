@@ -37,6 +37,7 @@ data class ManagedExecutionSnapshot(
     val status: ManagedExecutionStatus,
     val alive: Boolean,
     val startedAtMs: Long? = null,
+    val runtimeInstanceMarker: String? = null,
     val lastExitCode: Int? = null,
     val terminationUncertain: Boolean = false,
 )

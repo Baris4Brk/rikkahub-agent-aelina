@@ -26,6 +26,13 @@ enum class WorkspaceProcessStatus {
     LOST,
 }
 
+enum class WorkspaceProcessManagerState {
+    NOT_STARTED,
+    LOADING,
+    READY,
+    FAILED,
+}
+
 @Serializable
 enum class WorkspaceRestartPolicy {
     @SerialName("never")
@@ -116,6 +123,8 @@ data class WorkspaceProcessSnapshot(
     val hostPid: Long? = null,
     val alive: Boolean = false,
     val startedAt: Long? = null,
+    /** Changes whenever a new native instance is launched for this stable process id. */
+    val runtimeInstanceMarker: String? = null,
     val restartPolicy: WorkspaceRestartPolicy,
     val desiredState: WorkspaceDesiredState,
     val keepAwake: Boolean,

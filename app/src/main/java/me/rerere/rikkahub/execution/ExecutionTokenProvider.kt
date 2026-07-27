@@ -9,14 +9,47 @@ import javax.crypto.SecretKey
 
 fun interface ExecutionTokenProvider {
     fun tokenFor(nativeId: String): String
+
+    /** 128-bit externally visible owner proof; production overrides with direct Keystore HMAC. */
+    fun ownerTokenFor(
+        domain: String,
+        assistantId: String,
+        conversationId: String,
+        origin: String,
+    ): String {
+        val seed = listOf(domain, assistantId, conversationId, origin)
+            .joinToString("\u0000")
+        val mac = Mac.getInstance("HmacSHA256")
+        mac.init(javax.crypto.spec.SecretKeySpec(tokenFor("owner_seed").toByteArray(), "HmacSHA256"))
+        return mac.doFinal(seed.toByteArray(Charsets.UTF_8))
+            .take(16)
+            .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+    }
 }
 
 class AndroidKeystoreExecutionTokenProvider : ExecutionTokenProvider {
     override fun tokenFor(nativeId: String): String {
         require(nativeId.matches(NATIVE_ID)) { "invalid managed execution id" }
+        // Preserve the v1 supervisor token so already-running managed processes remain operable.
+        return hmac(nativeId)
+    }
+
+    override fun ownerTokenFor(
+        domain: String,
+        assistantId: String,
+        conversationId: String,
+        origin: String,
+    ): String {
+        require(domain.matches(NATIVE_ID)) { "invalid owner token domain" }
+        require(assistantId.isNotBlank() && conversationId.isNotBlank() && origin.isNotBlank())
+        return hmac("owner-v1\u0000$domain\u0000$assistantId\u0000$conversationId\u0000$origin")
+            .take(32)
+    }
+
+    private fun hmac(input: String): String {
         val mac = Mac.getInstance(KeyProperties.KEY_ALGORITHM_HMAC_SHA256)
         mac.init(loadOrCreateKey())
-        return mac.doFinal(nativeId.toByteArray(Charsets.UTF_8))
+        return mac.doFinal(input.toByteArray(Charsets.UTF_8))
             .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
     }
 

@@ -115,6 +115,31 @@ class SshManagedBackgroundExecutionTest {
     }
 
     @Test
+    fun `saved profile adapter leaves force escalation to cancellation coordinator`() = runBlocking {
+        val ledger = InMemoryLedger()
+        val supervisor = FakeSshManagedSupervisor().apply { gracefulStopKeepsRunning = true }
+        val starter = SshManagedBackgroundStarter(
+            supervisor = supervisor,
+            ledger = ledger,
+            tokenProvider = tokenProvider,
+            scope = scope,
+        )
+        starter.start(savedSpec(background = true), executionContext).awaitResult()
+        val record = ledger.list().single()
+        val adapter = SshManagedExecutionAdapter(
+            ledger = ledger,
+            supervisor = supervisor,
+            profileResolver = SshSavedConnectionResolver { Result.success(savedConnection()) },
+            tokenProvider = tokenProvider,
+        )
+
+        assertTrue(adapter.stop(caller, record.executionId, false) is ManagedExecutionResult.Snapshot)
+        assertEquals(listOf(false), supervisor.stopForces)
+        assertTrue(adapter.stop(caller, record.executionId, true) is ManagedExecutionResult.Stopped)
+        assertEquals(listOf(false, true), supervisor.stopForces)
+    }
+
+    @Test
     fun `remote supervisor validates capabilities and identity before process group signal`() {
         val start = AndroidSshManagedSupervisor.startCommand(
             nativeId = "ssh_12345678",
@@ -142,6 +167,8 @@ class SshManagedBackgroundExecutionTest {
         var identity = SshSupervisorIdentity(321, 321, 7_777)
         var running = true
         var stopResult: Result<SshSupervisorStatus>? = null
+        var gracefulStopKeepsRunning = false
+        val stopForces = mutableListOf<Boolean>()
 
         override suspend fun start(
             connection: SshSavedConnection,
@@ -159,7 +186,7 @@ class SshManagedBackgroundExecutionTest {
                 identity = identity,
                 state = if (running) "running" else "stopped",
                 running = running,
-                identityVerified = running,
+                identityVerified = true,
             )
         )
 
@@ -169,7 +196,8 @@ class SshManagedBackgroundExecutionTest {
             token: String,
             force: Boolean,
         ): Result<SshSupervisorStatus> = stopResult ?: run {
-            running = false
+            stopForces += force
+            if (force || !gracefulStopKeepsRunning) running = false
             status(connection, nativeId, token)
         }
 

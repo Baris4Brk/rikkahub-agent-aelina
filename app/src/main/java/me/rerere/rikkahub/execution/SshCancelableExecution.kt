@@ -40,6 +40,10 @@ import me.rerere.rikkahub.data.ai.tools.local.probeReachability
 import me.rerere.rikkahub.data.ai.tools.local.runOnSession
 import me.rerere.rikkahub.data.ai.tools.local.shellSingleQuote
 import me.rerere.rikkahub.data.repository.SshHostRepository
+import me.rerere.rikkahub.data.execution.CompletionPolicy
+import me.rerere.rikkahub.data.execution.ExecutionRuntime
+import me.rerere.rikkahub.data.execution.ManagedExecutionRegistration
+import me.rerere.rikkahub.data.execution.ManagedExecutionReservation
 
 internal data class SshExecutionSpec(
     val host: String,
@@ -79,6 +83,8 @@ internal class SshCancelableStartableTool(
     private val backend: SshCancelableExecutionBackend,
     private val scope: CoroutineScope,
     private val managedBackgroundStarter: SshManagedBackgroundStarter? = null,
+    private val registration: ManagedExecutionRegistration? = null,
+    private val unmanagedRegistry: SshUnmanagedExecutionRegistry? = null,
 ) : StartableTool {
     override suspend fun start(
         args: JsonElement,
@@ -93,8 +99,11 @@ internal class SshCancelableStartableTool(
             if (spec.savedProfileName != null && managedBackgroundStarter != null) {
                 return managedBackgroundStarter.start(spec, context)
             }
+            if (registration != null && unmanagedRegistry != null) {
+                return startTemporaryBackground(spec, context, registration, unmanagedRegistry)
+            }
             return LegacyToolExecutionHandle(
-                executionId = "ssh-detached-${context.runId}",
+                executionId = "ssh:unmanaged_${context.runId}",
                 result = scope.async { legacyTool.execute(args) },
             )
         }
@@ -103,6 +112,53 @@ internal class SshCancelableStartableTool(
             return rejected(context, failure.message ?: "ssh_start_failed")
         }
         return SshToolExecutionHandle(executionId, started.result, started.hooks)
+    }
+
+    private suspend fun startTemporaryBackground(
+        spec: SshExecutionSpec,
+        context: ToolExecutionContext,
+        registration: ManagedExecutionRegistration,
+        registry: SshUnmanagedExecutionRegistry,
+    ): ToolExecutionHandle {
+        val nativeId = "unmanaged_${UUID.randomUUID().toString().replace("-", "")}"
+        val executionId = managedExecutionId(ManagedExecutionRuntime.SSH, nativeId)
+        registration.reserve(
+            context = context,
+            reservation = ManagedExecutionReservation(
+                executionId = executionId,
+                runtime = ExecutionRuntime.SSH,
+                completionPolicy = CompletionPolicy.DETACH_BACKGROUND,
+            ),
+        )
+        val started = backend.start(spec, executionId).getOrElse { failure ->
+            runCatching { registration.failed(executionId, "ssh_unmanaged_start_failed") }
+            return rejected(context, failure.message ?: "ssh_start_failed")
+        }
+        runCatching {
+            registration.running(
+                executionId = executionId,
+                runtimeInstanceMarker = started.identity.processStartTicks.toString(),
+            )
+        }
+        val owner = SshUnmanagedOwner(
+            assistantId = context.capabilitySubject?.id ?: context.assistantId,
+            conversationId = context.conversationId.toString(),
+            origin = context.callOrigin,
+        )
+        registry.register(executionId, owner, started)
+        return SshUnmanagedBackgroundToolHandle(
+            executionId = executionId,
+            acknowledgement = listOf(UIMessagePart.Text(buildJsonObject {
+                put("success", true)
+                put("mode", "unmanaged_background")
+                put("execution_id", executionId)
+                put("recovery", "unsupported_after_app_restart")
+            }.toString())),
+            registry = registry,
+            owner = owner,
+            runId = context.runId.toString(),
+            scope = scope,
+        )
     }
 
     private fun rejected(
@@ -122,6 +178,8 @@ class SshManagedStartableFactory(
     private val scope: CoroutineScope,
     ledger: ManagedExecutionLedger,
     tokenProvider: ExecutionTokenProvider,
+    private val registration: ManagedExecutionRegistration? = null,
+    private val unmanagedRegistry: SshUnmanagedExecutionRegistry? = null,
 ) {
     private val backend = AndroidSshCancelableExecutionBackend(context, scope)
     private val managedBackgroundStarter = SshManagedBackgroundStarter(
@@ -129,6 +187,7 @@ class SshManagedStartableFactory(
         ledger = ledger,
         tokenProvider = tokenProvider,
         scope = scope,
+        registration = registration,
     )
 
     fun createInline(legacyTool: Tool): StartableTool = SshCancelableStartableTool(
@@ -136,6 +195,8 @@ class SshManagedStartableFactory(
         inlineResolver(),
         backend,
         scope,
+        registration = registration,
+        unmanagedRegistry = unmanagedRegistry,
     )
 
     fun createSaved(legacyTool: Tool): StartableTool = SshCancelableStartableTool(
@@ -144,6 +205,8 @@ class SshManagedStartableFactory(
         backend,
         scope,
         managedBackgroundStarter,
+        registration,
+        unmanagedRegistry,
     )
 
     private fun inlineResolver() = SshExecutionSpecResolver { args ->

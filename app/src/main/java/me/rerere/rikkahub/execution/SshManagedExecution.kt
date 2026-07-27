@@ -14,6 +14,10 @@ import me.rerere.rikkahub.data.ai.tools.ToolExecutionHandle
 import me.rerere.rikkahub.data.ai.tools.local.SshAuth
 import me.rerere.rikkahub.data.ai.tools.local.isUsable
 import me.rerere.rikkahub.data.repository.SshHostRepository
+import me.rerere.rikkahub.data.execution.CompletionPolicy
+import me.rerere.rikkahub.data.execution.ExecutionRuntime
+import me.rerere.rikkahub.data.execution.ManagedExecutionRegistration
+import me.rerere.rikkahub.data.execution.ManagedExecutionReservation
 
 internal data class SshSavedConnection(
     val profileName: String,
@@ -104,6 +108,7 @@ internal class SshManagedBackgroundStarter(
     private val ledger: ManagedExecutionLedger,
     private val tokenProvider: ExecutionTokenProvider,
     private val scope: CoroutineScope,
+    private val registration: ManagedExecutionRegistration? = null,
 ) {
     suspend fun start(
         spec: SshExecutionSpec,
@@ -122,11 +127,41 @@ internal class SshManagedBackgroundStarter(
             auth = spec.auth,
             timeoutMs = spec.timeoutMs,
         )
+        val now = System.currentTimeMillis()
+        ledger.upsert(
+            ManagedExecutionLedgerRecord(
+                executionId = executionId,
+                runtime = ManagedExecutionRuntime.SSH.idPrefix,
+                nativeId = nativeId,
+                ownerAssistantId = context.assistantId,
+                ownerConversationId = context.conversationId.toString(),
+                ownerOrigin = context.callOrigin.name,
+                status = ManagedExecutionStatus.STARTING.name,
+                profileName = profileName,
+                tokenHash = managedSha256(token),
+                createdAtMs = now,
+                updatedAtMs = now,
+            )
+        )
+        try {
+            registration?.reserve(
+                context = context,
+                reservation = ManagedExecutionReservation(
+                    executionId = executionId,
+                    runtime = ExecutionRuntime.SSH,
+                    completionPolicy = CompletionPolicy.DETACH_BACKGROUND,
+                ),
+            )
+        } catch (failure: Throwable) {
+            ledger.setManagedStatus(executionId, ManagedExecutionStatus.FAILED)
+            throw failure
+        }
         val identity = supervisor.start(connection, nativeId, token, spec.command)
             .getOrElse { failure ->
+                ledger.setManagedStatus(executionId, ManagedExecutionStatus.FAILED)
+                runCatching { registration?.failed(executionId, "ssh_managed_start_failed") }
                 return rejected(context, failure.message ?: "ssh_managed_start_failed")
             }
-        val now = System.currentTimeMillis()
         ledger.upsert(
             ManagedExecutionLedgerRecord(
                 executionId = executionId,
@@ -145,6 +180,12 @@ internal class SshManagedBackgroundStarter(
                 updatedAtMs = now,
             )
         )
+        runCatching {
+            registration?.running(
+                executionId = executionId,
+                runtimeInstanceMarker = identity.processStartTicks.toString(),
+            )
+        }
         return LegacyToolExecutionHandle(
             executionId = executionId,
             result = scope.async {
@@ -174,20 +215,26 @@ internal class SshManagedExecutionAdapter(
     private val supervisor: SshManagedSupervisor,
     private val profileResolver: SshSavedConnectionResolver,
     private val tokenProvider: ExecutionTokenProvider,
+    private val unmanagedRegistry: SshUnmanagedExecutionRegistry? = null,
 ) : ManagedExecutionAdapter {
     override val runtime: ManagedExecutionRuntime = ManagedExecutionRuntime.SSH
 
     override suspend fun list(
         caller: ManagedExecutionCaller,
         includeStopped: Boolean,
-    ): List<ManagedExecutionSnapshot> = ownedRecords(caller).mapNotNull { record ->
-        refresh(record).getOrNull()
-    }.filter { includeStopped || it.alive }
+    ): List<ManagedExecutionSnapshot> = (
+        ownedRecords(caller).mapNotNull { record -> refresh(record).getOrNull() } +
+            unmanagedRegistry?.list(caller, includeStopped).orEmpty()
+        ).filter { includeStopped || it.alive }
 
     override suspend fun status(
         caller: ManagedExecutionCaller,
         executionId: String,
     ): ManagedExecutionResult {
+        if (executionId.isUnmanagedSshExecution()) {
+            return unmanagedRegistry?.status(caller, executionId)
+                ?: ManagedExecutionResult.Error("execution_unsupported")
+        }
         val record = ownedRecord(caller, executionId)
             ?: return ManagedExecutionResult.Error("execution_not_found")
         return refresh(record).fold(
@@ -201,6 +248,9 @@ internal class SshManagedExecutionAdapter(
         executionId: String,
         tailBytes: Int,
     ): ManagedExecutionResult {
+        if (executionId.isUnmanagedSshExecution()) {
+            return ManagedExecutionResult.Error("execution_logs_unsupported")
+        }
         val record = ownedRecord(caller, executionId)
             ?: return ManagedExecutionResult.Error("execution_not_found")
         val connection = resolveConnection(record).getOrElse {
@@ -228,6 +278,10 @@ internal class SshManagedExecutionAdapter(
         executionId: String,
         force: Boolean,
     ): ManagedExecutionResult {
+        if (executionId.isUnmanagedSshExecution()) {
+            return unmanagedRegistry?.stop(caller, executionId, force)
+                ?: ManagedExecutionResult.Error("execution_unsupported")
+        }
         val record = ownedRecord(caller, executionId)
             ?: return ManagedExecutionResult.Error("execution_not_found")
         return stopRecord(record, force)
@@ -245,7 +299,7 @@ internal class SshManagedExecutionAdapter(
                     uncertain = true,
                 )
             }
-        }
+        } + unmanagedRegistry?.emergencyStop().orEmpty()
 
     private suspend fun stopRecord(
         record: ManagedExecutionLedgerRecord,
@@ -266,10 +320,6 @@ internal class SshManagedExecutionAdapter(
                 delay(STOP_POLL_INTERVAL_MS)
                 status = supervisor.status(connection, record.nativeId, token).getOrDefault(status)
                 if (!status.running) break
-            }
-            if (status.running) {
-                status = supervisor.stop(connection, record.nativeId, token, force = true)
-                    .getOrDefault(status)
             }
         }
         if (!record.matches(status.identity) || status.running || !status.identityVerified) {
@@ -359,6 +409,8 @@ private fun ManagedExecutionLedgerRecord.matches(identity: SshSupervisorIdentity
     pid == identity.pid && processGroupId == identity.processGroupId &&
         processStartTicks == identity.processStartTicks
 
+internal fun String.isUnmanagedSshExecution(): Boolean = startsWith("ssh:unmanaged_")
+
 private fun ManagedExecutionLedgerRecord.toSshSnapshot(
     status: ManagedExecutionStatus,
     alive: Boolean,
@@ -371,6 +423,7 @@ private fun ManagedExecutionLedgerRecord.toSshSnapshot(
     status = status,
     alive = alive,
     startedAtMs = createdAtMs,
+    runtimeInstanceMarker = processStartTicks?.toString(),
     lastExitCode = exitCode,
     terminationUncertain = uncertain,
 )

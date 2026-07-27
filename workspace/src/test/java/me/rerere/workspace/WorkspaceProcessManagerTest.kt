@@ -23,6 +23,28 @@ class WorkspaceProcessManagerTest {
     val temporaryFolder = TemporaryFolder()
 
     @Test
+    fun `reservation exposes real id and never launches before startReserved`() = runBlocking {
+        val fixture = fixture()
+        fixture.launcher.processes += FakeProcess()
+
+        val reserved = fixture.manager.reserveProcessId(fixture.request())
+
+        assertTrue(reserved.ok)
+        assertEquals("PROCESS_RESERVED", reserved.code)
+        assertEquals("wp_10000000", reserved.process?.processId)
+        assertEquals(0, fixture.launcher.launchCount)
+        assertEquals(WorkspaceProcessStatus.STARTING, reserved.process?.status)
+
+        val started = fixture.manager.startReserved("wp_10000000")
+
+        assertTrue(started.ok)
+        assertEquals("wp_10000000", started.process?.processId)
+        assertEquals(1, fixture.launcher.launchCount)
+        val process = requireNotNull(started.process)
+        assertTrue(process.runtimeInstanceMarker?.endsWith(":${process.startedAt}") == true)
+    }
+
+    @Test
     fun `start returns immediately and stop confirms process termination`() = runBlocking {
         val fixture = fixture()
         val process = FakeProcess()
@@ -39,6 +61,25 @@ class WorkspaceProcessManagerTest {
         assertTrue(stopped.ok)
         assertFalse(process.isAlive)
         assertEquals(WorkspaceDesiredState.STOPPED, stopped.process?.desiredState)
+    }
+
+    @Test
+    fun `graceful stop never escalates until force is explicitly requested`() = runBlocking {
+        val fixture = fixture()
+        val process = FakeProcess(stopOnDestroy = false)
+        fixture.launcher.processes += process
+        val started = fixture.manager.start(fixture.request())
+
+        val graceful = fixture.manager.stop(started.process!!.processId, force = false)
+
+        assertFalse(graceful.ok)
+        assertTrue(process.isAlive)
+        assertEquals(0, process.forceCalls)
+
+        val forced = fixture.manager.stop(started.process!!.processId, force = true)
+        assertTrue(forced.ok)
+        assertFalse(process.isAlive)
+        assertEquals(1, process.forceCalls)
     }
 
     @Test
@@ -92,6 +133,7 @@ class WorkspaceProcessManagerTest {
     @Test
     fun `never policy is marked lost during restore`() = runBlocking {
         val fixture = fixture()
+        assertEquals(WorkspaceProcessManagerState.NOT_STARTED, fixture.manager.initializationState.value)
         val definition = WorkspaceProcessDefinition(
             id = "wp_12345678",
             workspaceId = "workspace-a",
@@ -105,6 +147,7 @@ class WorkspaceProcessManagerTest {
 
         fixture.manager.restoreDesiredProcesses(mapOf("workspace-a" to "root-a"))
 
+        assertEquals(WorkspaceProcessManagerState.READY, fixture.manager.initializationState.value)
         val status = fixture.manager.status(definition.id)
         assertEquals(WorkspaceProcessStatus.LOST, status.process?.status)
         assertEquals(WorkspaceDesiredState.STOPPED, status.process?.desiredState)
@@ -337,11 +380,14 @@ class WorkspaceProcessManagerTest {
         }
     }
 
-    private class FakeProcess : Process() {
+    private class FakeProcess(
+        private val stopOnDestroy: Boolean = true,
+    ) : Process() {
         private val finished = CountDownLatch(1)
         private val stdin = ByteArrayOutputStream()
         @Volatile private var alive = true
         @Volatile private var code = 0
+        var forceCalls = 0
 
         override fun getOutputStream(): OutputStream = stdin
         override fun getInputStream(): InputStream = ByteArrayInputStream(byteArrayOf())
@@ -357,8 +403,13 @@ class WorkspaceProcessManagerTest {
             return code
         }
 
-        override fun destroy() = complete(143)
-        override fun destroyForcibly(): Process = apply { complete(137) }
+        override fun destroy() {
+            if (stopOnDestroy) complete(143)
+        }
+        override fun destroyForcibly(): Process = apply {
+            forceCalls++
+            complete(137)
+        }
         override fun isAlive(): Boolean = alive
 
         fun complete(exitCode: Int) {

@@ -26,6 +26,10 @@ import me.rerere.rikkahub.data.ai.tools.ToolExecutionContext
 import me.rerere.rikkahub.data.ai.tools.ToolExecutionHandle
 import me.rerere.rikkahub.data.ai.tools.ToolResult
 import me.rerere.rikkahub.data.ai.tools.local.shellSingleQuote
+import me.rerere.rikkahub.data.execution.CompletionPolicy
+import me.rerere.rikkahub.data.execution.ExecutionRuntime
+import me.rerere.rikkahub.data.execution.ManagedExecutionRegistration
+import me.rerere.rikkahub.data.execution.ManagedExecutionReservation
 import me.rerere.rikkahub.data.preferences.TermuxDefaults
 import me.rerere.rikkahub.data.preferences.TermuxRuntime
 
@@ -93,6 +97,7 @@ class TermuxManagedStartableTool(
     private val ledger: ManagedExecutionLedger,
     private val tokenProvider: ExecutionTokenProvider,
     private val scope: CoroutineScope,
+    private val registration: ManagedExecutionRegistration? = null,
 ) : StartableTool {
     override suspend fun start(
         args: JsonElement,
@@ -111,18 +116,51 @@ class TermuxManagedStartableTool(
         val nativeId = "tx_${UUID.randomUUID().toString().replace("-", "")}"
         val executionId = managedExecutionId(ManagedExecutionRuntime.TERMUX, nativeId)
         val token = tokenProvider.tokenFor(nativeId)
+        val now = System.currentTimeMillis()
+        ledger.upsert(
+            ManagedExecutionLedgerRecord(
+                executionId = executionId,
+                runtime = ManagedExecutionRuntime.TERMUX.idPrefix,
+                nativeId = nativeId,
+                ownerAssistantId = context.assistantId,
+                ownerConversationId = context.conversationId.toString(),
+                ownerOrigin = context.callOrigin.name,
+                status = ManagedExecutionStatus.STARTING.name,
+                tokenHash = sha256(token),
+                createdAtMs = now,
+                updatedAtMs = now,
+            )
+        )
+        try {
+            registration?.reserve(
+                context = context,
+                reservation = ManagedExecutionReservation(
+                    executionId = executionId,
+                    runtime = ExecutionRuntime.TERMUX,
+                    completionPolicy = if (parsed.background) {
+                        CompletionPolicy.DETACH_BACKGROUND
+                    } else {
+                        CompletionPolicy.WAIT_FOR_CHILDREN
+                    },
+                ),
+            )
+        } catch (failure: Throwable) {
+            ledger.updateStatus(executionId, ManagedExecutionStatus.FAILED)
+            throw failure
+        }
         val identity = supervisor.start(
             nativeId,
             token,
             parsed.shellCommand,
             parsed.workingDirectory,
         ).getOrElse { failure ->
+            ledger.updateStatus(executionId, ManagedExecutionStatus.FAILED)
+            runCatching { registration?.failed(executionId, "termux_supervisor_start_failed") }
             return completedLegacy(
                 context,
                 errorResult(failure.message ?: "termux_supervisor_start_failed"),
             )
         }
-        val now = System.currentTimeMillis()
         ledger.upsert(
             ManagedExecutionLedgerRecord(
                 executionId = executionId,
@@ -140,6 +178,12 @@ class TermuxManagedStartableTool(
                 updatedAtMs = now,
             )
         )
+        runCatching {
+            registration?.running(
+                executionId = executionId,
+                runtimeInstanceMarker = identity.processStartTicks.toString(),
+            )
+        }
         val bridge = SupervisorBridge(supervisor, token, identity)
         val result: Deferred<ToolResult> = scope.async {
             if (parsed.background) {
@@ -185,6 +229,17 @@ class TermuxManagedStartableTool(
                         if (status.state == "exited") ManagedExecutionStatus.EXITED
                         else ManagedExecutionStatus.STOPPED,
                     )
+                    runCatching {
+                        registration?.exited(
+                            executionId = executionId,
+                            succeeded = status.exitCode == 0,
+                            reasonCode = if (status.exitCode == 0) {
+                                "termux_process_exited_zero"
+                            } else {
+                                "termux_process_exited_nonzero"
+                            },
+                        )
+                    }
                     val logs = supervisor.logs(nativeId, token, 64 * 1024).getOrNull()
                     listOf(UIMessagePart.Text(buildJsonObject {
                         put("success", status.exitCode == 0)
@@ -303,6 +358,7 @@ class TermuxManagedStartableFactory(
     private val ledger: ManagedExecutionLedger,
     private val tokenProvider: ExecutionTokenProvider,
     private val scope: CoroutineScope,
+    private val registration: ManagedExecutionRegistration? = null,
 ) {
     fun create(legacyTool: Tool): StartableTool = TermuxManagedStartableTool(
         legacyTool = legacyTool,
@@ -310,6 +366,7 @@ class TermuxManagedStartableFactory(
         ledger = ledger,
         tokenProvider = tokenProvider,
         scope = scope,
+        registration = registration,
     )
 }
 
@@ -398,9 +455,6 @@ class TermuxManagedExecutionAdapter(
                 status = supervisor.status(record.nativeId, token).getOrDefault(status)
                 if (!status.running) break
             }
-            if (status.running) {
-                status = supervisor.stop(record.nativeId, token, force = true).getOrDefault(status)
-            }
         }
         val identityMatches = record.matches(status.identity)
         if (!identityMatches || status.running) {
@@ -475,6 +529,7 @@ private fun ManagedExecutionLedgerRecord.toSnapshot(
     status = status,
     alive = alive,
     startedAtMs = createdAtMs,
+    runtimeInstanceMarker = processStartTicks?.toString(),
     lastExitCode = exitCode,
     terminationUncertain = uncertain,
 )
