@@ -47,12 +47,12 @@ object ImportedDatabaseReconciler {
 
     /**
      * Room's schema version and identity hash for [AppDatabase]. Both are copied verbatim
-     * from app/schemas/me.rerere.rikkahub.data.db.AppDatabase/36.json. When the schema
+     * from app/schemas/me.rerere.rikkahub.data.db.AppDatabase/37.json. When the schema
      * version is bumped, update BOTH constants (and the table DDL below if the fork-only
      * tables changed) or this reconciliation will silently stop matching.
      */
-    internal const val EXPECTED_VERSION = 36
-    internal const val EXPECTED_IDENTITY_HASH = "efb4f396f5f1d0fcce7479fbf5ef9238"
+    internal const val EXPECTED_VERSION = 37
+    internal const val EXPECTED_IDENTITY_HASH = "8cb20e594bfefae355191428fcd7ca9a"
     internal const val PRE_STORAGE_MODE_V35_IDENTITY_HASH = "2a74d694211f0df9f9094c7571ec71dd"
 
     internal enum class ReconcilePlan {
@@ -72,7 +72,8 @@ object ImportedDatabaseReconciler {
         version > EXPECTED_VERSION -> ReconcilePlan.SKIP
         version == EXPECTED_VERSION && identityHash == EXPECTED_IDENTITY_HASH ->
             ReconcilePlan.SKIP
-        version == 35 && identityHash == PRE_STORAGE_MODE_V35_IDENTITY_HASH ->
+        version == EXPECTED_VERSION && version == 35 &&
+            identityHash == PRE_STORAGE_MODE_V35_IDENTITY_HASH ->
             ReconcilePlan.CURRENT_V35_DELTA
         else -> ReconcilePlan.FULL_COMPATIBILITY
     }
@@ -347,6 +348,65 @@ object ImportedDatabaseReconciler {
         ).forEach(db::execSQL)
     }
 
+    /** Same-version upstream v37 backups need the complete fork execution schema before Room opens. */
+    private fun ensureExecutionV37Schema(db: SQLiteDatabase) {
+        ensureColumns(
+            db,
+            "execution_records",
+            listOf(
+                "execution_kind" to "TEXT NOT NULL DEFAULT 'TOOL_CALL'",
+                "state_version" to "INTEGER NOT NULL DEFAULT 0",
+                "last_state_source" to "TEXT NOT NULL DEFAULT 'LEGACY'",
+                "last_reason_code" to "TEXT",
+                "verification_state" to "TEXT NOT NULL DEFAULT 'UNKNOWN'",
+                "last_probe_at_ms" to "INTEGER",
+                "completion_policy" to "TEXT NOT NULL DEFAULT 'WAIT_FOR_CHILDREN'",
+                "runtime_instance_marker" to "TEXT",
+                "cancellation_requested_at_ms" to "INTEGER",
+            ),
+        )
+        listOf(
+            "CREATE TABLE IF NOT EXISTS `execution_events` (`event_id` TEXT NOT NULL, " +
+                "`execution_id` TEXT NOT NULL, `sequence` INTEGER NOT NULL, " +
+                "`previous_status` TEXT, `next_status` TEXT NOT NULL, " +
+                "`previous_verification` TEXT, `next_verification` TEXT NOT NULL, " +
+                "`source` TEXT NOT NULL, `reason_code` TEXT, `created_at_ms` INTEGER NOT NULL, " +
+                "PRIMARY KEY(`event_id`), FOREIGN KEY(`execution_id`) REFERENCES " +
+                "`execution_records`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE)",
+            "CREATE TABLE IF NOT EXISTS `pending_tool_approvals` (`approval_id` TEXT NOT NULL, " +
+                "`execution_id` TEXT NOT NULL, `trace_id` TEXT, `tool_call_id` TEXT NOT NULL, " +
+                "`conversation_id` TEXT NOT NULL, `subject_id` TEXT NOT NULL, " +
+                "`subject_type` TEXT NOT NULL, `origin` TEXT NOT NULL, " +
+                "`capability_key` TEXT NOT NULL, `resource_category` TEXT NOT NULL, " +
+                "`requested_at_ms` INTEGER NOT NULL, `status` TEXT NOT NULL DEFAULT 'PENDING', " +
+                "`state_version` INTEGER NOT NULL DEFAULT 0, `resolved_at_ms` INTEGER, " +
+                "`resolution_reason` TEXT, `resolution_request_id` TEXT, " +
+                "PRIMARY KEY(`approval_id`))",
+            "CREATE INDEX IF NOT EXISTS `idx_execution_records_conversation_status_updated` " +
+                "ON `execution_records` (`conversation_id`, `status`, `updated_at_ms`)",
+            "CREATE INDEX IF NOT EXISTS `idx_execution_records_subject_status_updated` " +
+                "ON `execution_records` (`subject_id`, `status`, `updated_at_ms`)",
+            "CREATE INDEX IF NOT EXISTS `idx_execution_records_parent_status` " +
+                "ON `execution_records` (`parent_execution_id`, `status`)",
+            "CREATE INDEX IF NOT EXISTS `idx_execution_records_runtime_handle` " +
+                "ON `execution_records` (`runtime`, `runtime_handle_summary`)",
+            "CREATE INDEX IF NOT EXISTS `idx_execution_records_heartbeat_status` " +
+                "ON `execution_records` (`heartbeat_at_ms`, `status`)",
+            "CREATE INDEX IF NOT EXISTS `idx_execution_events_execution` " +
+                "ON `execution_events` (`execution_id`)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS `idx_execution_events_execution_sequence` " +
+                "ON `execution_events` (`execution_id`, `sequence`)",
+            "CREATE INDEX IF NOT EXISTS `idx_execution_events_created` " +
+                "ON `execution_events` (`created_at_ms`)",
+            "CREATE INDEX IF NOT EXISTS `idx_tool_approvals_execution` " +
+                "ON `pending_tool_approvals` (`execution_id`)",
+            "CREATE INDEX IF NOT EXISTS `idx_tool_approvals_conversation_status_requested` " +
+                "ON `pending_tool_approvals` (`conversation_id`, `status`, `requested_at_ms`)",
+            "CREATE INDEX IF NOT EXISTS `idx_tool_approvals_resolved` " +
+                "ON `pending_tool_approvals` (`resolved_at_ms`)",
+        ).forEach(db::execSQL)
+    }
+
     private fun ensureCapabilityGrantsV35Schema(db: SQLiteDatabase) {
         listOf(
             "CREATE TABLE IF NOT EXISTS `capability_grants` (`id` TEXT NOT NULL, `subject_id` TEXT NOT NULL, `subject_type` TEXT NOT NULL, `capability_key` TEXT NOT NULL, `resource_kind` TEXT NOT NULL, `resource_identifier` TEXT NOT NULL, `allowed_origins` TEXT NOT NULL, `scope` TEXT NOT NULL, `expires_at_ms` INTEGER, `revoked` INTEGER NOT NULL, `created_at_ms` INTEGER NOT NULL, `updated_at_ms` INTEGER NOT NULL, PRIMARY KEY(`id`))",
@@ -485,6 +545,7 @@ object ImportedDatabaseReconciler {
                                 "ON `message_node` (`conversation_id`, `node_index`)",
                         )
                     }
+                    if (version >= 37) ensureExecutionV37Schema(db)
 
                     // Older backups must keep their original user_version so Room can run
                     // every real migration (including 28→29). Precreating fork-only tables

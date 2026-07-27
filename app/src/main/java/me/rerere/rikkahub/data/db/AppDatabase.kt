@@ -10,6 +10,10 @@ import me.rerere.rikkahub.data.agentrun.AgentRun
 import me.rerere.rikkahub.data.agentrun.AgentRunDao
 import me.rerere.rikkahub.data.execution.ExecutionRecord
 import me.rerere.rikkahub.data.execution.ExecutionRecordDao
+import me.rerere.rikkahub.data.execution.ExecutionEventDao
+import me.rerere.rikkahub.data.execution.ExecutionEventRecord
+import me.rerere.rikkahub.data.execution.PendingToolApprovalDao
+import me.rerere.rikkahub.data.execution.PendingToolApprovalRecord
 import me.rerere.rikkahub.data.capability.CapabilityGrantDao
 import me.rerere.rikkahub.data.capability.CapabilityGrantEntity
 import me.rerere.rikkahub.data.db.dao.AlarmDao
@@ -88,13 +92,15 @@ import me.rerere.rikkahub.workflow.db.WorkflowRunEntity
         WorkflowRunEntity::class,
         AgentRun::class,
         ExecutionRecord::class,
+        ExecutionEventRecord::class,
+        PendingToolApprovalRecord::class,
         CapabilityGrantEntity::class,
         WorkspaceEntity::class,
         PendingChatCommandEntity::class,
     ],
     // v33 freezes the conversation-context limit with each queued capture so changing the
     // setting later cannot split or enlarge a batch that has already been accepted.
-    version = 36,
+    version = 37,
     autoMigrations = [
         AutoMigration(from = 1, to = 2),
         AutoMigration(from = 2, to = 3),
@@ -156,6 +162,10 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun agentRunDao(): AgentRunDao
 
     abstract fun executionRecordDao(): ExecutionRecordDao
+
+    abstract fun executionEventDao(): ExecutionEventDao
+
+    abstract fun pendingToolApprovalDao(): PendingToolApprovalDao
 
     abstract fun capabilityGrantDao(): CapabilityGrantDao
 

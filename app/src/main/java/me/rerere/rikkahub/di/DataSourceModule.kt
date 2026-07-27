@@ -48,6 +48,7 @@ import me.rerere.rikkahub.data.db.migrations.MIGRATION_32_33
 import me.rerere.rikkahub.data.db.migrations.MIGRATION_33_34
 import me.rerere.rikkahub.data.db.migrations.MIGRATION_34_35
 import me.rerere.rikkahub.data.db.migrations.MIGRATION_35_36
+import me.rerere.rikkahub.data.db.migrations.MIGRATION_36_37
 import me.rerere.rikkahub.data.repository.MemorySearchIndex
 import me.rerere.rikkahub.data.repository.MemoryRetriever
 import me.rerere.rikkahub.memory.AndroidMemoryWorkScheduler
@@ -109,6 +110,7 @@ val dataSourceModule = module {
                 MIGRATION_33_34,
                 MIGRATION_34_35,
                 MIGRATION_35_36,
+                MIGRATION_36_37,
             )
             .addCallback(object : RoomDatabase.Callback() {
                 override fun onOpen(db: SupportSQLiteDatabase) {
@@ -226,6 +228,8 @@ val dataSourceModule = module {
     // Authoritative per-execution ledger. This is intentionally distinct from AgentRun: one
     // AgentRun may own many runtime handles, each with its own cancellation/recovery outcome.
     single { get<AppDatabase>().executionRecordDao() }
+    single { get<AppDatabase>().executionEventDao() }
+    single { get<AppDatabase>().pendingToolApprovalDao() }
     single { me.rerere.rikkahub.data.execution.ExecutionRepository(get()) }
     single { get<AppDatabase>().capabilityGrantDao() }
     single { me.rerere.rikkahub.data.capability.CapabilityGrantRepository(get()) }
