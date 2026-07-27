@@ -188,6 +188,7 @@ class RikkaHubApp : Application() {
         // cross-pillar generalisation of the Phase 9.5 cron stranded-row sweep and is what
         // makes background sub-agents survivable across process death.
         runAgentRunBootRecovery()
+        get<me.rerere.rikkahub.data.execution.ExecutionRetentionManager>().requestCleanup()
         runExecutionBootRecovery()
         refreshCapabilityPolicyGrants()
         reconcileMemoryV2Metadata()

@@ -230,7 +230,28 @@ val dataSourceModule = module {
     single { get<AppDatabase>().executionRecordDao() }
     single { get<AppDatabase>().executionEventDao() }
     single { get<AppDatabase>().pendingToolApprovalDao() }
-    single { me.rerere.rikkahub.data.execution.ExecutionRepository(get()) }
+    single {
+        me.rerere.rikkahub.data.execution.ExecutionStateTransaction(
+            database = get(),
+            recordDao = get(),
+            eventDao = get(),
+        )
+    }
+    single {
+        me.rerere.rikkahub.data.execution.ExecutionRetentionManager(
+            recordDao = get(),
+            eventDao = get(),
+            approvalDao = get(),
+            scope = get<AppScope>(),
+        )
+    }
+    single {
+        me.rerere.rikkahub.data.execution.ExecutionRepository(
+            dao = get(),
+            transaction = get(),
+            retention = get(),
+        )
+    }
     single { get<AppDatabase>().capabilityGrantDao() }
     single { me.rerere.rikkahub.data.capability.CapabilityGrantRepository(get()) }
     single<me.rerere.rikkahub.data.capability.CapabilityPolicyEngine> {
