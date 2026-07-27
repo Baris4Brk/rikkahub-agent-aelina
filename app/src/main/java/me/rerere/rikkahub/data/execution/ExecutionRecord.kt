@@ -97,8 +97,8 @@ enum class ExecutionStatus {
         return next in when (this) {
             queued -> setOf(waiting_approval, starting, cancel_requested, failed, cancelled, orphaned, unknown)
             waiting_approval -> setOf(starting, cancel_requested, cancelled, failed, orphaned, unknown)
-            starting -> setOf(running, cancel_requested, terminating, succeeded, failed, cancelled, orphaned, unknown)
-            running -> setOf(cancel_requested, terminating, succeeded, failed, cancelled, orphaned, unknown)
+            starting -> setOf(running, cancel_requested, terminating, succeeded, failed, cancelled, timed_out, orphaned, unknown)
+            running -> setOf(cancel_requested, terminating, succeeded, failed, cancelled, timed_out, orphaned, unknown)
             cancel_requested -> setOf(terminating, cancelled, timed_out, failed, orphaned, unknown)
             terminating -> setOf(cancelled, timed_out, failed, orphaned, unknown)
             succeeded, failed, cancelled, timed_out, orphaned, unknown -> emptySet()

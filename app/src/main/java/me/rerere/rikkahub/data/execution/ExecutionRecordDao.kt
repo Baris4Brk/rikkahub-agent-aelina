@@ -20,7 +20,8 @@ interface ExecutionRecordDao {
 
     @Query(
         "SELECT * FROM execution_records WHERE status NOT IN " +
-            "('succeeded', 'failed', 'cancelled', 'orphaned', 'unknown') ORDER BY updated_at_ms ASC",
+            "('succeeded', 'failed', 'cancelled', 'timed_out', 'orphaned', 'unknown') " +
+            "ORDER BY updated_at_ms ASC",
     )
     suspend fun getInFlight(): List<ExecutionRecord>
 
