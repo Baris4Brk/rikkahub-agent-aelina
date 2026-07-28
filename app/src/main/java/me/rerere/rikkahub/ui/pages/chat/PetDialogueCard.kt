@@ -10,7 +10,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.IconButton
@@ -28,6 +27,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.key
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
@@ -48,6 +48,8 @@ import me.rerere.rikkahub.pet.PetHandoffCoordinator
 import me.rerere.rikkahub.pet.PetHandoffMode
 import me.rerere.rikkahub.pet.PetHandoffStatus
 import me.rerere.rikkahub.pet.PetPersonaSource
+import me.rerere.rikkahub.service.ChatService
+import me.rerere.rikkahub.service.chat.PetInteractionSlotResult
 import org.koin.compose.koinInject
 
 @Composable
@@ -62,6 +64,7 @@ fun PetDialogueCard(
     val generator: PetDialogueGenerator = koinInject()
     val personaSource: PetPersonaSource = koinInject()
     val handoffCoordinator: PetHandoffCoordinator = koinInject()
+    val chatService: ChatService = koinInject()
     val scope = rememberCoroutineScope()
     val assistantId = assistant.id.toString()
     val conversationKey = conversationId.toString()
@@ -70,9 +73,6 @@ fun PetDialogueCard(
     }.collectAsState(initial = null)
     val pending by remember(assistantId) {
         repository.observePendingHandoffs(assistantId)
-    }.collectAsState(initial = emptyList())
-    val archives by remember(assistantId) {
-        repository.observeArchives(assistantId)
     }.collectAsState(initial = emptyList())
     var expanded by remember { mutableStateOf(false) }
     var showDiary by remember { mutableStateOf(false) }
@@ -152,40 +152,52 @@ fun PetDialogueCard(
                             sending = true
                             localError = null
                             scope.launch {
-                                val persona = personaSource.observe(assistant.id).first()
-                                val history = active?.turns.orEmpty().map { turn ->
-                                    PetDialogueTurnEntityView(
-                                        userInput = turn.userText ?: turn.interactionJson.orEmpty(),
-                                        assistantText = turn.assistantText,
-                                    )
-                                }
-                                val mode = runCatching { PetHandoffMode.valueOf(assistant.petHandoffMode) }
-                                    .getOrDefault(PetHandoffMode.CONFIRM)
-                                when (val result = generator.generate(persona, history, submitted, mode)) {
-                                    is PetGenerationResult.Success -> {
-                                        val updated = repository.append(
-                                            assistantId,
-                                            conversationKey,
-                                            PetDialogueTurnDraft(
-                                                inputKind = PetDialogueInputKind.TEXT,
-                                                userText = submitted,
-                                                assistantText = result.text.ifBlank { null },
-                                                action = result.action,
-                                                handoff = result.handoff,
-                                            ),
-                                        )
-                                        if (mode == PetHandoffMode.AUTO) {
-                                            updated.turns.lastOrNull()?.handoffRequestId?.let { handoffCoordinator.submit(it, automatic = true) }
+                                try {
+                                    var autoHandoffId: String? = null
+                                    val slot = chatService.runPetInteraction(conversationId) {
+                                        val persona = personaSource.observe(assistant.id).first()
+                                        val history = active?.turns.orEmpty().map { turn ->
+                                            PetDialogueTurnEntityView(
+                                                userInput = turn.userText ?: turn.interactionJson.orEmpty(),
+                                                assistantText = turn.assistantText,
+                                            )
+                                        }
+                                        val mode = runCatching { PetHandoffMode.valueOf(assistant.petHandoffMode) }
+                                            .getOrDefault(PetHandoffMode.CONFIRM)
+                                        when (val result = generator.generate(persona, history, submitted, mode)) {
+                                            is PetGenerationResult.Success -> {
+                                                val updated = repository.append(
+                                                    assistantId,
+                                                    conversationKey,
+                                                    PetDialogueTurnDraft(
+                                                        inputKind = PetDialogueInputKind.TEXT,
+                                                        userText = submitted,
+                                                        assistantText = result.text.ifBlank { null },
+                                                        action = result.action,
+                                                        handoff = result.handoff,
+                                                    ),
+                                                )
+                                                if (mode == PetHandoffMode.AUTO) {
+                                                    autoHandoffId = updated.turns.lastOrNull()?.handoffRequestId
+                                                }
+                                            }
+                                            PetGenerationResult.LocalAnimationOnly -> repository.append(
+                                                assistantId,
+                                                conversationKey,
+                                                PetDialogueTurnDraft(PetDialogueInputKind.TEXT, userText = submitted),
+                                            )
+                                            is PetGenerationResult.Failure -> localError = result.code
                                         }
                                     }
-                                    PetGenerationResult.LocalAnimationOnly -> repository.append(
-                                        assistantId,
-                                        conversationKey,
-                                        PetDialogueTurnDraft(PetDialogueInputKind.TEXT, userText = submitted),
-                                    )
-                                    is PetGenerationResult.Failure -> localError = result.code
+                                    if (slot is PetInteractionSlotResult.Busy) {
+                                        input = submitted
+                                        localError = "主任务已开始，这条桌宠消息没有发送"
+                                    } else {
+                                        autoHandoffId?.let { handoffCoordinator.submit(it, automatic = true) }
+                                    }
+                                } finally {
+                                    sending = false
                                 }
-                                sending = false
                             }
                         },
                     ) { Text(if (sending) "回应中" else "发送") }
@@ -199,16 +211,42 @@ fun PetDialogueCard(
                     TextButton(onClick = { showDiary = true }) { Text("查看日记") }
                 }
                 pending.filter { it.status == PetHandoffStatus.DRAFT.name }.forEach { request ->
-                    Card(modifier = Modifier.fillMaxWidth()) {
-                        Column(modifier = Modifier.padding(10.dp)) {
-                            Text("待转交：${request.title}", style = MaterialTheme.typography.titleSmall)
-                            Text(request.request, maxLines = 4, overflow = TextOverflow.Ellipsis)
-                            Row {
-                                TextButton(onClick = { scope.launch { handoffCoordinator.submit(request.requestId, false) } }) {
-                                    Text("转交")
-                                }
-                                TextButton(onClick = { scope.launch { handoffCoordinator.dismiss(request.requestId, request.stateVersion) } }) {
-                                    Text("拒绝")
+                    key(request.requestId) {
+                        var handoffTitle by remember(request.stateVersion) { mutableStateOf(request.title) }
+                        var handoffText by remember(request.stateVersion) { mutableStateOf(request.request) }
+                        Card(modifier = Modifier.fillMaxWidth()) {
+                            Column(modifier = Modifier.padding(10.dp)) {
+                                Text("待转交（可编辑）", style = MaterialTheme.typography.titleSmall)
+                                OutlinedTextField(
+                                    value = handoffTitle,
+                                    onValueChange = { handoffTitle = it.take(160) },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    label = { Text("任务标题") },
+                                )
+                                OutlinedTextField(
+                                    value = handoffText,
+                                    onValueChange = { handoffText = it.take(2_000) },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    label = { Text("任务草稿") },
+                                    maxLines = 5,
+                                )
+                                Row {
+                                    TextButton(onClick = {
+                                        scope.launch {
+                                            handoffCoordinator.editDraft(
+                                                request.requestId,
+                                                request.stateVersion,
+                                                handoffTitle,
+                                                handoffText,
+                                            )
+                                        }
+                                    }) { Text("保存草稿") }
+                                    TextButton(onClick = { scope.launch { handoffCoordinator.submit(request.requestId, false) } }) {
+                                        Text("转交")
+                                    }
+                                    TextButton(onClick = { scope.launch { handoffCoordinator.dismiss(request.requestId, request.stateVersion) } }) {
+                                        Text("拒绝")
+                                    }
                                 }
                             }
                         }
@@ -218,22 +256,5 @@ fun PetDialogueCard(
         }
     }
 
-    if (showDiary) {
-        AlertDialog(
-            onDismissRequest = { showDiary = false },
-            title = { Text("桌宠日记") },
-            text = {
-                LazyColumn(modifier = Modifier.heightIn(max = 440.dp)) {
-                    items(archives, key = { it.sessionId }) { diary ->
-                        Column(modifier = Modifier.fillMaxWidth().padding(vertical = 7.dp)) {
-                            Text(diary.title.ifBlank { diary.localDate }, style = MaterialTheme.typography.titleSmall)
-                            Text(diary.summary.ifBlank { "摘要生成中或尚未填写" }, maxLines = 3, overflow = TextOverflow.Ellipsis)
-                            Text("${diary.archiveReason} · ${diary.localDate}", style = MaterialTheme.typography.labelSmall)
-                        }
-                    }
-                }
-            },
-            confirmButton = { TextButton(onClick = { showDiary = false }) { Text("关闭") } },
-        )
-    }
+    if (showDiary) PetDiaryDialog(assistantId = assistantId, onDismiss = { showDiary = false })
 }

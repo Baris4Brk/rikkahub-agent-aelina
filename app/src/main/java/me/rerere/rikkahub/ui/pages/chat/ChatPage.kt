@@ -38,6 +38,7 @@ import androidx.compose.material3.adaptive.currentWindowDpSize
 import androidx.compose.material3.rememberBottomSheetState
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -54,6 +55,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.core.content.FileProvider
 import androidx.core.net.toUri
 import com.dokar.sonner.ToastType
@@ -292,6 +295,25 @@ private fun ChatPageContent(
     val assistant = setting.getAssistantById(conversation.assistantId) ?: setting.getCurrentAssistant()
     var showFilesSheet by remember { mutableStateOf(false) }
     var showSendModeDialog by remember { mutableStateOf(false) }
+
+    LaunchedEffect(runtimeState) {
+        me.rerere.rikkahub.pet.overlay.TrustedApprovalSurfaceVisibility.setVisible(
+            runtimeState == RuntimeState.WaitingApproval,
+        )
+    }
+    LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
+        me.rerere.rikkahub.pet.overlay.TrustedApprovalSurfaceVisibility.setVisible(false)
+    }
+    LifecycleEventEffect(Lifecycle.Event.ON_START) {
+        me.rerere.rikkahub.pet.overlay.TrustedApprovalSurfaceVisibility.setVisible(
+            runtimeState == RuntimeState.WaitingApproval,
+        )
+    }
+    DisposableEffect(conversation.id) {
+        onDispose {
+            me.rerere.rikkahub.pet.overlay.TrustedApprovalSurfaceVisibility.setVisible(false)
+        }
+    }
 
     val completionProviders = remember(assistant.workspaceId, conversation.workspaceCwd, workspaceRepository) {
         assistant.workspaceId?.let { workspaceId ->

@@ -23,6 +23,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.selects.selectUnbiased
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.sync.Mutex
 import me.rerere.rikkahub.data.ai.GenerationRunControl
 import me.rerere.rikkahub.data.ai.tools.CancelRequestResult
 import me.rerere.rikkahub.data.ai.tools.ToolCancelReason
@@ -41,6 +42,11 @@ fun interface RuntimeCommandExecutor {
 
 fun interface RuntimeHydrator {
     suspend fun hydrate()
+}
+
+sealed interface PetInteractionSlotResult<out T> {
+    data class Completed<T>(val value: T) : PetInteractionSlotResult<T>
+    data object Busy : PetInteractionSlotResult<Nothing>
 }
 
 fun interface RuntimeRepairer {
@@ -111,6 +117,8 @@ class ConversationRuntime(
     private val steeringFallbackCommands = ConcurrentHashMap<Uuid, SendMessageCommand>()
     private val terminalizingCommandIds = ConcurrentHashMap.newKeySet<Uuid>()
     private val finishedOutcomes = ConcurrentHashMap<Uuid, CommandOutcome>()
+    private val petInteractionMutex = Mutex()
+    @Volatile private var activePetInteractionJob: Job? = null
 
     private val _runtimeState = MutableStateFlow<RuntimeState>(RuntimeState.Hydrating)
     val runtimeState: StateFlow<RuntimeState> = _runtimeState.asStateFlow()
@@ -159,7 +167,7 @@ class ConversationRuntime(
     val hasRetainedWork: Boolean
         get() = activeRun != null || pendingNormalIndex.size > 0 || acceptedCommands.isNotEmpty() ||
             hydrationState.value == HydrationState.Hydrating || pendingStop != null || pendingAfterCancel != null ||
-            runtimeState.value == RuntimeState.WaitingApproval
+            runtimeState.value == RuntimeState.WaitingApproval || activePetInteractionJob?.isActive == true
 
     @Deprecated("Runtime lifetime is owned by ConversationSession")
     val isInUse: Boolean get() = hasRetainedWork
@@ -169,10 +177,30 @@ class ConversationRuntime(
         sessionJob.cancel(CancellationException("Runtime closed"))
         activeRun?.control?.requestCancelAllTools(ToolCancelReason.SHUTDOWN)
         activeRun?.job?.cancel(CancellationException("Runtime closed"))
+        activePetInteractionJob?.cancel(CancellationException("Runtime closed"))
+    }
+
+    /** Non-durable, single-slot pet work. Any ordinary/control command preempts this job. */
+    internal suspend fun <T> runPetInteraction(block: suspend () -> T): PetInteractionSlotResult<T> {
+        if (runtimeState.value != RuntimeState.Idle || !petInteractionMutex.tryLock()) {
+            return PetInteractionSlotResult.Busy
+        }
+        return try {
+            if (runtimeState.value != RuntimeState.Idle || pendingNormalIndex.size > 0) {
+                PetInteractionSlotResult.Busy
+            } else {
+                activePetInteractionJob = currentCoroutineContext()[Job]
+                PetInteractionSlotResult.Completed(block())
+            }
+        } finally {
+            activePetInteractionJob = null
+            petInteractionMutex.unlock()
+        }
     }
 
     internal suspend fun enqueueEnvelope(envelope: CommandEnvelope<out ChatCommand>): SubmitResult {
         if (!sessionJob.isActive) return reject(envelope, "Runtime unavailable")
+        activePetInteractionJob?.cancel(CancellationException("Pet interaction preempted by chat command"))
         val regenerate = envelope.command as? RegenerateCommand
         if (regenerate?.policy == RegeneratePolicy.INTERRUPT_CURRENT) {
             return replaceEmergencyEnvelope(
@@ -497,6 +525,7 @@ class ConversationRuntime(
 
     internal fun replaceEmergencyEnvelope(envelope: CommandEnvelope<out EmergencyCommand>): SubmitResult {
         if (!sessionJob.isActive) return reject(envelope, "Runtime unavailable")
+        activePetInteractionJob?.cancel(CancellationException("Pet interaction preempted by emergency command"))
         var finishedOutcome: CommandOutcome? = null
         var existingEnvelope: CommandEnvelope<out ChatCommand>? = null
         synchronized(acceptanceLock) {

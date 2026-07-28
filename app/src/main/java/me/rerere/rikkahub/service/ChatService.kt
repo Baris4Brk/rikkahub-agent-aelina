@@ -876,6 +876,12 @@ class ChatService(
         annotations = annotations,
     ).submission
 
+    suspend fun <T> runPetInteraction(
+        conversationId: Uuid,
+        block: suspend () -> T,
+    ): me.rerere.rikkahub.service.chat.PetInteractionSlotResult<T> =
+        getOrCreateRuntime(conversationId).runPetInteraction(block)
+
     internal suspend fun submitUserMessageTracked(
         conversationId: Uuid,
         content: List<UIMessagePart>,

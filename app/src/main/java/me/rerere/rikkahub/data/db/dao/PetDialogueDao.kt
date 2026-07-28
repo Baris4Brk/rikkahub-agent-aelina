@@ -61,6 +61,13 @@ interface PetDialogueDao {
 
     @Query(
         "SELECT * FROM pet_dialogue_sessions WHERE assistantId = :assistantId " +
+            "AND status IN ('ARCHIVED', 'SOFT_DELETED') " +
+            "ORDER BY COALESCE(archivedAtMs, updatedAtMs) DESC LIMIT :limit",
+    )
+    fun observeDiaryIndex(assistantId: String, limit: Int): Flow<List<PetDialogueSessionEntity>>
+
+    @Query(
+        "SELECT * FROM pet_dialogue_sessions WHERE assistantId = :assistantId " +
             "AND status = 'ARCHIVED' ORDER BY archivedAtMs DESC LIMIT :limit",
     )
     suspend fun getArchives(assistantId: String, limit: Int): List<PetDialogueSessionEntity>
@@ -201,6 +208,12 @@ interface PetDialogueDao {
 
     @Query("DELETE FROM pet_dialogue_sessions WHERE status = 'SOFT_DELETED' AND deletedAtMs <= :cutoffMs")
     suspend fun purgeDeleted(cutoffMs: Long): Int
+
+    @Query(
+        "DELETE FROM pet_dialogue_sessions WHERE sessionId = :sessionId AND assistantId = :assistantId " +
+            "AND status = 'SOFT_DELETED' AND stateVersion = :expectedVersion",
+    )
+    suspend fun deletePermanently(sessionId: String, assistantId: String, expectedVersion: Long): Int
 
     @Query(
         "SELECT COUNT(*) FROM pet_dialogue_sessions s WHERE " +

@@ -51,6 +51,8 @@ import me.rerere.rikkahub.pet.PetInteractionPayload
 import me.rerere.rikkahub.pet.PetPersonaSource
 import me.rerere.rikkahub.pet.assets.CodexPetManifest
 import me.rerere.rikkahub.pet.render.CodexPetAtlas
+import me.rerere.rikkahub.service.ChatService
+import me.rerere.rikkahub.service.chat.PetInteractionSlotResult
 import org.koin.android.ext.android.inject
 
 class DesktopPetService : Service() {
@@ -60,6 +62,7 @@ class DesktopPetService : Service() {
     private val dialogueGenerator: PetDialogueGenerator by inject()
     private val personaSource: PetPersonaSource by inject()
     private val handoffCoordinator: PetHandoffCoordinator by inject()
+    private val chatService: ChatService by inject()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val json = Json { ignoreUnknownKeys = true }
     private lateinit var windowManager: WindowManager
@@ -102,6 +105,7 @@ class DesktopPetService : Service() {
         }
         ContextCompat.registerReceiver(this, screenReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
         scope.launch { observeConfiguredPet() }
+        scope.launch { TrustedApprovalSurfaceVisibility.visible.collect { refreshVisibility() } }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -268,65 +272,71 @@ class DesktopPetService : Service() {
         interactionJob = scope.launch {
             val payload = PetInteractionPayload(type = gesture, region = region)
             val interactionJson = json.encodeToString(payload)
-            val current = dialogueRepository.observeActive(
-                assistant.id.toString(),
-                conversationId.toString(),
-            ).first()
-            val history = current?.turns.orEmpty().map { turn ->
-                PetDialogueTurnEntityView(
-                    userInput = turn.userText ?: turn.interactionJson.orEmpty(),
-                    assistantText = turn.assistantText,
-                )
-            }
-            val mode = runCatching { PetHandoffMode.valueOf(assistant.petHandoffMode) }
-                .getOrDefault(PetHandoffMode.CONFIRM)
-            val persona = personaSource.observe(assistant.id).first()
-            when (val generated = dialogueGenerator.generate(
-                persona = persona,
-                history = history,
-                input = "用户对桌宠的 ${region.name.lowercase()} 区域做了 $gesture 互动。",
-                handoffMode = mode,
-            )) {
-                is PetGenerationResult.Success -> {
-                    val updated = dialogueRepository.append(
+            var bubbleText: String? = null
+            var autoHandoffId: String? = null
+            val slot = chatService.runPetInteraction(conversationId) {
+                val current = dialogueRepository.observeActive(
+                    assistant.id.toString(),
+                    conversationId.toString(),
+                ).first()
+                val history = current?.turns.orEmpty().map { turn ->
+                    PetDialogueTurnEntityView(
+                        userInput = turn.userText ?: turn.interactionJson.orEmpty(),
+                        assistantText = turn.assistantText,
+                    )
+                }
+                val mode = runCatching { PetHandoffMode.valueOf(assistant.petHandoffMode) }
+                    .getOrDefault(PetHandoffMode.CONFIRM)
+                val persona = personaSource.observe(assistant.id).first()
+                when (val generated = dialogueGenerator.generate(
+                    persona = persona,
+                    history = history,
+                    input = "用户对桌宠的 ${region.name.lowercase()} 区域做了 $gesture 互动。",
+                    handoffMode = mode,
+                )) {
+                    is PetGenerationResult.Success -> {
+                        val updated = dialogueRepository.append(
+                            assistant.id.toString(),
+                            conversationId.toString(),
+                            PetDialogueTurnDraft(
+                                inputKind = PetDialogueInputKind.TOUCH,
+                                interactionJson = interactionJson,
+                                assistantText = generated.text.ifBlank { null },
+                                action = generated.action,
+                                handoff = generated.handoff,
+                            ),
+                        )
+                        if (sidecarAllowed) spriteView?.setAction(generated.action)
+                        bubbleText = generated.text.ifBlank { null }
+                        if (mode == PetHandoffMode.AUTO) {
+                            autoHandoffId = updated.turns.lastOrNull()?.handoffRequestId
+                        }
+                    }
+                    PetGenerationResult.LocalAnimationOnly -> dialogueRepository.append(
                         assistant.id.toString(),
                         conversationId.toString(),
                         PetDialogueTurnDraft(
                             inputKind = PetDialogueInputKind.TOUCH,
                             interactionJson = interactionJson,
-                            assistantText = generated.text.ifBlank { null },
-                            action = generated.action,
-                            handoff = generated.handoff,
                         ),
                     )
-                    if (sidecarAllowed) spriteView?.setAction(generated.action)
-                    if (currentStatusBubble == null && generated.text.isNotBlank()) {
-                        renderBubble(generated.text)
-                        delay(8_000)
-                        if (currentStatusBubble == null) renderBubble(null)
-                    }
-                    if (mode == PetHandoffMode.AUTO) {
-                        updated.turns.lastOrNull()?.handoffRequestId?.let {
-                            handoffCoordinator.submit(it, automatic = true)
-                        }
-                    }
+                    is PetGenerationResult.Failure -> dialogueRepository.append(
+                        assistant.id.toString(),
+                        conversationId.toString(),
+                        PetDialogueTurnDraft(
+                            inputKind = PetDialogueInputKind.TOUCH,
+                            interactionJson = interactionJson,
+                        ),
+                    )
                 }
-                PetGenerationResult.LocalAnimationOnly -> dialogueRepository.append(
-                    assistant.id.toString(),
-                    conversationId.toString(),
-                    PetDialogueTurnDraft(
-                        inputKind = PetDialogueInputKind.TOUCH,
-                        interactionJson = interactionJson,
-                    ),
-                )
-                is PetGenerationResult.Failure -> dialogueRepository.append(
-                    assistant.id.toString(),
-                    conversationId.toString(),
-                    PetDialogueTurnDraft(
-                        inputKind = PetDialogueInputKind.TOUCH,
-                        interactionJson = interactionJson,
-                    ),
-                )
+            }
+            if (slot is PetInteractionSlotResult.Completed) {
+                autoHandoffId?.let { handoffCoordinator.submit(it, automatic = true) }
+                if (currentStatusBubble == null && bubbleText != null) {
+                    renderBubble(bubbleText)
+                    delay(8_000)
+                    if (currentStatusBubble == null) renderBubble(null)
+                }
             }
         }
     }
@@ -342,7 +352,8 @@ class DesktopPetService : Service() {
     private fun refreshVisibility() {
         val power = getSystemService(POWER_SERVICE) as PowerManager
         val keyguard = getSystemService(KEYGUARD_SERVICE) as KeyguardManager
-        val visible = power.isInteractive && !keyguard.isDeviceLocked && !keyguard.isKeyguardLocked
+        val visible = power.isInteractive && !keyguard.isDeviceLocked && !keyguard.isKeyguardLocked &&
+            !TrustedApprovalSurfaceVisibility.visible.value
         val visibility = if (visible) View.VISIBLE else View.GONE
         spriteView?.visibility = visibility
         placeholderView?.visibility = visibility

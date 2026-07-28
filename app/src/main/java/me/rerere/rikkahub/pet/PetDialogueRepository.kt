@@ -87,6 +87,9 @@ class PetDialogueRepository(
 
     fun observeRevisions(sessionId: String) = dao.observeRevisions(sessionId)
 
+    fun observeDiaryIndex(assistantId: String, limit: Int = 500) =
+        dao.observeDiaryIndex(assistantId, limit.coerceIn(1, 500))
+
     fun observePendingHandoffs(assistantId: String) = dao.observePendingHandoffs(assistantId)
 
     suspend fun ensureActive(
@@ -251,6 +254,17 @@ class PetDialogueRepository(
 
     suspend fun purgeExpiredTrash(retentionDays: Long = 30): Int =
         dao.purgeDeleted(clock.millis() - retentionDays.coerceAtLeast(1) * MILLIS_PER_DAY)
+
+    suspend fun getSession(sessionId: String) = dao.getSession(sessionId)
+
+    suspend fun getTurns(sessionId: String) = dao.getTurns(sessionId)
+
+    suspend fun getRevisions(sessionId: String) = dao.getRevisions(sessionId)
+
+    suspend fun deletePermanently(sessionId: String, assistantId: String, expectedVersion: Long): Boolean =
+        mutationMutex.withLock {
+            database.withTransaction { dao.deletePermanently(sessionId, assistantId, expectedVersion) == 1 }
+        }
 
     private suspend fun changeArchiveStatus(
         sessionId: String,
