@@ -83,6 +83,8 @@ object DefaultPrivilegedSessionResolver : PrivilegedSessionResolver {
         ToolCallOrigin.LocalChat,
         ToolCallOrigin.SystemAssistant,
         ToolCallOrigin.QuickCapture,
+        ToolCallOrigin.PetHandoffConfirmed,
+        ToolCallOrigin.PetHandoffAuto,
     )
 }
 

@@ -49,6 +49,7 @@ import me.rerere.rikkahub.data.db.migrations.MIGRATION_33_34
 import me.rerere.rikkahub.data.db.migrations.MIGRATION_34_35
 import me.rerere.rikkahub.data.db.migrations.MIGRATION_35_36
 import me.rerere.rikkahub.data.db.migrations.MIGRATION_36_37
+import me.rerere.rikkahub.data.db.migrations.MIGRATION_37_38
 import me.rerere.rikkahub.data.repository.MemorySearchIndex
 import me.rerere.rikkahub.data.repository.MemoryRetriever
 import me.rerere.rikkahub.memory.AndroidMemoryWorkScheduler
@@ -65,6 +66,16 @@ import me.rerere.rikkahub.memory.MemoryWorkScheduler
 import me.rerere.rikkahub.memory.ProviderMemoryExtractor
 import me.rerere.rikkahub.memory.RoomMemoryCaptureStore
 import me.rerere.rikkahub.memory.RoomMemoryProcessingStore
+import me.rerere.rikkahub.pet.PetDialogueRepository
+import me.rerere.rikkahub.pet.PetHandoffCoordinator
+import me.rerere.rikkahub.pet.PetDiaryToolProvider
+import me.rerere.rikkahub.pet.PetDialogueGenerator
+import me.rerere.rikkahub.pet.PetPersonaSource
+import me.rerere.rikkahub.pet.PetSummaryScheduler
+import me.rerere.rikkahub.pet.AndroidPetSummaryScheduler
+import me.rerere.rikkahub.pet.PetDiarySummarizer
+import me.rerere.rikkahub.pet.PetHandoffRecovery
+import me.rerere.rikkahub.pet.PetDiagnostics
 import me.rerere.rikkahub.service.chat.DurableCommandQueue
 import me.rerere.rikkahub.data.ai.mcp.McpManager
 import me.rerere.rikkahub.data.agentrun.AgentRunBootRecovery
@@ -111,6 +122,7 @@ val dataSourceModule = module {
                 MIGRATION_34_35,
                 MIGRATION_35_36,
                 MIGRATION_36_37,
+                MIGRATION_37_38,
             )
             .addCallback(object : RoomDatabase.Callback() {
                 override fun onOpen(db: SupportSQLiteDatabase) {
@@ -230,6 +242,16 @@ val dataSourceModule = module {
     single { get<AppDatabase>().executionRecordDao() }
     single { get<AppDatabase>().executionEventDao() }
     single { get<AppDatabase>().pendingToolApprovalDao() }
+    single { get<AppDatabase>().petDialogueDao() }
+    single<PetSummaryScheduler> { AndroidPetSummaryScheduler(context = get()) }
+    single { PetDialogueRepository(database = get(), dao = get(), summaryScheduler = get()) }
+    single { PetHandoffCoordinator(database = get(), dao = get(), chatService = get(), appScope = get<AppScope>()) }
+    single { PetHandoffRecovery(dao = get(), pendingCommandDao = get(), coordinator = get()) }
+    single { PetDiaryToolProvider(dao = get(), repository = get()) }
+    single { PetPersonaSource(settingsStore = get()) }
+    single { PetDialogueGenerator(settingsStore = get(), providerManager = get()) }
+    single { PetDiarySummarizer(settingsStore = get(), providerManager = get()) }
+    single { PetDiagnostics(context = get(), dao = get(), settingsStore = get(), summaryScheduler = get()) }
     single { me.rerere.rikkahub.data.execution.ExecutionConsistencyMetrics() }
     single {
         me.rerere.rikkahub.data.execution.ExecutionStateTransaction(

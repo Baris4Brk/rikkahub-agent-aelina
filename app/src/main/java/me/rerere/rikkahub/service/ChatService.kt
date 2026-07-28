@@ -124,6 +124,7 @@ import me.rerere.rikkahub.data.ai.GenerationRunControl
 import me.rerere.rikkahub.data.ai.tools.CancelRequestResult
 import me.rerere.rikkahub.data.ai.tools.ToolCancelReason
 import me.rerere.rikkahub.service.chat.ChatCommand
+import me.rerere.rikkahub.service.chat.PetDialogueCommand
 import me.rerere.rikkahub.service.chat.CancelCurrentToolCommand
 import me.rerere.rikkahub.service.chat.CommandEnvelope
 import me.rerere.rikkahub.service.chat.CommandOrigin
@@ -641,6 +642,9 @@ class ChatService(
             CommandOrigin.SYSTEM_ASSISTANT -> ToolCallOrigin.SystemAssistant
             CommandOrigin.SYSTEM_ASSISTANT_KEYGUARD -> ToolCallOrigin.SystemAssistantKeyguard
             CommandOrigin.QUICK_CAPTURE -> ToolCallOrigin.QuickCapture
+            CommandOrigin.PET_INTERACTION -> ToolCallOrigin.PetInteraction
+            CommandOrigin.PET_HANDOFF_CONFIRMED -> ToolCallOrigin.PetHandoffConfirmed
+            CommandOrigin.PET_HANDOFF_AUTO -> ToolCallOrigin.PetHandoffAuto
             // Approval continuation is an internal command, but it must retain the
             // surface that created the pending tool call. If no in-memory provenance is
             // available (for example after process death), fail closed as a workflow.
@@ -682,6 +686,9 @@ class ChatService(
             ToolCallOrigin.SystemAssistant,
             ToolCallOrigin.SystemAssistantKeyguard,
             ToolCallOrigin.QuickCapture,
+            ToolCallOrigin.PetInteraction,
+            ToolCallOrigin.PetHandoffConfirmed,
+            ToolCallOrigin.PetHandoffAuto,
             -> me.rerere.rikkahub.data.capability.SubjectType.LOCAL_ASSISTANT
         }
         val id = if (type == me.rerere.rikkahub.data.capability.SubjectType.LOCAL_ASSISTANT) {
@@ -1236,6 +1243,7 @@ class ChatService(
         val acceptedAssistantSnapshot = acceptedSystemAssistantTarget?.assistant ?: acceptedQuickCaptureTarget?.assistant
 
         return when (command) {
+            is PetDialogueCommand -> RunOutcome.Rejected("pet_dialogue_command_is_memory_only")
             is SendMessageCommand -> executeSendMessageLegacy(
                 commandId = envelope.id,
                 origin = envelope.origin,
@@ -2691,7 +2699,11 @@ class ChatService(
             }
             ToolCallOrigin.MCP,
             ToolCallOrigin.ExternalIntent,
+            ToolCallOrigin.PetInteraction,
+            ToolCallOrigin.PetHandoffAuto,
             -> me.rerere.rikkahub.memory.MemoryCaptureOrigin.INTERNAL
+            ToolCallOrigin.PetHandoffConfirmed ->
+                me.rerere.rikkahub.memory.MemoryCaptureOrigin.APP_UI
         }
         val scopeId = if (assistant.useGlobalMemory) {
             MemoryRepository.GLOBAL_MEMORY_ID

@@ -17,6 +17,9 @@ object ContextRequestFactory {
         targetDisplaySessionId: String? = null,
         allowedSources: Set<ContextSource> = ContextSource.entries.toSet(),
     ): ContextRequest? {
+        if (commandOrigin == CommandOrigin.PET_INTERACTION ||
+            toolCallOrigin == ToolCallOrigin.PetInteraction
+        ) return null
         if (runId.isNullOrBlank() || commandId.isNullOrBlank()) return null
         return ContextRequest(
             commandOrigin = commandOrigin,
@@ -61,6 +64,9 @@ object ContextRequestFactory {
             CommandOrigin.TELEGRAM -> ContextInvocationSurface.TELEGRAM
             CommandOrigin.WEB_API -> ContextInvocationSurface.WEB
             CommandOrigin.CRON -> ContextInvocationSurface.CRON
+            CommandOrigin.PET_INTERACTION -> ContextInvocationSurface.KEYGUARD
+            CommandOrigin.PET_HANDOFF_CONFIRMED -> ContextInvocationSurface.LOCAL_CHAT
+            CommandOrigin.PET_HANDOFF_AUTO -> ContextInvocationSurface.WORKFLOW
             CommandOrigin.INTERNAL -> when (toolCallOrigin) {
                 ToolCallOrigin.LocalChat -> ContextInvocationSurface.LOCAL_CHAT
                 ToolCallOrigin.SystemAssistant -> ContextInvocationSurface.SYSTEM_ASSISTANT
@@ -71,6 +77,9 @@ object ContextRequestFactory {
                 ToolCallOrigin.WebServer -> ContextInvocationSurface.WEB
                 ToolCallOrigin.MCP -> ContextInvocationSurface.MCP
                 ToolCallOrigin.ExternalIntent -> ContextInvocationSurface.EXTERNAL_AUTOMATION
+                ToolCallOrigin.PetInteraction -> ContextInvocationSurface.KEYGUARD
+                ToolCallOrigin.PetHandoffConfirmed -> ContextInvocationSurface.LOCAL_CHAT
+                ToolCallOrigin.PetHandoffAuto -> ContextInvocationSurface.WORKFLOW
             }
         }
     }

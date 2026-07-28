@@ -403,6 +403,7 @@ class LocalTools(
     private val termuxSessionEmergencyController: me.rerere.rikkahub.data.ai.tools.local.TermuxSessionEmergencyController,
     private val executionTokenProvider: me.rerere.rikkahub.execution.ExecutionTokenProvider,
     private val cancellationCoordinator: me.rerere.rikkahub.data.execution.CancellationCoordinator,
+    private val petDiaryToolProvider: me.rerere.rikkahub.pet.PetDiaryToolProvider,
 ) {
     private val displayTargetResolver by lazy {
         me.rerere.rikkahub.data.ai.tools.local.DisplayTargetResolver(displayAutomationRuntime)
@@ -756,6 +757,7 @@ class LocalTools(
         invocationContext: ToolInvocationContext = ToolInvocationContext.EMPTY,
     ): List<Tool> {
         val tools = mutableListOf<Tool>()
+        tools.addAll(petDiaryToolProvider.tools(invocationContext))
         if (options.contains(LocalToolOption.JavascriptEngine)) {
             tools.add(javascriptTool)
         }

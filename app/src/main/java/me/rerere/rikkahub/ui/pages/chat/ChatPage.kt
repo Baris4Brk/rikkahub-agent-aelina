@@ -75,6 +75,7 @@ import me.rerere.rikkahub.Screen
 import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.datastore.findProvider
 import me.rerere.rikkahub.data.datastore.getCurrentAssistant
+import me.rerere.rikkahub.data.datastore.getAssistantById
 import me.rerere.rikkahub.data.datastore.getCurrentChatModel
 import me.rerere.rikkahub.data.files.FilesManager
 import me.rerere.rikkahub.data.model.Assistant
@@ -288,7 +289,7 @@ private fun ChatPageContent(
     val workspaceRepository: WorkspaceRepository = koinInject()
     var previewMode by rememberSaveable { mutableStateOf(false) }
     val hazeState = rememberHazeState()
-    val assistant = setting.getCurrentAssistant()
+    val assistant = setting.getAssistantById(conversation.assistantId) ?: setting.getCurrentAssistant()
     var showFilesSheet by remember { mutableStateOf(false) }
     var showSendModeDialog by remember { mutableStateOf(false) }
 
@@ -337,27 +338,28 @@ private fun ChatPageContent(
         AssistantBackground(setting = setting, modifier = Modifier.hazeSource(hazeState))
         Scaffold(
             topBar = {
-                TopBar(
-                    settings = setting,
-                    conversation = conversation,
-                    bigScreen = bigScreen,
-                    drawerState = drawerState,
-                    previewMode = previewMode,
-                    onNewChat = {
-                        navigateToChatPage(navController)
-                    },
-                    onClickMenu = {
-                        previewMode = !previewMode
-                    },
-                    onOpenDiagnostics = {
-                        navController.navigate(
-                            Screen.SettingDiagnosticsForConversation(conversation.id.toString())
-                        )
-                    },
-                    onUpdateTitle = {
-                        vm.updateTitle(it)
-                    }
-                )
+                Column {
+                    TopBar(
+                        settings = setting,
+                        conversation = conversation,
+                        bigScreen = bigScreen,
+                        drawerState = drawerState,
+                        previewMode = previewMode,
+                        onNewChat = { navigateToChatPage(navController) },
+                        onClickMenu = { previewMode = !previewMode },
+                        onOpenDiagnostics = {
+                            navController.navigate(
+                                Screen.SettingDiagnosticsForConversation(conversation.id.toString())
+                            )
+                        },
+                        onUpdateTitle = { vm.updateTitle(it) },
+                    )
+                    PetDialogueCard(
+                        assistant = assistant,
+                        conversationId = conversation.id,
+                        mainBusy = runtimeState !is RuntimeState.Idle,
+                    )
+                }
             },
             bottomBar = {
                 Column {
@@ -630,7 +632,7 @@ private fun ChatPageContent(
                         }
                     },
                     onUpdateChatModel = {
-                        vm.setChatModel(assistant = setting.getCurrentAssistant(), model = it)
+                        vm.setChatModel(assistant = assistant, model = it)
                     },
                     onUpdateAssistant = {
                         vm.updateSettings(

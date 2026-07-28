@@ -26,6 +26,7 @@ import me.rerere.rikkahub.data.db.dao.MemoryDAO
 import me.rerere.rikkahub.data.db.dao.MemoryV2Dao
 import me.rerere.rikkahub.data.db.dao.MessageNodeDAO
 import me.rerere.rikkahub.data.db.dao.PendingChatCommandDao
+import me.rerere.rikkahub.data.db.dao.PetDialogueDao
 import me.rerere.rikkahub.data.db.dao.ScheduledJobDao
 import me.rerere.rikkahub.data.db.dao.ScheduledJobRunDao
 import me.rerere.rikkahub.data.db.dao.SshHostDao
@@ -48,6 +49,10 @@ import me.rerere.rikkahub.data.db.entity.MemoryRelationCandidateEntity
 import me.rerere.rikkahub.data.db.entity.MemoryBackfillRunEntity
 import me.rerere.rikkahub.data.db.entity.MessageNodeEntity
 import me.rerere.rikkahub.data.db.entity.PendingChatCommandEntity
+import me.rerere.rikkahub.data.db.entity.PetDialogueRevisionEntity
+import me.rerere.rikkahub.data.db.entity.PetDialogueSessionEntity
+import me.rerere.rikkahub.data.db.entity.PetDialogueTurnEntity
+import me.rerere.rikkahub.data.db.entity.PetHandoffRequestEntity
 import me.rerere.rikkahub.data.db.entity.ScheduledJobEntity
 import me.rerere.rikkahub.data.db.entity.ScheduledJobRunEntity
 import me.rerere.rikkahub.data.db.entity.SshHostEntity
@@ -97,10 +102,14 @@ import me.rerere.rikkahub.workflow.db.WorkflowRunEntity
         CapabilityGrantEntity::class,
         WorkspaceEntity::class,
         PendingChatCommandEntity::class,
+        PetDialogueSessionEntity::class,
+        PetDialogueTurnEntity::class,
+        PetHandoffRequestEntity::class,
+        PetDialogueRevisionEntity::class,
     ],
     // v33 freezes the conversation-context limit with each queued capture so changing the
     // setting later cannot split or enlarge a batch that has already been accepted.
-    version = 37,
+    version = 38,
     autoMigrations = [
         AutoMigration(from = 1, to = 2),
         AutoMigration(from = 2, to = 3),
@@ -172,6 +181,8 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun workspaceDao(): WorkspaceDAO
 
     abstract fun pendingChatCommandDao(): PendingChatCommandDao
+
+    abstract fun petDialogueDao(): PetDialogueDao
 }
 
 object TokenUsageConverter {

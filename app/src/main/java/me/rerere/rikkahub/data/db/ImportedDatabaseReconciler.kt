@@ -47,12 +47,12 @@ object ImportedDatabaseReconciler {
 
     /**
      * Room's schema version and identity hash for [AppDatabase]. Both are copied verbatim
-     * from app/schemas/me.rerere.rikkahub.data.db.AppDatabase/37.json. When the schema
+     * from app/schemas/me.rerere.rikkahub.data.db.AppDatabase/38.json. When the schema
      * version is bumped, update BOTH constants (and the table DDL below if the fork-only
      * tables changed) or this reconciliation will silently stop matching.
      */
-    internal const val EXPECTED_VERSION = 37
-    internal const val EXPECTED_IDENTITY_HASH = "8bf48c5fd55eef1331c5b5cf043eac5b"
+    internal const val EXPECTED_VERSION = 38
+    internal const val EXPECTED_IDENTITY_HASH = "70e847d8db457399fbc4fbc9c21a41b0"
     internal const val PRE_STORAGE_MODE_V35_IDENTITY_HASH = "2a74d694211f0df9f9094c7571ec71dd"
 
     internal enum class ReconcilePlan {
@@ -408,6 +408,33 @@ object ImportedDatabaseReconciler {
         ).forEach(db::execSQL)
     }
 
+    /** Same-version upstream v38 backups need the fork-only pet sidecar schema before Room opens. */
+    private fun ensurePetV38Schema(db: SQLiteDatabase) {
+        listOf(
+            "CREATE TABLE IF NOT EXISTS `pet_dialogue_sessions` (`sessionId` TEXT NOT NULL, `assistantId` TEXT NOT NULL, `privilegedConversationId` TEXT NOT NULL, `localDate` TEXT NOT NULL, `zoneId` TEXT NOT NULL, `activeOwnerKey` TEXT, `status` TEXT NOT NULL, `archiveReason` TEXT, `title` TEXT NOT NULL, `summary` TEXT NOT NULL, `notes` TEXT NOT NULL, `tagsJson` TEXT NOT NULL, `summaryState` TEXT NOT NULL, `stateVersion` INTEGER NOT NULL, `createdAtMs` INTEGER NOT NULL, `updatedAtMs` INTEGER NOT NULL, `archivedAtMs` INTEGER, `deletedAtMs` INTEGER, PRIMARY KEY(`sessionId`))",
+            "CREATE INDEX IF NOT EXISTS `index_pet_dialogue_sessions_assistantId` ON `pet_dialogue_sessions` (`assistantId`)",
+            "CREATE INDEX IF NOT EXISTS `index_pet_dialogue_sessions_privilegedConversationId` ON `pet_dialogue_sessions` (`privilegedConversationId`)",
+            "CREATE INDEX IF NOT EXISTS `index_pet_dialogue_sessions_assistantId_status` ON `pet_dialogue_sessions` (`assistantId`, `status`)",
+            "CREATE INDEX IF NOT EXISTS `index_pet_dialogue_sessions_assistantId_localDate` ON `pet_dialogue_sessions` (`assistantId`, `localDate`)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS `index_pet_dialogue_sessions_activeOwnerKey` ON `pet_dialogue_sessions` (`activeOwnerKey`)",
+            "CREATE INDEX IF NOT EXISTS `index_pet_dialogue_sessions_deletedAtMs` ON `pet_dialogue_sessions` (`deletedAtMs`)",
+            "CREATE TABLE IF NOT EXISTS `pet_dialogue_turns` (`turnId` TEXT NOT NULL, `sessionId` TEXT NOT NULL, `sequence` INTEGER NOT NULL, `inputKind` TEXT NOT NULL, `userText` TEXT, `interactionJson` TEXT, `assistantText` TEXT, `action` TEXT, `handoffRequestId` TEXT, `createdAtMs` INTEGER NOT NULL, PRIMARY KEY(`turnId`), FOREIGN KEY(`sessionId`) REFERENCES `pet_dialogue_sessions`(`sessionId`) ON UPDATE NO ACTION ON DELETE CASCADE)",
+            "CREATE INDEX IF NOT EXISTS `index_pet_dialogue_turns_sessionId` ON `pet_dialogue_turns` (`sessionId`)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS `index_pet_dialogue_turns_sessionId_sequence` ON `pet_dialogue_turns` (`sessionId`, `sequence`)",
+            "CREATE INDEX IF NOT EXISTS `index_pet_dialogue_turns_handoffRequestId` ON `pet_dialogue_turns` (`handoffRequestId`)",
+            "CREATE TABLE IF NOT EXISTS `pet_handoff_requests` (`requestId` TEXT NOT NULL, `sessionId` TEXT NOT NULL, `turnId` TEXT NOT NULL, `assistantId` TEXT NOT NULL, `privilegedConversationId` TEXT NOT NULL, `mode` TEXT NOT NULL, `status` TEXT NOT NULL, `title` TEXT NOT NULL, `request` TEXT NOT NULL, `targetCommandId` TEXT, `stateVersion` INTEGER NOT NULL, `createdAtMs` INTEGER NOT NULL, `submittedAtMs` INTEGER, `resolvedAtMs` INTEGER, `expiresAtMs` INTEGER, PRIMARY KEY(`requestId`), FOREIGN KEY(`sessionId`) REFERENCES `pet_dialogue_sessions`(`sessionId`) ON UPDATE NO ACTION ON DELETE CASCADE, FOREIGN KEY(`turnId`) REFERENCES `pet_dialogue_turns`(`turnId`) ON UPDATE NO ACTION ON DELETE CASCADE)",
+            "CREATE INDEX IF NOT EXISTS `index_pet_handoff_requests_sessionId` ON `pet_handoff_requests` (`sessionId`)",
+            "CREATE INDEX IF NOT EXISTS `index_pet_handoff_requests_turnId` ON `pet_handoff_requests` (`turnId`)",
+            "CREATE INDEX IF NOT EXISTS `index_pet_handoff_requests_assistantId_status` ON `pet_handoff_requests` (`assistantId`, `status`)",
+            "CREATE INDEX IF NOT EXISTS `index_pet_handoff_requests_targetCommandId` ON `pet_handoff_requests` (`targetCommandId`)",
+            "CREATE INDEX IF NOT EXISTS `index_pet_handoff_requests_expiresAtMs` ON `pet_handoff_requests` (`expiresAtMs`)",
+            "CREATE TABLE IF NOT EXISTS `pet_dialogue_revisions` (`revisionId` TEXT NOT NULL, `sessionId` TEXT NOT NULL, `revision` INTEGER NOT NULL, `actor` TEXT NOT NULL, `operation` TEXT NOT NULL, `previousTitle` TEXT NOT NULL, `previousSummary` TEXT NOT NULL, `previousNotes` TEXT NOT NULL, `previousTagsJson` TEXT NOT NULL, `previousStatus` TEXT NOT NULL, `createdAtMs` INTEGER NOT NULL, PRIMARY KEY(`revisionId`), FOREIGN KEY(`sessionId`) REFERENCES `pet_dialogue_sessions`(`sessionId`) ON UPDATE NO ACTION ON DELETE CASCADE)",
+            "CREATE INDEX IF NOT EXISTS `index_pet_dialogue_revisions_sessionId` ON `pet_dialogue_revisions` (`sessionId`)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS `index_pet_dialogue_revisions_sessionId_revision` ON `pet_dialogue_revisions` (`sessionId`, `revision`)",
+            "CREATE INDEX IF NOT EXISTS `index_pet_dialogue_revisions_createdAtMs` ON `pet_dialogue_revisions` (`createdAtMs`)",
+        ).forEach(db::execSQL)
+    }
+
     private fun ensureCapabilityGrantsV35Schema(db: SQLiteDatabase) {
         listOf(
             "CREATE TABLE IF NOT EXISTS `capability_grants` (`id` TEXT NOT NULL, `subject_id` TEXT NOT NULL, `subject_type` TEXT NOT NULL, `capability_key` TEXT NOT NULL, `resource_kind` TEXT NOT NULL, `resource_identifier` TEXT NOT NULL, `allowed_origins` TEXT NOT NULL, `scope` TEXT NOT NULL, `expires_at_ms` INTEGER, `revoked` INTEGER NOT NULL, `created_at_ms` INTEGER NOT NULL, `updated_at_ms` INTEGER NOT NULL, PRIMARY KEY(`id`))",
@@ -547,6 +574,7 @@ object ImportedDatabaseReconciler {
                         )
                     }
                     if (version >= 37) ensureExecutionV37Schema(db)
+                    if (version >= 38) ensurePetV38Schema(db)
 
                     // Older backups must keep their original user_version so Room can run
                     // every real migration (including 28→29). Precreating fork-only tables

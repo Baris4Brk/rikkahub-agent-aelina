@@ -25,6 +25,9 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -56,6 +59,7 @@ fun AssistantDetailPage(id: String) {
     val pendingReviewCount by vm.pendingReviewCount.collectAsStateWithLifecycle()
     val navController = LocalNavController.current
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
+    var showPetSettings by remember { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
@@ -157,9 +161,33 @@ fun AssistantDetailPage(id: String) {
                         headlineContent = { Text(stringResource(R.string.assistant_page_tab_local_tools)) },
                         trailingContent = { Icon(HugeIcons.ArrowRight01, null) },
                     )
+                    item(
+                        onClick = { showPetSettings = true },
+                        leadingContent = { Icon(HugeIcons.Puzzle, null) },
+                        supportingContent = {
+                            Text(
+                                if (assistant.privilegedConversationId == null) {
+                                    "请先配置第二用户会话"
+                                } else if (assistant.petEnabled) {
+                                    "已启用 · ${assistant.petPackageId ?: "应用占位图"}"
+                                } else {
+                                    "导入 Codex Pet，并绑定第二用户短会话"
+                                },
+                            )
+                        },
+                        headlineContent = { Text("第二用户桌宠") },
+                        trailingContent = { Icon(HugeIcons.ArrowRight01, null) },
+                    )
                 }
             }
         }
+    }
+    if (showPetSettings) {
+        PetSettingsDialog(
+            assistant = assistant,
+            onDismiss = { showPetSettings = false },
+            onUpdate = { next -> vm.updateAssistant { current -> next.copy(id = current.id) } },
+        )
     }
 }
 

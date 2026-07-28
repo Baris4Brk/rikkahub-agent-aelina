@@ -40,4 +40,13 @@ enum class ToolCallOrigin {
      *  Restricted surface — no file writes to the agent workspace, no keystore ops,
      *  no notification posts (the user chose the app via intent, not the assistant). */
     ExternalIntent,
+
+    /** Zero-tool pet sidecar generation. Kept as a hard-denied origin for defense in depth. */
+    PetInteraction,
+
+    /** A user-confirmed pet draft now executing as a normal second-user task. */
+    PetHandoffConfirmed,
+
+    /** An optional automatic pet task; every produced tool must return to trusted-app approval. */
+    PetHandoffAuto,
 }

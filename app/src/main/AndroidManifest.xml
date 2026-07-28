@@ -585,6 +585,25 @@
     </service>
 
     <service
+      android:name=".pet.overlay.DesktopPetService"
+      android:exported="false"
+      android:foregroundServiceType="specialUse">
+      <property
+        android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+        android:value="user-enabled second-user desktop pet overlay" />
+    </service>
+
+    <receiver
+      android:name=".pet.overlay.DesktopPetBootReceiver"
+      android:enabled="true"
+      android:exported="true"
+      android:permission="android.permission.RECEIVE_BOOT_COMPLETED">
+      <intent-filter>
+        <action android:name="android.intent.action.BOOT_COMPLETED" />
+      </intent-filter>
+    </receiver>
+
+    <service
       android:name=".quickcapture.QuickCaptureMediaProjectionService"
       android:exported="false"
       android:foregroundServiceType="mediaProjection" />

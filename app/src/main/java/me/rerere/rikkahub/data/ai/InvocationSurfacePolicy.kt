@@ -35,7 +35,10 @@ object InvocationSurfacePolicy {
     )
 
     /** Every origin that may own a tool surface. Keyguard is intentionally absent. */
-    val ALL_NON_KEYGUARD: Set<ToolCallOrigin> = LOCAL_OR_WORKFLOW + REMOTE
+    val ALL_NON_KEYGUARD: Set<ToolCallOrigin> = LOCAL_OR_WORKFLOW + REMOTE + setOf(
+        ToolCallOrigin.PetHandoffConfirmed,
+        ToolCallOrigin.PetHandoffAuto,
+    )
 
     fun forOrigin(origin: ToolCallOrigin): InvocationSurfaceDecision = when (origin) {
         ToolCallOrigin.LocalChat -> InvocationSurfaceDecision(
@@ -52,6 +55,30 @@ object InvocationSurfacePolicy {
             allowsAutoApproval = true,
             allowsSelectedConversationUnrestricted = true,
             requiresVisibleForegroundSurface = true,
+            allowsForegroundOnlyTools = false,
+        )
+        ToolCallOrigin.PetHandoffConfirmed -> InvocationSurfaceDecision(
+            allowsToolExecution = true,
+            allowsPrivilegedToolInjection = true,
+            allowsAutoApproval = true,
+            allowsSelectedConversationUnrestricted = true,
+            requiresVisibleForegroundSurface = true,
+            allowsForegroundOnlyTools = true,
+        )
+        ToolCallOrigin.PetHandoffAuto -> InvocationSurfaceDecision(
+            allowsToolExecution = true,
+            allowsPrivilegedToolInjection = true,
+            allowsAutoApproval = false,
+            allowsSelectedConversationUnrestricted = false,
+            requiresVisibleForegroundSurface = false,
+            allowsForegroundOnlyTools = false,
+        )
+        ToolCallOrigin.PetInteraction -> InvocationSurfaceDecision(
+            allowsToolExecution = false,
+            allowsPrivilegedToolInjection = false,
+            allowsAutoApproval = false,
+            allowsSelectedConversationUnrestricted = false,
+            requiresVisibleForegroundSurface = false,
             allowsForegroundOnlyTools = false,
         )
         ToolCallOrigin.QuickCapture -> InvocationSurfaceDecision(
@@ -99,7 +126,7 @@ object InvocationSurfacePolicy {
         if (forOrigin(origin).allowsToolExecution) {
             null
         } else {
-            "$toolName is unavailable from the locked system-assistant surface. Unlock the device and invoke again."
+            "$toolName is unavailable from this invocation surface. Open the unlocked app to continue."
         }
 
     /**

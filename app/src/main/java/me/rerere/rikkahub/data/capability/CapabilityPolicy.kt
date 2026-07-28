@@ -238,6 +238,8 @@ class DefaultCapabilityPolicyEngine(
             ToolCallOrigin.LocalChat,
             ToolCallOrigin.SystemAssistant,
             ToolCallOrigin.QuickCapture,
+            ToolCallOrigin.PetHandoffConfirmed,
+            ToolCallOrigin.PetHandoffAuto,
         )
     }
 }

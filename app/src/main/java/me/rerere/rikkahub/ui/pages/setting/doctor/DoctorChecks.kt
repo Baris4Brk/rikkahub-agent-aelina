@@ -168,6 +168,7 @@ class DoctorChecks(
     private val workspaceRepository: me.rerere.rikkahub.data.repository.WorkspaceRepository? = null,
     private val capabilityGrantRepository: me.rerere.rikkahub.data.capability.CapabilityGrantRepository? = null,
     private val executionConsistencyDoctor: me.rerere.rikkahub.diagnostics.ExecutionConsistencyDoctor? = null,
+    private val petDiagnostics: me.rerere.rikkahub.pet.PetDiagnostics? = null,
 ) {
     suspend fun runAll(): List<DoctorCheck> = withContext(Dispatchers.IO) {
         // Aggregate enabled tools across every assistant. A tool is "in use" if at least
@@ -190,7 +191,44 @@ class DoctorChecks(
             addAll(runtimeDiagnosticsChecks())
             addAll(linuxRuntimeStateChecks())
             addAll(executionConsistencyChecks())
+            addAll(petChecks())
         }
+    }
+
+    private suspend fun petChecks(): List<DoctorCheck> {
+        val diagnostics = petDiagnostics ?: return emptyList()
+        val snapshot = runCatching { diagnostics.inspect() }.getOrElse {
+            return listOf(
+                DoctorCheck(
+                    id = "pet.diagnostics.unavailable",
+                    category = DoctorCategory.Diagnostics,
+                    label = "Second-user pet diagnostics",
+                    detail = "Unable to inspect pet sidecar state.",
+                    severity = Severity.WARN,
+                ),
+            )
+        }
+        val inconsistent = snapshot.overCapacitySessions + snapshot.expiredPendingHandoffs
+        return listOf(
+            DoctorCheck(
+                id = "pet.session_integrity",
+                category = DoctorCategory.Database,
+                label = "Pet dialogue session integrity",
+                detail = "${snapshot.overCapacitySessions} over-capacity sessions; ${snapshot.expiredPendingHandoffs} expired handoffs still pending.",
+                severity = if (inconsistent == 0) Severity.OK else Severity.FAIL,
+                fix = if (inconsistent > 0 || snapshot.pendingSummaries > 0) FixAction.AutoFix(
+                    label = "Repair safe pet state",
+                    run = { AutoFixResult(true, "Scheduled or repaired ${diagnostics.repair()} pet records.") },
+                ) else null,
+            ),
+            DoctorCheck(
+                id = "pet.assets",
+                category = DoctorCategory.AssistantInfo,
+                label = "Pet package and persona projection",
+                detail = "Missing packages: ${snapshot.missingPackages.size}; truncated personas: ${snapshot.truncatedPersonas.size}; pending summaries: ${snapshot.pendingSummaries}.",
+                severity = if (snapshot.missingPackages.isEmpty()) Severity.OK else Severity.WARN,
+            ),
+        )
     }
 
     private suspend fun executionConsistencyChecks(): List<DoctorCheck> {

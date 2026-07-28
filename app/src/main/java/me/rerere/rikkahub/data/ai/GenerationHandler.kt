@@ -1148,6 +1148,13 @@ class GenerationHandler(
                                     "should run it themselves in a terminal outside the agent."
                             ))
                         }
+                        callOrigin == ToolCallOrigin.PetHandoffAuto &&
+                            tool.approvalState is ToolApprovalState.Auto -> {
+                            // Auto handoff may enqueue a task, but it never inherits grants and
+                            // every tool returns to an unlocked trusted-app approval surface.
+                            hasPendingApproval = true
+                            tool.copy(approvalState = ToolApprovalState.Pending)
+                        }
                         // Tool needs approval and state is Auto:
                         toolDef?.needsApproval(tool.inputAsJson()) == true &&
                             tool.approvalState is ToolApprovalState.Auto -> {

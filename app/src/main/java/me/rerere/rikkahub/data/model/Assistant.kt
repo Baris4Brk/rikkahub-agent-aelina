@@ -105,6 +105,14 @@ data class Assistant(
     val secondUserPolicyConfirmed: Boolean = false,
     /** Explicit opt-in for temporary read-only access to other local conversation histories. */
     val allowConversationHistoryRead: Boolean = false,
+    /** Optional P1 pet sidecar settings. Defaults keep existing assistants and exports unchanged. */
+    val petEnabled: Boolean = false,
+    val petPackageId: String? = null,
+    val petSupplement: String? = null,
+    val petHandoffMode: String = "CONFIRM",
+    val petBootRestoreEnabled: Boolean = false,
+    val petHeadBoundary: Float = 0.34f,
+    val petBodyBoundary: Float = 0.76f,
 )
 
 @Serializable

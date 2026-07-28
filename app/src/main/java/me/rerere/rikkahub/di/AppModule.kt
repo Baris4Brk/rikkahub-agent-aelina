@@ -425,6 +425,7 @@ val appModule = module {
             termuxSessionEmergencyController = get(),
             executionTokenProvider = get(),
             cancellationCoordinator = get(),
+            petDiaryToolProvider = get(),
         )
     }
 
@@ -788,6 +789,7 @@ val appModule = module {
             workspaceRepository = get(),
             capabilityGrantRepository = get(),
             executionConsistencyDoctor = get(),
+            petDiagnostics = get(),
         )
     }
 }

@@ -89,6 +89,7 @@ class RikkaHubApp : Application() {
             Log.e(TAG, "Unable to install the system-assistant session adapter", error)
         }
         this.createNotificationChannel()
+        me.rerere.rikkahub.pet.PetDailyArchiveScheduler.schedule(this)
 
         // Restore any headless conversation IDs that survived a process kill; must run
         // before any cron worker fires so mark/unmark are consistent.
@@ -137,6 +138,10 @@ class RikkaHubApp : Application() {
         // "addObserver must be called on the main thread" because Koin's lazy factory
         // builds ChatService on the IO thread.
         eagerlyInitChatService()
+        get<AppScope>().launch(Dispatchers.IO) {
+            runCatching { get<me.rerere.rikkahub.pet.PetHandoffRecovery>().reconcile() }
+                .onFailure { Log.w(TAG, "Pet handoff recovery failed", it) }
+        }
 
         // Start Telegram bot if previously enabled — service is START_NOT_STICKY so OS won't
         // auto-revive it after a process kill; we need to bring it back ourselves.

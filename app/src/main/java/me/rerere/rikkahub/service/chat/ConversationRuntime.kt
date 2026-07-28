@@ -254,6 +254,7 @@ class ConversationRuntime(
             }
         }
         return when (val command = envelope.command) {
+            is PetDialogueCommand -> reject(envelope, "PetDialogueCommand uses the non-durable pet slot")
             is EmergencyCommand -> reject(envelope, "EmergencyCommand must use submitEmergency")
             is ResumeAfterApprovalCommand -> tryEnqueue(
                 approvalResumeChannel,
@@ -312,7 +313,7 @@ class ConversationRuntime(
             type = encoded.first,
             payloadJson = encoded.second,
             state = DurableCommandState.PENDING.name,
-            priority = 0,
+            priority = if (envelope.origin == CommandOrigin.PET_HANDOFF_AUTO) -10 else 0,
             sequence = envelope.sequence,
             expectedTargetVersion = (envelope.command as? RegenerateCommand)?.expectedTargetVersion,
             expectedBranchHeadMessageId = (envelope.command as? RegenerateCommand)?.expectedBranchHeadMessageId?.toString(),

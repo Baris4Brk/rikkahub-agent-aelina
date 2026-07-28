@@ -27,6 +27,7 @@ object CommandCodec {
     }.getOrDefault(CommandOrigin.INTERNAL)
 
     fun encode(command: ChatCommand): Pair<String, String> = when (command) {
+        is PetDialogueCommand -> error("pet_dialogue_command_is_memory_only")
         is SendMessageCommand -> "send_message" to buildJsonObject {
             put("content", json.encodeToString(RawUserContent.serializer(), command.content))
             command.assistantIdSnapshot?.let { put("assistantIdSnapshot", it.toString()) }

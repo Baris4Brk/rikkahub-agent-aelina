@@ -414,6 +414,9 @@ class ToolExecutionGate(
             return GateResult.Denied("Emergency stop is active — all tool execution is paused. " +
                     "Go to Settings > Safety > Emergency Stop to resume.")
         }
+        if (origin == ToolCallOrigin.PetInteraction) {
+            return GateResult.Denied("pet_interaction_tools_forbidden")
+        }
 
         // A keyguard invocation remains untrusted for its entire lifetime, even if the user
         // unlocks before model generation reaches a tool call. This hard stop intentionally

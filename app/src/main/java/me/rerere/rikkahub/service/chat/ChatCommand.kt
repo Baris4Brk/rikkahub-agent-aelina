@@ -25,8 +25,18 @@ enum class CommandOrigin {
     TELEGRAM,
     WEB_API,
     CRON,
+    PET_INTERACTION,
+    PET_HANDOFF_CONFIRMED,
+    PET_HANDOFF_AUTO,
     INTERNAL,
 }
+
+/** In-memory only: never encoded into the durable ordinary-chat command queue. */
+data class PetDialogueCommand(
+    val assistantId: Uuid,
+    val privilegedConversationId: Uuid,
+    val input: String,
+) : ChatCommand
 
 @Serializable
 data class RawUserContent(
