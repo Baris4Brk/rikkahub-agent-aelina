@@ -52,7 +52,7 @@ object ImportedDatabaseReconciler {
      * tables changed) or this reconciliation will silently stop matching.
      */
     internal const val EXPECTED_VERSION = 37
-    internal const val EXPECTED_IDENTITY_HASH = "8cb20e594bfefae355191428fcd7ca9a"
+    internal const val EXPECTED_IDENTITY_HASH = "8bf48c5fd55eef1331c5b5cf043eac5b"
     internal const val PRE_STORAGE_MODE_V35_IDENTITY_HASH = "2a74d694211f0df9f9094c7571ec71dd"
 
     internal enum class ReconcilePlan {
@@ -363,6 +363,7 @@ object ImportedDatabaseReconciler {
                 "completion_policy" to "TEXT NOT NULL DEFAULT 'WAIT_FOR_CHILDREN'",
                 "runtime_instance_marker" to "TEXT",
                 "cancellation_requested_at_ms" to "INTEGER",
+                "requested_terminal_outcome" to "TEXT NOT NULL DEFAULT 'NONE'",
             ),
         )
         listOf(

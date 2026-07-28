@@ -109,7 +109,10 @@ class ManagedExecutionRegistration(
         )
     }
 
-    suspend fun cancelRequested(executionId: String) {
+    suspend fun cancelRequested(
+        executionId: String,
+        requestedOutcome: RequestedTerminalOutcome = RequestedTerminalOutcome.CANCELLED,
+    ) {
         requireApplied(
             repository.transition(
                 id = executionId,
@@ -118,13 +121,22 @@ class ManagedExecutionRegistration(
                 mutationId = "managed-cancel-requested:$executionId",
                 source = ExecutionStateSource.USER,
                 reasonCode = "managed_cancel_requested",
+                requestedTerminalOutcome = requestedOutcome,
             ),
             expected = ExecutionStatus.cancel_requested,
         )
     }
 
     suspend fun cancellationProbed(executionId: String, stopped: Boolean) {
-        val target = if (stopped) ExecutionStatus.cancelled else ExecutionStatus.terminating
+        val current = repository.get(executionId) ?: failTracking("managed_execution_missing")
+        val requested = RequestedTerminalOutcome.fromWire(current.requestedTerminalOutcome)
+        val target = if (!stopped) {
+            ExecutionStatus.terminating
+        } else if (requested == RequestedTerminalOutcome.TIMED_OUT) {
+            ExecutionStatus.timed_out
+        } else {
+            ExecutionStatus.cancelled
+        }
         requireApplied(
             repository.transition(
                 id = executionId,
@@ -139,6 +151,7 @@ class ManagedExecutionRegistration(
                 reasonCode = if (stopped) "managed_stop_confirmed" else "managed_stop_unconfirmed",
                 cancellationResult = if (stopped) "STOPPED_CONFIRMED" else "STOP_UNCONFIRMED",
                 probeAtMs = System.currentTimeMillis(),
+                requestedTerminalOutcome = requested,
             ),
             expected = target,
         )

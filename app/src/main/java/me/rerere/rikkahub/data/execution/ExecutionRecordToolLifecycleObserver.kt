@@ -76,6 +76,7 @@ class ExecutionRecordCriticalToolLifecycleSink(
                     detail = event.detail ?: "cancel_requested",
                     mutationId = mutationId(event),
                     reasonCode = event.detail ?: "cancel_requested",
+                    requestedTerminalOutcome = event.requestedTerminalOutcome,
                 ),
                 ExecutionStatus.cancel_requested,
             )
@@ -87,6 +88,7 @@ class ExecutionRecordCriticalToolLifecycleSink(
                     runtimeHandleSummary = event.executionId,
                     mutationId = mutationId(event),
                     reasonCode = "termination_started",
+                    requestedTerminalOutcome = event.requestedTerminalOutcome,
                 ),
                 ExecutionStatus.terminating,
             )
@@ -133,35 +135,36 @@ class ExecutionRecordCriticalToolLifecycleSink(
                         } else {
                             VerificationState.STALE
                         },
+                        requestedTerminalOutcome = RequestedTerminalOutcome.CANCELLED,
                     ),
                     target,
                 )
             }
 
-            RedactedToolLifecycleEvent.Phase.TIMED_OUT -> requireDurable(
-                repository.transition(
-                    id = recordId,
-                    target = ExecutionStatus.timed_out,
-                    runtimeHandleSummary = event.executionId,
-                    cancellationResult = event.terminationState?.name,
-                    detail = if (event.terminationState == ToolTerminationState.StoppedConfirmed) {
-                        "wall_clock_timeout_termination_confirmed"
-                    } else {
-                        "wall_clock_timeout_termination_unconfirmed"
-                    },
-                    mutationId = mutationId(event),
-                    reasonCode = event.detail ?: "wall_clock_timeout",
-                    verificationState = if (
-                        event.terminationState == ToolTerminationState.StoppedConfirmed ||
-                        event.executionId == null
-                    ) {
-                        VerificationState.LIVE_CONFIRMED
-                    } else {
-                        VerificationState.STALE
-                    },
-                ),
-                ExecutionStatus.timed_out,
-            )
+            RedactedToolLifecycleEvent.Phase.TIMED_OUT -> {
+                val decision = decideTimedOutExecution(
+                    terminationState = event.terminationState,
+                    hasRuntimeHandle = event.executionId != null,
+                )
+                requireDurable(
+                    repository.transition(
+                        id = recordId,
+                        target = decision.target,
+                        runtimeHandleSummary = event.executionId,
+                        cancellationResult = event.terminationState?.name,
+                        detail = if (event.terminationState == ToolTerminationState.StoppedConfirmed) {
+                            "wall_clock_timeout_termination_confirmed"
+                        } else {
+                            "wall_clock_timeout_termination_unconfirmed"
+                        },
+                        mutationId = mutationId(event),
+                        reasonCode = event.detail ?: "wall_clock_timeout",
+                        verificationState = decision.verification,
+                        requestedTerminalOutcome = RequestedTerminalOutcome.TIMED_OUT,
+                    ),
+                    decision.target,
+                )
+            }
         }
     }
 
@@ -218,6 +221,23 @@ class ExecutionRecordCriticalToolLifecycleSink(
         else -> runtimeFor(toolName, legacy = false)
     }
 
+}
+
+internal data class TimedOutExecutionDecision(
+    val target: ExecutionStatus,
+    val verification: VerificationState,
+)
+
+internal fun decideTimedOutExecution(
+    terminationState: ToolTerminationState?,
+    hasRuntimeHandle: Boolean,
+): TimedOutExecutionDecision {
+    val confirmed = terminationState == ToolTerminationState.StoppedConfirmed || !hasRuntimeHandle
+    return if (confirmed) {
+        TimedOutExecutionDecision(ExecutionStatus.timed_out, VerificationState.LIVE_CONFIRMED)
+    } else {
+        TimedOutExecutionDecision(ExecutionStatus.terminating, VerificationState.STALE)
+    }
 }
 
 object ExecutionRecordIds {

@@ -55,6 +55,22 @@ class SecondUserPresentationRuntimeTest {
     }
 
     @Test
+    fun `recent orphan without active work is stale untrusted and unknown`() {
+        val orphaned = record(
+            status = ExecutionStatus.orphaned,
+            verification = VerificationState.DATABASE_CONFIRMED,
+            updatedAtMs = NOW - 1_000,
+            finishedAtMs = NOW - 1_000,
+        )
+
+        val state = reduce(recent = listOf(orphaned))
+
+        assertEquals(SecondUserPresentationStatus.STALE, state.status)
+        assertFalse(state.trusted)
+        assertEquals(VerificationState.UNKNOWN, state.verification)
+    }
+
+    @Test
     fun `failed recent beats successful recent and expires after eight seconds`() {
         val failed = record(
             id = "failed",

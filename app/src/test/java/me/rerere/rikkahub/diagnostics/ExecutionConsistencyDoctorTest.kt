@@ -26,6 +26,12 @@ class ExecutionConsistencyDoctorTest {
         assertTrue(approvalHasRedactionViolation(approval("token=hidden")))
         assertTrue(containsSensitiveExecutionDetail("stdout: hidden"))
         assertTrue(containsSensitiveExecutionDetail("C:\\Users\\private"))
+        assertTrue(containsSensitiveExecutionDetail("https://host/path?token-value"))
+        assertTrue(containsSensitiveExecutionDetail("ssh://user@host/private"))
+        assertTrue(containsSensitiveExecutionDetail("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyMSJ9.c2lnbmF0dXJlMTIz"))
+        assertTrue(containsSensitiveExecutionDetail("owner@example.com"))
+        assertTrue(containsSensitiveExecutionDetail("+86 138 0013 8000"))
+        assertTrue(containsSensitiveExecutionDetail("AKIAABCDEFGHIJKLMNOP"))
     }
 
     @Test

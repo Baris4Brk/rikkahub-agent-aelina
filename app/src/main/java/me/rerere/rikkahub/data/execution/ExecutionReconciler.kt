@@ -137,7 +137,7 @@ internal fun planExecutionProbeMutation(
                     ExecutionStatus.terminating,
                 )
             ) {
-                ExecutionStatus.cancelled
+                record.requestedTerminalStatus()
             } else if (observed.exitCode == 0) {
                 ExecutionStatus.succeeded
             } else {
@@ -146,20 +146,32 @@ internal fun planExecutionProbeMutation(
             verification = VerificationState.RUNTIME_CONFIRMED
             reason = when (target) {
                 ExecutionStatus.cancelled -> "runtime_exit_after_cancel"
+                ExecutionStatus.timed_out -> "runtime_exit_after_timeout"
                 ExecutionStatus.succeeded -> "runtime_exit_zero"
                 else -> "runtime_exit_nonzero"
             }
         }
         is RuntimeProbeResult.Missing -> if (observed.authoritative) {
-            target = ExecutionStatus.orphaned
-            verification = VerificationState.UNKNOWN
-            continuity = RuntimeContinuity.LOST
-            reason = if (ExecutionRuntime.fromWire(record.runtime) == ExecutionRuntime.WORKSPACE &&
-                CompletionPolicy.fromWire(record.completionPolicy) == CompletionPolicy.DETACH_BACKGROUND
-            ) {
-                "workspace_never_lost"
+            if (current in setOf(ExecutionStatus.cancel_requested, ExecutionStatus.terminating)) {
+                target = record.requestedTerminalStatus()
+                verification = VerificationState.RUNTIME_CONFIRMED
+                continuity = RuntimeContinuity.SAME_INSTANCE
+                reason = if (target == ExecutionStatus.timed_out) {
+                    "runtime_missing_after_timeout"
+                } else {
+                    "runtime_missing_after_cancel"
+                }
             } else {
-                "runtime_authoritatively_missing"
+                target = ExecutionStatus.orphaned
+                verification = VerificationState.UNKNOWN
+                continuity = RuntimeContinuity.LOST
+                reason = if (ExecutionRuntime.fromWire(record.runtime) == ExecutionRuntime.WORKSPACE &&
+                    CompletionPolicy.fromWire(record.completionPolicy) == CompletionPolicy.DETACH_BACKGROUND
+                ) {
+                    "workspace_never_lost"
+                } else {
+                    "runtime_authoritatively_missing"
+                }
             }
         } else {
             target = current
@@ -201,10 +213,19 @@ internal fun planExecutionProbeMutation(
             verificationState = verification,
             runtimeInstanceMarker = marker,
             cancellationResult = "STOPPED_CONFIRMED".takeIf {
-                target == ExecutionStatus.cancelled
+                target == ExecutionStatus.cancelled || target == ExecutionStatus.timed_out
             },
             probeAtMs = probedAt,
         ),
         continuity = continuity,
     )
 }
+
+private fun ExecutionRecord.requestedTerminalStatus(): ExecutionStatus =
+    if (RequestedTerminalOutcome.fromWire(requestedTerminalOutcome) ==
+        RequestedTerminalOutcome.TIMED_OUT
+    ) {
+        ExecutionStatus.timed_out
+    } else {
+        ExecutionStatus.cancelled
+    }

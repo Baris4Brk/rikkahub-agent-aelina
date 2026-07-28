@@ -30,6 +30,7 @@ import me.rerere.rikkahub.data.execution.CompletionPolicy
 import me.rerere.rikkahub.data.execution.ExecutionRuntime
 import me.rerere.rikkahub.data.execution.ManagedExecutionRegistration
 import me.rerere.rikkahub.data.execution.ManagedExecutionReservation
+import me.rerere.rikkahub.data.execution.RequestedTerminalOutcome
 import me.rerere.rikkahub.data.preferences.TermuxDefaults
 import me.rerere.rikkahub.data.preferences.TermuxRuntime
 
@@ -261,6 +262,12 @@ class TermuxManagedStartableTool(
             expectedPid = identity.pid,
             expectedPgid = identity.processGroupId,
             expectedStartTimeMillis = identity.processStartTicks,
+            onCancellationRequested = { outcome ->
+                registration?.cancelRequested(executionId, outcome)
+            },
+            onCancellationProbed = { _, stopped ->
+                registration?.cancellationProbed(executionId, stopped)
+            },
         )
     }
 
@@ -275,11 +282,15 @@ class TermuxManagedStartableTool(
         executionId: String,
         identity: TermuxSupervisorIdentity,
     ): Boolean {
+        runCatching {
+            registration?.cancelRequested(executionId, RequestedTerminalOutcome.TIMED_OUT)
+        }
         ledger.updateStatus(executionId, ManagedExecutionStatus.STOP_REQUESTED)
         supervisor.stop(nativeId, token, force = false)
         delay(STOP_GRACE_MS)
         if (isConfirmedStopped(nativeId, token, identity)) {
             ledger.updateStatus(executionId, ManagedExecutionStatus.STOPPED)
+            runCatching { registration?.cancellationProbed(executionId, true) }
             return true
         }
 
@@ -287,10 +298,12 @@ class TermuxManagedStartableTool(
         repeat(STOP_VERIFY_ATTEMPTS) { attempt ->
             if (isConfirmedStopped(nativeId, token, identity)) {
                 ledger.updateStatus(executionId, ManagedExecutionStatus.STOPPED)
+                runCatching { registration?.cancellationProbed(executionId, true) }
                 return true
             }
             if (attempt + 1 < STOP_VERIFY_ATTEMPTS) delay(STOP_VERIFY_INTERVAL_MS)
         }
+        runCatching { registration?.cancellationProbed(executionId, false) }
         return false
     }
 

@@ -25,6 +25,7 @@ data class ExecutionRecordDraft(
     val verificationState: VerificationState = VerificationState.LIVE_CONFIRMED,
     val runtimeHandleSummary: String? = null,
     val runtimeInstanceMarker: String? = null,
+    val requestedTerminalOutcome: RequestedTerminalOutcome = RequestedTerminalOutcome.NONE,
 )
 
 sealed interface ExecutionTransitionResult {
@@ -80,6 +81,7 @@ class ExecutionRepository(
         completionPolicy: CompletionPolicy? = null,
         runtimeInstanceMarker: String? = null,
         probeAtMs: Long? = null,
+        requestedTerminalOutcome: RequestedTerminalOutcome? = null,
     ): ExecutionTransitionResult = mutex.withLock {
         val result = mutateWithRetry(id) { existing ->
             ExecutionMutation(
@@ -96,6 +98,7 @@ class ExecutionRepository(
                 completionPolicy = completionPolicy,
                 runtimeInstanceMarker = runtimeInstanceMarker?.take(MAX_INSTANCE_MARKER_CHARS),
                 cancellationResult = cancellationResult?.take(MAX_CANCELLATION_CHARS),
+                requestedTerminalOutcome = requestedTerminalOutcome,
                 terminalDetail = detail?.take(MAX_DETAIL_CHARS),
                 probeAtMs = probeAtMs,
             )
@@ -281,4 +284,5 @@ internal fun ExecutionRecordDraft.toRecord(nowMs: Long): ExecutionRecord = Execu
     verificationState = verificationState.name,
     completionPolicy = completionPolicy.name,
     runtimeInstanceMarker = runtimeInstanceMarker,
+    requestedTerminalOutcome = requestedTerminalOutcome.name,
 )

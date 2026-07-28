@@ -8,7 +8,7 @@ class ImportedDatabaseReconcilerContractTest {
     fun `reconciler current version and identity match Room schema 37`() {
         assertEquals(37, ImportedDatabaseReconciler.EXPECTED_VERSION)
         assertEquals(
-            "8cb20e594bfefae355191428fcd7ca9a",
+            "8bf48c5fd55eef1331c5b5cf043eac5b",
             ImportedDatabaseReconciler.EXPECTED_IDENTITY_HASH,
         )
     }
@@ -30,7 +30,7 @@ class ImportedDatabaseReconcilerContractTest {
             ImportedDatabaseReconciler.ReconcilePlan.SKIP,
             ImportedDatabaseReconciler.reconcilePlan(
                 version = 37,
-                identityHash = "8cb20e594bfefae355191428fcd7ca9a",
+                identityHash = "8bf48c5fd55eef1331c5b5cf043eac5b",
             ),
         )
     }
@@ -40,6 +40,17 @@ class ImportedDatabaseReconcilerContractTest {
         assertEquals(
             ImportedDatabaseReconciler.ReconcilePlan.FULL_COMPATIBILITY,
             ImportedDatabaseReconciler.reconcilePlan(version = 37, identityHash = "upstream"),
+        )
+    }
+
+    @Test
+    fun `previous P0 v37 receives requested terminal outcome compatibility column`() {
+        assertEquals(
+            ImportedDatabaseReconciler.ReconcilePlan.FULL_COMPATIBILITY,
+            ImportedDatabaseReconciler.reconcilePlan(
+                version = 37,
+                identityHash = "8cb20e594bfefae355191428fcd7ca9a",
+            ),
         )
     }
 }

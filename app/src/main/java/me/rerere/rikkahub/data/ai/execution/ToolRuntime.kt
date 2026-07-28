@@ -28,6 +28,7 @@ import me.rerere.rikkahub.data.ai.tools.ToolExecutionContext
 import me.rerere.rikkahub.data.ai.tools.ToolExecutionHandle
 import me.rerere.rikkahub.data.ai.tools.ToolResult
 import me.rerere.rikkahub.data.ai.tools.ToolTerminationState
+import me.rerere.rikkahub.data.execution.RequestedTerminalOutcome
 import kotlin.time.Duration.Companion.milliseconds
 
 interface ToolRuntime {
@@ -145,6 +146,7 @@ data class RedactedToolLifecycleEvent(
     val context: RedactedToolCallContext,
     val executionId: String? = null,
     val terminationState: ToolTerminationState? = null,
+    val requestedTerminalOutcome: RequestedTerminalOutcome = RequestedTerminalOutcome.NONE,
     /** Stable, non-secret runtime reason (never tool input, output, or exception text). */
     val detail: String? = null,
 ) {
@@ -278,6 +280,7 @@ class DefaultToolRuntime(
                     phase = RedactedToolLifecycleEvent.Phase.TIMED_OUT,
                     context = redacted,
                     detail = "wall_clock_timeout_before_start",
+                    requestedTerminalOutcome = RequestedTerminalOutcome.TIMED_OUT,
                 ),
                 durableTrackingRequired = durableTrackingRequired,
             )
@@ -353,6 +356,13 @@ class DefaultToolRuntime(
                                     context = redacted,
                                     executionId = handle.executionId,
                                     detail = cancelReason.message,
+                                    requestedTerminalOutcome = if (
+                                        cancelReason == ToolCancelReason.TIMEOUT
+                                    ) {
+                                        RequestedTerminalOutcome.TIMED_OUT
+                                    } else {
+                                        RequestedTerminalOutcome.CANCELLED
+                                    },
                                 ),
                                 durableTrackingRequired = durableTrackingRequired,
                             )
@@ -361,6 +371,13 @@ class DefaultToolRuntime(
                                     phase = RedactedToolLifecycleEvent.Phase.TERMINATING,
                                     context = redacted,
                                     executionId = handle.executionId,
+                                    requestedTerminalOutcome = if (
+                                        cancelReason == ToolCancelReason.TIMEOUT
+                                    ) {
+                                        RequestedTerminalOutcome.TIMED_OUT
+                                    } else {
+                                        RequestedTerminalOutcome.CANCELLED
+                                    },
                                 ),
                                 durableTrackingRequired = durableTrackingRequired,
                             )
@@ -375,6 +392,7 @@ class DefaultToolRuntime(
                                         executionId = handle.executionId,
                                         terminationState = state,
                                         detail = cancelReason.message,
+                                        requestedTerminalOutcome = RequestedTerminalOutcome.CANCELLED,
                                     ),
                                     durableTrackingRequired = durableTrackingRequired,
                                 )
@@ -407,6 +425,7 @@ class DefaultToolRuntime(
                 executionId = executionId,
                 terminationState = timeoutTerminationState,
                 detail = "wall_clock_timeout",
+                requestedTerminalOutcome = RequestedTerminalOutcome.TIMED_OUT,
             ),
             durableTrackingRequired = durableTrackingRequired,
         )

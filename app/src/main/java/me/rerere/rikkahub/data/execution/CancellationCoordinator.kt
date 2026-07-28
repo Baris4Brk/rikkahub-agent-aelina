@@ -25,11 +25,25 @@ class CancellationCoordinator(
 ) {
     private val inFlight = ConcurrentHashMap<String, Deferred<CancellationOutcome>>()
 
-    fun cancel(executionId: String): Deferred<CancellationOutcome> = synchronized(inFlight) {
+    fun cancel(executionId: String): Deferred<CancellationOutcome> =
+        singleFlight(executionId, ::cancelInternal)
+
+    suspend fun cancelAndAwait(executionId: String): CancellationOutcome = cancel(executionId).await()
+
+    /** Continues a persisted cancellation without attempting an illegal state regression. */
+    suspend fun resumeCancellation(executionId: String): CancellationOutcome = singleFlight(
+        executionId = executionId,
+        action = ::resumeInternal,
+    ).await()
+
+    private fun singleFlight(
+        executionId: String,
+        action: suspend (String) -> CancellationOutcome,
+    ): Deferred<CancellationOutcome> = synchronized(inFlight) {
         inFlight[executionId]?.takeIf { it.isActive } ?: scope.async(
             start = CoroutineStart.LAZY,
         ) {
-            cancelInternal(executionId)
+            action(executionId)
         }.also { created ->
             inFlight[executionId] = created
             created.invokeOnCompletion { inFlight.remove(executionId, created) }
@@ -37,12 +51,13 @@ class CancellationCoordinator(
         }
     }
 
-    suspend fun cancelAndAwait(executionId: String): CancellationOutcome = cancel(executionId).await()
-
     private suspend fun cancelInternal(executionId: String): CancellationOutcome {
         val initial = repository.get(executionId) ?: return CancellationOutcome.Missing
         if (ExecutionStatus.fromWire(initial.status).isTerminal) {
             return CancellationOutcome.AlreadyTerminal(initial)
+        }
+        if (ExecutionStatus.fromWire(initial.status) in CANCELLATION_STATES) {
+            return resumeInternal(executionId)
         }
         when (val requested = repository.transition(
             id = executionId,
@@ -51,6 +66,7 @@ class CancellationCoordinator(
             mutationId = "cancel-request:$executionId",
             source = ExecutionStateSource.USER,
             reasonCode = "cancel_requested",
+            requestedTerminalOutcome = RequestedTerminalOutcome.CANCELLED,
         )) {
             is ExecutionTransitionResult.Terminal -> return CancellationOutcome.AlreadyTerminal(requested.record)
             is ExecutionTransitionResult.Missing -> return CancellationOutcome.Missing
@@ -60,11 +76,27 @@ class CancellationCoordinator(
             is ExecutionTransitionResult.Applied -> Unit
         }
 
+        return resumeInternal(executionId)
+    }
+
+    private suspend fun resumeInternal(executionId: String): CancellationOutcome {
+        val current = repository.get(executionId) ?: return CancellationOutcome.Missing
+        if (ExecutionStatus.fromWire(current.status).isTerminal) {
+            return CancellationOutcome.AlreadyTerminal(current)
+        }
+        return when (cancellationResumePhase(ExecutionStatus.fromWire(current.status))) {
+            CancellationResumePhase.GRACEFUL -> continueGracefulCancellation(executionId)
+            CancellationResumePhase.FORCE -> continueForcedCancellation(executionId)
+            CancellationResumePhase.INVALID -> unconfirmed(executionId, "cancellation_resume_state_invalid")
+        }
+    }
+
+    private suspend fun continueGracefulCancellation(executionId: String): CancellationOutcome {
         dispatchStop(executionId, force = false)
         when (val firstProbe = runtimeProbe.probe(repository.get(executionId) ?: return CancellationOutcome.Missing)) {
-            is RuntimeProbeResult.Exited -> return confirmCancelled(executionId, "graceful_stop_confirmed")
+            is RuntimeProbeResult.Exited -> return confirmRequestedOutcome(executionId, "graceful_stop_confirmed")
             is RuntimeProbeResult.Missing -> if (firstProbe.authoritative) {
-                return confirmCancelled(executionId, "graceful_stop_confirmed")
+                return confirmRequestedOutcome(executionId, "graceful_stop_confirmed")
             } else {
                 return unconfirmed(executionId, "runtime_missing_unconfirmed")
             }
@@ -89,13 +121,17 @@ class CancellationCoordinator(
             -> return unconfirmed(executionId, "force_stop_transition_conflict")
             is ExecutionTransitionResult.Applied -> Unit
         }
+        return continueForcedCancellation(executionId)
+    }
+
+    private suspend fun continueForcedCancellation(executionId: String): CancellationOutcome {
         dispatchStop(executionId, force = true)
         return when (val finalProbe = runtimeProbe.probe(
             repository.get(executionId) ?: return CancellationOutcome.Missing,
         )) {
-            is RuntimeProbeResult.Exited -> confirmCancelled(executionId, "force_stop_confirmed")
+            is RuntimeProbeResult.Exited -> confirmRequestedOutcome(executionId, "force_stop_confirmed")
             is RuntimeProbeResult.Missing -> if (finalProbe.authoritative) {
-                confirmCancelled(executionId, "force_stop_confirmed")
+                confirmRequestedOutcome(executionId, "force_stop_confirmed")
             } else {
                 unconfirmed(executionId, "runtime_missing_unconfirmed")
             }
@@ -112,23 +148,31 @@ class CancellationCoordinator(
         managedCoordinator.dispatch(ManagedExecutionRequest.Stop(caller, executionId, force))
     }
 
-    private suspend fun confirmCancelled(
+    private suspend fun confirmRequestedOutcome(
         executionId: String,
         reasonCode: String,
     ): CancellationOutcome {
+        val current = repository.get(executionId) ?: return CancellationOutcome.Missing
+        val requested = RequestedTerminalOutcome.fromWire(current.requestedTerminalOutcome)
+        val target = if (requested == RequestedTerminalOutcome.TIMED_OUT) {
+            ExecutionStatus.timed_out
+        } else {
+            ExecutionStatus.cancelled
+        }
         return when (val result = repository.transition(
             id = executionId,
-            target = ExecutionStatus.cancelled,
+            target = target,
             verificationState = VerificationState.RUNTIME_CONFIRMED,
-            mutationId = "cancel-confirmed:$executionId:$reasonCode",
+            mutationId = "cancel-confirmed:$executionId:${target.name}:$reasonCode",
             source = ExecutionStateSource.PROBE,
             reasonCode = reasonCode,
             cancellationResult = "STOPPED_CONFIRMED",
             probeAtMs = System.currentTimeMillis(),
+            requestedTerminalOutcome = requested,
         )) {
             is ExecutionTransitionResult.Applied -> CancellationOutcome.Cancelled(result.record)
             is ExecutionTransitionResult.Terminal -> if (
-                ExecutionStatus.fromWire(result.record.status) == ExecutionStatus.cancelled
+                ExecutionStatus.fromWire(result.record.status) == target
             ) {
                 CancellationOutcome.Cancelled(result.record)
             } else {
@@ -166,4 +210,19 @@ class CancellationCoordinator(
             ?: return CancellationOutcome.Missing
         return CancellationOutcome.Unconfirmed(record, reasonCode)
     }
+
+    private companion object {
+        val CANCELLATION_STATES = setOf(
+            ExecutionStatus.cancel_requested,
+            ExecutionStatus.terminating,
+        )
+    }
+}
+
+internal enum class CancellationResumePhase { GRACEFUL, FORCE, INVALID }
+
+internal fun cancellationResumePhase(status: ExecutionStatus): CancellationResumePhase = when (status) {
+    ExecutionStatus.cancel_requested -> CancellationResumePhase.GRACEFUL
+    ExecutionStatus.terminating -> CancellationResumePhase.FORCE
+    else -> CancellationResumePhase.INVALID
 }

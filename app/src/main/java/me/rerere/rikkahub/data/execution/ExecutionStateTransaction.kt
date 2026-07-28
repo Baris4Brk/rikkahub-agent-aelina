@@ -17,6 +17,7 @@ data class ExecutionMutation(
     val completionPolicy: CompletionPolicy? = null,
     val runtimeInstanceMarker: String? = null,
     val cancellationResult: String? = null,
+    val requestedTerminalOutcome: RequestedTerminalOutcome? = null,
     val terminalDetail: String? = null,
     val heartbeatAtMs: Long? = null,
     val probeAtMs: Long? = null,
@@ -69,6 +70,8 @@ internal object ExecutionMutationReducer {
                 ?: existing.heartbeatAtMs,
             finishedAtMs = nowMs.takeIf { target.isTerminal } ?: existing.finishedAtMs,
             cancellationResult = mutation.cancellationResult ?: existing.cancellationResult,
+            requestedTerminalOutcome = mutation.requestedTerminalOutcome?.name
+                ?: existing.requestedTerminalOutcome,
             terminalDetail = mutation.terminalDetail ?: existing.terminalDetail,
             stateVersion = existing.stateVersion + 1,
             lastStateSource = mutation.source.name,
@@ -166,6 +169,7 @@ class ExecutionStateTransaction(
                         completionPolicy = next.completionPolicy,
                         runtimeInstanceMarker = next.runtimeInstanceMarker,
                         cancellationRequestedAtMs = next.cancellationRequestedAtMs,
+                        requestedTerminalOutcome = next.requestedTerminalOutcome,
                     )
                     if (updated != 1) {
                         metrics?.recordCasConflict()

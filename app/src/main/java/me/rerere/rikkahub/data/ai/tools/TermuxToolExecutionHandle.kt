@@ -2,11 +2,13 @@ package me.rerere.rikkahub.data.ai.tools
 
 import java.security.MessageDigest
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
+import me.rerere.rikkahub.data.execution.RequestedTerminalOutcome
 
 /**
  * Narrow bridge seam for a persistent, authenticated Termux process supervisor. The bridge
@@ -35,13 +37,23 @@ class TermuxToolExecutionHandle(
     private val expectedPid: Long,
     private val expectedPgid: Long,
     private val expectedStartTimeMillis: Long,
+    private val onCancellationRequested: suspend (RequestedTerminalOutcome) -> Unit = {},
+    private val onCancellationProbed: suspend (RequestedTerminalOutcome, Boolean) -> Unit = { _, _ -> },
 ) : ToolExecutionHandle {
     private val cancelRequested = AtomicBoolean(false)
+    private val requestedOutcome = AtomicReference(RequestedTerminalOutcome.NONE)
 
     override suspend fun awaitResult(): ToolResult = result.await()
 
     override fun requestCancel(reason: ToolCancelReason): CancelRequestResult {
         if (!cancelRequested.compareAndSet(false, true)) return CancelRequestResult.AlreadyRequested
+        requestedOutcome.set(
+            if (reason == ToolCancelReason.TIMEOUT) {
+                RequestedTerminalOutcome.TIMED_OUT
+            } else {
+                RequestedTerminalOutcome.CANCELLED
+            },
+        )
         return CancelRequestResult.Requested
     }
 
@@ -50,20 +62,27 @@ class TermuxToolExecutionHandle(
             return if (result.isCompleted) ToolTerminationState.StoppedConfirmed
             else ToolTerminationState.Unknown
         }
+        val outcome = requestedOutcome.get()
+        runCatching { onCancellationRequested(outcome) }
         try {
             bridge.cancel(runId, force = false)
         } catch (_: Throwable) {
             // A status poll can still confirm a process that exited while the cancellation
             // transport was failing, so continue through the normal confirmation path.
         }
-        if (waitForStopped(gracePeriod)) return ToolTerminationState.StoppedConfirmed
+        if (waitForStopped(gracePeriod)) {
+            runCatching { onCancellationProbed(outcome, true) }
+            return ToolTerminationState.StoppedConfirmed
+        }
 
         try {
             bridge.cancel(runId, force = true)
         } catch (_: Throwable) {
             // Keep the outcome unknown unless the next bounded status polling can prove it.
         }
-        return if (waitForStopped(gracePeriod)) {
+        val stopped = waitForStopped(gracePeriod)
+        runCatching { onCancellationProbed(outcome, stopped) }
+        return if (stopped) {
             ToolTerminationState.StoppedConfirmed
         } else {
             ToolTerminationState.Unknown

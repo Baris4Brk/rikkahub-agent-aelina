@@ -109,6 +109,9 @@ data class ExecutionRecord(
     val runtimeInstanceMarker: String? = null,
     @ColumnInfo(name = "cancellation_requested_at_ms")
     val cancellationRequestedAtMs: Long? = null,
+    /** Persisted intent used to choose the honest terminal state after an independent probe. */
+    @ColumnInfo(name = "requested_terminal_outcome", defaultValue = "'NONE'")
+    val requestedTerminalOutcome: String = RequestedTerminalOutcome.NONE.name,
 )
 
 enum class ExecutionKind {
@@ -149,6 +152,17 @@ enum class RuntimeContinuity {
     RESTARTED,
     LOST,
     UNKNOWN,
+}
+
+enum class RequestedTerminalOutcome {
+    NONE,
+    CANCELLED,
+    TIMED_OUT;
+
+    companion object {
+        fun fromWire(value: String?): RequestedTerminalOutcome =
+            entries.firstOrNull { it.name == value } ?: NONE
+    }
 }
 
 enum class ExecutionStateSource {

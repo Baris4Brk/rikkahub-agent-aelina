@@ -296,6 +296,7 @@ val dataSourceModule = module {
             repository = get(),
             approvalDao = get(),
             reconciler = get(),
+            cancellationCoordinator = get(),
         )
     }
     single {

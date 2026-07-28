@@ -58,7 +58,8 @@ class Migration_36_37_Test {
         val db = helper.runMigrationsAndValidate(testDb, 37, false, MIGRATION_36_37)
         db.query(
             "SELECT execution_kind, state_version, verification_state, completion_policy, " +
-                "runtime_instance_marker FROM execution_records WHERE id='running'",
+                "runtime_instance_marker, requested_terminal_outcome " +
+                "FROM execution_records WHERE id='running'",
         ).use { cursor ->
             check(cursor.moveToFirst())
             assertEquals("TOOL_CALL", cursor.getString(0))
@@ -66,6 +67,7 @@ class Migration_36_37_Test {
             assertEquals("RECONCILING", cursor.getString(2))
             assertEquals("WAIT_FOR_CHILDREN", cursor.getString(3))
             assertNull(cursor.getString(4))
+            assertEquals("NONE", cursor.getString(5))
         }
         db.query("SELECT verification_state FROM execution_records WHERE id='done'").use { cursor ->
             check(cursor.moveToFirst())

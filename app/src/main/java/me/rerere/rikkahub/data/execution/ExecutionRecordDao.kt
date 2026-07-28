@@ -4,16 +4,12 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
-import androidx.room.Update
 import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface ExecutionRecordDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertIgnore(record: ExecutionRecord): Long
-
-    @Update
-    suspend fun update(record: ExecutionRecord)
 
     @Query(
         """
@@ -35,7 +31,8 @@ interface ExecutionRecordDao {
             last_probe_at_ms = :lastProbeAtMs,
             completion_policy = :completionPolicy,
             runtime_instance_marker = :runtimeInstanceMarker,
-            cancellation_requested_at_ms = :cancellationRequestedAtMs
+            cancellation_requested_at_ms = :cancellationRequestedAtMs,
+            requested_terminal_outcome = :requestedTerminalOutcome
         WHERE id = :id AND state_version = :expectedVersion
         """,
     )
@@ -60,6 +57,7 @@ interface ExecutionRecordDao {
         completionPolicy: String,
         runtimeInstanceMarker: String?,
         cancellationRequestedAtMs: Long?,
+        requestedTerminalOutcome: String,
     ): Int
 
     @Query("SELECT * FROM execution_records WHERE id = :id LIMIT 1")

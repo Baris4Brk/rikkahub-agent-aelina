@@ -176,15 +176,29 @@ internal fun approvalHasRedactionViolation(record: PendingToolApprovalRecord): B
 ).any(::containsSensitiveExecutionDetail)
 
 internal fun containsSensitiveExecutionDetail(value: String): Boolean =
-    SENSITIVE_EXECUTION_DETAIL.containsMatchIn(value)
+    SENSITIVE_EXECUTION_DETAIL_PATTERNS.any { it.containsMatchIn(value) }
 
-private val SENSITIVE_EXECUTION_DETAIL = Regex(
-    pattern = """(?ix)
-        (?:content|file):// |
-        (?:^|[\s=])[a-z]:[\\/] |
-        /(?:data|storage|sdcard|home|system|vendor|proc|dev|etc|tmp|workspace)(?:/|$) |
-        \b(?:token|password|secret|api[_ -]?key|stdin|stdout|stderr|command|output)\s*[:=]
-    """.trimIndent(),
+private val SENSITIVE_EXECUTION_DETAIL_PATTERNS = listOf(
+    Regex("""(?:content|file)://""", RegexOption.IGNORE_CASE),
+    Regex("""https?://[^\s?#]+\?[^\s]+""", RegexOption.IGNORE_CASE),
+    Regex("""ssh://[^\s]+""", RegexOption.IGNORE_CASE),
+    Regex("""(?:^|[\s=])[a-z]:[\\/]""", RegexOption.IGNORE_CASE),
+    Regex(
+        """/(?:data|storage|sdcard|home|system|vendor|proc|dev|etc|tmp|workspace)(?:/|$)""",
+        RegexOption.IGNORE_CASE,
+    ),
+    Regex(
+        """\b(?:token|password|secret|api[_ -]?key|stdin|stdout|stderr|command|output)\s*[:=]""",
+        RegexOption.IGNORE_CASE,
+    ),
+    Regex("""\beyJ[a-z0-9_-]{8,}\.[a-z0-9_-]{8,}\.[a-z0-9_-]{8,}\b""", RegexOption.IGNORE_CASE),
+    Regex("""\b[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}\b""", RegexOption.IGNORE_CASE),
+    Regex("""(?<!\d)(?:\+?\d[\d ()\-]{7,}\d)(?!\d)"""),
+    Regex("""\bAKIA[0-9A-Z]{16}\b"""),
+    Regex("""\bAIza[0-9A-Za-z_-]{35}\b"""),
+    Regex("""\bgh[pousr]_[A-Za-z0-9]{20,}\b"""),
+    Regex("""\bxox[baprs]-[A-Za-z0-9\-]{10,}\b"""),
+    Regex("""-----BEGIN(?:[ A-Z]+)PRIVATE KEY-----""", RegexOption.IGNORE_CASE),
 )
 
 private const val DOCTOR_RECORD_LIMIT = 2_500

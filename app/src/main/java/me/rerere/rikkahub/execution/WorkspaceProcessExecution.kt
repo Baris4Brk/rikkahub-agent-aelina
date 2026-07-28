@@ -28,6 +28,7 @@ import me.rerere.rikkahub.data.execution.CompletionPolicy
 import me.rerere.rikkahub.data.execution.ExecutionRuntime
 import me.rerere.rikkahub.data.execution.ManagedExecutionRegistration
 import me.rerere.rikkahub.data.execution.ManagedExecutionReservation
+import me.rerere.rikkahub.data.execution.RequestedTerminalOutcome
 import me.rerere.rikkahub.data.repository.WorkspaceRepository
 import me.rerere.workspace.WorkspaceProcessManager
 import me.rerere.workspace.WorkspaceProcessResult
@@ -193,12 +194,19 @@ class WorkspaceProcessExecutionHandle(
     private val result: ToolResult,
 ) : ToolExecutionHandle {
     private val stopRequest = AtomicReference<Deferred<WorkspaceProcessResult>?>(null)
+    private val requestedOutcome = AtomicReference(RequestedTerminalOutcome.NONE)
 
     override suspend fun awaitResult(): ToolResult = result
 
     override fun requestCancel(reason: ToolCancelReason): CancelRequestResult {
+        val outcome = if (reason == ToolCancelReason.TIMEOUT) {
+            RequestedTerminalOutcome.TIMED_OUT
+        } else {
+            RequestedTerminalOutcome.CANCELLED
+        }
+        requestedOutcome.compareAndSet(RequestedTerminalOutcome.NONE, outcome)
         val job = scope.async {
-            runCatching { registration.cancelRequested(executionId) }
+            runCatching { registration.cancelRequested(executionId, requestedOutcome.get()) }
             manager.stop(
                 processId = processId,
                 force = false,

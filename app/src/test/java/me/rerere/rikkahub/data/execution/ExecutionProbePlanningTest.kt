@@ -77,10 +77,43 @@ class ExecutionProbePlanningTest {
         assertEquals("runtime_alive_after_cancel", plan.mutation.reasonCode)
     }
 
+    @Test
+    fun `confirmed exit after timeout becomes timed out instead of cancelled`() {
+        val plan = planExecutionProbeMutation(
+            record(
+                status = ExecutionStatus.terminating,
+                requestedOutcome = RequestedTerminalOutcome.TIMED_OUT,
+            ),
+            RuntimeProbeResult.Exited(exitCode = 143),
+            probedAt = 5_000L,
+        )
+
+        assertEquals(ExecutionStatus.timed_out, plan.mutation.targetStatus)
+        assertEquals(VerificationState.RUNTIME_CONFIRMED, plan.mutation.verificationState)
+        assertEquals("STOPPED_CONFIRMED", plan.mutation.cancellationResult)
+    }
+
+    @Test
+    fun `authoritative missing after user cancellation becomes cancelled`() {
+        val plan = planExecutionProbeMutation(
+            record(
+                status = ExecutionStatus.cancel_requested,
+                requestedOutcome = RequestedTerminalOutcome.CANCELLED,
+            ),
+            RuntimeProbeResult.Missing(authoritative = true),
+            probedAt = 5_000L,
+        )
+
+        assertEquals(ExecutionStatus.cancelled, plan.mutation.targetStatus)
+        assertEquals(VerificationState.RUNTIME_CONFIRMED, plan.mutation.verificationState)
+        assertEquals("STOPPED_CONFIRMED", plan.mutation.cancellationResult)
+    }
+
     private fun record(
         status: ExecutionStatus = ExecutionStatus.running,
         completionPolicy: CompletionPolicy = CompletionPolicy.WAIT_FOR_CHILDREN,
         runtimeInstanceMarker: String? = null,
+        requestedOutcome: RequestedTerminalOutcome = RequestedTerminalOutcome.NONE,
     ) = ExecutionRecord(
         id = "workspace:wp_real",
         traceId = "run",
@@ -100,5 +133,6 @@ class ExecutionProbePlanningTest {
         verificationState = VerificationState.RECONCILING.name,
         completionPolicy = completionPolicy.name,
         runtimeInstanceMarker = runtimeInstanceMarker,
+        requestedTerminalOutcome = requestedOutcome.name,
     )
 }

@@ -226,13 +226,17 @@ internal fun reduceSecondUserPresentation(
         else -> SecondUserPresentationStatus.IDLE
     }
     val relevant = (active + recent).distinctBy(ExecutionRecord::id)
-    val verification = active.map { VerificationState.fromWire(it.verificationState) }
-        .minByOrNull(::verificationTrustRank)
-        ?: when {
+    val relevantVerification = relevant.map { VerificationState.fromWire(it.verificationState) }
+    val verification = when (status) {
+        SecondUserPresentationStatus.STALE -> VerificationState.UNKNOWN
+        SecondUserPresentationStatus.RECOVERING ->
+            relevantVerification.minByOrNull(::verificationTrustRank)
+                ?: VerificationState.RECONCILING
+        else -> relevantVerification.minByOrNull(::verificationTrustRank) ?: when {
             modelGenerating -> VerificationState.LIVE_CONFIRMED
-            waitingApproval -> VerificationState.DATABASE_CONFIRMED
             else -> VerificationState.DATABASE_CONFIRMED
         }
+    }
     val continuity = aggregateContinuity(relevant)
     val summaries = relevant.sortedByDescending(ExecutionRecord::updatedAtMs)
         .take(MAX_SAFE_EXECUTION_SUMMARIES)
@@ -246,7 +250,10 @@ internal fun reduceSecondUserPresentation(
         activeSubAgentCount = activeSubAgents,
         pendingApprovalCount = pendingApprovals,
         safetyBlocked = safetyBlocked,
-        trusted = active.none {
+        trusted = status !in setOf(
+            SecondUserPresentationStatus.STALE,
+            SecondUserPresentationStatus.RECOVERING,
+        ) && relevant.none {
             VerificationState.fromWire(it.verificationState) in setOf(
                 VerificationState.RECONCILING,
                 VerificationState.STALE,

@@ -2,7 +2,7 @@
   "formatVersion": 1,
   "database": {
     "version": 37,
-    "identityHash": "8cb20e594bfefae355191428fcd7ca9a",
+    "identityHash": "8bf48c5fd55eef1331c5b5cf043eac5b",
     "entities": [
       {
         "tableName": "alarms",
@@ -2271,7 +2271,7 @@
       },
       {
         "tableName": "execution_records",
-        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `trace_id` TEXT NOT NULL, `parent_execution_id` TEXT, `command_id` TEXT, `conversation_id` TEXT, `subject_id` TEXT NOT NULL, `subject_type` TEXT NOT NULL, `origin` TEXT NOT NULL, `capability_keys` TEXT NOT NULL, `resource_summary` TEXT NOT NULL, `runtime` TEXT NOT NULL, `execution_kind` TEXT NOT NULL DEFAULT 'TOOL_CALL', `idempotency_key` TEXT, `runtime_handle_summary` TEXT, `status` TEXT NOT NULL, `created_at_ms` INTEGER NOT NULL, `updated_at_ms` INTEGER NOT NULL, `started_at_ms` INTEGER, `heartbeat_at_ms` INTEGER, `finished_at_ms` INTEGER, `cancellation_result` TEXT, `terminal_detail` TEXT, `state_version` INTEGER NOT NULL DEFAULT 0, `last_state_source` TEXT NOT NULL DEFAULT 'LEGACY', `last_reason_code` TEXT, `verification_state` TEXT NOT NULL DEFAULT 'UNKNOWN', `last_probe_at_ms` INTEGER, `completion_policy` TEXT NOT NULL DEFAULT 'WAIT_FOR_CHILDREN', `runtime_instance_marker` TEXT, `cancellation_requested_at_ms` INTEGER, PRIMARY KEY(`id`))",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `trace_id` TEXT NOT NULL, `parent_execution_id` TEXT, `command_id` TEXT, `conversation_id` TEXT, `subject_id` TEXT NOT NULL, `subject_type` TEXT NOT NULL, `origin` TEXT NOT NULL, `capability_keys` TEXT NOT NULL, `resource_summary` TEXT NOT NULL, `runtime` TEXT NOT NULL, `execution_kind` TEXT NOT NULL DEFAULT 'TOOL_CALL', `idempotency_key` TEXT, `runtime_handle_summary` TEXT, `status` TEXT NOT NULL, `created_at_ms` INTEGER NOT NULL, `updated_at_ms` INTEGER NOT NULL, `started_at_ms` INTEGER, `heartbeat_at_ms` INTEGER, `finished_at_ms` INTEGER, `cancellation_result` TEXT, `terminal_detail` TEXT, `state_version` INTEGER NOT NULL DEFAULT 0, `last_state_source` TEXT NOT NULL DEFAULT 'LEGACY', `last_reason_code` TEXT, `verification_state` TEXT NOT NULL DEFAULT 'UNKNOWN', `last_probe_at_ms` INTEGER, `completion_policy` TEXT NOT NULL DEFAULT 'WAIT_FOR_CHILDREN', `runtime_instance_marker` TEXT, `cancellation_requested_at_ms` INTEGER, `requested_terminal_outcome` TEXT NOT NULL DEFAULT 'NONE', PRIMARY KEY(`id`))",
         "fields": [
           {
             "fieldPath": "id",
@@ -2443,6 +2443,13 @@
             "fieldPath": "cancellationRequestedAtMs",
             "columnName": "cancellation_requested_at_ms",
             "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "requestedTerminalOutcome",
+            "columnName": "requested_terminal_outcome",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "'NONE'"
           }
         ],
         "primaryKey": {
@@ -3173,7 +3180,7 @@
     ],
     "setupQueries": [
       "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '8cb20e594bfefae355191428fcd7ca9a')"
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '8bf48c5fd55eef1331c5b5cf043eac5b')"
     ]
   }
 }

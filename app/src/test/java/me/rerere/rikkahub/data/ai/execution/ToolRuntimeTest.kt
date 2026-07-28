@@ -12,6 +12,7 @@ import me.rerere.rikkahub.data.ai.tools.ToolCancelReason
 import me.rerere.rikkahub.data.ai.tools.ToolExecutionContext
 import me.rerere.rikkahub.data.ai.tools.ToolExecutionHandle
 import me.rerere.rikkahub.data.ai.tools.ToolTerminationState
+import me.rerere.rikkahub.data.execution.RequestedTerminalOutcome
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -210,6 +211,44 @@ class ToolRuntimeTest {
         assertTrue(result is ToolExecutionPlanResult.TimedOut)
         assertEquals(ToolCancelReason.TIMEOUT, cancelReason)
         assertTrue(terminationAwaited)
+    }
+
+    @Test
+    fun `unconfirmed wall clock timeout persists timeout intent`() = runBlocking {
+        val events = mutableListOf<RedactedToolLifecycleEvent>()
+        val runtime = DefaultToolRuntime(
+            policyResolver = resolver,
+            criticalSink = CriticalToolLifecycleSink(events::add),
+        )
+        val blocking = object : ToolExecutionHandle {
+            override val executionId: String = "termux:real"
+            override suspend fun awaitResult(): List<UIMessagePart> = awaitCancellation()
+            override fun requestCancel(reason: ToolCancelReason) = CancelRequestResult.Requested
+            override suspend fun awaitTermination(gracePeriod: Duration) =
+                ToolTerminationState.Unknown
+        }
+
+        runtime.execute(
+            ToolExecutionPlanRequest(
+                toolCallId = "slow-unconfirmed",
+                toolName = "privileged_run_command",
+                args = buildJsonObject {},
+                executionContext = executionContext(),
+                startableTool = object : StartableTool {
+                    override suspend fun start(
+                        args: kotlinx.serialization.json.JsonElement,
+                        context: ToolExecutionContext,
+                    ): ToolExecutionHandle = blocking
+                },
+                legacyExecute = { error("legacy must not run") },
+                runControl = null,
+                wallClockBudgetMs = 25,
+            ),
+        )
+
+        val timedOut = events.last { it.phase == RedactedToolLifecycleEvent.Phase.TIMED_OUT }
+        assertEquals(RequestedTerminalOutcome.TIMED_OUT, timedOut.requestedTerminalOutcome)
+        assertEquals(ToolTerminationState.Unknown, timedOut.terminationState)
     }
 
     @Test

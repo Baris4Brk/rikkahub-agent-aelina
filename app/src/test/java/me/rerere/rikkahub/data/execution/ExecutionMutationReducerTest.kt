@@ -55,6 +55,23 @@ class ExecutionMutationReducerTest {
     }
 
     @Test
+    fun `requested timeout outcome survives nonterminal cancellation states`() {
+        val current = record(status = ExecutionStatus.running, version = 1)
+        val mutation = mutation(
+            current,
+            ExecutionStatus.terminating,
+            VerificationState.STALE,
+        ).copy(requestedTerminalOutcome = RequestedTerminalOutcome.TIMED_OUT)
+
+        val next = (ExecutionMutationReducer.reduce(current, mutation, 4_000L) as
+            ExecutionReduction.Next).record
+
+        assertEquals(ExecutionStatus.terminating.name, next.status)
+        assertEquals(RequestedTerminalOutcome.TIMED_OUT.name, next.requestedTerminalOutcome)
+        assertNull(next.finishedAtMs)
+    }
+
+    @Test
     fun `illegal jump is rejected without changing the snapshot`() {
         val current = record(status = ExecutionStatus.queued, version = 2)
         val result = ExecutionMutationReducer.reduce(

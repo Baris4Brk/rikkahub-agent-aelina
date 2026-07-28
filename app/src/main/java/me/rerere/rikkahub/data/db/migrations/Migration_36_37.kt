@@ -33,6 +33,10 @@ val MIGRATION_36_37 = object : Migration(36, 37) {
             "ALTER TABLE `execution_records` ADD COLUMN `cancellation_requested_at_ms` INTEGER",
         )
         db.execSQL(
+            "ALTER TABLE `execution_records` ADD COLUMN `requested_terminal_outcome` " +
+                "TEXT NOT NULL DEFAULT 'NONE'",
+        )
+        db.execSQL(
             """
             UPDATE `execution_records`
             SET `verification_state` = CASE

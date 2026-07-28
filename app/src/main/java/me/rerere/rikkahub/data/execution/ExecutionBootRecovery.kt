@@ -21,6 +21,7 @@ class ExecutionBootRecovery(
     private val repository: ExecutionRepository,
     private val approvalDao: PendingToolApprovalDao,
     private val reconciler: ExecutionReconciler,
+    private val cancellationCoordinator: CancellationCoordinator,
 ) {
     suspend fun runRecovery(): ExecutionRecoverySummary {
         var verified = 0
@@ -34,7 +35,11 @@ class ExecutionBootRecovery(
                 return@forEach
             }
             if (record.runtime.isManagedRuntime()) {
-                val update = reconciler.reconcile(record.id)
+                var update = reconciler.reconcile(record.id)
+                if (shouldResumeCancellation(update)) {
+                    cancellationCoordinator.resumeCancellation(record.id)
+                    update = reconciler.reconcile(record.id)
+                }
                 if (update.record?.let { VerificationState.fromWire(it.verificationState) } ==
                     VerificationState.RUNTIME_CONFIRMED
                 ) {
@@ -66,6 +71,14 @@ class ExecutionBootRecovery(
         else -> false
     }
 }
+
+internal fun shouldResumeCancellation(update: ExecutionProbeUpdate): Boolean =
+    update.probe is RuntimeProbeResult.Alive && update.record?.let {
+        ExecutionStatus.fromWire(it.status) in setOf(
+            ExecutionStatus.cancel_requested,
+            ExecutionStatus.terminating,
+        )
+    } == true
 
 /** Revalidates Termux against its authenticated supervisor; other runtimes use their ledger. */
 class LiveManagedExecutionVerifier(
