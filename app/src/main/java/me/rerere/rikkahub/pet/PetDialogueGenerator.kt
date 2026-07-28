@@ -1,11 +1,14 @@
 package me.rerere.rikkahub.pet
 
+import android.util.Log
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.decodeFromJsonElement
+import kotlinx.serialization.json.jsonObject
 import me.rerere.ai.core.ReasoningLevel
 import me.rerere.ai.provider.ModelAbility
 import me.rerere.ai.provider.ProviderManager
@@ -91,7 +94,9 @@ class PetDialogueGenerator(
             )
         }
         val raw = response.choices.firstOrNull()?.message?.toText().orEmpty()
-        val parsed = parseResponse(raw) ?: return PetGenerationResult.LocalAnimationOnly
+        if (raw.isBlank()) return PetGenerationResult.Failure("pet_empty_response")
+        val parsed = parsePetModelResponse(raw, json)
+            ?: return PetGenerationResult.Failure("pet_response_invalid")
         val safeText = PetBubbleSanitizer.sanitize(parsed.text)
         val action = runCatching { PetAction.valueOf(parsed.action.uppercase()) }.getOrDefault(PetAction.IDLE)
         val handoff = parsed.handoff.takeIf { it.needed && handoffMode != PetHandoffMode.SUGGEST_ONLY }
@@ -109,13 +114,10 @@ class PetDialogueGenerator(
         } else {
             throw cancelled
         }
-    } catch (_: Throwable) {
-        PetGenerationResult.LocalAnimationOnly
-    }
-
-    private fun parseResponse(raw: String): PetModelResponse? {
-        val trimmed = raw.trim().removePrefix("```json").removePrefix("```").removeSuffix("```").trim()
-        return runCatching { json.decodeFromString<PetModelResponse>(trimmed) }.getOrNull()
+    } catch (error: Throwable) {
+        // Do not log provider messages: they can contain request or account details.
+        Log.w(TAG, "Pet generation failed: ${error.javaClass.simpleName}")
+        PetGenerationResult.Failure("pet_generation_failed")
     }
 
     private fun buildPetSystemPrompt(persona: PetPersonaProjection, mode: PetHandoffMode): String = """
@@ -130,8 +132,69 @@ class PetDialogueGenerator(
     """.trimIndent()
 
     private companion object {
+        const val TAG = "PetDialogueGenerator"
         const val PET_GENERATION_TIMEOUT_MS = 60_000L
     }
+}
+
+internal fun parsePetModelResponse(raw: String, json: Json = Json { ignoreUnknownKeys = true }): PetModelResponse? {
+    val trimmed = raw.trim()
+        .removePrefix("```json")
+        .removePrefix("```")
+        .removeSuffix("```")
+        .trim()
+    val candidates = listOfNotNull(trimmed, extractFirstJsonObject(raw)).distinct()
+    return candidates.firstNotNullOfOrNull { candidate ->
+        runCatching {
+            val objectValue = json.parseToJsonElement(candidate).jsonObject
+            if ("text" !in objectValue) return@runCatching null
+            json.decodeFromJsonElement<PetModelResponse>(objectValue)
+        }.getOrNull()
+    }
+}
+
+/** Extracts a balanced JSON object while respecting quoted braces and escapes. */
+internal fun extractFirstJsonObject(raw: String): String? {
+    var start = -1
+    var depth = 0
+    var quoted = false
+    var escaped = false
+    raw.forEachIndexed { index, char ->
+        if (start < 0) {
+            if (char == '{') {
+                start = index
+                depth = 1
+            }
+            return@forEachIndexed
+        }
+        if (quoted) {
+            when {
+                escaped -> escaped = false
+                char == '\\' -> escaped = true
+                char == '"' -> quoted = false
+            }
+            return@forEachIndexed
+        }
+        when (char) {
+            '"' -> quoted = true
+            '{' -> depth++
+            '}' -> {
+                depth--
+                if (depth == 0) return raw.substring(start, index + 1)
+            }
+        }
+    }
+    return null
+}
+
+internal fun petGenerationErrorMessage(code: String): String = when (code) {
+    "pet_model_missing" -> "未找到可用的 Fast Model"
+    "pet_provider_missing", "pet_provider_disabled" -> "Fast Model 的服务商不可用"
+    "pet_generation_timeout" -> "桌宠回应超时，请重试"
+    "pet_empty_response" -> "模型返回了空回应，请重试"
+    "pet_response_invalid" -> "模型回应格式无效，请重试"
+    "pet_input_too_long" -> "输入内容过长"
+    else -> "桌宠模型调用失败，请检查 Fast Model 与服务商"
 }
 
 data class PetDialogueTurnEntityView(

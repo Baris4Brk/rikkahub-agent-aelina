@@ -29,6 +29,12 @@ class ExecutionBootRecoveryTest {
         )
     }
 
+    @Test
+    fun `boot probes managed child but never a tool parent that lacks a native handle`() {
+        assertTrue(shouldProbeRuntimeOnBoot(record(ExecutionKind.MANAGED_PROCESS)))
+        assertFalse(shouldProbeRuntimeOnBoot(record(ExecutionKind.TOOL_CALL)))
+    }
+
     private fun update(status: ExecutionStatus, alive: Boolean) = ExecutionProbeUpdate(
         executionId = "workspace:wp_real",
         probe = if (alive) RuntimeProbeResult.Alive("generation:1") else RuntimeProbeResult.Exited(0),
@@ -49,5 +55,21 @@ class ExecutionBootRecoveryTest {
             requestedTerminalOutcome = RequestedTerminalOutcome.CANCELLED.name,
         ),
         continuity = RuntimeContinuity.SAME_INSTANCE,
+    )
+
+    private fun record(kind: ExecutionKind) = ExecutionRecord(
+        id = if (kind == ExecutionKind.MANAGED_PROCESS) "termux:native" else "tool:run:call",
+        traceId = "run",
+        subjectId = "assistant",
+        subjectType = "LOCAL_SECOND_USER",
+        origin = "LocalChat",
+        capabilityKeys = "linux.background",
+        resourceSummary = "termux",
+        runtime = ExecutionRuntime.TERMUX.name,
+        executionKind = kind.name,
+        status = ExecutionStatus.starting.name,
+        createdAtMs = 1,
+        updatedAtMs = 2,
+        verificationState = VerificationState.STALE.name,
     )
 }

@@ -48,6 +48,7 @@ import me.rerere.rikkahub.pet.PetHandoffCoordinator
 import me.rerere.rikkahub.pet.PetHandoffMode
 import me.rerere.rikkahub.pet.PetHandoffStatus
 import me.rerere.rikkahub.pet.PetPersonaSource
+import me.rerere.rikkahub.pet.petGenerationErrorMessage
 import me.rerere.rikkahub.service.ChatService
 import me.rerere.rikkahub.service.chat.PetInteractionSlotResult
 import org.koin.compose.koinInject
@@ -186,7 +187,10 @@ fun PetDialogueCard(
                                                 conversationKey,
                                                 PetDialogueTurnDraft(PetDialogueInputKind.TEXT, userText = submitted),
                                             )
-                                            is PetGenerationResult.Failure -> localError = result.code
+                                            is PetGenerationResult.Failure -> {
+                                                input = submitted
+                                                localError = petGenerationErrorMessage(result.code)
+                                            }
                                         }
                                     }
                                     if (slot is PetInteractionSlotResult.Busy) {

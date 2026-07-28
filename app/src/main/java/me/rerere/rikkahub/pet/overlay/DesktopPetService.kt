@@ -209,6 +209,7 @@ class DesktopPetService : Service() {
             context = this,
             atlas = atlas,
             onInteraction = { gesture, region ->
+                spriteView?.showLocalFeedback()
                 if (sidecarAllowed) {
                     spriteView?.setAction(
                         when (region) {
@@ -346,14 +347,17 @@ class DesktopPetService : Service() {
                             interactionJson = interactionJson,
                         ),
                     )
-                    is PetGenerationResult.Failure -> dialogueRepository.append(
-                        assistant.id.toString(),
-                        conversationId.toString(),
-                        PetDialogueTurnDraft(
-                            inputKind = PetDialogueInputKind.TOUCH,
-                            interactionJson = interactionJson,
-                        ),
-                    )
+                    is PetGenerationResult.Failure -> {
+                        dialogueRepository.append(
+                            assistant.id.toString(),
+                            conversationId.toString(),
+                            PetDialogueTurnDraft(
+                                inputKind = PetDialogueInputKind.TOUCH,
+                                interactionJson = interactionJson,
+                            ),
+                        )
+                        bubbleText = me.rerere.rikkahub.pet.petGenerationErrorMessage(generated.code)
+                    }
                 }
             }
             if (slot is PetInteractionSlotResult.Completed) {

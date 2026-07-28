@@ -34,7 +34,7 @@ class ExecutionBootRecovery(
                 // payload is reconciled against the conversation graph before this sweep.
                 return@forEach
             }
-            if (record.runtime.isManagedRuntime()) {
+            if (shouldProbeRuntimeOnBoot(record)) {
                 var update = reconciler.reconcile(record.id)
                 if (shouldResumeCancellation(update)) {
                     cancellationCoordinator.resumeCancellation(record.id)
@@ -55,6 +55,9 @@ class ExecutionBootRecovery(
                     id = record.id,
                     target = ExecutionStatus.orphaned,
                     detail = "process_restart_unverified_no_auto_retry",
+                    source = ExecutionStateSource.RECOVERY,
+                    reasonCode = "tool_call_process_lost",
+                    verificationState = VerificationState.UNKNOWN,
                 )
                 orphaned++
             }
@@ -62,14 +65,20 @@ class ExecutionBootRecovery(
         return ExecutionRecoverySummary(verifiedManaged = verified, orphaned = orphaned)
     }
 
-    private fun String.isManagedRuntime(): Boolean = when (ExecutionRuntime.fromWire(this)) {
-        ExecutionRuntime.TERMUX,
-        ExecutionRuntime.SSH,
-        ExecutionRuntime.WORKSPACE,
-        -> true
+}
 
-        else -> false
-    }
+/** Only child process rows have a durable native handle that can be probed after restart. */
+internal fun shouldProbeRuntimeOnBoot(record: ExecutionRecord): Boolean =
+    ExecutionKind.fromWire(record.executionKind) == ExecutionKind.MANAGED_PROCESS &&
+        record.runtime.isManagedRuntime()
+
+private fun String.isManagedRuntime(): Boolean = when (ExecutionRuntime.fromWire(this)) {
+    ExecutionRuntime.TERMUX,
+    ExecutionRuntime.SSH,
+    ExecutionRuntime.WORKSPACE,
+    -> true
+
+    else -> false
 }
 
 internal fun shouldResumeCancellation(update: ExecutionProbeUpdate): Boolean =

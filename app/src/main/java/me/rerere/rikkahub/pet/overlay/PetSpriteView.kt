@@ -2,6 +2,7 @@ package me.rerere.rikkahub.pet.overlay
 
 import android.content.Context
 import android.graphics.Canvas
+import android.graphics.Paint
 import android.graphics.RectF
 import android.os.SystemClock
 import android.view.Choreographer
@@ -38,6 +39,12 @@ class PetSpriteView(
     private var pathLength = 0f
     private var lastTapAtMs = 0L
     private var pendingSingleTap: Runnable? = null
+    private var localFeedbackUntilMs = 0L
+    private val feedbackPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0xFFFF6F91.toInt()
+        textAlign = Paint.Align.CENTER
+        typeface = android.graphics.Typeface.DEFAULT_BOLD
+    }
 
     fun setAction(action: PetAction) {
         val next = CodexPetAnimation.from(action)
@@ -59,6 +66,12 @@ class PetSpriteView(
         Choreographer.getInstance().removeFrameCallback(this)
     }
 
+    /** Local-only feedback used when trusted runtime state forbids model interaction. */
+    fun showLocalFeedback() {
+        localFeedbackUntilMs = SystemClock.uptimeMillis() + LOCAL_FEEDBACK_MS
+        invalidate()
+    }
+
     override fun doFrame(frameTimeNanos: Long) {
         if (!running) return
         val nextFrame = clock.frameIndex(
@@ -75,6 +88,13 @@ class PetSpriteView(
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         atlas.draw(canvas, animation, frame, RectF(0f, 0f, width.toFloat(), height.toFloat()))
+        val remaining = localFeedbackUntilMs - SystemClock.uptimeMillis()
+        if (remaining > 0L) {
+            feedbackPaint.textSize = minOf(width, height) * 0.28f
+            feedbackPaint.alpha = (255f * (remaining.toFloat() / LOCAL_FEEDBACK_MS)).toInt().coerceIn(48, 255)
+            canvas.drawText("♥", width * 0.72f, height * 0.28f, feedbackPaint)
+            postInvalidateOnAnimation()
+        }
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean = when (event.actionMasked) {
@@ -153,5 +173,9 @@ class PetSpriteView(
         pauseAnimation()
         pendingSingleTap?.let(::removeCallbacks)
         super.onDetachedFromWindow()
+    }
+
+    private companion object {
+        const val LOCAL_FEEDBACK_MS = 650L
     }
 }

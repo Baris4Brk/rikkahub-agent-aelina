@@ -6,6 +6,7 @@ import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.pet.render.PetFrameClock
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import me.rerere.rikkahub.data.ai.ToolCallOrigin
@@ -53,6 +54,26 @@ class PetPolicyTest {
         assertEquals(0, clock.frameIndex(0, 6))
         assertEquals(1, clock.frameIndex(166, 6))
         assertEquals(0, clock.frameIndex(996, 6))
+    }
+
+    @Test
+    fun `pet response parser accepts a whitelisted json object wrapped in model prose`() {
+        val parsed = parsePetModelResponse(
+            "说明：\n```json\n{\"text\":\"你好 {朋友}\",\"action\":\"WAVING\",\"handoff\":{\"needed\":false}}\n```",
+        )
+        assertEquals("你好 {朋友}", parsed?.text)
+        assertEquals("WAVING", parsed?.action)
+        assertNull(parsePetModelResponse("模型没有输出约定结构"))
+        assertNull(parsePetModelResponse("{}"))
+    }
+
+    @Test
+    fun `pet generation errors are safe and actionable`() {
+        assertEquals("模型回应格式无效，请重试", petGenerationErrorMessage("pet_response_invalid"))
+        assertEquals(
+            "桌宠模型调用失败，请检查 Fast Model 与服务商",
+            petGenerationErrorMessage("provider_secret_detail_must_not_escape"),
+        )
     }
 
     @Test
