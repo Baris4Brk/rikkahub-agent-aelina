@@ -159,10 +159,10 @@ class CodexPetAtlas private constructor(
 }
 
 class PetFrameClock(
-    private val fps: Int = 20,
+    private val fps: Int = 6,
 ) {
     init {
-        require(fps in setOf(12, 20, 30))
+        require(fps in 4..30)
     }
 
     fun frameIndex(elapsedMs: Long, frameCount: Int): Int {

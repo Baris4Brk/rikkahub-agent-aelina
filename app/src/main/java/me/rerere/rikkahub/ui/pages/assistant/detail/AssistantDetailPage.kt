@@ -186,7 +186,12 @@ fun AssistantDetailPage(id: String) {
         PetSettingsDialog(
             assistant = assistant,
             onDismiss = { showPetSettings = false },
-            onUpdate = { next -> vm.updateAssistant { current -> next.copy(id = current.id) } },
+            onUpdate = { next, afterUpdate ->
+                vm.updateAssistantAfter(
+                    transform = { current -> next.copy(id = current.id) },
+                    afterUpdate = afterUpdate,
+                )
+            },
         )
     }
 }

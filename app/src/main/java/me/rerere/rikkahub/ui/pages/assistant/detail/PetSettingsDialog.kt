@@ -28,8 +28,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.pet.PetHandoffMode
 import me.rerere.rikkahub.pet.assets.AndroidPetImageProbe
@@ -41,7 +41,7 @@ import me.rerere.rikkahub.pet.overlay.DesktopPetService
 fun PetSettingsDialog(
     assistant: Assistant,
     onDismiss: () -> Unit,
-    onUpdate: (Assistant) -> Unit,
+    onUpdate: (Assistant, afterUpdate: () -> Unit) -> Unit,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -107,6 +107,21 @@ fun PetSettingsDialog(
                     Text(if (draft.petPackageId == null) "导入 .codex-pet.zip" else "更换桌宠资源")
                 }
                 Text("当前：${draft.petPackageId ?: "静态应用占位图"}")
+                Text("桌宠大小 ${(draft.petScale.coerceIn(0.05f, 2.0f) * 100).roundToInt()}%")
+                Slider(
+                    value = draft.petScale.coerceIn(0.05f, 2.0f),
+                    onValueChange = { draft = draft.copy(petScale = it) },
+                    valueRange = 0.05f..2.0f,
+                    steps = 38,
+                )
+                Text("超出屏幕可用范围时会等比例缩小", style = MaterialTheme.typography.bodySmall)
+                Text("动画速度 ${draft.petAnimationFps.coerceIn(4, 12)} 帧/秒")
+                Slider(
+                    value = draft.petAnimationFps.coerceIn(4, 12).toFloat(),
+                    onValueChange = { draft = draft.copy(petAnimationFps = it.roundToInt()) },
+                    valueRange = 4f..12f,
+                    steps = 7,
+                )
                 OutlinedTextField(
                     value = draft.petSupplement.orEmpty(),
                     onValueChange = { draft = draft.copy(petSupplement = it.take(2_000)) },
@@ -171,11 +186,17 @@ fun PetSettingsDialog(
         },
         confirmButton = {
             TextButton(onClick = {
-                onUpdate(draft)
-                if (draft.petEnabled) {
-                    scope.launch { delay(350); DesktopPetService.start(context) }
-                } else {
-                    DesktopPetService.stop(context)
+                val saved = draft.copy(
+                    petScale = draft.petScale.coerceIn(0.05f, 2.0f),
+                    petAnimationFps = draft.petAnimationFps.coerceIn(4, 12),
+                )
+                val appContext = context.applicationContext
+                onUpdate(saved) {
+                    if (saved.petEnabled) {
+                        DesktopPetService.start(appContext)
+                    } else {
+                        DesktopPetService.stop(appContext)
+                    }
                 }
                 onDismiss()
             }) { Text("保存") }

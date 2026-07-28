@@ -20,8 +20,9 @@ class PetSpriteView(
     private val onDrag: (dx: Int, dy: Int, finished: Boolean) -> Unit,
     private val headBoundary: Float = 0.34f,
     private val bodyBoundary: Float = 0.76f,
+    animationFps: Int = 6,
 ) : View(context), Choreographer.FrameCallback {
-    private val clock = PetFrameClock(20)
+    private val clock = PetFrameClock(animationFps.coerceIn(4, 30))
     private var animation = CodexPetAnimation.IDLE
     private var startedAtMs = SystemClock.uptimeMillis()
     private var frame = 0
@@ -60,12 +61,14 @@ class PetSpriteView(
 
     override fun doFrame(frameTimeNanos: Long) {
         if (!running) return
-        frame = clock.frameIndex(
+        val nextFrame = clock.frameIndex(
             elapsedMs = SystemClock.uptimeMillis() - startedAtMs,
             frameCount = atlas.frameCount(animation),
         )
-        invalidate()
-        requestLayout()
+        if (nextFrame != frame) {
+            frame = nextFrame
+            invalidate()
+        }
         Choreographer.getInstance().postFrameCallback(this)
     }
 

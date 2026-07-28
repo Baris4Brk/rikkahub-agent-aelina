@@ -216,6 +216,13 @@ class AssistantDetailVM(
      * cleanup runs against the genuinely-prior assistant (read inside the lock).
      */
     fun updateAssistant(transform: (Assistant) -> Assistant) {
+        updateAssistantAfter(transform)
+    }
+
+    fun updateAssistantAfter(
+        transform: (Assistant) -> Assistant,
+        afterUpdate: (() -> Unit)? = null,
+    ) {
         viewModelScope.launch {
             settingsStore.update { current ->
                 val prior = current.assistants.firstOrNull { it.id == assistantId }
@@ -229,6 +236,7 @@ class AssistantDetailVM(
                     }
                 )
             }
+            afterUpdate?.invoke()
         }
     }
 

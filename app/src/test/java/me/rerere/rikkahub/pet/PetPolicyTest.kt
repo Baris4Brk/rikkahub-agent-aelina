@@ -48,6 +48,14 @@ class PetPolicyTest {
     }
 
     @Test
+    fun `default frame clock keeps short idle animation calm`() {
+        val clock = PetFrameClock()
+        assertEquals(0, clock.frameIndex(0, 6))
+        assertEquals(1, clock.frameIndex(166, 6))
+        assertEquals(0, clock.frameIndex(996, 6))
+    }
+
+    @Test
     fun `session policy archives before round 21 and rolls dates without empty diary`() {
         assertEquals(PetSessionRollAction.ARCHIVE_CAPACITY, PetSessionPolicy.beforeAppend("2026-07-29", "2026-07-29", 20))
         assertEquals(PetSessionRollAction.ARCHIVE_DAILY, PetSessionPolicy.beforeAppend("2026-07-28", "2026-07-29", 3))

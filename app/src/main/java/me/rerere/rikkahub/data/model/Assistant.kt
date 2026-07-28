@@ -113,6 +113,10 @@ data class Assistant(
     val petBootRestoreEnabled: Boolean = false,
     val petHeadBoundary: Float = 0.34f,
     val petBodyBoundary: Float = 0.76f,
+    /** Visual scale relative to the native 192x208dp Codex Pet frame. */
+    val petScale: Float = 1.0f,
+    /** Atlas playback rate. A calm default avoids rapidly looping short idle animations. */
+    val petAnimationFps: Int = 6,
 )
 
 @Serializable

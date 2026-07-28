@@ -15,6 +15,7 @@ import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import android.provider.Settings
+import android.util.Log
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
@@ -23,6 +24,7 @@ import android.widget.TextView
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import java.io.File
+import kotlin.math.roundToInt
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -50,6 +52,8 @@ import me.rerere.rikkahub.pet.PetHandoffMode
 import me.rerere.rikkahub.pet.PetInteractionPayload
 import me.rerere.rikkahub.pet.PetPersonaSource
 import me.rerere.rikkahub.pet.assets.CodexPetManifest
+import me.rerere.rikkahub.pet.assets.CODEX_FRAME_HEIGHT
+import me.rerere.rikkahub.pet.assets.CODEX_FRAME_WIDTH
 import me.rerere.rikkahub.pet.render.CodexPetAtlas
 import me.rerere.rikkahub.service.ChatService
 import me.rerere.rikkahub.service.chat.PetInteractionSlotResult
@@ -72,7 +76,7 @@ class DesktopPetService : Service() {
     private var spriteParams: WindowManager.LayoutParams? = null
     private var bubbleParams: WindowManager.LayoutParams? = null
     private var atlas: CodexPetAtlas? = null
-    private var loadedPackageId: String? = null
+    private var loadedRenderConfig: PetRenderConfig? = null
     private var currentAction = PetAction.IDLE
     private var currentStatusBubble: String? = null
     private var sidecarAllowed = false
@@ -133,11 +137,20 @@ class DesktopPetService : Service() {
             }
             if (assistant == null) {
                 removeWindows()
+                // The settings screen persists asynchronously. On a first enable,
+                // collectLatest will cancel this grace delay as soon as the enabled
+                // assistant reaches SettingsStore.
+                if (configuredAssistant == null) {
+                    Log.i(TAG, "Waiting for enabled pet configuration")
+                    delay(STARTUP_CONFIGURATION_GRACE_MS)
+                }
+                configuredAssistant = null
                 stopSelf()
                 return@collectLatest
             }
+            Log.i(TAG, "Loaded enabled pet configuration")
             configuredAssistant = assistant
-            loadConfiguredPackage(assistant.petPackageId)
+            loadConfiguredPackage(assistant)
             val target = SecondUserTarget(assistant.id, checkNotNull(assistant.privilegedConversationId))
             presentationSource.observe(target).collect { state ->
                 currentAction = PetPresentationMapper.action(state.status)
@@ -153,12 +166,17 @@ class DesktopPetService : Service() {
         }
     }
 
-    private fun loadConfiguredPackage(packageId: String?) {
-        if (packageId == loadedPackageId && (spriteView != null || placeholderView != null)) return
+    private fun loadConfiguredPackage(assistant: me.rerere.rikkahub.data.model.Assistant) {
+        val config = PetRenderConfig(
+            packageId = assistant.petPackageId,
+            scale = assistant.petScale.coerceIn(MIN_PET_SCALE, MAX_PET_SCALE),
+            animationFps = assistant.petAnimationFps.coerceIn(MIN_ANIMATION_FPS, MAX_ANIMATION_FPS),
+        )
+        if (config == loadedRenderConfig && (spriteView != null || placeholderView != null)) return
         removeWindows()
-        loadedPackageId = packageId
+        loadedRenderConfig = config
         if (!Settings.canDrawOverlays(this)) return
-        val packageDir = packageId?.let { File(filesDir, "pets/$it") }
+        val packageDir = config.packageId?.let { File(filesDir, "pets/$it") }
         val loaded = runCatching {
             val manifestFile = File(checkNotNull(packageDir), "pet.json")
             val manifest = json.decodeFromString<CodexPetManifest>(manifestFile.readText())
@@ -166,14 +184,21 @@ class DesktopPetService : Service() {
         }.getOrNull()
         if (loaded == null) showPlaceholder() else {
             atlas = loaded
-            showSprite(loaded)
+            showSprite(loaded, config)
         }
         refreshVisibility()
     }
 
-    private fun showSprite(atlas: CodexPetAtlas) {
-        val sizeWidth = dp(192)
-        val sizeHeight = dp(208)
+    private fun showSprite(atlas: CodexPetAtlas, config: PetRenderConfig) {
+        val requestedWidth = dp((CODEX_FRAME_WIDTH * config.scale).roundToInt()).coerceAtLeast(1)
+        val requestedHeight = dp((CODEX_FRAME_HEIGHT * config.scale).roundToInt()).coerceAtLeast(1)
+        val fit = minOf(
+            1f,
+            resources.displayMetrics.widthPixels * 0.95f / requestedWidth,
+            resources.displayMetrics.heightPixels * 0.80f / requestedHeight,
+        )
+        val sizeWidth = (requestedWidth * fit).roundToInt().coerceAtLeast(1)
+        val sizeHeight = (requestedHeight * fit).roundToInt().coerceAtLeast(1)
         val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
         val params = baseParams(sizeWidth, sizeHeight).apply {
             gravity = Gravity.TOP or Gravity.START
@@ -205,6 +230,7 @@ class DesktopPetService : Service() {
             },
             headBoundary = configuredAssistant?.petHeadBoundary ?: 0.34f,
             bodyBoundary = configuredAssistant?.petBodyBoundary ?: 0.76f,
+            animationFps = config.animationFps,
         ).apply { setAction(currentAction) }
         windowManager.addView(view, params)
         spriteView = view
@@ -409,12 +435,18 @@ class DesktopPetService : Service() {
 
     companion object {
         const val ACTION_STOP = "me.rerere.rikkahub.pet.STOP"
+        private const val TAG = "DesktopPetService"
         private const val CHANNEL_ID = "desktop_pet"
         private const val NOTIFICATION_ID = 7301
         private const val PREFS = "desktop_pet_position"
         private const val KEY_X = "x"
         private const val KEY_Y = "y"
         private const val MODEL_TOUCH_COOLDOWN_MS = 15_000L
+        private const val STARTUP_CONFIGURATION_GRACE_MS = 3_000L
+        private const val MIN_PET_SCALE = 0.05f
+        private const val MAX_PET_SCALE = 2.0f
+        private const val MIN_ANIMATION_FPS = 4
+        private const val MAX_ANIMATION_FPS = 12
 
         fun start(context: Context) {
             ContextCompat.startForegroundService(context, Intent(context, DesktopPetService::class.java))
@@ -425,3 +457,9 @@ class DesktopPetService : Service() {
         }
     }
 }
+
+private data class PetRenderConfig(
+    val packageId: String?,
+    val scale: Float,
+    val animationFps: Int,
+)
