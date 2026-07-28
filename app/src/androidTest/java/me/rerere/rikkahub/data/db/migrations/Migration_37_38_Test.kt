@@ -38,4 +38,22 @@ class Migration_37_38_Test {
         assertEquals(true, duplicateFailed)
         db.close()
     }
+
+    @Test
+    fun migrateEarlyFork37To38_repairsMissingRequestedTerminalOutcome() {
+        helper.createDatabase(testDb, 37).use { db ->
+            db.execSQL("ALTER TABLE execution_records DROP COLUMN requested_terminal_outcome")
+        }
+
+        val db = helper.runMigrationsAndValidate(testDb, 38, true, MIGRATION_37_38)
+        db.query("PRAGMA table_info(execution_records)").use { cursor ->
+            val nameIndex = cursor.getColumnIndexOrThrow("name")
+            var repaired = false
+            while (cursor.moveToNext()) {
+                repaired = repaired || cursor.getString(nameIndex) == "requested_terminal_outcome"
+            }
+            assertEquals(true, repaired)
+        }
+        db.close()
+    }
 }

@@ -5,6 +5,16 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 
 val MIGRATION_37_38 = object : Migration(37, 38) {
     override fun migrate(db: SupportSQLiteDatabase) {
+        // Some early P0 builds shipped database version 37 before
+        // requested_terminal_outcome was added to the final v37 schema. Those
+        // databases are otherwise valid, so repair the missing column in place
+        // instead of forcing users to clear their data.
+        if (!db.hasColumn("execution_records", "requested_terminal_outcome")) {
+            db.execSQL(
+                "ALTER TABLE `execution_records` ADD COLUMN `requested_terminal_outcome` " +
+                    "TEXT NOT NULL DEFAULT 'NONE'",
+            )
+        }
         db.execSQL(
             """
             CREATE TABLE IF NOT EXISTS `pet_dialogue_sessions` (
@@ -110,3 +120,12 @@ val MIGRATION_37_38 = object : Migration(37, 38) {
         db.execSQL("CREATE INDEX IF NOT EXISTS `index_pet_dialogue_revisions_createdAtMs` ON `pet_dialogue_revisions` (`createdAtMs`)")
     }
 }
+
+private fun SupportSQLiteDatabase.hasColumn(table: String, column: String): Boolean =
+    query("PRAGMA table_info(`$table`)").use { cursor ->
+        val nameIndex = cursor.getColumnIndexOrThrow("name")
+        while (cursor.moveToNext()) {
+            if (cursor.getString(nameIndex) == column) return@use true
+        }
+        false
+    }
