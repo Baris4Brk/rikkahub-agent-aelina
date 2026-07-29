@@ -115,6 +115,24 @@ class PetPolicyTest {
     }
 
     @Test
+    fun `empty pet text and incomplete handoff become a visible safe delegation`() {
+        val result = buildPetGenerationSuccess(
+            parsed = PetModelResponse(
+                text = "",
+                action = "WAVING",
+                handoff = PetModelHandoff(needed = true),
+            ),
+            input = "帮我整理今天的待办",
+            handoffMode = PetHandoffMode.CONFIRM,
+        )
+
+        assertTrue(result.text.isNotBlank())
+        assertEquals(PetAction.WAVING, result.action)
+        assertEquals("帮我整理今天的待办", result.handoff?.request)
+        assertTrue(result.handoff?.title?.isNotBlank() == true)
+    }
+
+    @Test
     fun `session policy archives before round 21 and rolls dates without empty diary`() {
         assertEquals(PetSessionRollAction.ARCHIVE_CAPACITY, PetSessionPolicy.beforeAppend("2026-07-29", "2026-07-29", 20))
         assertEquals(PetSessionRollAction.ARCHIVE_DAILY, PetSessionPolicy.beforeAppend("2026-07-28", "2026-07-29", 3))

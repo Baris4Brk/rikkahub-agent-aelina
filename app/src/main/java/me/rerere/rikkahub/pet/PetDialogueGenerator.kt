@@ -11,7 +11,6 @@ import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.jsonObject
 import me.rerere.ai.core.ReasoningLevel
 import me.rerere.ai.provider.Model
-import me.rerere.ai.provider.ModelAbility
 import me.rerere.ai.provider.ProviderManager
 import me.rerere.ai.provider.ProviderSetting
 import me.rerere.ai.provider.TextGenerationParams
@@ -73,44 +72,37 @@ class PetDialogueGenerator(
         val historyText = history.takeLast(MAX_PET_DIALOGUE_ROUNDS).joinToString("\n") { turn ->
             "用户：${turn.userInput}\n桌宠：${turn.assistantText.orEmpty()}"
         }
-        val response = withTimeout(PET_GENERATION_TIMEOUT_MS) {
-            provider.generateText(
+        val messages = listOf(
+            UIMessage.system(buildPetSystemPrompt(persona, handoffMode)),
+            UIMessage.user("<recent_dialogue>\n$historyText\n</recent_dialogue>\n<current_input>\n$input\n</current_input>"),
+        )
+        val raw = withTimeout(PET_GENERATION_TIMEOUT_MS) {
+            suspend fun request(maxTokens: Int): String = provider.generateText(
                 providerSetting = providerSetting,
-                messages = listOf(
-                    UIMessage.system(buildPetSystemPrompt(persona, handoffMode)),
-                    UIMessage.user("<recent_dialogue>\n$historyText\n</recent_dialogue>\n<current_input>\n$input\n</current_input>"),
-                ),
+                messages = messages,
                 params = TextGenerationParams(
                     model = model,
                     temperature = assistant.temperature ?: 0.7f,
-                    maxTokens = 512,
+                    maxTokens = maxTokens,
                     tools = emptyList(),
-                    reasoningLevel = if (ModelAbility.REASONING in model.abilities) {
-                        ReasoningLevel.LOW
-                    } else {
-                        ReasoningLevel.OFF
-                    },
+                    // Pet dialogue needs a tiny structured answer, not a reasoning-only response.
+                    reasoningLevel = ReasoningLevel.OFF,
                     omitReasoningConfigurationWhenOff = true,
                     customHeaders = model.customHeaders,
                     customBody = model.customBodies,
                 ),
-            )
+            ).choices.firstOrNull()?.message?.toText().orEmpty()
+
+            request(maxTokens = 768).ifBlank {
+                // A retry is safe because pet requests expose no tools or side effects. Some
+                // reasoning models consume a short completion budget without emitting text.
+                request(maxTokens = 1_536)
+            }
         }
-        val raw = response.choices.firstOrNull()?.message?.toText().orEmpty()
         if (raw.isBlank()) return PetGenerationResult.Failure("pet_empty_response")
         val parsed = parsePetModelResponse(raw, json)
             ?: return PetGenerationResult.Failure("pet_response_invalid")
-        val safeText = PetBubbleSanitizer.sanitize(parsed.text)
-        val action = runCatching { PetAction.valueOf(parsed.action.uppercase()) }.getOrDefault(PetAction.IDLE)
-        val handoff = parsed.handoff.takeIf { it.needed && handoffMode != PetHandoffMode.SUGGEST_ONLY }
-            ?.let {
-                PetHandoffDraft(
-                    mode = handoffMode,
-                    title = PetBubbleSanitizer.sanitize(it.title).take(160),
-                    request = PetBubbleSanitizer.sanitizeDraft(it.request).take(2_000),
-                )
-            }
-        PetGenerationResult.Success(safeText, action, handoff)
+        buildPetGenerationSuccess(parsed, input, handoffMode)
     } catch (cancelled: CancellationException) {
         if (cancelled is TimeoutCancellationException) {
             PetGenerationResult.Failure("pet_generation_timeout")
@@ -128,9 +120,9 @@ class PetDialogueGenerator(
         人物设定（仅作角色表达）：
         ${persona.personaPrompt}
 
-        仅输出 JSON：{"text":"不超过96个Unicode字符，可为空","action":"白名单动作","handoff":{"needed":false,"title":"","request":""}}
+        仅输出 JSON：{"text":"不超过96个Unicode字符且不能为空","action":"白名单动作","handoff":{"needed":false,"title":"","request":""}}
         action 只能是：${PetAction.entries.joinToString { it.name }}。
-        如用户明确要求办事，只生成安全任务草稿，不声称已经执行。当前转交模式：${mode.name}。
+        每次触摸或文字都必须给出一句简短回应。用户明确要求查询、修改、提醒或完成事情时，handoff.needed 必须为 true，title 和 request 必须完整；你只生成安全任务草稿，不声称已经执行。当前转交模式：${mode.name}。
         不复述密码、令牌、验证码、路径、通知正文或其他敏感原文。
     """.trimIndent()
 
@@ -138,6 +130,33 @@ class PetDialogueGenerator(
         const val TAG = "PetDialogueGenerator"
         const val PET_GENERATION_TIMEOUT_MS = 60_000L
     }
+}
+
+internal fun buildPetGenerationSuccess(
+    parsed: PetModelResponse,
+    input: String,
+    handoffMode: PetHandoffMode,
+): PetGenerationResult.Success {
+    val wantsHandoff = parsed.handoff.needed && handoffMode != PetHandoffMode.SUGGEST_ONLY
+    val safeInput = PetBubbleSanitizer.sanitizeDraft(input).take(2_000)
+    val handoff = if (wantsHandoff && safeInput.isNotBlank()) {
+        PetHandoffDraft(
+            mode = handoffMode,
+            title = PetBubbleSanitizer.sanitize(parsed.handoff.title)
+                .ifBlank { PetBubbleSanitizer.sanitize(input) }
+                .take(160),
+            request = PetBubbleSanitizer.sanitizeDraft(parsed.handoff.request)
+                .ifBlank { safeInput }
+                .take(2_000),
+        )
+    } else {
+        null
+    }
+    val text = PetBubbleSanitizer.sanitize(parsed.text).ifBlank {
+        if (handoff != null) "我把这件事整理好啦，可以交给第二用户处理。" else "我在呢。"
+    }
+    val action = runCatching { PetAction.valueOf(parsed.action.uppercase()) }.getOrDefault(PetAction.IDLE)
+    return PetGenerationResult.Success(text, action, handoff)
 }
 
 internal data class PetGenerationModelSelection(

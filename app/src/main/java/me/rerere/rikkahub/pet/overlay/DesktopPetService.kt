@@ -36,6 +36,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import me.rerere.rikkahub.RouteActivity
 import me.rerere.rikkahub.assistant.SecondUserPresentationSource
 import me.rerere.rikkahub.assistant.SecondUserTarget
 import me.rerere.rikkahub.data.datastore.SettingsStore
@@ -79,9 +80,11 @@ class DesktopPetService : Service() {
     private var loadedRenderConfig: PetRenderConfig? = null
     private var currentAction = PetAction.IDLE
     private var currentStatusBubble: String? = null
+    private var transientBubbleText: String? = null
     private var sidecarAllowed = false
     private var configuredAssistant: me.rerere.rikkahub.data.model.Assistant? = null
     private var interactionJob: Job? = null
+    private var bubbleDismissJob: Job? = null
     private var lastModelInteractionAtMs = 0L
 
     private val screenReceiver = object : BroadcastReceiver() {
@@ -160,7 +163,7 @@ class DesktopPetService : Service() {
                 )
                 spriteView?.setAction(currentAction)
                 currentStatusBubble = PetPresentationMapper.bubble(state.status)
-                renderBubble(currentStatusBubble)
+                refreshBubble()
                 refreshVisibility()
             }
         }
@@ -209,15 +212,19 @@ class DesktopPetService : Service() {
             context = this,
             atlas = atlas,
             onInteraction = { gesture, region ->
-                spriteView?.showLocalFeedback()
-                if (sidecarAllowed) {
-                    spriteView?.setAction(
-                        when (region) {
-                            me.rerere.rikkahub.pet.PetBodyRegion.HEAD -> PetAction.WAVING
-                            me.rerere.rikkahub.pet.PetBodyRegion.BODY -> PetAction.JUMPING
-                            else -> PetAction.IDLE
-                        },
-                    )
+                if (gesture == "long_press") {
+                    openPetDialogue()
+                } else {
+                    spriteView?.showLocalFeedback()
+                    if (sidecarAllowed) {
+                        spriteView?.setAction(
+                            when (region) {
+                                me.rerere.rikkahub.pet.PetBodyRegion.HEAD -> PetAction.WAVING
+                                me.rerere.rikkahub.pet.PetBodyRegion.BODY -> PetAction.JUMPING
+                                else -> PetAction.IDLE
+                            },
+                        )
+                    }
                     submitTouchInteraction(gesture, region)
                 }
             },
@@ -272,7 +279,7 @@ class DesktopPetService : Service() {
                 setColor(0xDD202020.toInt())
                 cornerRadius = dp(16).toFloat()
             }
-            setOnClickListener { openApp() }
+            setOnClickListener { openPetDialogue() }
         }
         val params = baseParams(WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT)
         spriteParams?.let { sprite ->
@@ -292,9 +299,18 @@ class DesktopPetService : Service() {
         val assistant = configuredAssistant ?: return
         val conversationId = assistant.privilegedConversationId ?: return
         val now = System.currentTimeMillis()
-        if (!sidecarAllowed || interactionJob?.isActive == true ||
-            now - lastModelInteractionAtMs < MODEL_TOUCH_COOLDOWN_MS
-        ) return
+        if (!sidecarAllowed) {
+            showTransientBubble("第二用户正在处理事情，稍后再来戳我吧。")
+            return
+        }
+        if (interactionJob?.isActive == true) {
+            showTransientBubble("我正在想怎么回应你……")
+            return
+        }
+        if (now - lastModelInteractionAtMs < MODEL_TOUCH_COOLDOWN_MS) {
+            showTransientBubble("我在呢，等一下再和我互动吧。", durationMs = 2_500L)
+            return
+        }
         lastModelInteractionAtMs = now
         interactionJob = scope.launch {
             val payload = PetInteractionPayload(type = gesture, region = region)
@@ -334,7 +350,7 @@ class DesktopPetService : Service() {
                             ),
                         )
                         if (sidecarAllowed) spriteView?.setAction(generated.action)
-                        bubbleText = generated.text.ifBlank { null }
+                        bubbleText = generated.text.ifBlank { "我在呢。" }
                         if (mode == PetHandoffMode.AUTO) {
                             autoHandoffId = updated.turns.lastOrNull()?.handoffRequestId
                         }
@@ -362,11 +378,26 @@ class DesktopPetService : Service() {
             }
             if (slot is PetInteractionSlotResult.Completed) {
                 autoHandoffId?.let { handoffCoordinator.submit(it, automatic = true) }
-                if (currentStatusBubble == null && bubbleText != null) {
-                    renderBubble(bubbleText)
-                    delay(8_000)
-                    if (currentStatusBubble == null) renderBubble(null)
-                }
+                bubbleText?.let(::showTransientBubble)
+            }
+        }
+    }
+
+    private fun refreshBubble() {
+        renderBubble(currentStatusBubble ?: transientBubbleText)
+    }
+
+    private fun showTransientBubble(text: String, durationMs: Long = 8_000L) {
+        val safe = me.rerere.rikkahub.pet.PetBubbleSanitizer.sanitize(text)
+        if (safe.isBlank()) return
+        transientBubbleText = safe
+        refreshBubble()
+        bubbleDismissJob?.cancel()
+        bubbleDismissJob = scope.launch {
+            delay(durationMs)
+            if (transientBubbleText == safe) {
+                transientBubbleText = null
+                refreshBubble()
             }
         }
     }
@@ -405,6 +436,9 @@ class DesktopPetService : Service() {
         atlas = null
         interactionJob?.cancel()
         interactionJob = null
+        bubbleDismissJob?.cancel()
+        bubbleDismissJob = null
+        transientBubbleText = null
     }
 
     private fun baseParams(width: Int, height: Int) = WindowManager.LayoutParams(
@@ -421,10 +455,19 @@ class DesktopPetService : Service() {
         PixelFormat.TRANSLUCENT,
     )
 
-    private fun openApp() {
-        packageManager.getLaunchIntentForPackage(packageName)?.apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-        }?.let(::startActivity)
+    private fun openPetDialogue() {
+        val conversationId = configuredAssistant?.privilegedConversationId ?: return
+        startActivity(
+            Intent(this, RouteActivity::class.java).apply {
+                addFlags(
+                    Intent.FLAG_ACTIVITY_NEW_TASK or
+                        Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                        Intent.FLAG_ACTIVITY_SINGLE_TOP,
+                )
+                putExtra(RouteActivity.EXTRA_CONVERSATION_ID, conversationId.toString())
+                putExtra(RouteActivity.EXTRA_OPEN_PET_DIALOGUE_REQUEST_ID, System.currentTimeMillis())
+            },
+        )
     }
 
     private fun createChannel() {

@@ -110,7 +110,13 @@ import java.io.File
 import kotlin.uuid.Uuid
 
 @Composable
-fun ChatPage(id: Uuid, text: String?, files: List<Uri>, nodeId: Uuid? = null) {
+fun ChatPage(
+    id: Uuid,
+    text: String?,
+    files: List<Uri>,
+    nodeId: Uuid? = null,
+    petDialogueRequestId: Long? = null,
+) {
     val vm: ChatVM = koinViewModel(
         parameters = {
             parametersOf(id.toString())
@@ -221,6 +227,7 @@ fun ChatPage(id: Uuid, text: String?, files: List<Uri>, nodeId: Uuid? = null) {
                     currentChatModel = currentChatModel,
                     bigScreen = true,
                     errors = errors,
+                    petDialogueRequestId = petDialogueRequestId,
                     onDismissError = { vm.dismissError(it) },
                     onClearAllErrors = { vm.clearAllErrors() },
                 )
@@ -253,6 +260,7 @@ fun ChatPage(id: Uuid, text: String?, files: List<Uri>, nodeId: Uuid? = null) {
                     currentChatModel = currentChatModel,
                     bigScreen = false,
                     errors = errors,
+                    petDialogueRequestId = petDialogueRequestId,
                     onDismissError = { vm.dismissError(it) },
                     onClearAllErrors = { vm.clearAllErrors() },
                 )
@@ -279,6 +287,7 @@ private fun ChatPageContent(
     enableWebSearch: Boolean,
     currentChatModel: Model?,
     errors: List<ChatError>,
+    petDialogueRequestId: Long?,
     onDismissError: (Uuid) -> Unit,
     onClearAllErrors: () -> Unit,
 ) {
@@ -380,6 +389,7 @@ private fun ChatPageContent(
                         assistant = assistant,
                         conversationId = conversation.id,
                         mainBusy = runtimeState !is RuntimeState.Idle,
+                        openRequestId = petDialogueRequestId,
                     )
                 }
             },

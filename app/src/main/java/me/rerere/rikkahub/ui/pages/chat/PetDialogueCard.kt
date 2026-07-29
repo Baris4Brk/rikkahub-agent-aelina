@@ -33,20 +33,25 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlin.uuid.Uuid
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.pet.ActivePetDialogue
+import me.rerere.rikkahub.pet.PetAction
 import me.rerere.rikkahub.pet.PetArchiveResult
+import me.rerere.rikkahub.pet.PetBubbleSanitizer
 import me.rerere.rikkahub.pet.PetDialogueGenerator
 import me.rerere.rikkahub.pet.PetDialogueInputKind
 import me.rerere.rikkahub.pet.PetDialogueRepository
 import me.rerere.rikkahub.pet.PetDialogueTurnDraft
 import me.rerere.rikkahub.pet.PetDialogueTurnEntityView
 import me.rerere.rikkahub.pet.PetGenerationResult
+import me.rerere.rikkahub.pet.PetHandoffDraft
 import me.rerere.rikkahub.pet.PetHandoffCoordinator
 import me.rerere.rikkahub.pet.PetHandoffMode
 import me.rerere.rikkahub.pet.PetHandoffStatus
+import me.rerere.rikkahub.pet.PetHandoffSubmitResult
 import me.rerere.rikkahub.pet.PetPersonaSource
 import me.rerere.rikkahub.pet.petGenerationErrorMessage
 import me.rerere.rikkahub.service.ChatService
@@ -58,6 +63,7 @@ fun PetDialogueCard(
     assistant: Assistant,
     conversationId: Uuid,
     mainBusy: Boolean,
+    openRequestId: Long? = null,
     modifier: Modifier = Modifier,
 ) {
     if (!assistant.petEnabled || assistant.privilegedConversationId != conversationId) return
@@ -80,9 +86,62 @@ fun PetDialogueCard(
     var input by remember { mutableStateOf("") }
     var sending by remember { mutableStateOf(false) }
     var localError by remember { mutableStateOf<String?>(null) }
+    var localNotice by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(assistantId, conversationKey) {
         repository.ensureActive(assistantId, conversationKey)
+    }
+    LaunchedEffect(openRequestId) {
+        if (openRequestId != null) expanded = true
+    }
+
+    val handOffDirectly: () -> Unit = {
+        val submitted = input.trim()
+        if (submitted.isNotBlank() && !sending) {
+            input = ""
+            sending = true
+            localError = null
+            localNotice = null
+            scope.launch {
+                try {
+                    val safeRequest = PetBubbleSanitizer.sanitizeDraft(submitted).take(2_000)
+                    val configuredMode = runCatching { PetHandoffMode.valueOf(assistant.petHandoffMode) }
+                        .getOrDefault(PetHandoffMode.CONFIRM)
+                    val draftMode = configuredMode.takeUnless { it == PetHandoffMode.SUGGEST_ONLY }
+                        ?: PetHandoffMode.CONFIRM
+                    val updated = repository.append(
+                        assistantId,
+                        conversationKey,
+                        PetDialogueTurnDraft(
+                            inputKind = PetDialogueInputKind.TEXT,
+                            userText = submitted,
+                            assistantText = "我现在把这件事交给第二用户处理。",
+                            action = PetAction.RUNNING,
+                            handoff = PetHandoffDraft(
+                                mode = draftMode,
+                                title = PetBubbleSanitizer.sanitize(submitted).take(80),
+                                request = safeRequest,
+                            ),
+                        ),
+                    )
+                    val requestId = updated.turns.lastOrNull()?.handoffRequestId
+                    val result = requestId?.let { handoffCoordinator.submit(it, automatic = false) }
+                    if (result is PetHandoffSubmitResult.Submitted) {
+                        localNotice = "已交给第二用户，会按普通任务排队并继续使用原有审批规则。"
+                    } else {
+                        input = submitted
+                        localError = "转交暂未成功，请重试。"
+                    }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Throwable) {
+                    input = submitted
+                    localError = "转交暂未成功，请重试。"
+                } finally {
+                    sending = false
+                }
+            }
+        }
     }
 
     Card(
@@ -135,13 +194,14 @@ fun PetDialogueCard(
                         }
                     }
                 }
+                localNotice?.let { Text(it, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodySmall) }
                 localError?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
                 OutlinedTextField(
                     value = input,
                     onValueChange = { value -> if (value.codePointCount(0, value.length) <= 500) input = value },
                     modifier = Modifier.fillMaxWidth(),
                     label = { Text("最多500字") },
-                    enabled = !mainBusy && !sending,
+                    enabled = !sending,
                     maxLines = 4,
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -152,6 +212,7 @@ fun PetDialogueCard(
                             input = ""
                             sending = true
                             localError = null
+                            localNotice = null
                             scope.launch {
                                 try {
                                     var autoHandoffId: String? = null
@@ -178,8 +239,12 @@ fun PetDialogueCard(
                                                         handoff = result.handoff,
                                                     ),
                                                 )
-                                                if (mode == PetHandoffMode.AUTO) {
-                                                    autoHandoffId = updated.turns.lastOrNull()?.handoffRequestId
+                                                if (result.handoff != null) {
+                                                    if (mode == PetHandoffMode.AUTO) {
+                                                        autoHandoffId = updated.turns.lastOrNull()?.handoffRequestId
+                                                    } else {
+                                                        localNotice = "桌宠已整理成转交草稿，你可以检查后交给第二用户。"
+                                                    }
                                                 }
                                             }
                                             PetGenerationResult.LocalAnimationOnly -> repository.append(
@@ -197,7 +262,14 @@ fun PetDialogueCard(
                                         input = submitted
                                         localError = "主任务已开始，这条桌宠消息没有发送"
                                     } else {
-                                        autoHandoffId?.let { handoffCoordinator.submit(it, automatic = true) }
+                                        autoHandoffId?.let { requestId ->
+                                            when (handoffCoordinator.submit(requestId, automatic = true)) {
+                                                is PetHandoffSubmitResult.Submitted -> {
+                                                    localNotice = "桌宠已自动交给第二用户处理。"
+                                                }
+                                                else -> localError = "自动转交暂未成功，请在转交卡片中重试。"
+                                            }
+                                        }
                                     }
                                 } finally {
                                     sending = false
@@ -205,6 +277,12 @@ fun PetDialogueCard(
                             }
                         },
                     ) { Text(if (sending) "回应中" else "发送") }
+                    Button(
+                        enabled = input.isNotBlank() && !sending,
+                        onClick = handOffDirectly,
+                    ) { Text("交给第二用户") }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     TextButton(onClick = {
                         scope.launch {
                             if (repository.archiveNow(assistantId, conversationKey) is PetArchiveResult.Empty) {
