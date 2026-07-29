@@ -13,7 +13,6 @@ import android.text.InputFilter
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
-import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -249,6 +248,9 @@ class AndroidSystemAssistantSessionAdapter(
             state.target is SystemAssistantTargetUiState.Ready
         views.openChat.isEnabled = state.conversationId != null
         views.configure.isEnabled = true
+        views.input.alpha = if (views.input.isEnabled) 1f else 0.6f
+        views.send.alpha = if (views.send.isEnabled) 1f else 0.45f
+        views.openChat.alpha = if (views.openChat.isEnabled) 1f else 0.45f
     }
 
     private fun statusText(state: SystemAssistantUiState, deviceLocked: Boolean): String = when {
@@ -432,55 +434,91 @@ class AndroidSystemAssistantSessionAdapter(
         fun dp(value: Int): Int = (value * density).toInt()
         val content = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(18), dp(20), dp(18))
-            background = GradientDrawable().apply {
-                color = android.content.res.ColorStateList.valueOf(Color.rgb(30, 30, 34))
-                cornerRadius = dp(24).toFloat()
-            }
-        }
-        val title = TextView(context).apply {
-            text = context.getString(R.string.system_assistant_overlay_title)
-            textSize = 20f
-            setTextColor(Color.WHITE)
+            elevation = dp(18).toFloat()
+            setPadding(dp(16), dp(14), dp(16), dp(16))
+            background = roundedBackground(context, Color.rgb(22, 24, 30), 28, Color.rgb(57, 61, 73))
         }
         val surface = TextView(context).apply {
             textSize = 12f
-            setTextColor(Color.LTGRAY)
+            setTextColor(Color.rgb(190, 211, 255))
+            setPadding(dp(10), dp(5), dp(10), dp(5))
+            background = roundedBackground(context, Color.rgb(42, 53, 78), 14)
         }
         val identity = TextView(context).apply {
-            textSize = 13f
-            setTextColor(Color.LTGRAY)
+            textSize = 11.5f
+            setTextColor(Color.rgb(166, 170, 181))
         }
-        val latestUser = messageView(context, Color.rgb(215, 225, 255))
-        val latestAssistant = messageView(context, Color.WHITE)
+        val latestUser = messageView(context, mine = true)
+        val latestAssistant = messageView(context, mine = false)
+        latestUser.maxWidth = (context.resources.displayMetrics.widthPixels * 0.82f).toInt()
+        latestAssistant.maxWidth = (context.resources.displayMetrics.widthPixels * 0.82f).toInt()
         val status = TextView(context).apply {
             textSize = 12f
-            setTextColor(Color.LTGRAY)
+            setTextColor(Color.rgb(194, 199, 211))
+            setPadding(dp(2), dp(7), dp(2), dp(3))
         }
         val input = EditText(context).apply {
             hint = context.getString(R.string.system_assistant_overlay_hint)
-            minLines = 2
-            maxLines = 5
+            minLines = 1
+            maxLines = 4
             filters = arrayOf(InputFilter.LengthFilter(SYSTEM_ASSISTANT_MAX_TEXT_LENGTH))
-            setBackgroundColor(Color.WHITE)
-            setTextColor(Color.BLACK)
-            setHintTextColor(Color.rgb(105, 105, 110))
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+            background = roundedBackground(context, Color.rgb(35, 38, 46), 18, Color.rgb(57, 61, 73))
+            setTextColor(Color.rgb(242, 244, 250))
+            setHintTextColor(Color.rgb(140, 145, 157))
         }
-        val send = Button(context).apply { text = context.getString(R.string.system_assistant_send) }
-        val close = Button(context).apply { text = context.getString(R.string.system_assistant_close) }
-        val openChat = Button(context).apply { text = context.getString(R.string.system_assistant_open_chat) }
-        val configure = Button(context).apply {
-            text = context.getString(R.string.system_assistant_open_configuration)
+        val send = modernAction(context, context.getString(R.string.system_assistant_send), primary = true)
+        val openChat = modernAction(context, context.getString(R.string.system_assistant_open_chat), primary = false)
+        val configure = modernAction(
+            context,
+            context.getString(R.string.system_assistant_open_configuration),
+            primary = false,
+        )
+        val close = TextView(context).apply {
+            text = "×"
+            gravity = Gravity.CENTER
+            textSize = 22f
+            setTextColor(Color.rgb(166, 170, 181))
+            background = roundedBackground(context, Color.rgb(35, 38, 46), 18)
+            isClickable = true
+            isFocusable = true
         }
-        content.addView(title, matchWrap())
-        content.addView(surface, matchWrap(top = dp(3)))
-        content.addView(identity, matchWrap(top = dp(4)))
-        content.addView(latestUser, matchWrap(top = dp(14)))
-        content.addView(latestAssistant, matchWrap(top = dp(8)))
-        content.addView(status, matchWrap(top = dp(10)))
+        val avatar = TextView(context).apply {
+            text = "AI"
+            gravity = Gravity.CENTER
+            textSize = 13f
+            setTextColor(Color.rgb(190, 211, 255))
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            background = roundedBackground(context, Color.rgb(42, 53, 78), 19)
+        }
+        val title = TextView(context).apply {
+            text = context.getString(R.string.system_assistant_overlay_title)
+            textSize = 17f
+            setTextColor(Color.rgb(242, 244, 250))
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+        }
+        val heading = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(title, matchWrap())
+            addView(identity, matchWrap(top = dp(1)))
+        }
+        content.addView(
+            LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(avatar, LinearLayout.LayoutParams(dp(40), dp(40)).apply { marginEnd = dp(10) })
+                addView(heading, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                addView(close, LinearLayout.LayoutParams(dp(38), dp(38)))
+            },
+            matchWrap(),
+        )
+        content.addView(surface, matchWrap(top = dp(12)))
+        content.addView(latestUser, bubbleWrap(mine = true, top = dp(10)))
+        content.addView(latestAssistant, bubbleWrap(mine = false, top = dp(7)))
+        content.addView(status, matchWrap(top = dp(6)))
         content.addView(input, matchWrap(top = dp(8)))
-        content.addView(buttonRow(context, send, close), matchWrap(top = dp(8)))
-        content.addView(buttonRow(context, openChat, configure), matchWrap(top = dp(4)))
+        content.addView(buttonRow(context, send, openChat), matchWrap(top = dp(10)))
+        content.addView(configure, matchWrap(top = dp(7)))
         return AssistantViews(
             root = ScrollView(context).apply {
                 isFillViewport = true
@@ -505,17 +543,63 @@ class AndroidSystemAssistantSessionAdapter(
         )
     }
 
-    private fun messageView(context: Context, color: Int): TextView = TextView(context).apply {
-        textSize = 15f
-        setTextColor(color)
+    private fun messageView(context: Context, mine: Boolean): TextView = TextView(context).apply {
+        val density = context.resources.displayMetrics.density
+        fun dp(value: Int): Int = (value * density).toInt()
+        textSize = 13.5f
+        setTextColor(Color.rgb(242, 244, 250))
         setTextIsSelectable(true)
+        setPadding(dp(12), dp(9), dp(12), dp(9))
+        background = roundedBackground(
+            context,
+            if (mine) Color.rgb(62, 75, 116) else Color.rgb(40, 43, 52),
+            17,
+        )
     }
 
-    private fun buttonRow(context: Context, first: Button, second: Button): LinearLayout =
+    private fun modernAction(context: Context, label: String, primary: Boolean): TextView {
+        val density = context.resources.displayMetrics.density
+        fun dp(value: Int): Int = (value * density).toInt()
+        return TextView(context).apply {
+            text = label
+            gravity = Gravity.CENTER
+            textSize = 13f
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            setTextColor(if (primary) Color.rgb(20, 24, 32) else Color.rgb(242, 244, 250))
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            background = roundedBackground(
+                context,
+                if (primary) Color.rgb(166, 196, 255) else Color.rgb(35, 38, 46),
+                16,
+                if (primary) null else Color.rgb(57, 61, 73),
+            )
+            isClickable = true
+            isFocusable = true
+        }
+    }
+
+    private fun roundedBackground(
+        context: Context,
+        color: Int,
+        radiusDp: Int,
+        stroke: Int? = null,
+    ): GradientDrawable {
+        val density = context.resources.displayMetrics.density
+        return GradientDrawable().apply {
+            setColor(color)
+            cornerRadius = radiusDp * density
+            stroke?.let { setStroke(density.toInt().coerceAtLeast(1), it) }
+        }
+    }
+
+    private fun buttonRow(context: Context, first: TextView, second: TextView): LinearLayout =
         LinearLayout(context).apply {
+            val density = context.resources.displayMetrics.density
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.END
-            addView(first, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(first, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginEnd = (8 * density).toInt()
+            })
             addView(second, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         }
 
@@ -525,6 +609,15 @@ class AndroidSystemAssistantSessionAdapter(
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = top }
 
+    private fun bubbleWrap(mine: Boolean, top: Int): LinearLayout.LayoutParams =
+        LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply {
+            gravity = if (mine) Gravity.END else Gravity.START
+            topMargin = top
+        }
+
     private data class AssistantViews(
         val root: View,
         val surface: TextView,
@@ -533,10 +626,10 @@ class AndroidSystemAssistantSessionAdapter(
         val latestAssistant: TextView,
         val status: TextView,
         val input: EditText,
-        val send: Button,
-        val close: Button,
-        val openChat: Button,
-        val configure: Button,
+        val send: TextView,
+        val close: TextView,
+        val openChat: TextView,
+        val configure: TextView,
     )
 
     private data class SessionEntry(

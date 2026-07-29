@@ -63,7 +63,6 @@ fun PetDialogueCard(
     assistant: Assistant,
     conversationId: Uuid,
     mainBusy: Boolean,
-    openRequestId: Long? = null,
     modifier: Modifier = Modifier,
 ) {
     if (!assistant.petEnabled || assistant.privilegedConversationId != conversationId) return
@@ -91,10 +90,6 @@ fun PetDialogueCard(
     LaunchedEffect(assistantId, conversationKey) {
         repository.ensureActive(assistantId, conversationKey)
     }
-    LaunchedEffect(openRequestId) {
-        if (openRequestId != null) expanded = true
-    }
-
     val handOffDirectly: () -> Unit = {
         val submitted = input.trim()
         if (submitted.isNotBlank() && !sending) {

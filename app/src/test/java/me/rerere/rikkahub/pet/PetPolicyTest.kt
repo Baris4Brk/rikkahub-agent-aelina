@@ -133,6 +133,14 @@ class PetPolicyTest {
     }
 
     @Test
+    fun `pet overlay gestures keep tap local and reserve menus for deliberate gestures`() {
+        assertEquals(PetOverlayGestureAction.LOCAL_FEEDBACK, petOverlayGestureAction("tap"))
+        assertEquals(PetOverlayGestureAction.LOCAL_FEEDBACK, petOverlayGestureAction("pat"))
+        assertEquals(PetOverlayGestureAction.QUICK_MENU, petOverlayGestureAction("double_tap"))
+        assertEquals(PetOverlayGestureAction.DIALOGUE, petOverlayGestureAction("long_press"))
+    }
+
+    @Test
     fun `session policy archives before round 21 and rolls dates without empty diary`() {
         assertEquals(PetSessionRollAction.ARCHIVE_CAPACITY, PetSessionPolicy.beforeAppend("2026-07-29", "2026-07-29", 20))
         assertEquals(PetSessionRollAction.ARCHIVE_DAILY, PetSessionPolicy.beforeAppend("2026-07-28", "2026-07-29", 3))

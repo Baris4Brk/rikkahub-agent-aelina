@@ -154,7 +154,6 @@ class RouteActivity : ComponentActivity() {
         const val EXTRA_OPEN_SYSTEM_ASSISTANT_SETTINGS = "open_system_assistant_settings"
         const val EXTRA_OPEN_QUICK_CAPTURE_SETTINGS = "open_quick_capture_settings"
         const val EXTRA_CONVERSATION_ID = "conversationId"
-        const val EXTRA_OPEN_PET_DIALOGUE_REQUEST_ID = "open_pet_dialogue_request_id"
         const val EXTRA_QUICK_CAPTURE_DRAFT_TEXT = "quick_capture_draft_text"
         const val EXTRA_QUICK_CAPTURE_DRAFT_FILES = "quick_capture_draft_files"
     }
@@ -274,9 +273,6 @@ class RouteActivity : ComponentActivity() {
                         id = conversationId,
                         text = source.getStringExtra(EXTRA_QUICK_CAPTURE_DRAFT_TEXT),
                         files = source.getStringArrayListExtra(EXTRA_QUICK_CAPTURE_DRAFT_FILES).orEmpty(),
-                        petDialogueRequestId = source.takeIf {
-                            it.hasExtra(EXTRA_OPEN_PET_DIALOGUE_REQUEST_ID)
-                        }?.getLongExtra(EXTRA_OPEN_PET_DIALOGUE_REQUEST_ID, 0L),
                     )
                 }
             }
@@ -286,7 +282,6 @@ class RouteActivity : ComponentActivity() {
         source.removeExtra(EXTRA_OPEN_QUICK_CAPTURE_SETTINGS)
         source.removeExtra(EXTRA_OPEN_CODEX_SETTINGS)
         source.removeExtra(EXTRA_CONVERSATION_ID)
-        source.removeExtra(EXTRA_OPEN_PET_DIALOGUE_REQUEST_ID)
         source.removeExtra(EXTRA_QUICK_CAPTURE_DRAFT_TEXT)
         source.removeExtra(EXTRA_QUICK_CAPTURE_DRAFT_FILES)
         return destination
@@ -388,8 +383,7 @@ class RouteActivity : ComponentActivity() {
                                     id = Uuid.parse(key.id),
                                     text = key.text,
                                     files = key.files.map { it.toUri() },
-                                    nodeId = key.nodeId?.let { Uuid.parse(it) },
-                                    petDialogueRequestId = key.petDialogueRequestId,
+                                    nodeId = key.nodeId?.let { Uuid.parse(it) }
                                 )
                             }
 
@@ -721,8 +715,7 @@ sealed interface Screen : NavKey {
         val id: String,
         val text: String? = null,
         val files: List<String> = emptyList(),
-        val nodeId: String? = null,
-        val petDialogueRequestId: Long? = null,
+        val nodeId: String? = null
     ) : Screen
 
     @Serializable

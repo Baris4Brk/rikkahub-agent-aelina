@@ -25,6 +25,14 @@ enum class PetAction {
 
 enum class PetBodyRegion { HEAD, BODY, FEET, UNKNOWN }
 
+enum class PetOverlayGestureAction { LOCAL_FEEDBACK, QUICK_MENU, DIALOGUE }
+
+fun petOverlayGestureAction(gesture: String): PetOverlayGestureAction = when (gesture) {
+    "long_press" -> PetOverlayGestureAction.DIALOGUE
+    "double_tap" -> PetOverlayGestureAction.QUICK_MENU
+    else -> PetOverlayGestureAction.LOCAL_FEEDBACK
+}
+
 enum class PetHandoffMode { CONFIRM, AUTO, SUGGEST_ONLY }
 
 enum class PetHandoffStatus { DRAFT, CONFIRMED, AUTO_SUBMITTED, DISMISSED, EXPIRED, RESOLVED }
