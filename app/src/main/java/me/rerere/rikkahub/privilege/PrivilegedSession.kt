@@ -64,7 +64,7 @@ object DefaultPrivilegedSessionResolver : PrivilegedSessionResolver {
         // only as an on-disk migration marker and deliberately has no runtime effect.
         val localSecondUser = isPrivileged &&
             assistant.secondUserPolicyConfirmed &&
-            origin in LOCAL_SECOND_USER_ORIGINS
+            origin in InvocationSurfacePolicy.CONFIRMED_LOCAL_SECOND_USER
 
         return PrivilegedSessionContext(
             assistantId = assistant.id,
@@ -79,13 +79,6 @@ object DefaultPrivilegedSessionResolver : PrivilegedSessionResolver {
         )
     }
 
-    private val LOCAL_SECOND_USER_ORIGINS = setOf(
-        ToolCallOrigin.LocalChat,
-        ToolCallOrigin.SystemAssistant,
-        ToolCallOrigin.QuickCapture,
-        ToolCallOrigin.PetHandoffConfirmed,
-        ToolCallOrigin.PetHandoffAuto,
-    )
 }
 
 const val DEFAULT_PRIVILEGED_IDENTITY_NAME = "第二用户"

@@ -29,6 +29,7 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -55,6 +56,7 @@ import me.rerere.rikkahub.R
 import me.rerere.rikkahub.data.event.AppEvent
 import me.rerere.rikkahub.data.event.AppEventBus
 import me.rerere.rikkahub.data.repository.MemoryRepository
+import me.rerere.rikkahub.tts.PersistentTtsLibrary
 import me.rerere.rikkahub.ui.components.richtext.MarkdownBlock
 import me.rerere.rikkahub.ui.components.ui.Favicon
 import me.rerere.rikkahub.ui.components.ui.FaviconRow
@@ -290,8 +292,11 @@ object TextToSpeechToolUI : ToolUIRenderer {
     @Composable
     override fun Summary(context: ToolUIContext) {
         val eventBus: AppEventBus = koinInject()
+        val persistentTtsLibrary: PersistentTtsLibrary = koinInject()
         val scope = rememberCoroutineScope()
         val text = context.arguments.getStringContent("text") ?: ""
+        val artifactId = context.content?.jsonObjectOrNull
+            ?.get("artifact_id")?.jsonPrimitive?.contentOrNull
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
@@ -306,7 +311,15 @@ object TextToSpeechToolUI : ToolUIRenderer {
                 modifier = Modifier.weight(1f),
             )
             FilledTonalIconButton(
-                onClick = { scope.launch { eventBus.emit(AppEvent.Speak(text)) } },
+                onClick = {
+                    if (artifactId != null) {
+                        persistentTtsLibrary.queueReplay(artifactId)
+                    } else {
+                        // Legacy calls predate persistent artifacts and cannot reuse audio that
+                        // was never saved. Keep their historical behavior without affecting new calls.
+                        scope.launch { eventBus.emit(AppEvent.Speak(text)) }
+                    }
+                },
                 modifier = Modifier.size(28.dp),
             ) {
                 Icon(

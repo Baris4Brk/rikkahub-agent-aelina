@@ -216,8 +216,8 @@ internal fun resolveGenerationCommandId(
     runId: Uuid?,
 ): Uuid? = activeCommandId ?: runId
 
-private fun List<UIMessage>.withQuickCaptureCorrelation(
-    annotation: UIMessageAnnotation.QuickCapture?,
+internal fun List<UIMessage>.withResponseCorrelation(
+    annotation: UIMessageAnnotation?,
 ): List<UIMessage> {
     annotation ?: return this
     val sourceIndex = indexOfLast { message ->
@@ -232,6 +232,9 @@ private fun List<UIMessage>.withQuickCaptureCorrelation(
         }
     }
 }
+
+private fun UIMessageAnnotation.isResponseCorrelation(): Boolean =
+    this is UIMessageAnnotation.QuickCapture || this is UIMessageAnnotation.PetHandoff
 
 internal data class ChatEmergencyRuntimeTarget(
     val conversationId: Uuid,
@@ -446,6 +449,8 @@ class ChatService(
     private val filesManager: FilesManager,
     private val skillManager: SkillManager,
     private val toolApprovalPreferences: me.rerere.rikkahub.data.preferences.ToolApprovalPreferences,
+    private val capabilityGrantRepository:
+        me.rerere.rikkahub.data.capability.CapabilityGrantRepository,
     private val workspaceRepository: WorkspaceRepository,
     private val workflowRepository: WorkflowRepository,
     private val durableCommandQueue: DurableCommandQueue,
@@ -1398,8 +1403,8 @@ class ChatService(
                 parts = userContent,
                 annotations = content.annotations,
             ).toMessageNode()
-            val quickCaptureAnnotation = content.annotations
-                .filterIsInstance<UIMessageAnnotation.QuickCapture>()
+            val responseCorrelationAnnotation = content.annotations
+                .filter { it.isResponseCorrelation() }
                 .singleOrNull()
             val withUser = currentConversation.copy(
                 messageNodes = currentConversation.messageNodes + userMessage,
@@ -1412,7 +1417,7 @@ class ChatService(
                             messageNodes = withUser.messageNodes + UIMessage(
                                 role = MessageRole.ASSISTANT,
                                 parts = fastPathPlan.assistantContent,
-                                annotations = listOfNotNull(quickCaptureAnnotation),
+                                annotations = listOfNotNull(responseCorrelationAnnotation),
                             ).toMessageNode()
                         )
                     )
@@ -1440,7 +1445,7 @@ class ChatService(
                             runControl = control,
                             activeCommandId = commandId,
                             acceptedAssistantSnapshot = acceptedAssistantSnapshot,
-                            quickCaptureAnnotation = quickCaptureAnnotation,
+                            responseCorrelationAnnotation = responseCorrelationAnnotation,
                             propagateFailure = true,
                         )
                     }
@@ -1947,7 +1952,7 @@ class ChatService(
         activeCommandId: Uuid? = null,
         propagateFailure: Boolean = false,
         acceptedAssistantSnapshot: Assistant? = null,
-        quickCaptureAnnotation: UIMessageAnnotation.QuickCapture? = null,
+        responseCorrelationAnnotation: UIMessageAnnotation? = null,
     ) {
         // Some continuation paths (regenerate, resume-after-approval) do not carry the
         // original command id into this method, but every live generation still owns a
@@ -2062,6 +2067,24 @@ class ChatService(
                 privilege = privilegeContext,
                 toolNameSurface = toolNameSurface,
             )
+            val workspaceShellSharedStorage =
+                me.rerere.rikkahub.data.ai.tools.canMountSecondUserSharedStorage(
+                    privilege = privilegeContext,
+                    grants = capabilityGrantRepository.current(),
+                )
+            val secondUserDeviceAccessAddendum = if (privilegeContext.expandLocalTools) {
+                val workspace = assistant.workspaceId?.toString()?.let { workspaceId ->
+                    workspaceRepository.getById(workspaceId)
+                }
+                me.rerere.rikkahub.data.ai.tools.secondUserDeviceAccessAddendum(
+                    privilege = privilegeContext,
+                    workspaceId = workspace?.id,
+                    workspaceStorageMode = workspace?.storageMode,
+                    workspaceShellSharedStorage = workspaceShellSharedStorage,
+                )
+            } else {
+                null
+            }
             val localToolOptions = if (privilegeContext.expandLocalTools) {
                 me.rerere.rikkahub.data.ai.tools.LocalToolOption.PRIVILEGED_IMPLEMENTED
             } else {
@@ -2233,6 +2256,7 @@ class ChatService(
                 systemAddendum = listOfNotNull(
                     me.rerere.rikkahub.data.ai.tools.ConversationSystemAddendum
                         .get(conversationId),
+                    secondUserDeviceAccessAddendum,
                     pluginPromptAddendum,
                 ).joinToString("\n\n").ifBlank { null },
                 isToolAutoApproved = { toolName ->
@@ -2418,7 +2442,13 @@ class ChatService(
                         }
                         addAll(workspaceProcessTools)
                     }
-                    addAll(createWorkspaceToolsIfReady(assistant.workspaceId?.toString(), conversation.workspaceCwd))
+                    addAll(
+                        createWorkspaceToolsIfReady(
+                            workspaceId = assistant.workspaceId?.toString(),
+                            cwd = conversation.workspaceCwd,
+                            allowSharedStorage = workspaceShellSharedStorage,
+                        ),
+                    )
                     if (assistant.enabledSkills.isNotEmpty()) {
                         addAll(
                             createSkillTools(
@@ -2544,8 +2574,8 @@ class ChatService(
                 if (runControl?.isUpdateFenced() == true) return@collect
                 when (chunk) {
                     is GenerationChunk.Messages -> {
-                        val correlatedMessages = chunk.messages.withQuickCaptureCorrelation(
-                            quickCaptureAnnotation,
+                        val correlatedMessages = chunk.messages.withResponseCorrelation(
+                            responseCorrelationAnnotation,
                         ).sanitizeTransientConversationToolResults()
                         val updatedConversation = getConversationFlow(conversationId).value
                             .updateCurrentMessages(correlatedMessages)
@@ -2833,7 +2863,11 @@ class ChatService(
         )
     }
 
-    private suspend fun createWorkspaceToolsIfReady(workspaceId: String?, cwd: String? = null): List<Tool> {
+    private suspend fun createWorkspaceToolsIfReady(
+        workspaceId: String?,
+        cwd: String? = null,
+        allowSharedStorage: Boolean = false,
+    ): List<Tool> {
         if (workspaceId.isNullOrBlank()) return emptyList()
         val workspace = workspaceRepository.getById(workspaceId) ?: return emptyList()
         if (workspace.shellStatus != WorkspaceShellStatus.READY.name) {
@@ -2843,7 +2877,12 @@ class ChatService(
             )
             return emptyList()
         }
-        return createWorkspaceTools(workspaceId, workspaceRepository, cwd)
+        return createWorkspaceTools(
+            workspaceId = workspaceId,
+            workspaceRepository = workspaceRepository,
+            cwd = cwd,
+            allowSharedStorage = allowSharedStorage,
+        )
     }
 
     // ---- 检查无效消�?----

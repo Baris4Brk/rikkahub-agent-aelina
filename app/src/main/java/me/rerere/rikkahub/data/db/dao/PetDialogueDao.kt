@@ -149,7 +149,7 @@ interface PetDialogueDao {
 
     @Query(
         "SELECT * FROM pet_handoff_requests WHERE assistantId = :assistantId " +
-            "AND status IN ('DRAFT', 'CONFIRMED', 'AUTO_SUBMITTED') ORDER BY createdAtMs DESC",
+            "AND status IN ('DRAFT', 'CONFIRMED', 'SUBMITTED', 'AUTO_SUBMITTED') ORDER BY createdAtMs DESC",
     )
     fun observePendingHandoffs(assistantId: String): Flow<List<PetHandoffRequestEntity>>
 
@@ -173,13 +173,13 @@ interface PetDialogueDao {
 
     @Query(
         "SELECT COUNT(*) FROM pet_handoff_requests WHERE assistantId = :assistantId " +
-        "AND mode = 'AUTO' AND status IN ('CONFIRMED', 'AUTO_SUBMITTED') " +
+        "AND mode = 'AUTO' AND status IN ('CONFIRMED', 'SUBMITTED', 'AUTO_SUBMITTED') " +
             "AND requestId != :excludingRequestId",
     )
     suspend fun countPendingAutoHandoffs(assistantId: String, excludingRequestId: String): Int
 
     @Query(
-        "SELECT * FROM pet_handoff_requests WHERE status IN ('CONFIRMED', 'AUTO_SUBMITTED') " +
+        "SELECT * FROM pet_handoff_requests WHERE status IN ('CONFIRMED', 'SUBMITTED', 'AUTO_SUBMITTED') " +
             "ORDER BY createdAtMs ASC",
     )
     suspend fun getRecoverableHandoffs(): List<PetHandoffRequestEntity>

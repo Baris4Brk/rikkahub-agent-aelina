@@ -44,7 +44,9 @@ fun secondUserLinuxGrantTools(
     val assistantId = invocation.callerAssistantId?.takeIf(String::isNotBlank) ?: return emptyList()
     val conversationId = invocation.callerConversationId?.takeIf(String::isNotBlank) ?: return emptyList()
     val origin = invocation.callOrigin ?: return emptyList()
-    if (!privilege.expandLocalTools || origin !in InvocationSurfacePolicy.LOCAL_UNLOCKED) return emptyList()
+    if (!privilege.expandLocalTools ||
+        origin !in InvocationSurfacePolicy.CONFIRMED_LOCAL_SECOND_USER
+    ) return emptyList()
     val subjectId = "$assistantId:$conversationId"
 
     val request = Tool(
@@ -53,7 +55,7 @@ fun secondUserLinuxGrantTools(
         parameters = { InputSchema.Obj(properties = buildJsonObject { }, required = emptyList()) },
         needsApproval = { true },
         execute = {
-            val allowedOrigins = InvocationSurfacePolicy.LOCAL_UNLOCKED
+            val allowedOrigins = InvocationSurfacePolicy.CONFIRMED_LOCAL_SECOND_USER
             SECOND_USER_LINUX_CAPABILITIES.forEach { (key, resource) ->
                 repository.upsert(
                     AccessGrant(
@@ -94,6 +96,9 @@ fun secondUserLinuxGrantTools(
                         put("id", grant.id)
                         put("capability", grant.capability.value)
                         put("resource", "${grant.resourceKind}:${grant.resourceIdentifier}")
+                        put("allowed_origins", buildJsonArray {
+                            grant.allowedOrigins.forEach { add(it.name) }
+                        })
                     }) }
                 })
             }.toString()))

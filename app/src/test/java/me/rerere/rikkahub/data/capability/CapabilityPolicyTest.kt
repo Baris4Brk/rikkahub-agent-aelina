@@ -44,6 +44,30 @@ class CapabilityPolicyTest {
     }
 
     @Test
+    fun `confirmed pet handoff is local but automatic handoff cannot inherit second user profile`() {
+        val engine = DefaultCapabilityPolicyEngine()
+        val confirmed = engine.evaluate(
+            request(
+                subject = CapabilitySubject("assistant-1", SubjectType.LOCAL_SECOND_USER),
+                origin = ToolCallOrigin.PetHandoffConfirmed,
+                unlocked = true,
+                selected = true,
+            ),
+        )
+        val automatic = engine.evaluate(
+            request(
+                subject = CapabilitySubject("assistant-1", SubjectType.LOCAL_SECOND_USER),
+                origin = ToolCallOrigin.PetHandoffAuto,
+                unlocked = true,
+                selected = true,
+            ),
+        )
+
+        assertEquals(PolicyDecision.Allowed("local_second_user_profile"), confirmed)
+        assertTrue(automatic is PolicyDecision.Denied)
+    }
+
+    @Test
     fun `second user Linux capability requires exact conversation grant`() {
         val subject = CapabilitySubject("assistant-1:conversation-1", SubjectType.LOCAL_SECOND_USER)
         val linux = CapabilityKey.of("linux.execute")

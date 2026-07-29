@@ -45,6 +45,7 @@ suspend fun createWorkspaceTools(
     workspaceId: String?,
     workspaceRepository: WorkspaceRepository,
     cwd: String? = null,
+    allowSharedStorage: Boolean = false,
 ): List<Tool> {
     if (workspaceId.isNullOrBlank()) return emptyList()
     val approvalOverrides = workspaceRepository.getById(workspaceId)?.toolApprovalOverrides().orEmpty()
@@ -56,7 +57,13 @@ suspend fun createWorkspaceTools(
         createReadFileTool(workspaceId, ::needsApproval, workspaceRepository),
         createWriteFileTool(workspaceId, ::needsApproval, workspaceRepository),
         createEditFileTool(workspaceId, ::needsApproval, workspaceRepository),
-        createShellTool(workspaceId, ::needsApproval, workspaceRepository, shellCwd),
+        createShellTool(
+            workspaceId,
+            ::needsApproval,
+            workspaceRepository,
+            shellCwd,
+            allowSharedStorage,
+        ),
     )
 }
 
@@ -73,7 +80,8 @@ private fun createReadFileTool(
     name = "workspace_read_file",
     description = """
         Read a file using the assistant's bound workspace Rootfs. Paths must be absolute inside Rootfs.
-        Use /workspace for the workspace files area.
+        Use /workspace for the workspace files area. This is not the Android phone storage root;
+        use direct phone file tools for Android shared-storage files.
         Supports UTF-8 text files and image files (png, jpg, jpeg, gif, webp, bmp).
     """.trimIndent().replace("\n", " "),
     parameters = {
@@ -111,7 +119,8 @@ private fun createWriteFileTool(
     name = "workspace_write_file",
     description = """
         Write a UTF-8 text file using the assistant's bound workspace Rootfs. Paths must be absolute inside Rootfs.
-        Use /workspace for the workspace files area.
+        Use /workspace for the workspace files area. For a phone-visible file, use a direct phone
+        file tool instead.
     """.trimIndent().replace("\n", " "),
     parameters = {
         InputSchema.Obj(
@@ -148,7 +157,8 @@ private fun createEditFileTool(
     name = "workspace_edit_file",
     description = """
         Edit a UTF-8 text file using the assistant's bound workspace Rootfs. Paths must be absolute inside Rootfs.
-        Use /workspace for the workspace files area.
+        Use /workspace for the workspace files area. For a phone-visible file, use a direct phone
+        file tool instead.
         Provide old_text and new_text. By default old_text must occur exactly once; set replace_all=true to replace every occurrence.
         If no exact match is found, whitespace-tolerant line matching is attempted automatically.
     """.trimIndent().replace("\n", " "),
@@ -211,10 +221,17 @@ private fun createShellTool(
     needsApproval: (String) -> Boolean,
     workspaceRepository: WorkspaceRepository,
     defaultCwd: String? = null,
+    allowSharedStorage: Boolean = false,
 ) = Tool(
     name = "workspace_shell",
     description = buildString {
         append("Run a shell command in the assistant's bound workspace Rootfs. The workspace files area is mounted at /workspace. ")
+        if (allowSharedStorage) {
+            append("This invocation has an authorized Android shared-storage mount at /sdcard. ")
+            append("Use /sdcard/Download, /sdcard/Music, or /sdcard/RikkaHubExchange for phone-visible files. ")
+        } else {
+            append("Android shared storage is not mounted for this invocation; use direct phone file tools instead. ")
+        }
         append("Use cwd for a path relative to the workspace files root. ")
         if (!defaultCwd.isNullOrBlank()) {
             append("Defaults to '$defaultCwd'. ")
@@ -260,7 +277,13 @@ private fun createShellTool(
             ?.coerceIn(1L, SHELL_TIMEOUT_MAX_SECONDS)
             ?.times(1_000L)
             ?: WorkspaceManager.DEFAULT_COMMAND_TIMEOUT_MS
-        val result = workspaceRepository.executeCommand(workspaceId, command, cwd, timeoutMillis)
+        val result = workspaceRepository.executeCommand(
+            id = workspaceId,
+            command = command,
+            cwd = cwd,
+            timeoutMillis = timeoutMillis,
+            allowSharedStorage = allowSharedStorage,
+        )
         listOf(
             UIMessagePart.Text(
                 buildJsonObject {

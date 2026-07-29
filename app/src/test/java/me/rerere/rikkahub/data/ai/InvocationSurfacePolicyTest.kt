@@ -74,6 +74,10 @@ class InvocationSurfacePolicyTest {
     @Test
     fun `named origin sets never acquire keyguard by enum growth`() {
         assertTrue(ToolCallOrigin.SystemAssistant in InvocationSurfacePolicy.LOCAL_UNLOCKED)
+        assertTrue(ToolCallOrigin.QuickCapture in InvocationSurfacePolicy.CONFIRMED_LOCAL_SECOND_USER)
+        assertTrue(ToolCallOrigin.PetHandoffConfirmed in InvocationSurfacePolicy.CONFIRMED_LOCAL_SECOND_USER)
+        assertFalse(ToolCallOrigin.PetHandoffAuto in InvocationSurfacePolicy.CONFIRMED_LOCAL_SECOND_USER)
+        assertFalse(ToolCallOrigin.Telegram in InvocationSurfacePolicy.CONFIRMED_LOCAL_SECOND_USER)
         assertTrue(ToolCallOrigin.TrustedWorkflow in InvocationSurfacePolicy.LOCAL_OR_WORKFLOW)
         assertTrue(ToolCallOrigin.Telegram in InvocationSurfacePolicy.REMOTE)
         assertFalse(ToolCallOrigin.SystemAssistantKeyguard in InvocationSurfacePolicy.LOCAL_UNLOCKED)
@@ -198,7 +202,7 @@ class InvocationSurfacePolicyTest {
     }
 
     @Test
-    fun `quick capture has an exact lease surface but no implicit tool directory or activity access`() {
+    fun `quick capture has an exact lease and confirmed second user tools but no activity access`() {
         val plan = ToolExposurePlan.create(
             origin = ToolCallOrigin.QuickCapture,
             deviceLocked = false,
@@ -217,8 +221,8 @@ class InvocationSurfacePolicyTest {
         assertFalse(plan.activityOverlayAuthorized)
         assertFalse(plan.canExpose("ask_user"))
         assertFalse(plan.canExpose("call_phone"))
-        // This otherwise background-safe tool remains unavailable until a future per-tool
-        // QuickCapture audit explicitly adds the origin to the capability catalog.
-        assertFalse(plan.canExpose("get_battery_status"))
+        // Quick Capture is an explicit unlocked action targeting the configured second user, so
+        // catalogued non-Activity tools are available under the same execution gate.
+        assertTrue(plan.canExpose("get_battery_status"))
     }
 }

@@ -184,8 +184,16 @@ fun PetDialogueCard(
                 LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 340.dp)) {
                     items(active?.turns.orEmpty(), key = { it.turnId }) { turn ->
                         Column(modifier = Modifier.padding(vertical = 5.dp)) {
-                            Text("你：${turn.userText ?: "[${turn.inputKind}]"}", style = MaterialTheme.typography.bodySmall)
-                            turn.assistantText?.let { Text("${assistant.name}：$it", style = MaterialTheme.typography.bodyMedium) }
+                            if (turn.inputKind == PetDialogueInputKind.HANDOFF_RESULT.name) {
+                                turn.assistantText?.let {
+                                    Text("第二用户：$it", style = MaterialTheme.typography.bodyMedium)
+                                }
+                            } else {
+                                Text("你：${turn.userText ?: "[${turn.inputKind}]"}", style = MaterialTheme.typography.bodySmall)
+                                turn.assistantText?.let {
+                                    Text("${assistant.name}：$it", style = MaterialTheme.typography.bodyMedium)
+                                }
+                            }
                         }
                     }
                 }

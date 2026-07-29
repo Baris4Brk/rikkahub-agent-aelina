@@ -16,8 +16,16 @@ import me.rerere.rikkahub.pet.MAX_PET_INPUT_CODE_POINTS
 internal enum class PetQuickAction { FORTUNE, JOKE, WEATHER }
 
 internal data class PetOverlayTurnUi(
-    val userText: String,
+    val userText: String?,
     val assistantText: String?,
+)
+
+internal data class PetOverlayHandoffUi(
+    val requestId: String,
+    val stateVersion: Long,
+    val title: String,
+    val request: String,
+    val submitted: Boolean,
 )
 
 /** Small, focusable application-overlay surface for pet sidecar dialogue. */
@@ -25,6 +33,8 @@ internal class PetDialogueOverlayView(
     context: Context,
     private val onSend: (String) -> Unit,
     private val onHandoff: (String) -> Unit,
+    private val onConfirmHandoff: (String) -> Unit,
+    private val onDismissHandoff: (String, Long) -> Unit,
     private val onQuickAction: (PetQuickAction) -> Unit,
     private val onClose: () -> Unit,
 ) : LinearLayout(context) {
@@ -46,6 +56,37 @@ internal class PetDialogueOverlayView(
         setTextColor(ACCENT_TEXT)
         setPadding(dp(10), dp(5), dp(10), dp(5))
         background = rounded(ACCENT_SOFT, 14)
+    }
+    private val handoffTitle = TextView(context).apply {
+        textSize = 13f
+        setTextColor(WHITE)
+        typeface = android.graphics.Typeface.DEFAULT_BOLD
+    }
+    private val handoffRequest = TextView(context).apply {
+        textSize = 12f
+        setTextColor(MUTED)
+        maxLines = 4
+    }
+    private val confirmHandoff = actionButton("确认转交", primary = true)
+    private val dismissHandoff = actionButton("拒绝", primary = false)
+    private val handoffDraft = LinearLayout(context).apply {
+        orientation = VERTICAL
+        setPadding(dp(12), dp(10), dp(12), dp(10))
+        background = rounded(INPUT, 18, BORDER)
+        visibility = GONE
+        addView(TextView(context).apply {
+            text = "待转交草稿"
+            textSize = 11f
+            setTextColor(ACCENT_TEXT)
+        }, matchWrap())
+        addView(handoffTitle, matchWrap(top = dp(4)))
+        addView(handoffRequest, matchWrap(top = dp(3)))
+        addView(LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            gravity = Gravity.END
+            addView(dismissHandoff, LayoutParams(0, dp(40), 0.7f).apply { marginEnd = dp(8) })
+            addView(confirmHandoff, LayoutParams(0, dp(40), 1.3f))
+        }, matchWrap(top = dp(8)))
     }
     private val messages = LinearLayout(context).apply {
         orientation = VERTICAL
@@ -122,6 +163,7 @@ internal class PetDialogueOverlayView(
             matchWrap(),
         )
         addView(status, matchWrap(top = dp(12)))
+        addView(handoffDraft, matchWrap(top = dp(8)))
         addView(timeline, LayoutParams(LayoutParams.MATCH_PARENT, dp(260)).apply { topMargin = dp(8) })
         addView(input, matchWrap(top = dp(10)))
         addView(dialogueActions, matchWrap(top = dp(10)))
@@ -159,13 +201,29 @@ internal class PetDialogueOverlayView(
             messages.addView(messageBubble("还没有对白，先说句话吧。", mine = false))
         } else {
             turns.takeLast(20).forEach { turn ->
-                messages.addView(messageBubble(turn.userText, mine = true))
+                turn.userText?.takeIf { it.isNotBlank() }?.let {
+                    messages.addView(messageBubble(it, mine = true))
+                }
                 turn.assistantText?.takeIf { it.isNotBlank() }?.let {
                     messages.addView(messageBubble(it, mine = false))
                 }
             }
         }
         timeline.post { timeline.fullScroll(View.FOCUS_DOWN) }
+    }
+
+    fun renderHandoff(handoff: PetOverlayHandoffUi?) {
+        if (handoff == null) {
+            handoffDraft.visibility = GONE
+            return
+        }
+        handoffDraft.visibility = VISIBLE
+        handoffTitle.text = handoff.title
+        handoffRequest.text = handoff.request
+        confirmHandoff.visibility = if (handoff.submitted) GONE else VISIBLE
+        dismissHandoff.visibility = if (handoff.submitted) GONE else VISIBLE
+        confirmHandoff.setOnClickListener { onConfirmHandoff(handoff.requestId) }
+        dismissHandoff.setOnClickListener { onDismissHandoff(handoff.requestId, handoff.stateVersion) }
     }
 
     fun setStatus(text: String, error: Boolean = false) {

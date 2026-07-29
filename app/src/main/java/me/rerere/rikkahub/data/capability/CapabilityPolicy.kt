@@ -3,6 +3,7 @@ package me.rerere.rikkahub.data.capability
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
+import me.rerere.rikkahub.data.ai.InvocationSurfacePolicy
 import me.rerere.rikkahub.data.ai.ToolCallOrigin
 import me.rerere.rikkahub.plugin.isPluginModelToolName
 
@@ -179,7 +180,10 @@ class DefaultCapabilityPolicyEngine(
                     message = "The grant belongs to a different selected privileged conversation.",
                 )
             }
-            if (!request.deviceUnlocked || request.origin !in LOCAL_UNLOCKED_ORIGINS) {
+            if (
+                !request.deviceUnlocked ||
+                request.origin !in InvocationSurfacePolicy.CONFIRMED_LOCAL_SECOND_USER
+            ) {
                 return PolicyDecision.Denied(
                     code = "second_user_local_unlocked_required",
                     message = "The local second-user profile is available only from an unlocked local surface.",
@@ -233,15 +237,6 @@ class DefaultCapabilityPolicyEngine(
         resourceKind == request.resource.kind &&
         (resourceIdentifier == request.resource.identifier || resourceIdentifier == "*")
 
-    private companion object {
-        val LOCAL_UNLOCKED_ORIGINS = setOf(
-            ToolCallOrigin.LocalChat,
-            ToolCallOrigin.SystemAssistant,
-            ToolCallOrigin.QuickCapture,
-            ToolCallOrigin.PetHandoffConfirmed,
-            ToolCallOrigin.PetHandoffAuto,
-        )
-    }
 }
 
 data class ResolvedToolCapability(

@@ -242,11 +242,22 @@ val dataSourceModule = module {
     single { get<AppDatabase>().executionRecordDao() }
     single { get<AppDatabase>().executionEventDao() }
     single { get<AppDatabase>().pendingToolApprovalDao() }
+    single { get<AppDatabase>().pendingChatCommandDao() }
     single { get<AppDatabase>().petDialogueDao() }
     single<PetSummaryScheduler> { AndroidPetSummaryScheduler(context = get()) }
     single { PetDialogueRepository(database = get(), dao = get(), summaryScheduler = get()) }
-    single { PetHandoffCoordinator(database = get(), dao = get(), chatService = get(), appScope = get<AppScope>()) }
-    single { PetHandoffRecovery(dao = get(), pendingCommandDao = get(), coordinator = get()) }
+    single {
+        PetHandoffCoordinator(
+            database = get(),
+            dao = get(),
+            pendingCommandDao = get(),
+            dialogueRepository = get(),
+            conversationRepository = get(),
+            chatService = get(),
+            appScope = get<AppScope>(),
+        )
+    }
+    single { PetHandoffRecovery(dao = get(), coordinator = get()) }
     single { PetDiaryToolProvider(dao = get(), repository = get()) }
     single { PetPersonaSource(settingsStore = get()) }
     single { PetDialogueGenerator(settingsStore = get(), providerManager = get()) }

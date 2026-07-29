@@ -15,6 +15,9 @@ interface PendingChatCommandDao {
     @Query("SELECT * FROM pending_chat_commands WHERE id = :id LIMIT 1")
     suspend fun findById(id: String): PendingChatCommandEntity?
 
+    @Query("SELECT * FROM pending_chat_commands WHERE id = :id LIMIT 1")
+    fun observeById(id: String): kotlinx.coroutines.flow.Flow<PendingChatCommandEntity?>
+
     @Query("SELECT * FROM pending_chat_commands WHERE idempotencyKey = :key LIMIT 1")
     suspend fun findByIdempotencyKey(key: String): PendingChatCommandEntity?
 

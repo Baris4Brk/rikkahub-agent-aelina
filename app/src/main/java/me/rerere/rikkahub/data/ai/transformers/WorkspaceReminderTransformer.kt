@@ -61,7 +61,8 @@ private fun buildWorkspacePrompt(workspace: WorkspaceEntity, cwd: String? = null
     appendLine("  - `workspace_shell`: run shell commands (the files area is mounted at /workspace).")
     appendLine("- Prefer `workspace_shell` for tasks that standard Unix tools handle well, and prefer `workspace_edit_file` for targeted edits over rewriting whole files.")
     appendLine("- The skills directory is mounted at `/skills`. Each skill is a subdirectory `/skills/<skill-name>/` containing a `SKILL.md` (with `name` and `description` frontmatter) plus any supporting files. Read a skill's `SKILL.md` before using it, and follow its instructions.")
-    appendLine("- Exchange files with RikkaHub or Termux through `/sdcard/RikkaHubExchange` when the shared-storage permission is available.")
+    appendLine("- `/sdcard` is the Android shared-storage mount only when the current execution has an explicit shared-storage grant. Otherwise use direct phone file tools and do not treat Rootfs lookalike paths as phone storage.")
+    appendLine("- When the mount is authorized, exchange files with RikkaHub or Termux through `/sdcard/RikkaHubExchange`.")
     if (!cwd.isNullOrBlank()) {
         appendLine(
             "- Current working directory: `${escapeXmlText(cwd)}`. " +

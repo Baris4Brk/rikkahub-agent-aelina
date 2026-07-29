@@ -48,6 +48,25 @@ class PrivilegedSessionResolverTest {
     }
 
     @Test
+    fun `confirmed pet handoff inherits second user tools but automatic handoff never does`() {
+        val confirmed = DefaultPrivilegedSessionResolver.resolve(
+            assistant = assistant,
+            conversation = conversation(privilegedConversationId),
+            origin = ToolCallOrigin.PetHandoffConfirmed,
+        )
+        val automatic = DefaultPrivilegedSessionResolver.resolve(
+            assistant = assistant,
+            conversation = conversation(privilegedConversationId),
+            origin = ToolCallOrigin.PetHandoffAuto,
+        )
+
+        assertTrue(confirmed.expandLocalTools)
+        assertTrue(confirmed.autoApproveTools)
+        assertFalse(automatic.expandLocalTools)
+        assertFalse(automatic.autoApproveTools)
+    }
+
+    @Test
     fun `selected remote conversation does not inherit local second user tools or approval`() {
         val context = DefaultPrivilegedSessionResolver.resolve(
             assistant = assistant,

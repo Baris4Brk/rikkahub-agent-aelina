@@ -68,7 +68,7 @@ object CapabilityCatalog {
         LocalToolOption.TimeInfo to setOf("get_time_info"),
         LocalToolOption.JavascriptEngine to setOf("eval_javascript"),
         LocalToolOption.Clipboard to setOf("clipboard_tool"),
-        LocalToolOption.Tts to setOf("text_to_speech"),
+        LocalToolOption.Tts to setOf("text_to_speech", "tts_library_list", "tts_library_play"),
         LocalToolOption.AskUser to setOf("ask_user"),
         LocalToolOption.ScreenTime to setOf("get_screen_time"),
         LocalToolOption.Calendar to setOf(
@@ -482,6 +482,8 @@ object CapabilityCatalog {
         "linux_grant_list",
         "linux_session_inspect",
         "linux_session_list",
+        "tts_library_list",
+        "tts_library_play",
     )
 
     private val registry: Map<CapabilityId, CapabilityDescriptor> = buildRegistry()

@@ -131,7 +131,6 @@ import me.rerere.rikkahub.data.ai.tools.local.listPairedBluetoothDevicesTool
 import me.rerere.rikkahub.data.ai.tools.local.scanNearbyBluetoothDevicesTool
 import me.rerere.rikkahub.data.ai.tools.local.getStepCountTool
 import me.rerere.rikkahub.data.ai.tools.local.exportConversationTool
-import me.rerere.rikkahub.data.event.AppEvent
 import me.rerere.rikkahub.data.event.AppEventBus
 import me.rerere.rikkahub.utils.readClipboardText
 import me.rerere.rikkahub.utils.writeClipboardText
@@ -404,6 +403,8 @@ class LocalTools(
     private val executionTokenProvider: me.rerere.rikkahub.execution.ExecutionTokenProvider,
     private val cancellationCoordinator: me.rerere.rikkahub.data.execution.CancellationCoordinator,
     private val petDiaryToolProvider: me.rerere.rikkahub.pet.PetDiaryToolProvider,
+    private val persistentTtsLibrary: me.rerere.rikkahub.tts.PersistentTtsLibrary,
+    private val ttsLibraryToolProvider: me.rerere.rikkahub.tts.TtsLibraryToolProvider,
 ) {
     private val displayTargetResolver by lazy {
         me.rerere.rikkahub.data.ai.tools.local.DisplayTargetResolver(displayAutomationRuntime)
@@ -640,7 +641,8 @@ class LocalTools(
             description = """
                 Speak text aloud to the user using the device's text-to-speech engine.
                 Use this when the user asks you to read something aloud, or when audio output is appropriate.
-                The tool returns immediately; audio plays in the background on the device.
+                The synthesized audio is permanently saved in the app's private TTS library before playback.
+                Replaying the returned artifact reuses the original file and does not call the provider again.
                 Provide natural, readable text without markdown formatting.
             """.trimIndent().replace("\n", " "),
             parameters = {
@@ -657,9 +659,14 @@ class LocalTools(
             execute = {
                 val text = it.jsonObject["text"]?.jsonPrimitive?.contentOrNull
                     ?: error("text is required")
-                eventBus.emit(AppEvent.Speak(text))
+                val entry = persistentTtsLibrary.synthesizeSaveAndQueue(text)
                 val payload = buildJsonObject {
                     put("success", true)
+                    put("saved", true)
+                    put("artifact_id", entry.artifactId)
+                    put("chunk_count", entry.chunks.size)
+                    put("size_bytes", entry.totalBytes)
+                    put("playback_queued", true)
                 }
                 listOf(UIMessagePart.Text(payload.toString()))
             }
@@ -769,6 +776,7 @@ class LocalTools(
         }
         if (options.contains(LocalToolOption.Tts)) {
             tools.add(ttsTool)
+            tools.addAll(ttsLibraryToolProvider.tools(invocationContext))
         }
         if (options.contains(LocalToolOption.AskUser)) {
             tools.add(askUserTool)

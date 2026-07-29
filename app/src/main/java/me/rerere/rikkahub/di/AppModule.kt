@@ -426,6 +426,8 @@ val appModule = module {
             executionTokenProvider = get(),
             cancellationCoordinator = get(),
             petDiaryToolProvider = get(),
+            persistentTtsLibrary = get(),
+            ttsLibraryToolProvider = get(),
         )
     }
 
@@ -444,6 +446,16 @@ val appModule = module {
     single {
         TTSManager(get())
     }
+
+    single {
+        me.rerere.rikkahub.tts.PersistentTtsLibrary(
+            context = get(),
+            settingsStore = get(),
+            ttsManager = get(),
+            appScope = get(),
+        )
+    }
+    single { me.rerere.rikkahub.tts.TtsLibraryToolProvider(get()) }
 
     single {
         SoundEffectPlayer(get())
@@ -739,6 +751,7 @@ val appModule = module {
             filesManager = get(),
             skillManager = get(),
             toolApprovalPreferences = get(),
+            capabilityGrantRepository = get(),
             workspaceRepository = get(),
             workflowRepository = get(),
             durableCommandQueue = get(),

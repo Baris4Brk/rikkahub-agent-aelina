@@ -172,6 +172,77 @@ class PetDialogueRepository(
         return result
     }
 
+    /**
+     * Atomically closes a submitted handoff and appends its safe result to the current sidecar.
+     * A dedicated input kind keeps the returned answer distinct from user-authored dialogue.
+     */
+    suspend fun completeHandoff(
+        requestId: String,
+        assistantText: String,
+        failed: Boolean = false,
+        zoneId: ZoneId = clock.zone,
+    ): Boolean {
+        val safeText = takeCodePoints(assistantText.trim(), MAX_PET_HANDOFF_RESULT_CODE_POINTS)
+        require(safeText.isNotBlank()) { "pet_handoff_result_empty" }
+        val archived = mutableListOf<String>()
+        val completed = mutationMutex.withLock {
+            database.withTransaction {
+                val handoff = dao.getHandoff(requestId) ?: return@withTransaction false
+                if (handoff.status == PetHandoffStatus.RESOLVED.name ||
+                    handoff.status == PetHandoffStatus.FAILED.name
+                ) return@withTransaction true
+                if (handoff.status !in setOf(
+                        PetHandoffStatus.SUBMITTED.name,
+                        PetHandoffStatus.AUTO_SUBMITTED.name,
+                        PetHandoffStatus.CONFIRMED.name,
+                    )
+                ) return@withTransaction false
+
+                val timestamp = now(zoneId)
+                var session = ensureActiveLocked(
+                    handoff.assistantId,
+                    handoff.privilegedConversationId,
+                    timestamp,
+                    archived,
+                )
+                var count = dao.countTurns(session.sessionId)
+                if (count >= MAX_PET_DIALOGUE_ROUNDS) {
+                    archiveLocked(session, PetDialogueArchiveReason.CAPACITY, timestamp)
+                    archived += session.sessionId
+                    session = createActive(handoff.assistantId, handoff.privilegedConversationId, timestamp)
+                    count = 0
+                }
+                dao.insertTurn(
+                    PetDialogueTurnEntity(
+                        turnId = idGenerator(),
+                        sessionId = session.sessionId,
+                        sequence = count + 1,
+                        inputKind = PetDialogueInputKind.HANDOFF_RESULT.name,
+                        userText = null,
+                        interactionJson = null,
+                        assistantText = safeText,
+                        action = if (failed) PetAction.FAILED.name else PetAction.REVIEW.name,
+                        handoffRequestId = requestId,
+                        createdAtMs = timestamp.toInstant().toEpochMilli(),
+                    ),
+                )
+                check(
+                    dao.updateHandoffStatus(
+                        requestId = requestId,
+                        expectedVersion = handoff.stateVersion,
+                        nextStatus = if (failed) PetHandoffStatus.FAILED.name else PetHandoffStatus.RESOLVED.name,
+                        targetCommandId = handoff.targetCommandId,
+                        submittedAtMs = handoff.submittedAtMs,
+                        resolvedAtMs = timestamp.toInstant().toEpochMilli(),
+                    ) == 1,
+                ) { "pet_handoff_completion_conflict" }
+                true
+            }
+        }
+        archived.forEach(summaryScheduler::schedule)
+        return completed
+    }
+
     suspend fun archiveNow(
         assistantId: String,
         privilegedConversationId: String,
@@ -405,15 +476,30 @@ class PetDialogueRepository(
                 require(!draft.interactionJson.isNullOrBlank()) { "pet_dialogue_touch_empty" }
                 require(draft.userText == null) { "pet_dialogue_touch_has_text" }
             }
+            PetDialogueInputKind.HANDOFF_RESULT -> {
+                require(draft.userText == null) { "pet_handoff_result_has_user_text" }
+                require(draft.interactionJson == null) { "pet_handoff_result_has_touch_payload" }
+                require(!draft.assistantText.isNullOrBlank()) { "pet_handoff_result_empty" }
+            }
         }
         draft.assistantText?.let {
-            require(codePointCount(it) <= MAX_PET_RESPONSE_CODE_POINTS) { "pet_dialogue_response_too_long" }
+            val limit = if (draft.inputKind == PetDialogueInputKind.HANDOFF_RESULT) {
+                MAX_PET_HANDOFF_RESULT_CODE_POINTS
+            } else {
+                MAX_PET_RESPONSE_CODE_POINTS
+            }
+            require(codePointCount(it) <= limit) { "pet_dialogue_response_too_long" }
         }
     }
 
     private fun now(zoneId: ZoneId): ZonedDateTime = ZonedDateTime.ofInstant(clock.instant(), zoneId)
 
     private fun codePointCount(value: String): Int = value.codePointCount(0, value.length)
+
+    private fun takeCodePoints(value: String, maxCodePoints: Int): String {
+        if (codePointCount(value) <= maxCodePoints) return value
+        return value.substring(0, value.offsetByCodePoints(0, maxCodePoints))
+    }
 
     private companion object {
         const val HANDOFF_EXPIRY_HOURS = 2L

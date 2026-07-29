@@ -54,7 +54,7 @@ class AuraTTSProvider : TTSProvider<TTSProviderSetting.Aura> {
             })
         }
 
-        Log.i(TAG, "generateSpeech: $requestBody")
+        Log.i(TAG, "generateSpeech: model=${providerSetting.model}, chars=${request.text.length}")
 
         val httpRequest = Request.Builder()
             .url("${providerSetting.baseUrl.trimEnd('/')}/tts")

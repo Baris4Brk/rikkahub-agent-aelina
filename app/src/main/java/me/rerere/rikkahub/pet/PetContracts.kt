@@ -7,7 +7,7 @@ enum class PetDialogueSessionStatus { ACTIVE, ARCHIVED, SOFT_DELETED }
 
 enum class PetDialogueArchiveReason { DAILY, MANUAL, CAPACITY }
 
-enum class PetDialogueInputKind { TEXT, TOUCH }
+enum class PetDialogueInputKind { TEXT, TOUCH, HANDOFF_RESULT }
 
 enum class PetSummaryState { NONE, PENDING, READY, FAILED }
 
@@ -35,7 +35,16 @@ fun petOverlayGestureAction(gesture: String): PetOverlayGestureAction = when (ge
 
 enum class PetHandoffMode { CONFIRM, AUTO, SUGGEST_ONLY }
 
-enum class PetHandoffStatus { DRAFT, CONFIRMED, AUTO_SUBMITTED, DISMISSED, EXPIRED, RESOLVED }
+enum class PetHandoffStatus {
+    DRAFT,
+    CONFIRMED,
+    SUBMITTED,
+    AUTO_SUBMITTED,
+    DISMISSED,
+    EXPIRED,
+    RESOLVED,
+    FAILED,
+}
 
 enum class CodexPetVersion { V1, V2 }
 
@@ -59,6 +68,7 @@ data class PetPersonaProjection(
 const val MAX_PET_DIALOGUE_ROUNDS = 20
 const val MAX_PET_INPUT_CODE_POINTS = 500
 const val MAX_PET_RESPONSE_CODE_POINTS = 96
+const val MAX_PET_HANDOFF_RESULT_CODE_POINTS = 1_200
 const val MAX_PET_PERSONA_CHARS = 8_000
 
 enum class PetSessionRollAction { NONE, ROLL_EMPTY_DATE, ARCHIVE_DAILY, ARCHIVE_CAPACITY }

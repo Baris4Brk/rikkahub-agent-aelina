@@ -10,6 +10,7 @@ import androidx.room.PrimaryKey
 import androidx.room.Query
 import androidx.room.Update
 import java.util.concurrent.atomic.AtomicReference
+import me.rerere.rikkahub.data.ai.InvocationSurfacePolicy
 import me.rerere.rikkahub.data.ai.ToolCallOrigin
 
 /** Persisted scoped grants. This table stores no secret material or tool arguments. */
@@ -80,7 +81,21 @@ class CapabilityGrantRepository(
     fun current(): Collection<AccessGrant> = snapshot.get()
 
     suspend fun refresh(): List<AccessGrant> {
-        val active = dao.listActive(nowMs()).mapNotNull { entity -> entity.toAccessGrant() }
+        val now = nowMs()
+        val stored = dao.listActive(now)
+        val upgraded = stored.map { entity ->
+            val normalized = normalizeStoredGrantOrigins(
+                subjectType = SubjectType.entries.firstOrNull { it.name == entity.subjectType },
+                origins = parseStoredOrigins(entity.allowedOrigins),
+            )
+            val serialized = serializeStoredOrigins(normalized)
+            if (serialized != entity.allowedOrigins) {
+                entity.copy(allowedOrigins = serialized, updatedAtMs = now).also { dao.update(it) }
+            } else {
+                entity
+            }
+        }
+        val active = upgraded.mapNotNull { entity -> entity.toAccessGrant() }
         snapshot.set(active)
         return active
     }
@@ -96,7 +111,7 @@ class CapabilityGrantRepository(
                 capabilityKey = grant.capability.value,
                 resourceKind = grant.resourceKind,
                 resourceIdentifier = grant.resourceIdentifier,
-                allowedOrigins = grant.allowedOrigins.joinToString("|") { it.name },
+                allowedOrigins = serializeStoredOrigins(grant.allowedOrigins),
                 scope = grant.scope.name,
                 expiresAtMs = grant.expiresAtMs,
                 revoked = grant.revoked,
@@ -122,12 +137,38 @@ class CapabilityGrantRepository(
             capability = CapabilityKey.of(capabilityKey),
             resourceKind = resourceKind,
             resourceIdentifier = resourceIdentifier,
-            allowedOrigins = allowedOrigins.split('|')
-                .mapNotNull { raw -> ToolCallOrigin.entries.firstOrNull { it.name == raw } }
-                .toSet(),
+            allowedOrigins = normalizeStoredGrantOrigins(
+                subjectType = SubjectType.entries.first { it.name == subjectType },
+                origins = parseStoredOrigins(allowedOrigins),
+            ),
             scope = GrantScope.entries.first { it.name == scope },
             expiresAtMs = expiresAtMs,
             revoked = revoked,
         )
     }.getOrNull()
 }
+
+private val LEGACY_LOCAL_SECOND_USER_ORIGINS = setOf(
+    ToolCallOrigin.LocalChat,
+    ToolCallOrigin.SystemAssistant,
+)
+
+/** Upgrade only the exact legacy local set; custom or remote grants retain their original scope. */
+internal fun normalizeStoredGrantOrigins(
+    subjectType: SubjectType?,
+    origins: Set<ToolCallOrigin>,
+): Set<ToolCallOrigin> = if (
+    subjectType == SubjectType.LOCAL_SECOND_USER &&
+    origins == LEGACY_LOCAL_SECOND_USER_ORIGINS
+) {
+    InvocationSurfacePolicy.CONFIRMED_LOCAL_SECOND_USER
+} else {
+    origins
+}
+
+private fun parseStoredOrigins(raw: String): Set<ToolCallOrigin> = raw.split('|')
+    .mapNotNull { name -> ToolCallOrigin.entries.firstOrNull { it.name == name } }
+    .toSet()
+
+private fun serializeStoredOrigins(origins: Set<ToolCallOrigin>): String =
+    ToolCallOrigin.entries.filter(origins::contains).joinToString("|") { it.name }

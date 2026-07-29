@@ -17,14 +17,27 @@ data class InvocationSurfaceDecision(
 
 /** Single source of truth for origin trust, tool-surface and elevation policy. */
 object InvocationSurfacePolicy {
-    /** Interactive local origins that may use non-Activity tools while visibly unlocked. */
+    /** Interactive local origins backed by an explicit action while the device is unlocked. */
     val LOCAL_UNLOCKED: Set<ToolCallOrigin> = setOf(
         ToolCallOrigin.LocalChat,
         ToolCallOrigin.SystemAssistant,
+        ToolCallOrigin.QuickCapture,
+        ToolCallOrigin.PetHandoffConfirmed,
     )
 
+    /**
+     * Local second-user requests that carry an explicit unlocked user action. Quick Capture and
+     * confirmed pet handoff join the normal app/assistant surfaces; automatic pet handoff stays
+     * excluded so it can never inherit persistent Linux or shared-storage grants.
+     */
+    val CONFIRMED_LOCAL_SECOND_USER: Set<ToolCallOrigin> = LOCAL_UNLOCKED
+
+    /** Confirmed second-user actions plus a workflow with its own frozen grant snapshot. */
+    val CONFIRMED_LOCAL_SECOND_USER_OR_WORKFLOW: Set<ToolCallOrigin> =
+        CONFIRMED_LOCAL_SECOND_USER + ToolCallOrigin.TrustedWorkflow
+
     /** Interactive local origins plus an explicitly trusted background workflow. */
-    val LOCAL_OR_WORKFLOW: Set<ToolCallOrigin> = LOCAL_UNLOCKED + ToolCallOrigin.TrustedWorkflow
+    val LOCAL_OR_WORKFLOW: Set<ToolCallOrigin> = CONFIRMED_LOCAL_SECOND_USER_OR_WORKFLOW
 
     /** Origins controlled outside the foreground RikkaHub UI. */
     val REMOTE: Set<ToolCallOrigin> = setOf(

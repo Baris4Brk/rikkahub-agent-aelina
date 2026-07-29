@@ -1,5 +1,6 @@
 package me.rerere.rikkahub.data.ai.tools
 
+import me.rerere.rikkahub.data.ai.InvocationSurfacePolicy
 import me.rerere.rikkahub.data.ai.ToolCallOrigin
 import me.rerere.rikkahub.data.capability.CapabilityCatalog
 import me.rerere.rikkahub.data.capability.CapabilityId
@@ -69,7 +70,7 @@ class WorkspaceProcessToolsTest {
         assertNull(capability?.localToolOption)
         assertEquals(WORKSPACE_PROCESS_TOOL_NAMES, capability?.toolNames)
         assertEquals(
-            setOf(ToolCallOrigin.LocalChat, ToolCallOrigin.SystemAssistant),
+            InvocationSurfacePolicy.CONFIRMED_LOCAL_SECOND_USER,
             capability?.allowedOrigins,
         )
         assertFalse(capability?.requiresUnlockedDevice ?: true)

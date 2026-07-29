@@ -34,6 +34,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
@@ -51,6 +52,7 @@ import me.rerere.rikkahub.pet.PetGenerationResult
 import me.rerere.rikkahub.pet.PetHandoffDraft
 import me.rerere.rikkahub.pet.PetHandoffCoordinator
 import me.rerere.rikkahub.pet.PetHandoffMode
+import me.rerere.rikkahub.pet.PetHandoffStatus
 import me.rerere.rikkahub.pet.PetHandoffSubmitResult
 import me.rerere.rikkahub.pet.PetOverlayGestureAction
 import me.rerere.rikkahub.pet.PetPersonaSource
@@ -90,6 +92,8 @@ class DesktopPetService : Service() {
     private var interactionJob: Job? = null
     private var dialogueObservationJob: Job? = null
     private var localActionJob: Job? = null
+    private var handoffBubbleJob: Job? = null
+    private var transientHandoffBubble: String? = null
 
     private val screenReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) = refreshVisibility()
@@ -117,6 +121,27 @@ class DesktopPetService : Service() {
         ContextCompat.registerReceiver(this, screenReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
         scope.launch { observeConfiguredPet() }
         scope.launch { TrustedApprovalSurfaceVisibility.visible.collect { refreshVisibility() } }
+        scope.launch {
+            handoffCoordinator.completions.collect { completion ->
+                if (System.currentTimeMillis() - completion.completedAtMs > HANDOFF_RESULT_REPLAY_WINDOW_MS) {
+                    return@collect
+                }
+                transientHandoffBubble = completion.text
+                dialogueOverlay?.setStatus(
+                    if (completion.failed) "第二用户任务未完成" else "第二用户已回复",
+                    error = completion.failed,
+                )
+                spriteView?.setAction(if (completion.failed) PetAction.FAILED else PetAction.REVIEW)
+                refreshBubble()
+                handoffBubbleJob?.cancel()
+                handoffBubbleJob = launch {
+                    delay(HANDOFF_RESULT_BUBBLE_MS)
+                    transientHandoffBubble = null
+                    spriteView?.setAction(currentAction)
+                    refreshBubble()
+                }
+            }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -274,6 +299,8 @@ class DesktopPetService : Service() {
             this.text = text
             setTextColor(Color.WHITE)
             textSize = 12f
+            maxWidth = dp(320)
+            maxLines = 8
             setPadding(dp(12), dp(7), dp(12), dp(7))
             background = GradientDrawable().apply {
                 setColor(0xDD202020.toInt())
@@ -299,6 +326,8 @@ class DesktopPetService : Service() {
             context = this,
             onSend = ::submitOverlayText,
             onHandoff = ::handoffOverlayText,
+            onConfirmHandoff = ::confirmHandoffDraft,
+            onDismissHandoff = ::dismissHandoffDraft,
             onQuickAction = { action ->
                 showPetOverlay(quickMenu = false)
                 when (action) {
@@ -322,13 +351,34 @@ class DesktopPetService : Service() {
             dialogueOverlay = created
             dialogueObservationJob?.cancel()
             dialogueObservationJob = scope.launch {
-                dialogueRepository.observeActive(assistant.id.toString(), conversationId.toString())
-                    .collectLatest { active ->
+                combine(
+                    dialogueRepository.observeActive(assistant.id.toString(), conversationId.toString()),
+                    dialogueRepository.observePendingHandoffs(assistant.id.toString()),
+                ) { active, pending -> active to pending }
+                    .collectLatest { (active, pending) ->
                         created.renderTurns(
                             active?.turns.orEmpty().map { turn ->
                                 PetOverlayTurnUi(
-                                    userText = turn.userText ?: "触摸互动",
+                                    userText = when (turn.inputKind) {
+                                        PetDialogueInputKind.HANDOFF_RESULT.name -> null
+                                        PetDialogueInputKind.TOUCH.name -> "触摸互动"
+                                        else -> turn.userText
+                                    },
                                     assistantText = turn.assistantText,
+                                )
+                            },
+                        )
+                        val handoff = pending.firstOrNull {
+                            it.privilegedConversationId == conversationId.toString()
+                        }
+                        created.renderHandoff(
+                            handoff?.let {
+                                PetOverlayHandoffUi(
+                                    requestId = it.requestId,
+                                    stateVersion = it.stateVersion,
+                                    title = it.title,
+                                    request = it.request,
+                                    submitted = it.status != PetHandoffStatus.DRAFT.name,
                                 )
                             },
                         )
@@ -523,8 +573,33 @@ class DesktopPetService : Service() {
         }
     }
 
+    private fun confirmHandoffDraft(requestId: String) {
+        dialogueOverlay?.setStatus("正在交给第二用户……")
+        scope.launch {
+            val result = handoffCoordinator.submit(requestId, automatic = false)
+            dialogueOverlay?.setStatus(
+                if (result is PetHandoffSubmitResult.Submitted) {
+                    "已交给第二用户，完成后会回到桌宠"
+                } else {
+                    "转交暂未成功，请重试"
+                },
+                error = result !is PetHandoffSubmitResult.Submitted,
+            )
+        }
+    }
+
+    private fun dismissHandoffDraft(requestId: String, stateVersion: Long) {
+        scope.launch {
+            val dismissed = handoffCoordinator.dismiss(requestId, stateVersion)
+            dialogueOverlay?.setStatus(
+                if (dismissed) "已拒绝这份转交草稿" else "草稿状态已变化，请重试",
+                error = !dismissed,
+            )
+        }
+    }
+
     private fun refreshBubble() {
-        renderBubble(currentStatusBubble)
+        renderBubble(transientHandoffBubble ?: currentStatusBubble)
     }
 
     private fun updateBubblePosition(sprite: WindowManager.LayoutParams) {
@@ -565,6 +640,9 @@ class DesktopPetService : Service() {
         interactionJob = null
         localActionJob?.cancel()
         localActionJob = null
+        handoffBubbleJob?.cancel()
+        handoffBubbleJob = null
+        transientHandoffBubble = null
     }
 
     private fun baseParams(width: Int, height: Int) = WindowManager.LayoutParams(
@@ -604,6 +682,8 @@ class DesktopPetService : Service() {
         private const val MAX_PET_SCALE = 2.0f
         private const val MIN_ANIMATION_FPS = 4
         private const val MAX_ANIMATION_FPS = 12
+        private const val HANDOFF_RESULT_BUBBLE_MS = 15_000L
+        private const val HANDOFF_RESULT_REPLAY_WINDOW_MS = 60_000L
 
         fun start(context: Context) {
             ContextCompat.startForegroundService(context, Intent(context, DesktopPetService::class.java))

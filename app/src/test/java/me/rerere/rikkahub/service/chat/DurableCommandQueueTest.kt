@@ -3,6 +3,7 @@ package me.rerere.rikkahub.service.chat
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.runBlocking
 import me.rerere.rikkahub.data.db.dao.PendingChatCommandDao
 import me.rerere.rikkahub.data.db.entity.PendingChatCommandEntity
@@ -121,6 +122,8 @@ internal class FakePendingChatCommandDao(
     }
 
     override suspend fun findById(id: String) = rows[id]
+    override fun observeById(id: String): Flow<PendingChatCommandEntity?> =
+        flow.map { current -> current.firstOrNull { it.id == id } }
     override suspend fun rewritePendingCommand(id: String, type: String, payloadJson: String): Int {
         rewriteFailure?.let { throw it }
         val row = rows[id] ?: return 0

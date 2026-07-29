@@ -613,6 +613,7 @@ private fun MessagePartsBlock(
     val referenceAnnotations = annotations.filterNot {
         it is UIMessageAnnotation.FinalAnswerRecovery ||
             it is UIMessageAnnotation.QuickCapture ||
+            it is UIMessageAnnotation.PetHandoff ||
             it is UIMessageAnnotation.ManualCompressionSummary
     }
 
@@ -719,6 +720,7 @@ private fun MessagePartsBlock(
                                 }
                                 is UIMessageAnnotation.FinalAnswerRecovery -> Unit
                                 is UIMessageAnnotation.QuickCapture -> Unit
+                                is UIMessageAnnotation.PetHandoff -> Unit
                                 is UIMessageAnnotation.ManualCompressionSummary -> Unit
                             }
                         }

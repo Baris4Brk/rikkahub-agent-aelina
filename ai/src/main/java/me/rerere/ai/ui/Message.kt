@@ -881,6 +881,14 @@ sealed class UIMessageAnnotation {
         val captureSessionId: String,
     ) : UIMessageAnnotation()
 
+    /** Internal correlation marker for a pet handoff and the answer generated for it. */
+    @Serializable
+    @SerialName("pet_handoff")
+    data class PetHandoff(
+        val commandId: String,
+        val requestId: String,
+    ) : UIMessageAnnotation()
+
     @Serializable
     @SerialName("final_answer_recovery")
     data class FinalAnswerRecovery(
