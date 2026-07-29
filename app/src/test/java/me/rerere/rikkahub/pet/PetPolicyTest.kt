@@ -1,7 +1,11 @@
 package me.rerere.rikkahub.pet
 
 import kotlin.uuid.Uuid
+import me.rerere.ai.provider.Model
+import me.rerere.ai.provider.ProviderSetting
 import me.rerere.rikkahub.assistant.SecondUserPresentationStatus
+import me.rerere.rikkahub.data.datastore.DEFAULT_AUTO_MODEL_ID
+import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.pet.render.PetFrameClock
 import org.junit.Assert.assertEquals
@@ -74,6 +78,40 @@ class PetPolicyTest {
             "桌宠模型调用失败，请检查 Fast Model 与服务商",
             petGenerationErrorMessage("provider_secret_detail_must_not_escape"),
         )
+    }
+
+    @Test
+    fun `credential-less auto fast model falls back to assistant chat model`() {
+        val fallbackProviderId = Uuid.random()
+        val fallbackModel = Model(modelId = "configured-chat", id = Uuid.random())
+        val assistant = Assistant(
+            id = Uuid.random(),
+            name = "Pet",
+            chatModelId = fallbackModel.id,
+        )
+        val settings = Settings(
+            fastModelId = DEFAULT_AUTO_MODEL_ID,
+            chatModelId = fallbackModel.id,
+            providers = listOf(
+                ProviderSetting.OpenAI(
+                    name = "RikkaHub Auto",
+                    apiKey = "",
+                    models = listOf(Model(modelId = "auto", id = DEFAULT_AUTO_MODEL_ID)),
+                ),
+                ProviderSetting.OpenAI(
+                    id = fallbackProviderId,
+                    name = "Configured",
+                    apiKey = "configured-key",
+                    models = listOf(fallbackModel),
+                ),
+            ),
+            assistants = listOf(assistant),
+        )
+
+        val selection = selectPetGenerationModel(settings, assistant)
+
+        assertEquals(fallbackModel.id, selection?.model?.id)
+        assertEquals(fallbackProviderId, selection?.provider?.id)
     }
 
     @Test

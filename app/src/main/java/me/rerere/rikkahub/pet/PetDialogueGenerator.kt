@@ -10,13 +10,18 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.jsonObject
 import me.rerere.ai.core.ReasoningLevel
+import me.rerere.ai.provider.Model
 import me.rerere.ai.provider.ModelAbility
 import me.rerere.ai.provider.ProviderManager
+import me.rerere.ai.provider.ProviderSetting
 import me.rerere.ai.provider.TextGenerationParams
 import me.rerere.ai.ui.UIMessage
+import me.rerere.rikkahub.data.datastore.DEFAULT_AUTO_MODEL_ID
+import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.datastore.findModelById
 import me.rerere.rikkahub.data.datastore.findProvider
+import me.rerere.rikkahub.data.model.Assistant
 
 @Serializable
 data class PetModelHandoff(
@@ -60,12 +65,10 @@ class PetDialogueGenerator(
         val settings = settingsStore.settingsFlow.first { !it.init }
         val assistant = settings.assistants.firstOrNull { it.id == persona.assistantId }
             ?: return PetGenerationResult.Failure("pet_assistant_missing")
-        val model = settings.findModelById(settings.fastModelId)
-            ?: settings.findModelById(assistant.chatModelId ?: settings.chatModelId)
-            ?: return PetGenerationResult.Failure("pet_model_missing")
-        val providerSetting = model.findProvider(settings.providers)
-            ?: return PetGenerationResult.Failure("pet_provider_missing")
-        if (!providerSetting.enabled) return PetGenerationResult.Failure("pet_provider_disabled")
+        val selection = selectPetGenerationModel(settings, assistant)
+            ?: return PetGenerationResult.Failure("pet_provider_unavailable")
+        val model = selection.model
+        val providerSetting = selection.provider
         val provider = providerManager.getProviderByType(providerSetting)
         val historyText = history.takeLast(MAX_PET_DIALOGUE_ROUNDS).joinToString("\n") { turn ->
             "用户：${turn.userInput}\n桌宠：${turn.assistantText.orEmpty()}"
@@ -137,6 +140,42 @@ class PetDialogueGenerator(
     }
 }
 
+internal data class PetGenerationModelSelection(
+    val model: Model,
+    val provider: ProviderSetting,
+)
+
+/**
+ * Prefer Fast Model, but do not strand pet dialogue on the credential-less built-in Auto model.
+ * The fallback is the bound assistant's normal chat model and still runs through the pet-only,
+ * zero-tool request above.
+ */
+internal fun selectPetGenerationModel(
+    settings: Settings,
+    assistant: Assistant,
+): PetGenerationModelSelection? {
+    val candidateIds = listOf(
+        settings.fastModelId,
+        assistant.chatModelId ?: settings.chatModelId,
+    ).distinct()
+    return candidateIds.firstNotNullOfOrNull { modelId ->
+        val model = settings.findModelById(modelId) ?: return@firstNotNullOfOrNull null
+        val provider = model.findProvider(settings.providers) ?: return@firstNotNullOfOrNull null
+        if (!isPetGenerationProviderUsable(model, provider)) return@firstNotNullOfOrNull null
+        PetGenerationModelSelection(model, provider)
+    }
+}
+
+internal fun isPetGenerationProviderUsable(
+    model: Model,
+    provider: ProviderSetting,
+): Boolean {
+    if (!provider.enabled) return false
+    return !(model.id == DEFAULT_AUTO_MODEL_ID &&
+        provider is ProviderSetting.OpenAI &&
+        provider.apiKey.isBlank())
+}
+
 internal fun parsePetModelResponse(raw: String, json: Json = Json { ignoreUnknownKeys = true }): PetModelResponse? {
     val trimmed = raw.trim()
         .removePrefix("```json")
@@ -188,6 +227,7 @@ internal fun extractFirstJsonObject(raw: String): String? {
 }
 
 internal fun petGenerationErrorMessage(code: String): String = when (code) {
+    "pet_provider_unavailable" -> "Fast Model 不可用，且第二用户主模型无法回退"
     "pet_model_missing" -> "未找到可用的 Fast Model"
     "pet_provider_missing", "pet_provider_disabled" -> "Fast Model 的服务商不可用"
     "pet_generation_timeout" -> "桌宠回应超时，请重试"
