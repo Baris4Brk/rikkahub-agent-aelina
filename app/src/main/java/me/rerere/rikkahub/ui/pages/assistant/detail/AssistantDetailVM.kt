@@ -24,6 +24,7 @@ import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.data.model.AssistantMemory
 import me.rerere.rikkahub.data.model.Avatar
 import me.rerere.rikkahub.data.model.Tag
+import me.rerere.rikkahub.pet.PetOverlaySelection
 import me.rerere.rikkahub.data.repository.MemoryRepository
 import me.rerere.rikkahub.data.repository.ConversationRepository
 import me.rerere.rikkahub.data.repository.WorkspaceRepository
@@ -234,6 +235,54 @@ class AssistantDetailVM(
                     assistants = current.assistants.map {
                         if (it.id == assistantId) next else it
                     }
+                )
+            }
+            afterUpdate?.invoke()
+        }
+    }
+
+    /** Saves one assistant's visual draft and atomically makes it the sole global pet selection. */
+    fun updatePetSettingsAfter(
+        draft: Assistant,
+        afterUpdate: (() -> Unit)? = null,
+    ) {
+        viewModelScope.launch {
+            settingsStore.update { current ->
+                val prior = current.assistants.firstOrNull { it.id == assistantId }
+                    ?: return@update current
+                val next = draft.copy(id = prior.id)
+                checkAvatarDelete(old = prior, new = next)
+                checkBackgroundDelete(old = prior, new = next)
+                val selection = when {
+                    next.petEnabled && next.privilegedConversationId != null -> {
+                        val existing = current.petOverlaySelection
+                            ?.takeIf {
+                                it.ownerAssistantId == next.id &&
+                                    it.privilegedConversationId == next.privilegedConversationId
+                            }
+                        (existing ?: checkNotNull(PetOverlaySelection.fromLegacy(next))).copy(
+                            enabled = true,
+                            packageId = next.petPackageId,
+                            scale = next.petScale,
+                            animationFps = next.petAnimationFps,
+                            headBoundary = next.petHeadBoundary,
+                            bodyBoundary = next.petBodyBoundary,
+                            idlePoolEnabled = next.petIdlePoolEnabled,
+                        ).normalized()
+                    }
+                    current.petOverlaySelection?.ownerAssistantId == next.id ->
+                        current.petOverlaySelection.copy(enabled = false)
+                    else -> current.petOverlaySelection
+                }
+                current.copy(
+                    assistants = current.assistants.map { assistant ->
+                        when {
+                            assistant.id == assistantId -> next
+                            next.petEnabled -> assistant.copy(petEnabled = false)
+                            else -> assistant
+                        }
+                    },
+                    petOverlaySelection = selection,
                 )
             }
             afterUpdate?.invoke()

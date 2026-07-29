@@ -11,6 +11,7 @@ import java.io.Closeable
 import java.io.File
 import me.rerere.rikkahub.pet.CodexPetVersion
 import me.rerere.rikkahub.pet.PetAction
+import me.rerere.rikkahub.pet.action.PetClipBinding
 import me.rerere.rikkahub.pet.assets.CODEX_ATLAS_COLUMNS
 import me.rerere.rikkahub.pet.assets.CODEX_FRAME_HEIGHT
 import me.rerere.rikkahub.pet.assets.CODEX_FRAME_WIDTH
@@ -44,7 +45,7 @@ class CodexPetAtlas private constructor(
     private val bitmap: Bitmap,
     val version: CodexPetVersion,
     policy: AtlasFramePolicy,
-) : Closeable {
+) : PetSpriteAtlas {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
     private val frameCounts = CodexPetAnimation.entries.associateWith { animation ->
         when (policy) {
@@ -57,6 +58,16 @@ class CodexPetAtlas private constructor(
 
     fun frameCount(animation: CodexPetAnimation): Int = checkNotNull(frameCounts[animation])
 
+    override fun frameCount(clip: PetClipBinding): Int {
+        require(clip.sheetId == PetClipBinding.BASE_SHEET_ID) { "pet_sheet_mismatch" }
+        require(clip.row in 0 until version.expectedRows()) { "pet_clip_row_out_of_range" }
+        val continuous = CodexPetAnimation.entries.firstOrNull { it.row == clip.row }
+            ?.let(::frameCount)
+            ?: detectContinuousFramesAtRow(clip.row).takeIf { it > 0 }
+            ?: clip.frames
+        return clip.frames.coerceIn(1, continuous.coerceIn(1, CODEX_ATLAS_COLUMNS))
+    }
+
     fun sourceRect(animation: CodexPetAnimation, frame: Int): Rect {
         val column = frame.mod(frameCount(animation))
         return Rect(
@@ -67,8 +78,29 @@ class CodexPetAtlas private constructor(
         )
     }
 
+    private fun sourceRect(clip: PetClipBinding, frame: Int): Rect {
+        val column = frame.mod(frameCount(clip))
+        return Rect(
+            column * CODEX_FRAME_WIDTH,
+            clip.row * CODEX_FRAME_HEIGHT,
+            (column + 1) * CODEX_FRAME_WIDTH,
+            (clip.row + 1) * CODEX_FRAME_HEIGHT,
+        )
+    }
+
     fun draw(canvas: Canvas, animation: CodexPetAnimation, frame: Int, destination: RectF) {
         canvas.drawBitmap(bitmap, sourceRect(animation, frame), destination, paint)
+    }
+
+    override fun draw(canvas: Canvas, clip: PetClipBinding, frame: Int, destination: RectF) {
+        if (clip.mirrorX) {
+            canvas.save()
+            canvas.scale(-1f, 1f, destination.centerX(), destination.centerY())
+            canvas.drawBitmap(bitmap, sourceRect(clip, frame), destination, paint)
+            canvas.restore()
+        } else {
+            canvas.drawBitmap(bitmap, sourceRect(clip, frame), destination, paint)
+        }
     }
 
     /** Hit testing uses the currently displayed frame's alpha; transparent pixels pass through. */
@@ -86,6 +118,25 @@ class CodexPetAtlas private constructor(
         ) return false
         val source = sourceRect(animation, frame)
         val x = source.left + (localX / renderedWidth * source.width()).toInt().coerceIn(0, source.width() - 1)
+        val y = source.top + (localY / renderedHeight * source.height()).toInt().coerceIn(0, source.height() - 1)
+        return bitmap.getPixel(x, y).ushr(24) >= alphaThreshold
+    }
+
+    override fun isOpaqueAt(
+        clip: PetClipBinding,
+        frame: Int,
+        localX: Float,
+        localY: Float,
+        renderedWidth: Float,
+        renderedHeight: Float,
+        alphaThreshold: Int,
+    ): Boolean {
+        if (renderedWidth <= 0f || renderedHeight <= 0f ||
+            localX !in 0f..<renderedWidth || localY !in 0f..<renderedHeight
+        ) return false
+        val source = sourceRect(clip, frame)
+        val mappedX = if (clip.mirrorX) renderedWidth - localX else localX
+        val x = source.left + (mappedX / renderedWidth * source.width()).toInt().coerceIn(0, source.width() - 1)
         val y = source.top + (localY / renderedHeight * source.height()).toInt().coerceIn(0, source.height() - 1)
         return bitmap.getPixel(x, y).ushr(24) >= alphaThreshold
     }
@@ -119,9 +170,13 @@ class CodexPetAtlas private constructor(
     }
 
     private fun detectContinuousFrames(animation: CodexPetAnimation): Int {
+        return detectContinuousFramesAtRow(animation.row)
+    }
+
+    private fun detectContinuousFramesAtRow(row: Int): Int {
         var count = 0
         for (column in 0 until CODEX_ATLAS_COLUMNS) {
-            if (!hasVisiblePixel(column, animation.row)) break
+            if (!hasVisiblePixel(column, row)) break
             count += 1
         }
         return count
@@ -159,15 +214,16 @@ class CodexPetAtlas private constructor(
 }
 
 class PetFrameClock(
-    private val fps: Int = 6,
+    val fps: Int = 6,
 ) {
     init {
         require(fps in 4..30)
     }
 
-    fun frameIndex(elapsedMs: Long, frameCount: Int): Int {
+    fun frameIndex(elapsedMs: Long, frameCount: Int, loop: Boolean = true): Int {
         if (frameCount <= 1) return 0
         val frameDuration = 1_000L / fps
-        return ((elapsedMs.coerceAtLeast(0) / frameDuration) % frameCount).toInt()
+        val raw = (elapsedMs.coerceAtLeast(0) / frameDuration).toInt()
+        return if (loop) raw % frameCount else raw.coerceAtMost(frameCount - 1)
     }
 }

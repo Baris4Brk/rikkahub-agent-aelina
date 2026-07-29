@@ -8,23 +8,39 @@ import android.os.SystemClock
 import android.view.Choreographer
 import android.view.MotionEvent
 import android.view.View
-import me.rerere.rikkahub.pet.PetAction
 import me.rerere.rikkahub.pet.PetBodyRegion
-import me.rerere.rikkahub.pet.render.CodexPetAnimation
-import me.rerere.rikkahub.pet.render.CodexPetAtlas
+import me.rerere.rikkahub.pet.PetStatusBadge
+import me.rerere.rikkahub.pet.action.CorePetActions
+import me.rerere.rikkahub.pet.action.PetActionProfile
+import me.rerere.rikkahub.pet.action.PetClipBinding
+import me.rerere.rikkahub.pet.action.PetClipLoopMode
+import me.rerere.rikkahub.pet.action.ResolvedPetAction
 import me.rerere.rikkahub.pet.render.PetFrameClock
+import me.rerere.rikkahub.pet.render.PetSpriteAtlas
+
+data class PetDragEvent(
+    val deltaXpx: Int,
+    val deltaYpx: Int,
+    val horizontalSpeedDpPerSecond: Float,
+    val verticalSpeedDpPerSecond: Float,
+    val finished: Boolean,
+)
 
 class PetSpriteView(
     context: Context,
-    private val atlas: CodexPetAtlas,
+    private val atlas: PetSpriteAtlas,
     private val onInteraction: (String, PetBodyRegion) -> Unit,
-    private val onDrag: (dx: Int, dy: Int, finished: Boolean) -> Unit,
+    private val onDrag: (PetDragEvent) -> Unit,
     private val headBoundary: Float = 0.34f,
     private val bodyBoundary: Float = 0.76f,
-    animationFps: Int = 6,
+    private val defaultAnimationFps: Int = 6,
 ) : View(context), Choreographer.FrameCallback {
-    private val clock = PetFrameClock(animationFps.coerceIn(4, 30))
-    private var animation = CodexPetAnimation.IDLE
+    private var clock = PetFrameClock(defaultAnimationFps.coerceIn(4, 30))
+    private var clip: PetClipBinding = PetActionProfile.standard()
+        .bindings
+        .getValue(CorePetActions.IDLE)
+    private var activeFrameCount = atlas.frameCount(clip)
+    private var loopMode = PetClipLoopMode.LOOP
     private var startedAtMs = SystemClock.uptimeMillis()
     private var frame = 0
     private var running = false
@@ -36,6 +52,9 @@ class PetSpriteView(
     private var downLocalY = 0f
     private var lastLocalX = 0f
     private var lastLocalY = 0f
+    private var lastMotionAtMs = 0L
+    private var lastHorizontalSpeedDpPerSecond = 0f
+    private var lastVerticalSpeedDpPerSecond = 0f
     private var pathLength = 0f
     private var lastTapAtMs = 0L
     private var pendingSingleTap: Runnable? = null
@@ -45,13 +64,36 @@ class PetSpriteView(
         textAlign = Paint.Align.CENTER
         typeface = android.graphics.Typeface.DEFAULT_BOLD
     }
+    private val badgePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        textAlign = Paint.Align.CENTER
+        typeface = android.graphics.Typeface.DEFAULT_BOLD
+    }
+    private var statusBadge: PetStatusBadge? = null
 
-    fun setAction(action: PetAction) {
-        val next = CodexPetAnimation.from(action)
-        if (next == animation) return
-        animation = next
+    /** Renderer-only entrypoint. Business state must go through PetBehaviorOrchestrator. */
+    internal fun setResolvedAction(action: ResolvedPetAction) {
+        val next = action.clip
+        val safeFrameCount = atlas.frameCount(next)
+        val requestedFps = action.clip.fps ?: defaultAnimationFps
+        val safeFps = requestedFps.coerceIn(4, 30)
+        val nextLoopMode = action.clip.loopMode
+        if (next == clip &&
+            activeFrameCount == safeFrameCount &&
+            this.loopMode == nextLoopMode &&
+            clock.fps == safeFps
+        ) return
+        clip = next
+        activeFrameCount = safeFrameCount
+        this.loopMode = nextLoopMode
+        clock = PetFrameClock(safeFps)
         startedAtMs = SystemClock.uptimeMillis()
         frame = 0
+        invalidate()
+    }
+
+    fun setStatusBadge(badge: PetStatusBadge?) {
+        if (statusBadge == badge) return
+        statusBadge = badge
         invalidate()
     }
 
@@ -76,7 +118,8 @@ class PetSpriteView(
         if (!running) return
         val nextFrame = clock.frameIndex(
             elapsedMs = SystemClock.uptimeMillis() - startedAtMs,
-            frameCount = atlas.frameCount(animation),
+            frameCount = activeFrameCount,
+            loop = loopMode == PetClipLoopMode.LOOP,
         )
         if (nextFrame != frame) {
             frame = nextFrame
@@ -87,7 +130,7 @@ class PetSpriteView(
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        atlas.draw(canvas, animation, frame, RectF(0f, 0f, width.toFloat(), height.toFloat()))
+        atlas.draw(canvas, clip, frame, RectF(0f, 0f, width.toFloat(), height.toFloat()))
         val remaining = localFeedbackUntilMs - SystemClock.uptimeMillis()
         if (remaining > 0L) {
             feedbackPaint.textSize = minOf(width, height) * 0.28f
@@ -95,11 +138,12 @@ class PetSpriteView(
             canvas.drawText("♥", width * 0.72f, height * 0.28f, feedbackPaint)
             postInvalidateOnAnimation()
         }
+        statusBadge?.let { drawStatusBadge(canvas, it) }
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean = when (event.actionMasked) {
         MotionEvent.ACTION_DOWN -> {
-            if (!atlas.isOpaqueAt(animation, frame, event.x, event.y, width.toFloat(), height.toFloat())) {
+            if (!atlas.isOpaqueAt(clip, frame, event.x, event.y, width.toFloat(), height.toFloat())) {
                 false
             } else {
                 downRawX = event.rawX
@@ -109,6 +153,9 @@ class PetSpriteView(
                 lastLocalX = event.x
                 lastLocalY = event.y
                 downAtMs = SystemClock.uptimeMillis()
+                lastMotionAtMs = event.eventTime
+                lastHorizontalSpeedDpPerSecond = 0f
+                lastVerticalSpeedDpPerSecond = 0f
                 pathLength = 0f
                 dragged = false
                 true
@@ -123,15 +170,36 @@ class PetSpriteView(
             val displacement = kotlin.math.hypot(event.x - downLocalX, event.y - downLocalY)
             if (displacement > 24f) dragged = true
             if (dragged) {
-                onDrag(dx, dy, false)
+                val elapsedMs = (event.eventTime - lastMotionAtMs).coerceAtLeast(1L)
+                val density = resources.displayMetrics.density.coerceAtLeast(0.1f)
+                lastHorizontalSpeedDpPerSecond = dx / density * 1_000f / elapsedMs
+                lastVerticalSpeedDpPerSecond = dy / density * 1_000f / elapsedMs
+                onDrag(
+                    PetDragEvent(
+                        deltaXpx = dx,
+                        deltaYpx = dy,
+                        horizontalSpeedDpPerSecond = lastHorizontalSpeedDpPerSecond,
+                        verticalSpeedDpPerSecond = lastVerticalSpeedDpPerSecond,
+                        finished = false,
+                    ),
+                )
                 downRawX = event.rawX
                 downRawY = event.rawY
+                lastMotionAtMs = event.eventTime
             }
             true
         }
         MotionEvent.ACTION_UP -> {
             if (dragged) {
-                onDrag(0, 0, true)
+                onDrag(
+                    PetDragEvent(
+                        deltaXpx = 0,
+                        deltaYpx = 0,
+                        horizontalSpeedDpPerSecond = lastHorizontalSpeedDpPerSecond,
+                        verticalSpeedDpPerSecond = lastVerticalSpeedDpPerSecond,
+                        finished = true,
+                    ),
+                )
             } else {
                 val region = regionAt(event.y)
                 val now = SystemClock.uptimeMillis()
@@ -156,7 +224,17 @@ class PetSpriteView(
             true
         }
         MotionEvent.ACTION_CANCEL -> {
-            if (dragged) onDrag(0, 0, true)
+            if (dragged) {
+                onDrag(
+                    PetDragEvent(
+                        deltaXpx = 0,
+                        deltaYpx = 0,
+                        horizontalSpeedDpPerSecond = lastHorizontalSpeedDpPerSecond,
+                        verticalSpeedDpPerSecond = lastVerticalSpeedDpPerSecond,
+                        finished = true,
+                    ),
+                )
+            }
             true
         }
         else -> false
@@ -167,6 +245,25 @@ class PetSpriteView(
         y < height * headBoundary.coerceIn(0.1f, 0.6f) -> PetBodyRegion.HEAD
         y < height * bodyBoundary.coerceIn(headBoundary + 0.1f, 0.95f) -> PetBodyRegion.BODY
         else -> PetBodyRegion.FEET
+    }
+
+    private fun drawStatusBadge(canvas: Canvas, badge: PetStatusBadge) {
+        val (symbol, color) = when (badge) {
+            PetStatusBadge.QUESTION -> "?" to 0xFFF4B400.toInt()
+            PetStatusBadge.FAILURE -> "!" to 0xFFD94343.toInt()
+            PetStatusBadge.SERVICE -> "•" to 0xFF4CAF50.toInt()
+        }
+        val radius = minOf(width, height) * 0.12f
+        val cx = width - radius * 1.15f
+        val cy = radius * 1.15f
+        badgePaint.color = color
+        badgePaint.alpha = 238
+        canvas.drawCircle(cx, cy, radius, badgePaint)
+        badgePaint.color = 0xFFFFFFFF.toInt()
+        badgePaint.textSize = radius * 1.45f
+        badgePaint.alpha = 255
+        val baseline = cy - (badgePaint.ascent() + badgePaint.descent()) / 2
+        canvas.drawText(symbol, cx, baseline, badgePaint)
     }
 
     override fun onDetachedFromWindow() {

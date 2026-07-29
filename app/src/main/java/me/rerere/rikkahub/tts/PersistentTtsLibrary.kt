@@ -10,6 +10,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -30,6 +33,8 @@ data class TtsLibraryEntry(
     val text: String,
     val createdAtMs: Long,
     val chunks: List<TtsLibraryChunk>,
+    /** Optional private scope used only for desktop-pet speaking behaviour. */
+    val ownerKey: String? = null,
 ) {
     val totalBytes: Long get() = chunks.sumOf(TtsLibraryChunk::sizeBytes)
 }
@@ -49,6 +54,20 @@ data class LoadedTtsArtifact(
     val audio: List<TTSResponse>,
 )
 
+sealed interface TtsPlaybackState {
+    data object Silent : TtsPlaybackState
+    data class Speaking(
+        val artifactId: String,
+        val ownerKey: String?,
+    ) : TtsPlaybackState
+}
+
+/** Stable, private ownership key for the bound second-user assistant and conversation. */
+object TtsPlaybackOwner {
+    fun secondUser(assistantId: String, conversationId: String): String =
+        "second_user:$assistantId:$conversationId"
+}
+
 /**
  * File-backed TTS archive. Entries are never pruned automatically.
  *
@@ -66,12 +85,14 @@ class TtsArtifactStore(
     suspend fun save(
         text: String,
         responses: List<TTSResponse>,
+        ownerKey: String? = null,
         createdAtMs: Long = System.currentTimeMillis(),
         artifactId: String = UUID.randomUUID().toString(),
     ): TtsLibraryEntry = mutationMutex.withLock {
         require(text.isNotBlank()) { "TTS text must not be blank" }
         require(responses.isNotEmpty()) { "TTS synthesis produced no audio" }
         require(SAFE_ID.matches(artifactId)) { "Invalid TTS artifact id" }
+        require(ownerKey == null || OWNER_KEY.matches(ownerKey)) { "Invalid TTS playback owner" }
 
         withContext(Dispatchers.IO) {
             root.mkdirsOrThrow()
@@ -99,6 +120,7 @@ class TtsArtifactStore(
                     text = text,
                     createdAtMs = createdAtMs,
                     chunks = chunks,
+                    ownerKey = ownerKey,
                 )
                 File(temporary, MANIFEST_FILE).writeText(json.encodeToString(entry), Charsets.UTF_8)
                 check(temporary.renameTo(destination)) { "Unable to commit TTS artifact" }
@@ -179,6 +201,7 @@ class TtsArtifactStore(
     private companion object {
         const val MANIFEST_FILE = "manifest.json"
         val SAFE_ID = Regex("[A-Za-z0-9_-]{8,80}")
+        val OWNER_KEY = Regex("[A-Za-z0-9:_-]{1,160}")
     }
 }
 
@@ -197,36 +220,63 @@ class PersistentTtsLibrary(
     private val playbackJobLock = Any()
     private var audioPlayer: AudioPlayer? = null
     private var playbackJob: Job? = null
+    private var playbackGeneration = 0L
+    private val _playbackState = MutableStateFlow<TtsPlaybackState>(TtsPlaybackState.Silent)
+    val playbackState: StateFlow<TtsPlaybackState> = _playbackState.asStateFlow()
 
-    suspend fun synthesizeSaveAndQueue(text: String): TtsLibraryEntry {
+    suspend fun synthesizeSaveAndQueue(text: String, ownerKey: String? = null): TtsLibraryEntry {
         require(text.isNotBlank()) { "text is required" }
         val provider = settingsStore.settingsFlow.value.getSelectedTTSProvider()
             ?: error("No TTS provider is configured")
         val chunks = chunker.split(text)
         val responses = chunks.map { chunk -> synthesizer.synthesize(provider, chunk) }
-        val entry = store.save(text = text, responses = responses)
-        check(queueReplay(entry.artifactId)) { "Saved TTS audio could not be queued" }
+        val entry = store.save(text = text, responses = responses, ownerKey = ownerKey)
+        check(queueReplay(entry.artifactId, ownerKey)) { "Saved TTS audio could not be queued" }
         return entry
     }
 
     /** Returns only after the entry is known to exist; playback then runs in application scope. */
-    fun queueReplay(artifactId: String): Boolean {
+    fun queueReplay(artifactId: String, ownerKey: String? = null): Boolean {
         if (!store.contains(artifactId)) return false
         synchronized(playbackJobLock) {
+            val generation = ++playbackGeneration
             playbackJob?.cancel()
             playbackJob = appScope.launchPlayback {
-                val artifact = store.load(artifactId) ?: return@launchPlayback
-                playbackMutex.withLock {
-                    val player = withContext(Dispatchers.Main.immediate) {
-                        audioPlayer ?: AudioPlayer(applicationContext).also { audioPlayer = it }
+                try {
+                    val artifact = store.load(artifactId) ?: return@launchPlayback
+                    val scopedOwner = ownerKey ?: artifact.entry.ownerKey
+                    publishPlaybackState(generation, TtsPlaybackState.Speaking(artifactId, scopedOwner))
+                    playbackMutex.withLock {
+                        val player = withContext(Dispatchers.Main.immediate) {
+                            audioPlayer ?: AudioPlayer(applicationContext).also { audioPlayer = it }
+                        }
+                        artifact.audio.forEach { response ->
+                            withContext(Dispatchers.Main.immediate) { player.play(response) }
+                        }
                     }
-                    artifact.audio.forEach { response ->
-                        withContext(Dispatchers.Main.immediate) { player.play(response) }
-                    }
+                } finally {
+                    publishPlaybackState(generation, TtsPlaybackState.Silent)
                 }
             }
         }
         return true
+    }
+
+    fun stopPlayback() {
+        synchronized(playbackJobLock) {
+            playbackGeneration += 1
+            playbackJob?.cancel()
+            playbackJob = null
+            _playbackState.value = TtsPlaybackState.Silent
+        }
+    }
+
+    private fun publishPlaybackState(generation: Long, state: TtsPlaybackState) {
+        synchronized(playbackJobLock) {
+            if (generation == playbackGeneration) {
+                _playbackState.value = state
+            }
+        }
     }
 
     suspend fun exists(artifactId: String): Boolean = store.get(artifactId) != null

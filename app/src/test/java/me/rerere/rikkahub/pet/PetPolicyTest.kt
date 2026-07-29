@@ -19,7 +19,7 @@ class PetPolicyTest {
     @Test
     fun `safety states always map above local idle`() {
         assertEquals(PetAction.FAILED, PetPresentationMapper.action(SecondUserPresentationStatus.SAFETY_BLOCKED))
-        assertEquals(PetAction.REVIEW, PetPresentationMapper.action(SecondUserPresentationStatus.WAITING_APPROVAL))
+        assertEquals(PetAction.WAITING, PetPresentationMapper.action(SecondUserPresentationStatus.WAITING_APPROVAL))
         assertEquals(PetAction.WAITING, PetPresentationMapper.action(SecondUserPresentationStatus.STALE))
     }
 
@@ -69,6 +69,18 @@ class PetPolicyTest {
         assertEquals("WAVING", parsed?.action)
         assertNull(parsePetModelResponse("模型没有输出约定结构"))
         assertNull(parsePetModelResponse("{}"))
+    }
+
+    @Test
+    fun `visual hint stays semantic while legacy action remains readable`() {
+        val result = buildPetGenerationSuccess(
+            parsed = PetModelResponse(text = "hi", visualHint = "PLAYFUL", action = "WAVING"),
+            input = "hello",
+            handoffMode = PetHandoffMode.CONFIRM,
+        )
+
+        assertEquals(me.rerere.rikkahub.pet.action.PetVisualHint.PLAYFUL, result.visualHint)
+        assertEquals(PetAction.WAVING, result.action)
     }
 
     @Test
@@ -133,9 +145,9 @@ class PetPolicyTest {
     }
 
     @Test
-    fun `pet overlay gestures keep tap local and reserve menus for deliberate gestures`() {
-        assertEquals(PetOverlayGestureAction.LOCAL_FEEDBACK, petOverlayGestureAction("tap"))
-        assertEquals(PetOverlayGestureAction.LOCAL_FEEDBACK, petOverlayGestureAction("pat"))
+    fun `pet overlay gestures use the model for casual touch and reserve menus for deliberate gestures`() {
+        assertEquals(PetOverlayGestureAction.MODEL_RESPONSE, petOverlayGestureAction("tap"))
+        assertEquals(PetOverlayGestureAction.MODEL_RESPONSE, petOverlayGestureAction("pat"))
         assertEquals(PetOverlayGestureAction.QUICK_MENU, petOverlayGestureAction("double_tap"))
         assertEquals(PetOverlayGestureAction.DIALOGUE, petOverlayGestureAction("long_press"))
     }

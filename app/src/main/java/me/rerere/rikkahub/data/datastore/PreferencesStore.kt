@@ -61,6 +61,8 @@ import org.koin.core.component.KoinComponent
 import org.koin.core.component.get
 import kotlin.uuid.Uuid
 import me.rerere.rikkahub.quickcapture.QuickCaptureSettings
+import me.rerere.rikkahub.pet.PetOverlaySelection
+import me.rerere.rikkahub.pet.resolvePetOverlaySelection
 
 private const val TAG = "PreferencesStore"
 
@@ -156,6 +158,7 @@ class SettingsStore(
         val ASSISTANT_TAGS = stringPreferencesKey("assistant_tags")
         val SYSTEM_ASSISTANT_TARGET_ASSISTANT = stringPreferencesKey("system_assistant_target_assistant")
         val QUICK_CAPTURE_SETTINGS = stringPreferencesKey("quick_capture_settings")
+        val PET_OVERLAY_SELECTION = stringPreferencesKey("pet_overlay_selection")
 
         // 搜索
         val SEARCH_SERVICES = stringPreferencesKey("search_services")
@@ -252,6 +255,10 @@ class SettingsStore(
                             JsonInstant.decodeFromString<QuickCaptureSettings>(value).normalized()
                         }.getOrNull()
                     } ?: QuickCaptureSettings(),
+                petOverlaySelection = preferences[PET_OVERLAY_SELECTION]?.let { value ->
+                    runCatching { JsonInstant.decodeFromString<PetOverlaySelection>(value).normalized() }
+                        .getOrNull()
+                },
                 assistantTags = preferences[ASSISTANT_TAGS]?.let {
                     JsonInstant.decodeFromString(it)
                 } ?: emptyList(),
@@ -533,6 +540,9 @@ class SettingsStore(
             preferences[QUICK_CAPTURE_SETTINGS] = JsonInstant.encodeToString(
                 settings.quickCaptureSettings.normalized()
             )
+            settings.petOverlaySelection?.let { selection ->
+                preferences[PET_OVERLAY_SELECTION] = JsonInstant.encodeToString(selection.normalized())
+            } ?: preferences.remove(PET_OVERLAY_SELECTION)
             preferences[ASSISTANT_TAGS] = JsonInstant.encodeToString(settings.assistantTags)
 
             preferences[SEARCH_SERVICES] = JsonInstant.encodeToString(settings.searchServices)
@@ -666,6 +676,22 @@ class SettingsStore(
             )
         }
     }
+
+    /**
+     * One-time conservative migration from the old per-assistant toggle. An ambiguous legacy
+     * configuration is intentionally left untouched until the user makes an explicit choice.
+     */
+    suspend fun migrateLegacyPetOverlaySelection(): Boolean {
+        var migrated = false
+        update { settings ->
+            if (settings.petOverlaySelection != null) return@update settings
+            val resolved = settings.resolvePetOverlaySelection() ?: return@update settings
+            if (!resolved.migratedFromLegacy) return@update settings
+            migrated = true
+            settings.copy(petOverlaySelection = resolved.selection)
+        }
+        return migrated
+    }
 }
 
 @Serializable
@@ -703,6 +729,7 @@ data class Settings(
     val assistantId: Uuid = DEFAULT_ASSISTANT_ID,
     val systemAssistantTargetAssistantId: Uuid? = null,
     val quickCaptureSettings: QuickCaptureSettings = QuickCaptureSettings(),
+    val petOverlaySelection: PetOverlaySelection? = null,
     val providers: List<ProviderSetting> = DEFAULT_PROVIDERS,
     /**
      * IDs of built-in providers the user explicitly removed via long-press. The re-seed

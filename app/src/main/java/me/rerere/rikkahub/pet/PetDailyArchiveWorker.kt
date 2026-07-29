@@ -26,13 +26,13 @@ class PetDailyArchiveWorker(
 
     override suspend fun doWork(): Result = try {
         val settings = settingsStore.settingsFlow.first { !it.init }
-        settings.assistants.filter { it.petEnabled && it.privilegedConversationId != null }
-            .forEach { assistant ->
+        settings.resolvePetOverlaySelection()?.let { selected ->
+            val assistant = selected.assistant
                 repository.ensureActive(
                     assistantId = assistant.id.toString(),
-                    privilegedConversationId = checkNotNull(assistant.privilegedConversationId).toString(),
+                    privilegedConversationId = selected.selection.privilegedConversationId.toString(),
                 )
-            }
+        }
         repository.purgeExpiredTrash()
         dao.getPendingSummaries(100).forEach { summaryScheduler.schedule(it.sessionId) }
         Result.success()

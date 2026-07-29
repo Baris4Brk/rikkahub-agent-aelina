@@ -30,6 +30,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.key
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlin.uuid.Uuid
@@ -37,6 +38,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import me.rerere.rikkahub.data.model.Assistant
+import me.rerere.rikkahub.data.datastore.Settings
+import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.pet.ActivePetDialogue
 import me.rerere.rikkahub.pet.PetAction
 import me.rerere.rikkahub.pet.PetArchiveResult
@@ -53,6 +56,7 @@ import me.rerere.rikkahub.pet.PetHandoffMode
 import me.rerere.rikkahub.pet.PetHandoffStatus
 import me.rerere.rikkahub.pet.PetHandoffSubmitResult
 import me.rerere.rikkahub.pet.PetPersonaSource
+import me.rerere.rikkahub.pet.resolvePetOverlaySelection
 import me.rerere.rikkahub.pet.petGenerationErrorMessage
 import me.rerere.rikkahub.service.ChatService
 import me.rerere.rikkahub.service.chat.PetInteractionSlotResult
@@ -65,7 +69,11 @@ fun PetDialogueCard(
     mainBusy: Boolean,
     modifier: Modifier = Modifier,
 ) {
-    if (!assistant.petEnabled || assistant.privilegedConversationId != conversationId) return
+    val settingsStore: SettingsStore = koinInject()
+    val context = LocalContext.current.applicationContext
+    val settings by settingsStore.settingsFlow.collectAsState(initial = Settings.dummy())
+    val selection = settings.resolvePetOverlaySelection()?.selection
+    if (selection?.ownerAssistantId != assistant.id || selection.privilegedConversationId != conversationId) return
     val repository: PetDialogueRepository = koinInject()
     val generator: PetDialogueGenerator = koinInject()
     val personaSource: PetPersonaSource = koinInject()
@@ -122,6 +130,7 @@ fun PetDialogueCard(
                     val requestId = updated.turns.lastOrNull()?.handoffRequestId
                     val result = requestId?.let { handoffCoordinator.submit(it, automatic = false) }
                     if (result is PetHandoffSubmitResult.Submitted) {
+                        me.rerere.rikkahub.pet.overlay.DesktopPetService.showHandoffVisual(context)
                         localNotice = "已交给第二用户，会按普通任务排队并继续使用原有审批规则。"
                     } else {
                         input = submitted
@@ -242,6 +251,10 @@ fun PetDialogueCard(
                                                         handoff = result.handoff,
                                                     ),
                                                 )
+                                                me.rerere.rikkahub.pet.overlay.DesktopPetService.showDialogueVisual(
+                                                    context,
+                                                    result.visualHint,
+                                                )
                                                 if (result.handoff != null) {
                                                     if (mode == PetHandoffMode.AUTO) {
                                                         autoHandoffId = updated.turns.lastOrNull()?.handoffRequestId
@@ -268,6 +281,7 @@ fun PetDialogueCard(
                                         autoHandoffId?.let { requestId ->
                                             when (handoffCoordinator.submit(requestId, automatic = true)) {
                                                 is PetHandoffSubmitResult.Submitted -> {
+                                                    me.rerere.rikkahub.pet.overlay.DesktopPetService.showHandoffVisual(context)
                                                     localNotice = "桌宠已自动交给第二用户处理。"
                                                 }
                                                 else -> localError = "自动转交暂未成功，请在转交卡片中重试。"

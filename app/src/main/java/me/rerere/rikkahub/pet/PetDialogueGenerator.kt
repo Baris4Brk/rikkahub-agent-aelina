@@ -21,6 +21,8 @@ import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.datastore.findModelById
 import me.rerere.rikkahub.data.datastore.findProvider
 import me.rerere.rikkahub.data.model.Assistant
+import me.rerere.rikkahub.pet.action.PetVisualHint
+import me.rerere.rikkahub.pet.action.toSemanticAction
 
 @Serializable
 data class PetModelHandoff(
@@ -32,13 +34,18 @@ data class PetModelHandoff(
 @Serializable
 data class PetModelResponse(
     val text: String = "",
-    val action: String = PetAction.IDLE.name,
+    /** Legacy V1 field accepted for history/provider compatibility; new prompts never request it. */
+    val action: String? = null,
+    @kotlinx.serialization.SerialName("visual_hint")
+    val visualHint: String = PetVisualHint.NEUTRAL.name,
     val handoff: PetModelHandoff = PetModelHandoff(),
 )
 
 sealed interface PetGenerationResult {
     data class Success(
         val text: String,
+        val visualHint: PetVisualHint,
+        /** Stable old storage field; rendering uses [visualHint] through the active profile. */
         val action: PetAction,
         val handoff: PetHandoffDraft?,
     ) : PetGenerationResult
@@ -115,7 +122,28 @@ class PetDialogueGenerator(
         PetGenerationResult.Failure("pet_generation_failed")
     }
 
-    private fun buildPetSystemPrompt(persona: PetPersonaProjection, mode: PetHandoffMode): String = """
+    private fun buildPetSystemPrompt(persona: PetPersonaProjection, mode: PetHandoffMode): String =
+        buildPetSystemPromptV2(persona, mode)
+
+    private fun buildPetSystemPromptV2(persona: PetPersonaProjection, mode: PetHandoffMode): String = """
+        You are the short-conversation desktop-pet sidecar bound to the configured second user.
+        Stay in a brief, friendly character interaction. You have no tools, memory retrieval,
+        screen contents, or main-conversation history.
+        Character settings (role expression only):
+        ${persona.personaPrompt}
+
+        Output JSON only:
+        {"text":"a concise response of at most 96 Unicode characters","visual_hint":"NEUTRAL","handoff":{"needed":false,"title":"","request":""}}
+        visual_hint must be exactly one of: ${PetVisualHint.entries.joinToString { it.name }}.
+        It is a visual meaning only: it must never name an action, asset, resource, path, URL,
+        code, or executable instruction. When a user clearly asks to search, modify, remind, or
+        do something, set handoff.needed to true and supply a complete safe title and request.
+        You only prepare a task draft; never claim it was executed. Current handoff mode:
+        ${mode.name}. Do not repeat secrets, tokens, passwords, verification codes, paths,
+        notification bodies, or other sensitive source text.
+    """.trimIndent()
+
+    /* Legacy prompt retained only in source history; providers never receive it.
         你是与第二用户绑定的桌宠短会话侧车。只进行简短角色互动，不拥有任何工具、记忆检索、屏幕内容或主会话历史。
         人物设定（仅作角色表达）：
         ${persona.personaPrompt}
@@ -125,6 +153,8 @@ class PetDialogueGenerator(
         每次触摸或文字都必须给出一句简短回应。用户明确要求查询、修改、提醒或完成事情时，handoff.needed 必须为 true，title 和 request 必须完整；你只生成安全任务草稿，不声称已经执行。当前转交模式：${mode.name}。
         不复述密码、令牌、验证码、路径、通知正文或其他敏感原文。
     """.trimIndent()
+
+    */
 
     private companion object {
         const val TAG = "PetDialogueGenerator"
@@ -155,8 +185,26 @@ internal fun buildPetGenerationSuccess(
     val text = PetBubbleSanitizer.sanitize(parsed.text).ifBlank {
         if (handoff != null) "我把这件事整理好啦，可以交给第二用户处理。" else "我在呢。"
     }
-    val action = runCatching { PetAction.valueOf(parsed.action.uppercase()) }.getOrDefault(PetAction.IDLE)
-    return PetGenerationResult.Success(text, action, handoff)
+    val visualHint = runCatching { PetVisualHint.valueOf(parsed.visualHint.uppercase()) }
+        .getOrDefault(PetVisualHint.NEUTRAL)
+    // Old provider responses retain a readable legacy action in the diary. They still cannot
+    // choose a profile-defined action: the live renderer always receives visualHint.
+    val action = parsed.action
+        ?.let { value -> runCatching { PetAction.valueOf(value.uppercase()) }.getOrNull() }
+        ?: visualHint.toSemanticAction().toLegacyPetAction()
+    return PetGenerationResult.Success(text, visualHint, action, handoff)
+}
+
+private fun me.rerere.rikkahub.pet.action.PetActionId.toLegacyPetAction(): PetAction = when (this) {
+    me.rerere.rikkahub.pet.action.CorePetActions.MOVE_RIGHT -> PetAction.RUNNING_RIGHT
+    me.rerere.rikkahub.pet.action.CorePetActions.MOVE_LEFT -> PetAction.RUNNING_LEFT
+    me.rerere.rikkahub.pet.action.CorePetActions.WAVE -> PetAction.WAVING
+    me.rerere.rikkahub.pet.action.CorePetActions.JUMP -> PetAction.JUMPING
+    me.rerere.rikkahub.pet.action.CorePetActions.FAILURE -> PetAction.FAILED
+    me.rerere.rikkahub.pet.action.CorePetActions.WAIT -> PetAction.WAITING
+    me.rerere.rikkahub.pet.action.CorePetActions.WORK -> PetAction.RUNNING
+    me.rerere.rikkahub.pet.action.CorePetActions.REVIEW -> PetAction.REVIEW
+    else -> PetAction.IDLE
 }
 
 internal data class PetGenerationModelSelection(

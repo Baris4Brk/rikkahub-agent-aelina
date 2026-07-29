@@ -225,8 +225,8 @@ class DoctorChecks(
                 id = "pet.assets",
                 category = DoctorCategory.AssistantInfo,
                 label = "Pet package and persona projection",
-                detail = "Missing packages: ${snapshot.missingPackages.size}; truncated personas: ${snapshot.truncatedPersonas.size}; pending summaries: ${snapshot.pendingSummaries}.",
-                severity = if (snapshot.missingPackages.isEmpty()) Severity.OK else Severity.WARN,
+                detail = "Global selection: ${if (snapshot.globalSelectionConfigured) "configured" else "needs selection"}; profile: ${snapshot.runtimeDiagnostics.profileId ?: "not loaded"}; renderer: ${snapshot.runtimeDiagnostics.rendererType ?: "not loaded"}; capabilities: ${snapshot.runtimeDiagnostics.supportedActionCount}; current: ${snapshot.runtimeDiagnostics.displayedActionId ?: "none"}; one-shot: ${snapshot.runtimeDiagnostics.activeOneShotActionId ?: "none"}; resource validation: ${snapshot.runtimeDiagnostics.resourceValid ?: "unknown"}; missing packages: ${snapshot.missingPackages.size}; truncated personas: ${snapshot.truncatedPersonas.size}; pending summaries: ${snapshot.pendingSummaries}; recent redacted action rejections: ${snapshot.rejectedActionCount}/${snapshot.actionTraceCount}.",
+                severity = if (snapshot.globalSelectionConfigured && snapshot.missingPackages.isEmpty() && snapshot.runtimeDiagnostics.resourceValid != false) Severity.OK else Severity.WARN,
             ),
         )
     }

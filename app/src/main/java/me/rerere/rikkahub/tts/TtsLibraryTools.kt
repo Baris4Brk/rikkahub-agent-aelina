@@ -12,6 +12,21 @@ import me.rerere.ai.ui.UIMessagePart
 import me.rerere.rikkahub.data.ai.InvocationSurfacePolicy
 import me.rerere.rikkahub.data.ai.tools.ToolInvocationContext
 
+/**
+ * Only a locally confirmed second-user task receives a speaking scope. Remote, workflow, pet
+ * and unscoped calls may still use TTS if otherwise permitted, but cannot animate the desktop pet.
+ */
+fun secondUserTtsOwnerKey(context: ToolInvocationContext): String? {
+    val privilege = context.privilege ?: return null
+    if (!privilege.isPrivileged || !privilege.expandLocalTools) return null
+    if (privilege.privilegedConversationId != privilege.conversationId) return null
+    if (context.callOrigin !in InvocationSurfacePolicy.CONFIRMED_LOCAL_SECOND_USER) return null
+    val assistantId = privilege.assistantId.toString()
+    val conversationId = privilege.conversationId.toString()
+    if (context.callerAssistantId != assistantId || context.callerConversationId != conversationId) return null
+    return TtsPlaybackOwner.secondUser(assistantId, conversationId)
+}
+
 /** Local-only history tools for the configured second-user conversation. */
 class TtsLibraryToolProvider(
     private val library: PersistentTtsLibrary,

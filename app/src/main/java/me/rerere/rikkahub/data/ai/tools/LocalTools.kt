@@ -635,8 +635,8 @@ class LocalTools(
         )
     }
 
-    val ttsTool by lazy {
-        Tool(
+    private fun ttsTool(ownerKey: String?): Tool {
+        return Tool(
             name = "text_to_speech",
             description = """
                 Speak text aloud to the user using the device's text-to-speech engine.
@@ -659,7 +659,7 @@ class LocalTools(
             execute = {
                 val text = it.jsonObject["text"]?.jsonPrimitive?.contentOrNull
                     ?: error("text is required")
-                val entry = persistentTtsLibrary.synthesizeSaveAndQueue(text)
+                val entry = persistentTtsLibrary.synthesizeSaveAndQueue(text, ownerKey)
                 val payload = buildJsonObject {
                     put("success", true)
                     put("saved", true)
@@ -775,7 +775,7 @@ class LocalTools(
             tools.add(clipboardTool)
         }
         if (options.contains(LocalToolOption.Tts)) {
-            tools.add(ttsTool)
+            tools.add(ttsTool(me.rerere.rikkahub.tts.secondUserTtsOwnerKey(invocationContext)))
             tools.addAll(ttsLibraryToolProvider.tools(invocationContext))
         }
         if (options.contains(LocalToolOption.AskUser)) {

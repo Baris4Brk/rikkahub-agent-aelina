@@ -48,6 +48,7 @@ fun PetSettingsDialog(
     var draft by remember(assistant) { mutableStateOf(assistant) }
     var status by remember { mutableStateOf<String?>(null) }
     var replacementUri by remember { mutableStateOf<Uri?>(null) }
+    var showProfileEditor by remember { mutableStateOf(false) }
 
     fun importPackage(uri: Uri, replace: Boolean) {
         scope.launch {
@@ -107,6 +108,11 @@ fun PetSettingsDialog(
                     Text(if (draft.petPackageId == null) "导入 .codex-pet.zip" else "更换桌宠资源")
                 }
                 Text("当前：${draft.petPackageId ?: "静态应用占位图"}")
+                if (draft.petPackageId != null) {
+                    TextButton(onClick = { showProfileEditor = true }) {
+                        Text("编辑安全视觉动作")
+                    }
+                }
                 Text("桌宠大小 ${(draft.petScale.coerceIn(0.05f, 2.0f) * 100).roundToInt()}%")
                 Slider(
                     value = draft.petScale.coerceIn(0.05f, 2.0f),
@@ -122,6 +128,20 @@ fun PetSettingsDialog(
                     valueRange = 4f..12f,
                     steps = 7,
                 )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Column {
+                        Text("空闲动作池")
+                        Text("默认关闭；仅在亮屏、真正空闲且非省电/低电量时随机播放", style = MaterialTheme.typography.bodySmall)
+                    }
+                    Switch(
+                        checked = draft.petIdlePoolEnabled,
+                        onCheckedChange = { draft = draft.copy(petIdlePoolEnabled = it) },
+                    )
+                }
                 OutlinedTextField(
                     value = draft.petSupplement.orEmpty(),
                     onValueChange = { draft = draft.copy(petSupplement = it.take(2_000)) },
@@ -203,4 +223,10 @@ fun PetSettingsDialog(
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
+    draft.petPackageId?.takeIf { showProfileEditor }?.let { packageId ->
+        PetVisualProfileEditorDialog(
+            packageId = packageId,
+            onDismiss = { showProfileEditor = false },
+        )
+    }
 }

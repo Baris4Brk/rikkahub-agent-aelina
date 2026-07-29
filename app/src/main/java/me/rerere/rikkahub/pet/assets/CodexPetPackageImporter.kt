@@ -8,12 +8,15 @@ import java.util.zip.ZipInputStream
 import kotlin.uuid.Uuid
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import me.rerere.rikkahub.pet.profile.PetProfileCodec
+import me.rerere.rikkahub.pet.profile.ValidatedPetProfile
 
 data class InstalledPetPackage(
     val manifest: CodexPetManifest,
     val directory: File,
     val spritesheet: File,
     val imageInfo: PetImageInfo,
+    val profile: ValidatedPetProfile,
 )
 
 /** Imports declarative image/JSON-only Codex Pet packages into app-private storage. */
@@ -48,6 +51,19 @@ class CodexPetPackageImporter(
             ) {
                 throw PetPackageException("pet_spritesheet_dimensions_invalid")
             }
+            val profileFile = File(contentRoot, PetProfileCodec.PROFILE_FILE_NAME)
+            val profile = if (profileFile.isFile) {
+                val rawProfile = profileFile.readBytes()
+                if (rawProfile.size > MAX_PROFILE_BYTES) throw PetPackageException("pet_profile_too_large")
+                PetProfileCodec.decodeAndValidate(
+                    raw = rawProfile.decodeUtf8BomAware(),
+                    manifest = manifest,
+                    packageRoot = contentRoot,
+                    imageProbe = imageProbe,
+                )
+            } else {
+                PetProfileCodec.defaultProfile(manifest)
+            }
 
             val target = File(petsRoot, manifest.id)
             if (target.exists() && !replaceExisting) throw PetPackageException("pet_id_exists")
@@ -78,6 +94,7 @@ class CodexPetPackageImporter(
                 directory = target,
                 spritesheet = safeChild(target, manifest.resolvedSpritesheetPath),
                 imageInfo = image,
+                profile = profile,
             )
         } finally {
             staging.deleteRecursively()
@@ -183,6 +200,7 @@ class CodexPetPackageImporter(
         const val INTERNAL_METADATA_NAME = "internal-metadata.json"
         const val MAX_FILES = 32
         const val MAX_JSON_BYTES = 512 * 1024
+        const val MAX_PROFILE_BYTES = 128 * 1024
         const val MAX_SINGLE_FILE_BYTES = 20L * 1024 * 1024
         const val MAX_TOTAL_BYTES = 32L * 1024 * 1024
         val DRIVE_PREFIX = Regex("^[a-zA-Z]:")

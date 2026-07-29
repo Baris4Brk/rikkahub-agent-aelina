@@ -1,0 +1,73 @@
+package me.rerere.rikkahub.pet
+
+import kotlin.uuid.Uuid
+import me.rerere.rikkahub.data.datastore.Settings
+import me.rerere.rikkahub.data.model.Assistant
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class PetOverlaySelectionTest {
+    @Test
+    fun `one legacy enabled pet migrates conservatively`() {
+        val conversation = Uuid.random()
+        val assistant = Assistant(
+            id = Uuid.random(),
+            petEnabled = true,
+            privilegedConversationId = conversation,
+            petPackageId = "codex.sample",
+            petScale = 1.4f,
+        )
+
+        val resolved = Settings(assistants = listOf(assistant)).resolvePetOverlaySelection()
+
+        assertTrue(resolved?.migratedFromLegacy == true)
+        assertEquals(assistant.id, resolved?.selection?.ownerAssistantId)
+        assertEquals(conversation, resolved?.selection?.privilegedConversationId)
+        assertEquals("codex.sample", resolved?.selection?.packageId)
+    }
+
+    @Test
+    fun `ambiguous legacy pets never choose an owner`() {
+        val first = Assistant(id = Uuid.random(), petEnabled = true, privilegedConversationId = Uuid.random())
+        val second = Assistant(id = Uuid.random(), petEnabled = true, privilegedConversationId = Uuid.random())
+
+        assertNull(Settings(assistants = listOf(first, second)).resolvePetOverlaySelection())
+    }
+
+    @Test
+    fun `explicit global choice fails closed when conversation is reassigned`() {
+        val assistant = Assistant(id = Uuid.random(), privilegedConversationId = Uuid.random(), petEnabled = true)
+        val wrongConversation = Uuid.random()
+        val settings = Settings(
+            assistants = listOf(assistant),
+            petOverlaySelection = PetOverlaySelection(
+                ownerAssistantId = assistant.id,
+                privilegedConversationId = wrongConversation,
+                enabled = true,
+            ),
+        )
+
+        assertNull(settings.resolvePetOverlaySelection())
+    }
+
+    @Test
+    fun `selection normalizes untrusted visual values`() {
+        val normalized = PetOverlaySelection(
+            ownerAssistantId = Uuid.random(),
+            privilegedConversationId = Uuid.random(),
+            scale = 99f,
+            animationFps = 99,
+            normalizedX = 3f,
+            normalizedY = -1f,
+        ).normalized()
+
+        assertEquals(2f, normalized.scale)
+        assertEquals(12, normalized.animationFps)
+        assertEquals(1f, normalized.normalizedX)
+        assertEquals(0f, normalized.normalizedY)
+        assertFalse(normalized.idlePoolEnabled)
+    }
+}

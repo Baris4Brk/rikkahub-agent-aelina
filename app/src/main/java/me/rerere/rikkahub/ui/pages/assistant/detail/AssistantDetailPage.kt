@@ -187,8 +187,8 @@ fun AssistantDetailPage(id: String) {
             assistant = assistant,
             onDismiss = { showPetSettings = false },
             onUpdate = { next, afterUpdate ->
-                vm.updateAssistantAfter(
-                    transform = { current -> next.copy(id = current.id) },
+                vm.updatePetSettingsAfter(
+                    draft = next,
                     afterUpdate = afterUpdate,
                 )
             },

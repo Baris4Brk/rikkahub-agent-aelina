@@ -76,6 +76,8 @@ import me.rerere.rikkahub.pet.AndroidPetSummaryScheduler
 import me.rerere.rikkahub.pet.PetDiarySummarizer
 import me.rerere.rikkahub.pet.PetHandoffRecovery
 import me.rerere.rikkahub.pet.PetDiagnostics
+import me.rerere.rikkahub.pet.behavior.PetActionTraceStore
+import me.rerere.rikkahub.pet.behavior.PetRuntimeDiagnostics
 import me.rerere.rikkahub.service.chat.DurableCommandQueue
 import me.rerere.rikkahub.data.ai.mcp.McpManager
 import me.rerere.rikkahub.data.agentrun.AgentRunBootRecovery
@@ -262,7 +264,18 @@ val dataSourceModule = module {
     single { PetPersonaSource(settingsStore = get()) }
     single { PetDialogueGenerator(settingsStore = get(), providerManager = get()) }
     single { PetDiarySummarizer(settingsStore = get(), providerManager = get()) }
-    single { PetDiagnostics(context = get(), dao = get(), settingsStore = get(), summaryScheduler = get()) }
+    single { PetActionTraceStore() }
+    single { PetRuntimeDiagnostics() }
+    single {
+        PetDiagnostics(
+            context = get(),
+            dao = get(),
+            settingsStore = get(),
+            summaryScheduler = get(),
+            actionTraceStore = get(),
+            runtimeDiagnosticsStore = get(),
+        )
+    }
     single { me.rerere.rikkahub.data.execution.ExecutionConsistencyMetrics() }
     single {
         me.rerere.rikkahub.data.execution.ExecutionStateTransaction(

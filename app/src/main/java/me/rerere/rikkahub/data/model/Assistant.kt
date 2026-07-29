@@ -117,6 +117,8 @@ data class Assistant(
     val petScale: Float = 1.0f,
     /** Atlas playback rate. A calm default avoids rapidly looping short idle animations. */
     val petAnimationFps: Int = 6,
+    /** Optional local idle variety; global selection remains disabled by default. */
+    val petIdlePoolEnabled: Boolean = false,
 )
 
 @Serializable

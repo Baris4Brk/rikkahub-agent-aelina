@@ -9,6 +9,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import me.rerere.rikkahub.data.datastore.SettingsStore
+import me.rerere.rikkahub.pet.resolvePetOverlaySelection
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.inject
 
@@ -21,7 +22,8 @@ class DesktopPetBootReceiver : BroadcastReceiver(), KoinComponent {
         CoroutineScope(SupervisorJob() + Dispatchers.Default).launch {
             try {
                 val settings = settingsStore.settingsFlow.first { !it.init }
-                if (settings.assistants.any { it.petEnabled && it.petBootRestoreEnabled }) {
+                val selected = settings.resolvePetOverlaySelection()
+                if (selected?.assistant?.petBootRestoreEnabled == true) {
                     DesktopPetService.start(context)
                 }
             } finally {

@@ -39,6 +39,7 @@ import me.rerere.rikkahub.data.files.FilesManager
 import me.rerere.rikkahub.data.files.FileFolders
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.ai.tools.HeadlessConversations
+import me.rerere.rikkahub.pet.resolvePetOverlaySelection
 import me.rerere.rikkahub.service.WebServerService
 import me.rerere.rikkahub.utils.CrashHandler
 import me.rerere.rikkahub.utils.DatabaseUtil
@@ -123,6 +124,7 @@ class RikkaHubApp : Application() {
         // user-visible. Existing START_STICKY services restore independently.
         restoreWorkspaceProcessesWhenForegrounded()
         restoreQuickCaptureWhenForegrounded()
+        restoreDesktopPetWhenForegrounded()
 
         // sync upload files to DB
         syncManagedFiles()
@@ -528,6 +530,33 @@ class RikkaHubApp : Application() {
                         }
                     }.onFailure {
                         Log.w(TAG, "restoreQuickCaptureWhenForegrounded failed", it)
+                    }
+                }
+            }
+        })
+    }
+
+    /**
+     * Unlike boot restore, this runs only after the user explicitly brings RikkaHub to the
+     * foreground. This makes an enabled pet return after Android kills the app process without
+     * turning the pet into an unsolicited boot-time foreground service.
+     */
+    private fun restoreDesktopPetWhenForegrounded() {
+        ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
+            override fun onStart(owner: LifecycleOwner) {
+                get<AppScope>().launch(Dispatchers.IO) {
+                    runCatching {
+                        val settings = get<SettingsStore>().settingsFlow.first { !it.init }
+                        if (me.rerere.rikkahub.pet.overlay.PetOverlayRestorePolicy
+                                .shouldRestoreOnAppForeground(
+                                    selection = settings.resolvePetOverlaySelection()?.selection,
+                                    overlayPermissionGranted = android.provider.Settings.canDrawOverlays(this@RikkaHubApp),
+                                )
+                        ) {
+                            me.rerere.rikkahub.pet.overlay.DesktopPetService.start(this@RikkaHubApp)
+                        }
+                    }.onFailure {
+                        Log.w(TAG, "restoreDesktopPetWhenForegrounded failed", it)
                     }
                 }
             }
