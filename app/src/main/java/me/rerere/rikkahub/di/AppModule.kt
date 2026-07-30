@@ -788,6 +788,8 @@ val appModule = module {
             setupTransactionCoordinator = get(),
             displayAutomationRuntime = get(),
             toolExperienceRepository = get(),
+            toolShortcutRepository = get(),
+            secondUserAuthorityService = get(),
         )
     }
     single {
@@ -802,6 +804,7 @@ val appModule = module {
             cancellation = get(),
             chatService = get(),
             toolExperiences = get(),
+            toolShortcuts = get(),
         )
     }
 

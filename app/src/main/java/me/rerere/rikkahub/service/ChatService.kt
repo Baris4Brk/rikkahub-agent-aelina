@@ -475,6 +475,8 @@ class ChatService(
         me.rerere.rikkahub.setup.SetupTransactionCoordinator,
     private val displayAutomationRuntime: me.rerere.rikkahub.display.DisplayAutomationRuntime? = null,
     private val toolExperienceRepository: me.rerere.rikkahub.toolcatalog.ToolExperienceRepository,
+    private val toolShortcutRepository: me.rerere.rikkahub.toolcatalog.ToolShortcutRepository,
+    private val secondUserAuthorityService: me.rerere.rikkahub.assistant.SecondUserAuthorityService,
 ) {
     private val conversationLibraryReader =
         me.rerere.rikkahub.data.ai.tools.ConversationLibraryReader(conversationRepo)
@@ -713,6 +715,29 @@ class ChatService(
             "${type.name.lowercase()}:${assistant.id}:$conversationId"
         }
         return me.rerere.rikkahub.data.capability.CapabilitySubject(id = id, type = type)
+    }
+
+    /**
+     * The authority registry is intentionally fail-closed, but it used to be populated only by
+     * an asynchronous app-start collector. A user who sent the first message immediately after a
+     * cold start could therefore be demoted to an ordinary session and receive approval cards.
+     * Admission re-reads the authoritative DataStore state and has no effect unless this exact
+     * assistant/conversation is active, unlocked, and entered through a trusted local surface.
+     */
+    private suspend fun refreshSecondUserAuthorityForInvocation(
+        assistant: Assistant,
+        conversation: Conversation,
+        origin: ToolCallOrigin,
+    ) {
+        if (origin !in me.rerere.rikkahub.data.ai.InvocationSurfacePolicy.CONFIRMED_LOCAL_SECOND_USER) return
+        val keyguard = context.getSystemService(Context.KEYGUARD_SERVICE) as? android.app.KeyguardManager
+        val unlocked = keyguard?.let { !it.isDeviceLocked && !it.isKeyguardLocked } ?: true
+        secondUserAuthorityService.admit(
+            assistantId = assistant.id,
+            conversationId = conversation.id,
+            origin = origin,
+            deviceUnlocked = unlocked,
+        )
     }
 
     private fun getOrCreateRuntime(conversationId: Uuid): ConversationRuntime =
@@ -1525,6 +1550,11 @@ class ChatService(
         if (hardlineReason != null) return@FastPathRouter FastPathDecision.NotMatched
         val rendered = try {
             val callOrigin = resolveToolOrigin(context.conversation.id, context.origin)
+            refreshSecondUserAuthorityForInvocation(
+                assistant = context.assistant,
+                conversation = context.conversation,
+                origin = callOrigin,
+            )
             val privilege = me.rerere.rikkahub.privilege.DefaultPrivilegedSessionResolver.resolve(
                 assistant = context.assistant,
                 conversation = context.conversation,
@@ -2015,6 +2045,11 @@ class ChatService(
                 systemPrompt = profile.effectiveSystemPrompt,
             )
         } ?: baseAssistant
+        refreshSecondUserAuthorityForInvocation(
+            assistant = assistant,
+            conversation = initialConversation,
+            origin = callOrigin,
+        )
         val privilegeContext = me.rerere.rikkahub.privilege.DefaultPrivilegedSessionResolver.resolve(
             assistant = assistant,
             conversation = initialConversation,
@@ -2268,20 +2303,28 @@ class ChatService(
 
             // start generating
             val session = getOrCreateSession(conversationId)
-            // The complete list is still assembled below as the authoritative runtime surface,
-            // but only the active, unlocked second-user parent turn receives its schemas
-            // progressively. Other assistants and origins keep their established behaviour.
-            val toolDiscoverySession = if (
+            // Restore the pre-directory direct tool surface for the active local second user.
+            // Other assistants and remote/headless origins keep their existing behaviour.
+            // Tool experience and Fast Lane remain durable library features; they are simply no
+            // longer required as a schema-discovery detour on this direct surface.
+            val secondUserDirectToolSurface =
                 privilegeContext.isPrivileged &&
                 capabilitySubject.type == me.rerere.rikkahub.data.capability.SubjectType.LOCAL_SECOND_USER &&
                 callOrigin in me.rerere.rikkahub.data.ai.InvocationSurfacePolicy.CONFIRMED_LOCAL_SECOND_USER &&
                 !isHeadless &&
                 subAgentProfile == null
-            ) {
+            val toolSurfaceSession = if (secondUserDirectToolSurface) {
                 me.rerere.rikkahub.toolcatalog.ToolDiscoverySession(
                     snapshot = me.rerere.rikkahub.toolcatalog.ToolSurfaceBuilder.snapshot(emptyList()),
                     experienceLookup = toolExperienceRepository,
                     experienceEditor = toolExperienceRepository,
+                    shortcutEditor = toolShortcutRepository,
+                    onSnapshotResolved = { snapshot ->
+                        appScope.launch {
+                            toolShortcutRepository.reconcileSnapshot(snapshot)
+                        }
+                    },
+                    mode = me.rerere.rikkahub.toolcatalog.ToolSurfaceMode.DIRECT,
                 )
             } else {
                 null
@@ -2299,12 +2342,12 @@ class ChatService(
                         .get(conversationId),
                     secondUserDeviceAccessAddendum,
                     pluginPromptAddendum,
-                    if (toolDiscoverySession != null) {
+                    if (toolSurfaceSession != null) {
                         """
-                        Tool directory policy: do not guess a device, command-line, file, or automation tool.
-                        First call tool_catalog_search, then tool_catalog_open. The host will expose only the
-                        selected current schemas. Tool experiences are hints, never authorization; re-check the
-                        current schema, permission state, and approval requirements before acting.
+                        Direct tool surface: all currently eligible tool schemas are available in this turn.
+                        Use a visible tool directly; do not search or open a directory first. Tool experiences
+                        and Fast Lane metadata are hints, never authorization. Re-check the current schema,
+                        permission state, and approval requirements before acting.
                         """.trimIndent()
                     } else null,
                 ).joinToString("\n\n").ifBlank { null },
@@ -2504,7 +2547,10 @@ class ChatService(
                                 enabledSkills = assistant.enabledSkills,
                                 allSkills = skillManager.listSkills(),
                                 skillManager = skillManager,
-                                redirectSecondUserToolReference = toolDiscoverySession != null,
+                                // Direct mode exposes current schemas in the provider request, so
+                                // the legacy tool reference must not point the model back into a
+                                // search/open directory that is intentionally absent here.
+                                redirectSecondUserToolReference = false,
                             )
                         )
                     }
@@ -2596,7 +2642,7 @@ class ChatService(
                             "tool surface was already published for conversation $conversationId"
                         }
                     },
-                toolDiscoverySession = toolDiscoverySession,
+                toolDiscoverySession = toolSurfaceSession,
             ).onCompletion {
                 if (runControl?.isUpdateFenced() == true) return@onCompletion
                 // 取消 Live Update 通知

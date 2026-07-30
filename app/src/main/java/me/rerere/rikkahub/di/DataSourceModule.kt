@@ -52,6 +52,7 @@ import me.rerere.rikkahub.data.db.migrations.MIGRATION_36_37
 import me.rerere.rikkahub.data.db.migrations.MIGRATION_37_38
 import me.rerere.rikkahub.data.db.migrations.MIGRATION_38_39
 import me.rerere.rikkahub.data.db.migrations.MIGRATION_39_40
+import me.rerere.rikkahub.data.db.migrations.MIGRATION_40_41
 import me.rerere.rikkahub.data.repository.MemorySearchIndex
 import me.rerere.rikkahub.data.repository.MemoryRetriever
 import me.rerere.rikkahub.memory.AndroidMemoryWorkScheduler
@@ -129,6 +130,7 @@ val dataSourceModule = module {
                 MIGRATION_37_38,
                 MIGRATION_38_39,
                 MIGRATION_39_40,
+                MIGRATION_40_41,
             )
             .addCallback(object : RoomDatabase.Callback() {
                 override fun onOpen(db: SupportSQLiteDatabase) {
@@ -254,7 +256,14 @@ val dataSourceModule = module {
     single { PetDialogueRepository(database = get(), dao = get(), summaryScheduler = get()) }
     single { get<AppDatabase>().toolExperienceDao() }
     single { me.rerere.rikkahub.toolcatalog.ToolExperienceRepository(database = get(), dao = get()) }
-    single { me.rerere.rikkahub.diagnostics.ToolCatalogDiagnostics(experiences = get()) }
+    single { get<AppDatabase>().toolShortcutDao() }
+    single { me.rerere.rikkahub.toolcatalog.ToolShortcutRepository(database = get(), dao = get()) }
+    single {
+        me.rerere.rikkahub.diagnostics.ToolCatalogDiagnostics(
+            experiences = get(),
+            shortcuts = get(),
+        )
+    }
     single {
         PetHandoffCoordinator(
             database = get(),
@@ -312,6 +321,7 @@ val dataSourceModule = module {
         me.rerere.rikkahub.toolcatalog.ToolExperienceRecorder(
             executionRepository = get(),
             experiences = get(),
+            shortcuts = get(),
         )
     }
     single {

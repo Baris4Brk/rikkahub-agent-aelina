@@ -47,12 +47,12 @@ object ImportedDatabaseReconciler {
 
     /**
      * Room's schema version and identity hash for [AppDatabase]. Both are copied verbatim
-     * from app/schemas/me.rerere.rikkahub.data.db.AppDatabase/40.json. When the schema
+     * from app/schemas/me.rerere.rikkahub.data.db.AppDatabase/41.json. When the schema
      * version is bumped, update BOTH constants (and the table DDL below if the fork-only
      * tables changed) or this reconciliation will silently stop matching.
      */
-    internal const val EXPECTED_VERSION = 40
-    internal const val EXPECTED_IDENTITY_HASH = "bf0cc9fcad994a73ac34982cf526e2ce"
+    internal const val EXPECTED_VERSION = 41
+    internal const val EXPECTED_IDENTITY_HASH = "0fc584fa99bb47672eb041a415f4b8c7"
     internal const val PRE_STORAGE_MODE_V35_IDENTITY_HASH = "2a74d694211f0df9f9094c7571ec71dd"
 
     internal enum class ReconcilePlan {
@@ -467,6 +467,16 @@ object ImportedDatabaseReconciler {
         ).forEach(db::execSQL)
     }
 
+    /** Same-version upstream v41 backups need the private model-confirmed shortcut metadata. */
+    private fun ensureToolShortcutV41Schema(db: SQLiteDatabase) {
+        listOf(
+            "CREATE TABLE IF NOT EXISTS `tool_shortcuts` (`shortcut_id` TEXT NOT NULL, `authority_subject_id` TEXT NOT NULL, `tool_name` TEXT NOT NULL, `source` TEXT NOT NULL, `category_path` TEXT NOT NULL, `risk` TEXT NOT NULL, `schema_fingerprint` TEXT NOT NULL, `state` TEXT NOT NULL, `state_version` INTEGER NOT NULL, `created_at_ms` INTEGER NOT NULL, `updated_at_ms` INTEGER NOT NULL, `last_used_at_ms` INTEGER, `use_count` INTEGER NOT NULL, `model_confirmed_at_ms` INTEGER NOT NULL, PRIMARY KEY(`shortcut_id`))",
+            "CREATE INDEX IF NOT EXISTS `index_tool_shortcuts_authority_subject_id_state_updated_at_ms` ON `tool_shortcuts` (`authority_subject_id`, `state`, `updated_at_ms`)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS `index_tool_shortcuts_authority_subject_id_tool_name_schema_fingerprint` ON `tool_shortcuts` (`authority_subject_id`, `tool_name`, `schema_fingerprint`)",
+            "CREATE INDEX IF NOT EXISTS `index_tool_shortcuts_tool_name_state` ON `tool_shortcuts` (`tool_name`, `state`)",
+        ).forEach(db::execSQL)
+    }
+
     private fun ensureCapabilityGrantsV35Schema(db: SQLiteDatabase) {
         listOf(
             "CREATE TABLE IF NOT EXISTS `capability_grants` (`id` TEXT NOT NULL, `subject_id` TEXT NOT NULL, `subject_type` TEXT NOT NULL, `capability_key` TEXT NOT NULL, `resource_kind` TEXT NOT NULL, `resource_identifier` TEXT NOT NULL, `allowed_origins` TEXT NOT NULL, `scope` TEXT NOT NULL, `expires_at_ms` INTEGER, `revoked` INTEGER NOT NULL, `created_at_ms` INTEGER NOT NULL, `updated_at_ms` INTEGER NOT NULL, PRIMARY KEY(`id`))",
@@ -610,6 +620,7 @@ object ImportedDatabaseReconciler {
                     if (version >= 38) ensurePetV38Schema(db)
                     if (version >= 39) ensurePendingCommandAuthorityV39Schema(db)
                     if (version >= 40) ensureToolExperienceV40Schema(db)
+                    if (version >= 41) ensureToolShortcutV41Schema(db)
 
                     // Older backups must keep their original user_version so Room can run
                     // every real migration (including 28→29). Precreating fork-only tables

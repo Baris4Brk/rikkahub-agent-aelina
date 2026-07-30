@@ -36,6 +36,8 @@ import me.rerere.rikkahub.toolcatalog.ToolExperienceDao
 import me.rerere.rikkahub.toolcatalog.ToolExperienceEntity
 import me.rerere.rikkahub.toolcatalog.ToolExperienceEvidenceEntity
 import me.rerere.rikkahub.toolcatalog.ToolExperienceRevisionEntity
+import me.rerere.rikkahub.toolcatalog.ToolShortcutDao
+import me.rerere.rikkahub.toolcatalog.ToolShortcutEntity
 import me.rerere.rikkahub.data.db.entity.AlarmEntity
 import me.rerere.rikkahub.data.db.entity.ConversationEntity
 import me.rerere.rikkahub.data.db.entity.BrowserBookmarkEntity
@@ -113,10 +115,11 @@ import me.rerere.rikkahub.workflow.db.WorkflowRunEntity
         ToolExperienceEntity::class,
         ToolExperienceEvidenceEntity::class,
         ToolExperienceRevisionEntity::class,
+        ToolShortcutEntity::class,
     ],
     // v33 freezes the conversation-context limit with each queued capture so changing the
     // setting later cannot split or enlarge a batch that has already been accepted.
-    version = 40,
+    version = 41,
     autoMigrations = [
         AutoMigration(from = 1, to = 2),
         AutoMigration(from = 2, to = 3),
@@ -192,6 +195,8 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun petDialogueDao(): PetDialogueDao
 
     abstract fun toolExperienceDao(): ToolExperienceDao
+
+    abstract fun toolShortcutDao(): ToolShortcutDao
 }
 
 object TokenUsageConverter {

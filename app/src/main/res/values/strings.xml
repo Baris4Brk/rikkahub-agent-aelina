@@ -2327,4 +2327,7 @@
   <string name="second_user_tool_library_delete">Delete</string>
   <string name="second_user_tool_library_save">Save</string>
   <string name="second_user_tool_library_edited">Experience updated</string>
+  <string name="second_user_tool_library_fast_lane">Fast lane</string>
+  <string name="second_user_tool_library_fast_lane_empty">No model-confirmed fast-lane tool is saved yet.</string>
+  <string name="second_user_tool_library_fast_lane_hint">Saved tools are metadata only. RikkaHub injects only a small relevant subset with current schemas.</string>
 </resources>

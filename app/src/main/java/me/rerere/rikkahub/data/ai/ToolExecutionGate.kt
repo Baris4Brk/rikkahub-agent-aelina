@@ -97,6 +97,23 @@ internal fun capabilityRequiresHardUnlock(capabilityId: CapabilityId?): Boolean 
         capabilityId == CapabilityId.StructuredPrivilegedSystemToolsV2 ||
         capabilityId == CapabilityId.VerifiedAccessibility
 
+/**
+ * The user-confirmed second user is a scoped local autonomy profile, not the app-wide safety
+ * toggle. This predicate is deliberately narrow: a matching epoch-bound subject, its exact
+ * protected conversation, an unlocked device, and a confirmed local origin are all required.
+ * It only changes the high-risk *enablement* switch; HARDLINE, self-preservation, system
+ * permission/consent, origin restrictions and Emergency Stop have already remained mandatory.
+ */
+internal fun canUseSecondUserHighRiskAutonomy(
+    subject: CapabilitySubject?,
+    conversationId: Uuid?,
+    origin: ToolCallOrigin,
+    deviceLocked: Boolean,
+): Boolean = !deviceLocked &&
+    subject?.type == me.rerere.rikkahub.data.capability.SubjectType.LOCAL_SECOND_USER &&
+    origin in InvocationSurfacePolicy.CONFIRMED_LOCAL_SECOND_USER &&
+    SecondUserAuthorityRegistry.matches(subject.id, conversationId, origin)
+
 private val SELF_PACKAGE_MUTATION_TOOLS = setOf(
     "force_stop_app",
     "clear_app_cache",
@@ -565,7 +582,16 @@ class ToolExecutionGate(
         }
 
         // ── Level 2: High-risk tools gate ──────────────────────────────────────────
-        if (toolName in HIGH_RISK_TOOLS && !safetySettings.isHighRiskToolsEnabled()) {
+        val secondUserHighRiskAutonomy = canUseSecondUserHighRiskAutonomy(
+            subject = capabilitySubject,
+            conversationId = conversationId,
+            origin = origin,
+            deviceLocked = deviceLocked,
+        )
+        if (toolName in HIGH_RISK_TOOLS &&
+            !safetySettings.isHighRiskToolsEnabled() &&
+            !secondUserHighRiskAutonomy
+        ) {
             return GateResult.Denied("High-risk tools are disabled. " +
                     "Enable them in Settings > Safety > High-Risk Tools.")
         }

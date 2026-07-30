@@ -66,9 +66,23 @@ data class ToolExperienceSummary(
 data class ToolDiscoveryMetrics(
     val candidateCount: Int,
     val selectedSchemaCount: Int,
-    /** BOOTSTRAP, OPENED_SCHEMAS, or PINNED_RECOVERY; contains no tool arguments. */
+    /** DIRECT_SURFACE, BOOTSTRAP, FAST_LANE_*, OPENED_SCHEMAS, or PINNED_RECOVERY; no arguments. */
     val stage: String,
+    /** Number of persisted shortcuts in the active authority library, not provider schemas. */
+    val fastLaneShortcutLibraryCount: Int = 0,
+    /** Number of real schemas automatically selected by a bundle or matching shortcut. */
+    val fastLaneInjectedSchemaCount: Int = 0,
+    /** Host-maintained bundle identifier, or null. */
+    val fastLaneBundleId: String? = null,
 )
+
+/** Controls whether a generation receives the full current tool surface or directory helpers. */
+enum class ToolSurfaceMode {
+    /** Current P2.1 progressive directory: the model searches, opens, then receives schemas. */
+    PROGRESSIVE_CATALOG,
+    /** Legacy direct surface: every current schema is available in the provider request. */
+    DIRECT,
+}
 
 sealed interface ToolExperienceEditResult {
     data class Updated(val stateVersion: Long) : ToolExperienceEditResult
@@ -226,6 +240,7 @@ class ToolCatalogSnapshot private constructor(
 object ToolCatalogTaxonomy {
     fun categoryFor(toolName: String, capabilityId: String?): String = when {
             toolName.startsWith("tool_catalog_") || toolName.startsWith("tool_experience_") ||
+            toolName.startsWith("tool_fast_lane_") ||
             toolName.startsWith("secret_vault_") || toolName.startsWith("rikkahub_") ||
             toolName.startsWith("assistant_") || toolName.startsWith("app_settings_") ||
             toolName.startsWith("setup_") ||
@@ -259,19 +274,25 @@ object ToolCatalogTaxonomy {
     }
 }
 
-/**
- * Mutable selection state for exactly one parent generation. It is not persisted: a compressed
- * or restarted conversation simply searches the durable directory again.
- */
+/** Mutable state for a parent generation's selected or direct tool surface. */
 class ToolDiscoverySession(
     private var snapshot: ToolCatalogSnapshot,
     private val experienceLookup: ToolExperienceLookup? = null,
     private val experienceEditor: ToolExperienceEditor? = null,
+    private val shortcutEditor: ToolShortcutEditor? = null,
+    private val initialShortcuts: List<ToolShortcutSummary> = emptyList(),
+    private val fastLaneBundle: ToolFastLaneBundle? = null,
+    private val onSnapshotResolved: ((ToolCatalogSnapshot) -> Unit)? = null,
+    private val mode: ToolSurfaceMode = ToolSurfaceMode.PROGRESSIVE_CATALOG,
 ) {
     private val lock = Any()
-    private val selectedNames = LinkedHashSet<String>()
+    private val selectedNames = LinkedHashSet<String>().apply {
+        addAll(initialShortcuts.filter { it.state == ToolShortcutState.ACTIVE.name }.map { it.toolName })
+    }
     private var lastPinnedSchemaCount = 0
     private var lastInjectedSchemaCount = 0
+    private var lastFastLaneInjectedSchemaCount = 0
+    private var lastReportedSnapshotSignature: Int? = null
 
     fun providerTools(
         candidates: List<Tool>,
@@ -286,26 +307,75 @@ class ToolDiscoverySession(
         pinnedToolNames: Set<String>,
     ): List<Tool> {
         snapshot = surface.snapshot
+        val snapshotSignature = snapshot.entries
+            .map { entry -> entry.toolName to entry.schemaFingerprint }
+            .hashCode()
+        if (snapshotSignature != lastReportedSnapshotSignature) {
+            lastReportedSnapshotSignature = snapshotSignature
+            onSnapshotResolved?.invoke(snapshot)
+        }
+        if (mode == ToolSurfaceMode.DIRECT) {
+            val direct = synchronized(lock) {
+                selectedNames.clear()
+                lastPinnedSchemaCount = pinnedToolNames.count { it in surface.definitions.map(Tool::name) }
+                lastFastLaneInjectedSchemaCount = 0
+                lastInjectedSchemaCount = surface.definitions.size
+                surface.definitions
+            }
+            return managementTools() + direct
+        }
         val selected = synchronized(lock) {
             val candidateNames = surface.definitions.mapTo(hashSetOf(), Tool::name)
             selectedNames.retainAll(candidateNames)
             val pinned = pinnedToolNames.filterTo(linkedSetOf()) { it in candidateNames }
             lastPinnedSchemaCount = pinned.size
             val core = CORE_TOOL_NAMES.filterTo(linkedSetOf()) { it in candidateNames }
+            val bundle = fastLaneBundle?.toolNames
+                ?.filterTo(linkedSetOf()) { it in candidateNames }
+                .orEmpty()
+            val eligibleShortcuts = initialShortcuts.asSequence()
+                .filter { shortcut ->
+                    shortcut.state == ToolShortcutState.ACTIVE.name &&
+                        snapshot.entry(shortcut.toolName)?.schemaFingerprint == shortcut.schemaFingerprint
+                }
+                .map(ToolShortcutSummary::toolName)
+                .filter { it in candidateNames }
+                .toCollection(linkedSetOf())
+            // A stale schema must never remain selected simply because it was once model-pinned.
+            val initialShortcutNames = initialShortcuts.mapTo(hashSetOf(), ToolShortcutSummary::toolName)
+            selectedNames.removeAll(initialShortcutNames - eligibleShortcuts)
+            val fastLaneCandidates = linkedSetOf<String>().apply {
+                addAll(bundle)
+                addAll(eligibleShortcuts)
+            }
+            val fastLane = if (fastLaneBundle != null) {
+                fastLaneCandidates
+            } else {
+                fastLaneCandidates.take(
+                    (TOOL_CATALOG_MAX_ACTIVE_SCHEMAS - core.size - pinned.size).coerceAtLeast(0),
+                ).toCollection(linkedSetOf())
+            }
             // Approved/pending calls are a recovery obligation, not a discovery choice: keep
             // every pinned schema even if an older turn already exceeded the normal selection
             // budget. `ask_user`, when present, is a real schema too, so it consumes one of
             // the normal six slots rather than silently making the ordinary surface seven.
             // Pinned recovery schemas remain exempt when they alone exceed the budget.
-            val reserved = core + pinned
-            val ordinaryCapacity = (TOOL_CATALOG_MAX_ACTIVE_SCHEMAS - reserved.size).coerceAtLeast(0)
+            val reserved = core + pinned + fastLane
+            // Full device status is a deliberate, bounded exception: it opens its eleven
+            // readers at once, still far below the former hundreds-of-schemas surface.
+            val schemaBudget = maxOf(
+                TOOL_CATALOG_MAX_ACTIVE_SCHEMAS,
+                reserved.size.takeIf { fastLaneBundle != null } ?: 0,
+            )
+            val ordinaryCapacity = (schemaBudget - reserved.size).coerceAtLeast(0)
             val ordinary = selectedNames
                 .asSequence()
-                .filterNot { it in pinned || it in core }
+                .filterNot { it in reserved }
                 .take(ordinaryCapacity)
                 .toList()
-            val actual = core + pinned + ordinary
+            val actual = core + pinned + fastLane + ordinary
             lastInjectedSchemaCount = actual.size
+            lastFastLaneInjectedSchemaCount = fastLane.count { it in actual }
             actual.mapNotNull(snapshot::entry).map(ToolCatalogEntry::definition)
         }
         return bootstrapTools() + selected
@@ -318,10 +388,16 @@ class ToolDiscoverySession(
             candidateCount = snapshot.entries.size,
             selectedSchemaCount = lastInjectedSchemaCount,
             stage = when {
+                mode == ToolSurfaceMode.DIRECT -> "DIRECT_SURFACE"
+                fastLaneBundle != null -> "FAST_LANE_BUNDLE"
+                lastFastLaneInjectedSchemaCount > 0 -> "FAST_LANE_SHORTCUTS"
                 selectedNames.isNotEmpty() -> "OPENED_SCHEMAS"
                 lastPinnedSchemaCount > 0 -> "PINNED_RECOVERY"
                 else -> "BOOTSTRAP"
             },
+            fastLaneShortcutLibraryCount = initialShortcuts.size,
+            fastLaneInjectedSchemaCount = lastFastLaneInjectedSchemaCount,
+            fastLaneBundleId = fastLaneBundle?.id,
         )
     }
 
@@ -329,7 +405,13 @@ class ToolDiscoverySession(
         add(catalogSearchTool())
         add(catalogListTool())
         add(catalogOpenTool())
+        addAll(managementTools())
+    }
+
+    /** Kept available in direct mode so experience and Fast Lane data remain editable. */
+    private fun managementTools(): List<Tool> = buildList {
         experienceEditor?.let { add(experienceUpdateTool(it)) }
+        shortcutEditor?.let { add(fastLaneManageTool(it)) }
     }
 
     private fun catalogSearchTool() = Tool(
@@ -464,6 +546,64 @@ class ToolDiscoverySession(
         },
     )
 
+    private fun fastLaneManageTool(editor: ToolShortcutEditor) = Tool(
+        name = TOOL_FAST_LANE_MANAGE,
+        description = "Manage model-confirmed fast-lane metadata. Pin an already available built-in entry; " +
+            "pinning exposes its current schema faster in progressive mode but never grants execution permission.",
+        parameters = {
+            InputSchema.Obj(
+                properties = buildJsonObject {
+                    put("action", stringSchema("One of: pin, unpin, list."))
+                    put("tool_id", stringSchema("Opened catalogue id for pin, or shortcut id for unpin."))
+                    put("tool_name", stringSchema("Available tool name for pin in direct mode."))
+                    put("expected_version", buildJsonObject { put("type", "integer") })
+                },
+                required = listOf("action"),
+            )
+        },
+        execute = { input ->
+            val arguments = input.jsonObject
+            val action = arguments["action"]?.jsonPrimitive?.contentOrNull?.lowercase().orEmpty()
+            val result = when (action) {
+                "pin" -> {
+                    val toolId = arguments["tool_id"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                    val toolName = arguments["tool_name"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                    val entry = snapshot.entries.firstOrNull { it.id == toolId }
+                        ?: toolName.takeIf { mode == ToolSurfaceMode.DIRECT }?.let(snapshot::entry)
+                    when {
+                        entry == null -> ToolShortcutMutationResult.Missing
+                        mode == ToolSurfaceMode.PROGRESSIVE_CATALOG &&
+                            entry.toolName !in selectedNames &&
+                            entry.toolName !in fastLaneBundle.orEmptyToolNames() ->
+                            ToolShortcutMutationResult.Invalid
+                        else -> editor.pin(entry)
+                    }
+                }
+                "unpin" -> editor.unpin(
+                    id = arguments["tool_id"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                    expectedVersion = arguments["expected_version"]?.jsonPrimitive?.contentOrNull
+                        ?.toLongOrNull() ?: -1L,
+                )
+                "list" -> null
+                else -> ToolShortcutMutationResult.Invalid
+            }
+            val shortcuts = if (action == "list") editor.list() else emptyList()
+            jsonResult(buildJsonObject {
+                put("action", action)
+                result?.let { put("result", it.fastLaneResultName()) }
+                if (result is ToolShortcutMutationResult.Pinned) {
+                    put("shortcut", result.shortcut.toJson())
+                }
+                if (result is ToolShortcutMutationResult.Updated) {
+                    put("state_version", result.stateVersion)
+                }
+                if (action == "list") {
+                    put("shortcuts", buildJsonArray { shortcuts.forEach { add(it.toJson()) } })
+                }
+            })
+        },
+    )
+
     private fun ToolCatalogEntry.toJson(includeRequirements: Boolean = false): JsonObject = buildJsonObject {
         put("id", id)
         put("name", toolName)
@@ -488,6 +628,29 @@ class ToolDiscoverySession(
         put("state_version", stateVersion)
     }
 
+    private fun ToolShortcutSummary.toJson(): JsonObject = buildJsonObject {
+        put("id", id)
+        put("name", toolName)
+        put("category", categoryPath)
+        put("risk", risk)
+        put("source", source)
+        put("state", state)
+        put("state_version", stateVersion)
+        put("use_count", useCount)
+        put("schema_fingerprint", schemaFingerprint.take(16))
+    }
+
+    private fun ToolShortcutMutationResult.fastLaneResultName(): String = when (this) {
+        is ToolShortcutMutationResult.Pinned -> "PINNED"
+        is ToolShortcutMutationResult.Updated -> "UPDATED"
+        ToolShortcutMutationResult.Missing -> "MISSING"
+        ToolShortcutMutationResult.Conflict -> "CONFLICT"
+        ToolShortcutMutationResult.Denied -> "DENIED"
+        ToolShortcutMutationResult.Invalid -> "INVALID"
+    }
+
+    private fun ToolFastLaneBundle?.orEmptyToolNames(): List<String> = this?.toolNames.orEmpty()
+
     private fun jsonResult(value: JsonObject): List<UIMessagePart> = listOf(UIMessagePart.Text(value.toString()))
 
     private fun stringSchema(description: String) = buildJsonObject {
@@ -500,6 +663,7 @@ class ToolDiscoverySession(
         const val TOOL_CATALOG_LIST = "tool_catalog_list"
         const val TOOL_CATALOG_OPEN = "tool_catalog_open"
         const val TOOL_EXPERIENCE_UPDATE = "tool_experience_update"
+        const val TOOL_FAST_LANE_MANAGE = "tool_fast_lane_manage"
 
         private val CORE_TOOL_NAMES = setOf("ask_user")
     }

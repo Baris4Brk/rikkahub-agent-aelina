@@ -21,6 +21,7 @@ import me.rerere.rikkahub.data.execution.VerificationState
 class ToolExperienceRecorder(
     private val executionRepository: ExecutionRepository,
     private val experiences: ToolExperienceRepository,
+    private val shortcuts: ToolShortcutRepository,
 ) {
     suspend fun recordIfEligible(
         definition: Tool,
@@ -62,6 +63,10 @@ class ToolExperienceRecorder(
                 outcome = outcome,
             ),
         )
+        // A model-confirmed shortcut becomes more relevant only after an independently tracked
+        // successful execution. This refresh stores no tool argument or result and never pins a
+        // tool automatically.
+        shortcuts.recordSuccessfulUse(entry, subject.id)
     }
 
     private companion object {

@@ -67,6 +67,7 @@ object InternalToolSecurityCatalog {
         "linux_session_exec",
         "linux_session_close",
         "tool_experience_update",
+        "tool_fast_lane_manage",
         "pet_diary_update_metadata",
         "pet_diary_soft_delete",
         "pet_diary_restore",

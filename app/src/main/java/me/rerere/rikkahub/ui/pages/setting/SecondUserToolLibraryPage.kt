@@ -43,6 +43,9 @@ import me.rerere.rikkahub.toolcatalog.ToolExperienceEntity
 import me.rerere.rikkahub.toolcatalog.ToolExperienceMutationResult
 import me.rerere.rikkahub.toolcatalog.ToolExperienceRepository
 import me.rerere.rikkahub.toolcatalog.ToolExperienceState
+import me.rerere.rikkahub.toolcatalog.ToolShortcutEntity
+import me.rerere.rikkahub.toolcatalog.ToolShortcutRepository
+import me.rerere.rikkahub.toolcatalog.ToolShortcutState
 import me.rerere.rikkahub.toolcatalog.ToolSurfaceBuilder
 import me.rerere.rikkahub.ui.components.nav.BackButton
 import me.rerere.rikkahub.ui.theme.CustomColors
@@ -56,6 +59,7 @@ import org.koin.compose.koinInject
 @Composable
 fun SecondUserToolLibraryPage(
     repository: ToolExperienceRepository = koinInject(),
+    shortcutRepository: ToolShortcutRepository = koinInject(),
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -65,6 +69,10 @@ fun SecondUserToolLibraryPage(
         subjectId?.let { repository.observeLibrary(it) } ?: flowOf(emptyList())
     }
     val experiences by experienceFlow.collectAsState(initial = emptyList())
+    val shortcutFlow = remember(subjectId) {
+        subjectId?.let { shortcutRepository.observeLibrary(it) } ?: flowOf(emptyList())
+    }
+    val shortcuts by shortcutFlow.collectAsState(initial = emptyList())
     val permissionRows = remember(context) {
         PermissionInventory.capabilityStatusRows(context).associateBy { it.id.removePrefix("capability:") }
     }
@@ -130,17 +138,30 @@ fun SecondUserToolLibraryPage(
                     onClick = { selectedTab = 1 },
                     text = { Text(stringResource(R.string.second_user_tool_library_experiences)) },
                 )
+                Tab(
+                    selected = selectedTab == 2,
+                    onClick = { selectedTab = 2 },
+                    text = { Text(stringResource(R.string.second_user_tool_library_fast_lane)) },
+                )
             }
-            if (selectedTab == 0) {
-                ToolCatalogContent(toolEntries)
-            } else {
-                ExperienceContent(
+            when (selectedTab) {
+                0 -> ToolCatalogContent(toolEntries)
+                1 -> ExperienceContent(
                     subjectId = subjectId,
                     experiences = experiences,
                     onEdit = ::beginEdit,
                     onSetState = { experience, state ->
                         scope.launch {
                             repository.setState(experience.experienceId, experience.stateVersion, state)
+                        }
+                    },
+                )
+                else -> FastLaneContent(
+                    subjectId = subjectId,
+                    shortcuts = shortcuts,
+                    onSetState = { shortcut, state ->
+                        scope.launch {
+                            shortcutRepository.setState(shortcut.shortcutId, shortcut.stateVersion, state)
                         }
                     },
                 )
@@ -230,6 +251,67 @@ fun SecondUserToolLibraryPage(
                 TextButton(onClick = { editing = null }) { Text("Close") }
             },
         )
+    }
+}
+
+@Composable
+private fun FastLaneContent(
+    subjectId: String?,
+    shortcuts: List<ToolShortcutEntity>,
+    onSetState: (ToolShortcutEntity, ToolShortcutState) -> Unit,
+) {
+    LazyColumn(
+        contentPadding = PaddingValues(12.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        item {
+            Text(
+                stringResource(R.string.second_user_tool_library_fast_lane_hint),
+                style = MaterialTheme.typography.bodyMedium,
+            )
+        }
+        when {
+            subjectId == null -> item {
+                Text(stringResource(R.string.second_user_tool_library_fast_lane_empty))
+            }
+            shortcuts.isEmpty() -> item {
+                Text(stringResource(R.string.second_user_tool_library_fast_lane_empty))
+            }
+            else -> items(shortcuts, key = ToolShortcutEntity::shortcutId) { shortcut ->
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Text(shortcut.toolName, style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            "${shortcut.categoryPath} · ${shortcut.risk} · ${shortcut.state}",
+                            style = MaterialTheme.typography.labelMedium,
+                        )
+                        Text(
+                            shortcut.useCount.toString(),
+                            style = MaterialTheme.typography.labelSmall,
+                        )
+                        Row {
+                            when (shortcut.state) {
+                                ToolShortcutState.ACTIVE.name -> TextButton(onClick = {
+                                    onSetState(shortcut, ToolShortcutState.DISABLED)
+                                }) { Text(stringResource(R.string.second_user_tool_library_disable)) }
+                                ToolShortcutState.DISABLED.name -> TextButton(onClick = {
+                                    onSetState(shortcut, ToolShortcutState.ACTIVE)
+                                }) { Text(stringResource(R.string.second_user_tool_library_restore)) }
+                                else -> TextButton(onClick = {
+                                    onSetState(shortcut, ToolShortcutState.DISABLED)
+                                }) { Text(stringResource(R.string.second_user_tool_library_disable)) }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

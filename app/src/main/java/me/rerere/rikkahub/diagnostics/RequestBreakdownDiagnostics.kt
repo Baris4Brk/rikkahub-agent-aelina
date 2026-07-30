@@ -43,6 +43,12 @@ data class RequestBreakdownDiagnostic(
     val toolCatalogSelectedSchemaCount: Int? = null,
     /** Privacy-safe phase of the progressive second-user directory. */
     val toolCatalogStage: String? = null,
+    /** Number of durable, model-confirmed shortcut metadata rows considered for this turn. */
+    val toolFastLaneShortcutLibraryCount: Int? = null,
+    /** Number of real schemas automatically injected by a Fast Lane path. */
+    val toolFastLaneInjectedSchemaCount: Int? = null,
+    /** Host-maintained quick-package id; never a Skill body or user prompt. */
+    val toolFastLaneBundleId: String? = null,
     val memoryCount: Int,
     val enabledSkillNames: List<String>,
     val toolNames: List<String>,
@@ -75,6 +81,9 @@ data class RequestBreakdownDiagnostic(
         toolCatalogCandidateCount?.let { append(", catalogCandidates=").append(it) }
         toolCatalogSelectedSchemaCount?.let { append(", catalogSelected=").append(it) }
         toolCatalogStage?.let { append(", catalogStage=").append(it) }
+        toolFastLaneShortcutLibraryCount?.let { append(", fastLaneLibrary=").append(it) }
+        toolFastLaneInjectedSchemaCount?.let { append(", fastLaneInjected=").append(it) }
+        toolFastLaneBundleId?.let { append(", fastLaneBundle=").append(it) }
         append(", memories=").append(memoryCount)
         providerPromptTokens?.let { append(", providerPrompt=").append(it) }
         providerCachedTokens?.let { append(", cached=").append(it) }
@@ -94,6 +103,9 @@ data class RequestBreakdownDiagnostic(
         toolCatalogCandidateCount?.let { put("tool_catalog_candidate_count", it) }
         toolCatalogSelectedSchemaCount?.let { put("tool_catalog_selected_schema_count", it) }
         toolCatalogStage?.let { put("tool_catalog_stage", it.take(32)) }
+        toolFastLaneShortcutLibraryCount?.let { put("tool_fast_lane_shortcut_library_count", it) }
+        toolFastLaneInjectedSchemaCount?.let { put("tool_fast_lane_injected_schema_count", it) }
+        toolFastLaneBundleId?.let { put("tool_fast_lane_bundle_id", it.take(64)) }
         put("memory_count", memoryCount)
         put("enabled_skill_names", JsonArray(enabledSkillNames.map(::JsonPrimitive)))
         put("tool_names", JsonArray(toolNames.map(::JsonPrimitive)))
@@ -131,6 +143,9 @@ data class RequestBreakdownDiagnostic(
             toolCatalogCandidateCount: Int? = null,
             toolCatalogSelectedSchemaCount: Int? = null,
             toolCatalogStage: String? = null,
+            toolFastLaneShortcutLibraryCount: Int? = null,
+            toolFastLaneInjectedSchemaCount: Int? = null,
+            toolFastLaneBundleId: String? = null,
         ): RequestBreakdownDiagnostic {
             val systemMessages = finalMessages.filter { it.role == MessageRole.SYSTEM }
             val nonSystemMessages = finalMessages.filterNot { it.role == MessageRole.SYSTEM }
@@ -152,6 +167,9 @@ data class RequestBreakdownDiagnostic(
                 toolCatalogCandidateCount = toolCatalogCandidateCount,
                 toolCatalogSelectedSchemaCount = toolCatalogSelectedSchemaCount,
                 toolCatalogStage = toolCatalogStage,
+                toolFastLaneShortcutLibraryCount = toolFastLaneShortcutLibraryCount,
+                toolFastLaneInjectedSchemaCount = toolFastLaneInjectedSchemaCount,
+                toolFastLaneBundleId = toolFastLaneBundleId,
                 memoryCount = memoryCount.coerceAtLeast(0),
                 enabledSkillNames = enabledSkillNames.map { it.trim() }.filter { it.isNotEmpty() }.distinct().sorted(),
                 toolNames = tools.map(Tool::name).distinct().sorted(),

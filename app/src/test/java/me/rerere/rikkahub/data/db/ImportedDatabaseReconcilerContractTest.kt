@@ -5,10 +5,10 @@ import org.junit.Test
 
 class ImportedDatabaseReconcilerContractTest {
     @Test
-    fun `reconciler current version and identity match Room schema 40`() {
-        assertEquals(40, ImportedDatabaseReconciler.EXPECTED_VERSION)
+    fun `reconciler current version and identity match Room schema 41`() {
+        assertEquals(41, ImportedDatabaseReconciler.EXPECTED_VERSION)
         assertEquals(
-            "bf0cc9fcad994a73ac34982cf526e2ce",
+            "0fc584fa99bb47672eb041a415f4b8c7",
             ImportedDatabaseReconciler.EXPECTED_IDENTITY_HASH,
         )
     }
@@ -25,12 +25,12 @@ class ImportedDatabaseReconcilerContractTest {
     }
 
     @Test
-    fun `current v40 skips raw framework SQLite reconciliation`() {
+    fun `current v41 skips raw framework SQLite reconciliation`() {
         assertEquals(
             ImportedDatabaseReconciler.ReconcilePlan.SKIP,
             ImportedDatabaseReconciler.reconcilePlan(
-                version = 40,
-                identityHash = "bf0cc9fcad994a73ac34982cf526e2ce",
+                version = 41,
+                identityHash = "0fc584fa99bb47672eb041a415f4b8c7",
             ),
         )
     }
@@ -39,7 +39,7 @@ class ImportedDatabaseReconcilerContractTest {
     fun `unknown current schema still uses compatibility reconciliation`() {
         assertEquals(
             ImportedDatabaseReconciler.ReconcilePlan.FULL_COMPATIBILITY,
-            ImportedDatabaseReconciler.reconcilePlan(version = 40, identityHash = "upstream"),
+            ImportedDatabaseReconciler.reconcilePlan(version = 41, identityHash = "upstream"),
         )
     }
 
@@ -50,6 +50,17 @@ class ImportedDatabaseReconcilerContractTest {
             ImportedDatabaseReconciler.reconcilePlan(
                 version = 39,
                 identityHash = "98db479b6258269f2aef18ce15e0f2f9",
+            ),
+        )
+    }
+
+    @Test
+    fun `previous v40 is reconciled before Room creates fast lane shortcuts`() {
+        assertEquals(
+            ImportedDatabaseReconciler.ReconcilePlan.FULL_COMPATIBILITY,
+            ImportedDatabaseReconciler.reconcilePlan(
+                version = 40,
+                identityHash = "bf0cc9fcad994a73ac34982cf526e2ce",
             ),
         )
     }

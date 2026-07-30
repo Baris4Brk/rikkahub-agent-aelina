@@ -2366,6 +2366,9 @@ class GenerationHandler(
             toolCatalogCandidateCount = toolDiscoveryMetrics?.candidateCount,
             toolCatalogSelectedSchemaCount = toolDiscoveryMetrics?.selectedSchemaCount,
             toolCatalogStage = toolDiscoveryMetrics?.stage,
+            toolFastLaneShortcutLibraryCount = toolDiscoveryMetrics?.fastLaneShortcutLibraryCount,
+            toolFastLaneInjectedSchemaCount = toolDiscoveryMetrics?.fastLaneInjectedSchemaCount,
+            toolFastLaneBundleId = toolDiscoveryMetrics?.fastLaneBundleId,
         )
         diagnosticHandle.recordRequestBreakdown(context.filesDir, breakdown)
         val providerOutcome = try {

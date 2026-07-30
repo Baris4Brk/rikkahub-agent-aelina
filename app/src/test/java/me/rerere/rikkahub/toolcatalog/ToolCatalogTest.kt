@@ -89,6 +89,72 @@ class ToolCatalogTest {
     }
 
     @Test
+    fun `full phone status fast lane exposes its bounded reader pack immediately`() {
+        val definitions = listOf(tool("ask_user")) + ToolFastLaneBundles.PHONE_STATUS_FULL.toolNames
+            .map(::tool)
+        val session = ToolDiscoverySession(
+            snapshot = ToolSurfaceBuilder.snapshot(definitions),
+            fastLaneBundle = ToolFastLaneBundles.PHONE_STATUS_FULL,
+        )
+
+        val initial = session.providerTools(definitions, emptySet())
+
+        assertTrue(initial.map(Tool::name).containsAll(ToolFastLaneBundles.PHONE_STATUS_FULL.toolNames))
+        assertEquals(12, session.metrics().selectedSchemaCount)
+        assertEquals("FAST_LANE_BUNDLE", session.metrics().stage)
+        assertEquals("phone_status_full", session.metrics().fastLaneBundleId)
+    }
+
+    @Test
+    fun `direct surface restores every current schema without catalogue helpers`() {
+        val definitions = listOf(
+            tool("ask_user"),
+            tool("mcp__c0ffee12_exa__search"),
+            tool("workspace_shell"),
+        )
+        val experienceEditor = ToolExperienceEditor { _, _, _, _, _ -> ToolExperienceEditResult.Updated(1) }
+        val session = ToolDiscoverySession(
+            snapshot = ToolSurfaceBuilder.snapshot(definitions),
+            experienceEditor = experienceEditor,
+            mode = ToolSurfaceMode.DIRECT,
+        )
+
+        val supplied = session.providerTools(definitions, emptySet()).map(Tool::name)
+
+        assertTrue(supplied.containsAll(definitions.map(Tool::name)))
+        assertTrue(supplied.contains(ToolDiscoverySession.TOOL_EXPERIENCE_UPDATE))
+        assertFalse(supplied.contains(ToolDiscoverySession.TOOL_CATALOG_SEARCH))
+        assertFalse(supplied.contains(ToolDiscoverySession.TOOL_CATALOG_LIST))
+        assertFalse(supplied.contains(ToolDiscoverySession.TOOL_CATALOG_OPEN))
+        assertEquals("DIRECT_SURFACE", session.metrics().stage)
+        assertEquals(definitions.size, session.metrics().selectedSchemaCount)
+    }
+
+    @Test
+    fun `shortcut relevance remains bounded and prefers matching file mutations`() {
+        val shortcuts = listOf(
+            shortcut("workspace_write_file", "Files and storage", useCount = 3),
+            shortcut("workspace_shell", "Command line / Workspace", useCount = 5),
+        ) + (0..12).map { shortcut("device_tool_$it", "Device and apps") }
+
+        val selected = ToolShortcutRelevance.select("写入文件", shortcuts, max = 6)
+
+        assertTrue(selected.size <= 6)
+        assertEquals("workspace_write_file", selected.first().toolName)
+    }
+
+    @Test
+    fun `high risk built in tools can be model pinned but external tools cannot`() {
+        val builtIn = ToolCatalogSnapshot.fromDefinitions(listOf(tool("workspace_shell")))
+            .entry("workspace_shell")!!
+        val external = ToolCatalogSnapshot.fromDefinitions(listOf(tool("mcp__server__erase")))
+            .entry("mcp__server__erase")!!
+
+        assertTrue(ToolFastLanePolicy.isPinnable(builtIn))
+        assertFalse(ToolFastLanePolicy.isPinnable(external))
+    }
+
+    @Test
     fun `experience prose rejects raw operational data`() {
         assertTrue(ToolExperienceContentPolicy.normalize(
             title = "Safe verification",
@@ -173,6 +239,7 @@ class ToolCatalogTest {
             ToolDiscoverySession.TOOL_CATALOG_LIST,
             ToolDiscoverySession.TOOL_CATALOG_OPEN,
             ToolDiscoverySession.TOOL_EXPERIENCE_UPDATE,
+            ToolDiscoverySession.TOOL_FAST_LANE_MANAGE,
         ).forEach { toolName ->
             assertTrue(security.resolve(toolName, context) != null)
             assertFalse(policy.resolve(toolName, buildJsonObject {}, context) == ToolExecutionPolicy.UNKNOWN)
@@ -222,5 +289,23 @@ class ToolCatalogTest {
         name = name,
         description = "Safe $name capability.",
         execute = { listOf(UIMessagePart.Text("{}")) },
+    )
+
+    private fun shortcut(
+        name: String,
+        category: String,
+        useCount: Long = 0,
+    ) = ToolShortcutSummary(
+        id = "shortcut:$name",
+        toolName = name,
+        source = "STATIC_CAPABILITY",
+        categoryPath = category,
+        risk = "HIGH",
+        schemaFingerprint = "fingerprint:$name",
+        state = ToolShortcutState.ACTIVE.name,
+        stateVersion = 0,
+        lastUsedAtMs = null,
+        useCount = useCount,
+        modelConfirmedAtMs = 0,
     )
 }

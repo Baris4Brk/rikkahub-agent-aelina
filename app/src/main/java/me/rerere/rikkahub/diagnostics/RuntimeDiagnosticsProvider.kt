@@ -185,9 +185,14 @@ class RuntimeDiagnosticsProvider(
                         "active=${catalog.experiences.activeCount}; " +
                         "stale=${catalog.experiences.staleCount}; " +
                         "experienceRedaction=${catalog.experiences.redactionViolationCount}; " +
+                        "shortcutLibrary=${catalog.shortcuts.totalCount}; " +
+                        "shortcutActive=${catalog.shortcuts.activeCount}; " +
+                        "shortcutStale=${catalog.shortcuts.staleCount}; " +
                         "catalogCandidates=${breakdown?.toolCatalogCandidateCount ?: 0}; " +
                         "catalogInjected=${breakdown?.toolCatalogSelectedSchemaCount ?: 0}; " +
-                        "catalogStage=${breakdown?.toolCatalogStage ?: "NONE"}",
+                        "catalogStage=${breakdown?.toolCatalogStage ?: "NONE"}; " +
+                        "fastLaneInjected=${breakdown?.toolFastLaneInjectedSchemaCount ?: 0}; " +
+                        "fastLaneBundle=${breakdown?.toolFastLaneBundleId ?: "NONE"}",
                 ))
             }
         }

@@ -58,6 +58,9 @@ class RequestBreakdownDiagnosticsTest {
             dynamicSystemAddendum = "surface-state",
             memoryCount = 1,
             enabledSkillNames = listOf("agent-core"),
+            toolFastLaneShortcutLibraryCount = 27,
+            toolFastLaneInjectedSchemaCount = 5,
+            toolFastLaneBundleId = "phone_status_full",
         )
         RequestBreakdownDiagnosticsStore.write(temporaryFolder.root, breakdown)
 
@@ -69,6 +72,8 @@ class RequestBreakdownDiagnosticsTest {
         assertTrue(output.contains("list_active_notifications"))
         assertTrue(output.contains("agent-core"))
         assertTrue(output.contains("estimated_request_tokens"))
+        assertTrue(output.contains("tool_fast_lane_shortcut_library_count"))
+        assertTrue(output.contains("phone_status_full"))
         assertEquals(
             breakdown.estimatedMessageTokens + breakdown.estimatedToolSchemaTokens,
             breakdown.estimatedRequestTokens,

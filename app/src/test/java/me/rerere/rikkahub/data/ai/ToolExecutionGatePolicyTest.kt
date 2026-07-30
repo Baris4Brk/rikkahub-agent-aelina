@@ -15,6 +15,11 @@ import me.rerere.rikkahub.privilege.STRUCTURED_PRIVILEGED_V2_TOOL_NAMES
 import me.rerere.rikkahub.privilege.STRUCTURED_PRIVILEGED_V2_WRITE_TOOL_NAMES
 import me.rerere.rikkahub.data.ai.tools.local.VERIFIED_ACCESSIBILITY_TOOL_NAMES
 import me.rerere.rikkahub.data.ai.tools.local.VERIFIED_ACCESSIBILITY_WRITE_TOOL_NAMES
+import me.rerere.rikkahub.assistant.SecondUserAdmissionSnapshot
+import me.rerere.rikkahub.assistant.SecondUserAuthorityRegistry
+import me.rerere.rikkahub.data.capability.CapabilitySubject
+import me.rerere.rikkahub.data.capability.SubjectType
+import kotlin.uuid.Uuid
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -169,6 +174,60 @@ class ToolExecutionGatePolicyTest {
                 capability = localOnly,
             ),
         )
+    }
+
+    @Test
+    fun `active unlocked second user can use high risk autonomy only in its bound conversation`() {
+        val assistantId = Uuid.random()
+        val conversationId = Uuid.random()
+        val authority = SecondUserAdmissionSnapshot.create(
+            assistantId = assistantId,
+            conversationId = conversationId,
+            authorityEpoch = 7,
+            origin = ToolCallOrigin.LocalChat,
+        )
+        SecondUserAuthorityRegistry.install(authority)
+        try {
+            val subject = CapabilitySubject(
+                id = authority.subjectId,
+                type = SubjectType.LOCAL_SECOND_USER,
+                privilegedConversationId = conversationId.toString(),
+            )
+            assertTrue(
+                canUseSecondUserHighRiskAutonomy(
+                    subject = subject,
+                    conversationId = conversationId,
+                    origin = ToolCallOrigin.LocalChat,
+                    deviceLocked = false,
+                ),
+            )
+            assertFalse(
+                canUseSecondUserHighRiskAutonomy(
+                    subject = subject,
+                    conversationId = Uuid.random(),
+                    origin = ToolCallOrigin.LocalChat,
+                    deviceLocked = false,
+                ),
+            )
+            assertFalse(
+                canUseSecondUserHighRiskAutonomy(
+                    subject = subject,
+                    conversationId = conversationId,
+                    origin = ToolCallOrigin.Telegram,
+                    deviceLocked = false,
+                ),
+            )
+            assertFalse(
+                canUseSecondUserHighRiskAutonomy(
+                    subject = subject,
+                    conversationId = conversationId,
+                    origin = ToolCallOrigin.LocalChat,
+                    deviceLocked = true,
+                ),
+            )
+        } finally {
+            SecondUserAuthorityRegistry.install(null)
+        }
     }
 
     @Test

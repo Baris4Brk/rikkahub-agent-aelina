@@ -12,6 +12,7 @@ import me.rerere.rikkahub.service.ChatService
 import me.rerere.rikkahub.service.chat.DurableCommandQueue
 import me.rerere.rikkahub.data.capability.SubjectType
 import me.rerere.rikkahub.toolcatalog.ToolExperienceRepository
+import me.rerere.rikkahub.toolcatalog.ToolShortcutRepository
 import kotlin.uuid.Uuid
 
 data class SecondUserRevocationSummary(
@@ -36,6 +37,7 @@ class SecondUserAuthorityRevocationCoordinator(
     private val cancellation: CancellationCoordinator,
     private val chatService: ChatService,
     private val toolExperiences: ToolExperienceRepository,
+    private val toolShortcuts: ToolShortcutRepository,
 ) {
     suspend fun resumeIfNeeded(): SecondUserRevocationSummary? {
         val config = authority.currentConfig()
@@ -67,6 +69,7 @@ class SecondUserAuthorityRevocationCoordinator(
         // Procedures are scoped to an authority epoch just like queue items and grants. Keep
         // their immutable history for the user, but make an old epoch ineligible for injection.
         toolExperiences.invalidateAuthoritySubjects(revokedSubjects)
+        toolShortcuts.invalidateAuthoritySubjects(revokedSubjects)
 
         var invalidatedApprovals = 0
         approvalDao.getAllPending()
