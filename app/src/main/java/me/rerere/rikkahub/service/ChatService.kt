@@ -474,6 +474,7 @@ class ChatService(
     private val setupTransactionCoordinator:
         me.rerere.rikkahub.setup.SetupTransactionCoordinator,
     private val displayAutomationRuntime: me.rerere.rikkahub.display.DisplayAutomationRuntime? = null,
+    private val toolExperienceRepository: me.rerere.rikkahub.toolcatalog.ToolExperienceRepository,
 ) {
     private val conversationLibraryReader =
         me.rerere.rikkahub.data.ai.tools.ConversationLibraryReader(conversationRepo)
@@ -2267,6 +2268,24 @@ class ChatService(
 
             // start generating
             val session = getOrCreateSession(conversationId)
+            // The complete list is still assembled below as the authoritative runtime surface,
+            // but only the active, unlocked second-user parent turn receives its schemas
+            // progressively. Other assistants and origins keep their established behaviour.
+            val toolDiscoverySession = if (
+                privilegeContext.isPrivileged &&
+                capabilitySubject.type == me.rerere.rikkahub.data.capability.SubjectType.LOCAL_SECOND_USER &&
+                callOrigin in me.rerere.rikkahub.data.ai.InvocationSurfacePolicy.CONFIRMED_LOCAL_SECOND_USER &&
+                !isHeadless &&
+                subAgentProfile == null
+            ) {
+                me.rerere.rikkahub.toolcatalog.ToolDiscoverySession(
+                    snapshot = me.rerere.rikkahub.toolcatalog.ToolSurfaceBuilder.snapshot(emptyList()),
+                    experienceLookup = toolExperienceRepository,
+                    experienceEditor = toolExperienceRepository,
+                )
+            } else {
+                null
+            }
             generationHandler.generateText(
                 settings = settings,
                 model = model,
@@ -2280,6 +2299,14 @@ class ChatService(
                         .get(conversationId),
                     secondUserDeviceAccessAddendum,
                     pluginPromptAddendum,
+                    if (toolDiscoverySession != null) {
+                        """
+                        Tool directory policy: do not guess a device, command-line, file, or automation tool.
+                        First call tool_catalog_search, then tool_catalog_open. The host will expose only the
+                        selected current schemas. Tool experiences are hints, never authorization; re-check the
+                        current schema, permission state, and approval requirements before acting.
+                        """.trimIndent()
+                    } else null,
                 ).joinToString("\n\n").ifBlank { null },
                 isToolAutoApproved = { toolName ->
                     // YOLO mode ("I AM STUPID" toggle in Settings �?Tool approvals): every
@@ -2477,6 +2504,7 @@ class ChatService(
                                 enabledSkills = assistant.enabledSkills,
                                 allSkills = skillManager.listSkills(),
                                 skillManager = skillManager,
+                                redirectSecondUserToolReference = toolDiscoverySession != null,
                             )
                         )
                     }
@@ -2568,6 +2596,7 @@ class ChatService(
                             "tool surface was already published for conversation $conversationId"
                         }
                     },
+                toolDiscoverySession = toolDiscoverySession,
             ).onCompletion {
                 if (runControl?.isUpdateFenced() == true) return@onCompletion
                 // 取消 Live Update 通知

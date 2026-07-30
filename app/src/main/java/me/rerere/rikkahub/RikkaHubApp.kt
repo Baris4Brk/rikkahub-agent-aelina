@@ -206,6 +206,10 @@ class RikkaHubApp : Application() {
         // makes background sub-agents survivable across process death.
         runAgentRunBootRecovery()
         get<me.rerere.rikkahub.data.execution.ExecutionRetentionManager>().requestCleanup()
+        get<AppScope>().launch(Dispatchers.IO) {
+            runCatching { get<me.rerere.rikkahub.toolcatalog.ToolExperienceRepository>().purgeDeleted() }
+                .onFailure { Log.w(TAG, "tool experience retention cleanup failed", it) }
+        }
         runExecutionBootRecovery()
         refreshCapabilityPolicyGrants()
         reconcileMemoryV2Metadata()

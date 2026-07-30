@@ -135,6 +135,7 @@ import me.rerere.rikkahub.ui.pages.setting.SettingSpeechPage
 import me.rerere.rikkahub.ui.pages.setting.SettingSystemAssistantPage
 import me.rerere.rikkahub.ui.pages.setting.SecondUserAuthorityRecoveryPage
 import me.rerere.rikkahub.ui.pages.setting.SecondUserSecretVaultPage
+import me.rerere.rikkahub.ui.pages.setting.SecondUserToolLibraryPage
 import me.rerere.rikkahub.ui.pages.setting.SettingTelegramPage
 import me.rerere.rikkahub.ui.pages.setting.SettingWebPage
 import me.rerere.rikkahub.ui.pages.share.handler.ShareHandlerPage
@@ -448,6 +449,9 @@ class RouteActivity : ComponentActivity() {
                             }
                             entry<Screen.SecondUserSecretVault> {
                                 SecondUserSecretVaultPage()
+                            }
+                            entry<Screen.SecondUserToolLibrary> {
+                                SecondUserToolLibraryPage()
                             }
 
                             entry<Screen.AssistantDetail> { key ->
@@ -779,6 +783,9 @@ sealed interface Screen : NavKey {
 
     @Serializable
     data object SecondUserSecretVault : Screen
+
+    @Serializable
+    data object SecondUserToolLibrary : Screen
 
     @Serializable
     data class AssistantDetail(val id: String) : Screen

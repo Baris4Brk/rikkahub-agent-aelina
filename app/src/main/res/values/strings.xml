@@ -2317,4 +2317,14 @@
   <string name="second_user_vault_open">Open secret vault</string>
   <string name="second_user_vault_migrate_legacy">Migrate legacy secrets</string>
   <string name="second_user_vault_migration_result">Migrated %1$d secret(s); %2$d item(s) still need manual handling.</string>
+  <string name="second_user_tool_library_title">Tools and Experience</string>
+  <string name="second_user_tool_library_tools">Tools</string>
+  <string name="second_user_tool_library_experiences">Experience</string>
+  <string name="second_user_tool_library_empty">No saved experience yet.</string>
+  <string name="second_user_tool_library_dynamic">Dynamic external tools appear only when their source is configured.</string>
+  <string name="second_user_tool_library_disable">Disable</string>
+  <string name="second_user_tool_library_restore">Restore</string>
+  <string name="second_user_tool_library_delete">Delete</string>
+  <string name="second_user_tool_library_save">Save</string>
+  <string name="second_user_tool_library_edited">Experience updated</string>
 </resources>

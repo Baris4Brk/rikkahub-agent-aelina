@@ -388,6 +388,7 @@ val appModule = module {
             toolSecurityDescriptorResolver = get(),
             toolExecutionPolicyResolver = get(),
             executionConsistencyDoctor = get(),
+            toolCatalogDiagnostics = get(),
         )
     }
     single {
@@ -786,6 +787,7 @@ val appModule = module {
             subAgentExecutionProfileRegistry = get(),
             setupTransactionCoordinator = get(),
             displayAutomationRuntime = get(),
+            toolExperienceRepository = get(),
         )
     }
     single {
@@ -799,6 +801,7 @@ val appModule = module {
             executions = get(),
             cancellation = get(),
             chatService = get(),
+            toolExperiences = get(),
         )
     }
 

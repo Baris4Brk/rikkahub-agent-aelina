@@ -47,12 +47,12 @@ object ImportedDatabaseReconciler {
 
     /**
      * Room's schema version and identity hash for [AppDatabase]. Both are copied verbatim
-     * from app/schemas/me.rerere.rikkahub.data.db.AppDatabase/39.json. When the schema
+     * from app/schemas/me.rerere.rikkahub.data.db.AppDatabase/40.json. When the schema
      * version is bumped, update BOTH constants (and the table DDL below if the fork-only
      * tables changed) or this reconciliation will silently stop matching.
      */
-    internal const val EXPECTED_VERSION = 39
-    internal const val EXPECTED_IDENTITY_HASH = "98db479b6258269f2aef18ce15e0f2f9"
+    internal const val EXPECTED_VERSION = 40
+    internal const val EXPECTED_IDENTITY_HASH = "bf0cc9fcad994a73ac34982cf526e2ce"
     internal const val PRE_STORAGE_MODE_V35_IDENTITY_HASH = "2a74d694211f0df9f9094c7571ec71dd"
 
     internal enum class ReconcilePlan {
@@ -450,6 +450,23 @@ object ImportedDatabaseReconciler {
         )
     }
 
+    /** Same-version upstream v40 backups need the private, redacted experience store. */
+    private fun ensureToolExperienceV40Schema(db: SQLiteDatabase) {
+        listOf(
+            "CREATE TABLE IF NOT EXISTS `tool_experiences` (`experience_id` TEXT NOT NULL, `authority_subject_id` TEXT NOT NULL, `primary_tool_name` TEXT NOT NULL, `tool_names_json` TEXT NOT NULL, `category_path` TEXT NOT NULL, `schema_fingerprint` TEXT NOT NULL, `title` TEXT NOT NULL, `body` TEXT NOT NULL, `tags_json` TEXT NOT NULL, `state` TEXT NOT NULL, `confidence` TEXT NOT NULL, `state_version` INTEGER NOT NULL, `created_at_ms` INTEGER NOT NULL, `updated_at_ms` INTEGER NOT NULL, `last_observed_at_ms` INTEGER NOT NULL, `last_verified_at_ms` INTEGER, `deleted_at_ms` INTEGER, PRIMARY KEY(`experience_id`))",
+            "CREATE INDEX IF NOT EXISTS `index_tool_experiences_authority_subject_id_state_updated_at_ms` ON `tool_experiences` (`authority_subject_id`, `state`, `updated_at_ms`)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS `index_tool_experiences_authority_subject_id_primary_tool_name_schema_fingerprint` ON `tool_experiences` (`authority_subject_id`, `primary_tool_name`, `schema_fingerprint`)",
+            "CREATE INDEX IF NOT EXISTS `index_tool_experiences_primary_tool_name_state` ON `tool_experiences` (`primary_tool_name`, `state`)",
+            "CREATE INDEX IF NOT EXISTS `index_tool_experiences_deleted_at_ms` ON `tool_experiences` (`deleted_at_ms`)",
+            "CREATE TABLE IF NOT EXISTS `tool_experience_evidence` (`evidence_id` TEXT NOT NULL, `experience_id` TEXT NOT NULL, `execution_id` TEXT NOT NULL, `tool_name` TEXT NOT NULL, `schema_fingerprint` TEXT NOT NULL, `outcome_kind` TEXT NOT NULL, `created_at_ms` INTEGER NOT NULL, PRIMARY KEY(`evidence_id`), FOREIGN KEY(`experience_id`) REFERENCES `tool_experiences`(`experience_id`) ON UPDATE NO ACTION ON DELETE CASCADE)",
+            "CREATE INDEX IF NOT EXISTS `index_tool_experience_evidence_experience_id_created_at_ms` ON `tool_experience_evidence` (`experience_id`, `created_at_ms`)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS `index_tool_experience_evidence_execution_id` ON `tool_experience_evidence` (`execution_id`)",
+            "CREATE TABLE IF NOT EXISTS `tool_experience_revisions` (`revision_id` TEXT NOT NULL, `experience_id` TEXT NOT NULL, `revision` INTEGER NOT NULL, `actor` TEXT NOT NULL, `title` TEXT NOT NULL, `body` TEXT NOT NULL, `tags_json` TEXT NOT NULL, `created_at_ms` INTEGER NOT NULL, PRIMARY KEY(`revision_id`), FOREIGN KEY(`experience_id`) REFERENCES `tool_experiences`(`experience_id`) ON UPDATE NO ACTION ON DELETE CASCADE)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS `index_tool_experience_revisions_experience_id_revision` ON `tool_experience_revisions` (`experience_id`, `revision`)",
+            "CREATE INDEX IF NOT EXISTS `index_tool_experience_revisions_created_at_ms` ON `tool_experience_revisions` (`created_at_ms`)",
+        ).forEach(db::execSQL)
+    }
+
     private fun ensureCapabilityGrantsV35Schema(db: SQLiteDatabase) {
         listOf(
             "CREATE TABLE IF NOT EXISTS `capability_grants` (`id` TEXT NOT NULL, `subject_id` TEXT NOT NULL, `subject_type` TEXT NOT NULL, `capability_key` TEXT NOT NULL, `resource_kind` TEXT NOT NULL, `resource_identifier` TEXT NOT NULL, `allowed_origins` TEXT NOT NULL, `scope` TEXT NOT NULL, `expires_at_ms` INTEGER, `revoked` INTEGER NOT NULL, `created_at_ms` INTEGER NOT NULL, `updated_at_ms` INTEGER NOT NULL, PRIMARY KEY(`id`))",
@@ -592,6 +609,7 @@ object ImportedDatabaseReconciler {
                     if (version >= 37) ensureExecutionV37Schema(db)
                     if (version >= 38) ensurePetV38Schema(db)
                     if (version >= 39) ensurePendingCommandAuthorityV39Schema(db)
+                    if (version >= 40) ensureToolExperienceV40Schema(db)
 
                     // Older backups must keep their original user_version so Room can run
                     // every real migration (including 28→29). Precreating fork-only tables

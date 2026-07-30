@@ -198,6 +198,14 @@ fun SecondUserAuthorityRecoveryPage(
                         ) {
                             Text(stringResource(R.string.second_user_vault_open))
                         }
+                        if (configuredSnapshot != null) {
+                            TextButton(
+                                enabled = !busy,
+                                onClick = { navigator.navigate(Screen.SecondUserToolLibrary) },
+                            ) {
+                                Text(stringResource(R.string.second_user_tool_library_title))
+                            }
+                        }
                     }
                 }
             }

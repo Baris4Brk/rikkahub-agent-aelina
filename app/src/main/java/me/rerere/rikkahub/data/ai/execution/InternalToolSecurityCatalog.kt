@@ -26,6 +26,20 @@ object InternalToolSecurityCatalog {
         "linux_grant_list",
         "linux_session_inspect",
         "linux_session_list",
+        // P2.1 progressive second-user directory helpers. They are deliberately explicit
+        // internal entries so ToolRuntime never treats a new helper as an unknown bypass.
+        "tool_catalog_search",
+        "tool_catalog_list",
+        "tool_catalog_open",
+        // P1 pet diary reads are scoped to the selected second-user conversation. They
+        // still go through ToolExecutionGate; this list merely prevents an accidental
+        // unknown-tool rejection after the provider has deliberately exposed them.
+        "pet_dialogue_current",
+        "pet_diary_list",
+        "pet_diary_read",
+        // P2 vault access is intentionally metadata-only. The secret value has no model tool.
+        "secret_vault_list",
+        "secret_vault_test_binding",
     )
 
     val MUTATING: Set<String> = setOf(
@@ -52,6 +66,12 @@ object InternalToolSecurityCatalog {
         "linux_session_create",
         "linux_session_exec",
         "linux_session_close",
+        "tool_experience_update",
+        "pet_diary_update_metadata",
+        "pet_diary_soft_delete",
+        "pet_diary_restore",
+        "secret_vault_create_slot",
+        "secret_vault_set_binding",
     )
 
     val ARGUMENT_DEPENDENT: Set<String> = setOf("memory_tool")

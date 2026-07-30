@@ -100,6 +100,10 @@ import me.rerere.rikkahub.data.model.AssistantMemory
 import me.rerere.rikkahub.data.repository.ConversationRepository
 import me.rerere.rikkahub.security.resolveProviderBinding
 import me.rerere.rikkahub.data.repository.MemoryRepository
+import me.rerere.rikkahub.toolcatalog.ToolDiscoverySession
+import me.rerere.rikkahub.toolcatalog.ToolDiscoveryMetrics
+import me.rerere.rikkahub.toolcatalog.ToolExperienceRecorder
+import me.rerere.rikkahub.toolcatalog.ToolSurfaceBuilder
 import me.rerere.rikkahub.utils.applyPlaceholders
 import java.util.Locale
 import kotlin.time.Clock
@@ -426,6 +430,7 @@ class GenerationHandler(
     private val contextBroker: me.rerere.rikkahub.context.ContextBroker,
     private val contextDiagnosticsStore: me.rerere.rikkahub.context.ContextDiagnosticsStore,
     private val secondUserSecretVault: me.rerere.rikkahub.security.SecondUserSecretVault? = null,
+    private val toolExperienceRecorder: ToolExperienceRecorder? = null,
 ) {
     fun generateText(
         settings: Settings,
@@ -441,6 +446,8 @@ class GenerationHandler(
         selectedPrivilegedConversation: Boolean = false,
         memories: List<AssistantMemory>? = null,
         tools: List<Tool> = emptyList(),
+        /** Per-parent-run progressive directory selection for the active second user only. */
+        toolDiscoverySession: ToolDiscoverySession? = null,
         /** False for a restricted child profile that did not inherit `memory_tool`. */
         memoryToolAllowed: Boolean = true,
         startableTools: Map<String, me.rerere.rikkahub.data.ai.tools.StartableTool> = emptyMap(),
@@ -637,14 +644,10 @@ class GenerationHandler(
                 },
             ).joinToString("\n\n").ifBlank { null }
 
-            val toolsInternal = buildList {
-                Log.i(TAG, "generateInternal: build tools($assistant)")
-                val completingAlreadyAcceptedTools = pendingTools.isNotEmpty() &&
-                    !finalizationStep.skipResumableTools
-                if ((!forceFinalization || completingAlreadyAcceptedTools) &&
-                    assistant.enableMemory &&
-                    memoryToolAllowed
-                ) {
+            val completingAlreadyAcceptedTools = pendingTools.isNotEmpty() &&
+                !finalizationStep.skipResumableTools
+            val candidateTools = buildList {
+                if (assistant.enableMemory && memoryToolAllowed) {
                     val memoryAssistantId = if (assistant.useGlobalMemory) {
                         MemoryRepository.GLOBAL_MEMORY_ID
                     } else {
@@ -678,7 +681,19 @@ class GenerationHandler(
                         },
                     ).let(this::addAll)
                 }
-                if (!forceFinalization || completingAlreadyAcceptedTools) addAll(tools)
+                addAll(tools)
+            }
+            val candidateSurface = ToolSurfaceBuilder.build(candidateTools)
+            val toolsInternal = buildList {
+                Log.i(TAG, "generateInternal: build tools($assistant)")
+                if (!forceFinalization || completingAlreadyAcceptedTools) {
+                    val pinnedToolNames = pendingTools.mapTo(linkedSetOf()) { it.toolName }
+                    if (toolDiscoverySession != null) {
+                        addAll(toolDiscoverySession.providerTools(candidateSurface, pinnedToolNames))
+                    } else {
+                        addAll(candidateSurface.definitions)
+                    }
+                }
             }
 
             // Mixed-state guard: if the last message has tools STILL in Pending (waiting
@@ -756,6 +771,7 @@ class GenerationHandler(
                         callOrigin = callOrigin,
                         conversationId = conversationId,
                         commandId = commandId,
+                        toolDiscoveryMetrics = toolDiscoverySession?.metrics(),
                     )
                 } catch (t: Throwable) {
                     if (t is CancellationException &&
@@ -1537,6 +1553,11 @@ class GenerationHandler(
                                         "wall-clock budget exhausted",
                                 )
                             }
+                            toolExperienceRecorder?.recordIfEligible(
+                                definition = toolDef,
+                                result = runtimeResult,
+                                context = executionContext,
+                            )
                             val result = runtimeResult.output
                             // Upstream tool-output truncation: when the workspace shell is
                             // available, oversized text output is spilled to /tool_outputs/
@@ -1715,6 +1736,11 @@ class GenerationHandler(
                                 "wall-clock budget exhausted",
                         )
                     }
+                    toolExperienceRecorder?.recordIfEligible(
+                        definition = ready.toolDef,
+                        result = runtimeResult,
+                        context = ready.executionContext,
+                    )
                     markedTool.copy(
                         output = maybeTruncateToolOutput(
                             ready.tool.toolCallId,
@@ -2163,6 +2189,7 @@ class GenerationHandler(
         callOrigin: ToolCallOrigin = ToolCallOrigin.LocalChat,
         conversationId: Uuid? = null,
         commandId: Uuid? = null,
+        toolDiscoveryMetrics: ToolDiscoveryMetrics? = null,
     ): GenerationTerminal {
         val persistentSteeringContext = preparePersistentSteeringContext(
             (contextMessages ?: messages)
@@ -2336,6 +2363,9 @@ class GenerationHandler(
             dynamicSystemAddendum = providerSystemAddendum,
             memoryCount = memories.size,
             enabledSkillNames = assistant.enabledSkills,
+            toolCatalogCandidateCount = toolDiscoveryMetrics?.candidateCount,
+            toolCatalogSelectedSchemaCount = toolDiscoveryMetrics?.selectedSchemaCount,
+            toolCatalogStage = toolDiscoveryMetrics?.stage,
         )
         diagnosticHandle.recordRequestBreakdown(context.filesDir, breakdown)
         val providerOutcome = try {

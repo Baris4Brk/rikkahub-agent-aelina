@@ -32,6 +32,10 @@ import me.rerere.rikkahub.data.db.dao.ScheduledJobRunDao
 import me.rerere.rikkahub.data.db.dao.SshHostDao
 import me.rerere.rikkahub.data.db.dao.TelegramChatDao
 import me.rerere.rikkahub.data.db.dao.WorkspaceDAO
+import me.rerere.rikkahub.toolcatalog.ToolExperienceDao
+import me.rerere.rikkahub.toolcatalog.ToolExperienceEntity
+import me.rerere.rikkahub.toolcatalog.ToolExperienceEvidenceEntity
+import me.rerere.rikkahub.toolcatalog.ToolExperienceRevisionEntity
 import me.rerere.rikkahub.data.db.entity.AlarmEntity
 import me.rerere.rikkahub.data.db.entity.ConversationEntity
 import me.rerere.rikkahub.data.db.entity.BrowserBookmarkEntity
@@ -106,10 +110,13 @@ import me.rerere.rikkahub.workflow.db.WorkflowRunEntity
         PetDialogueTurnEntity::class,
         PetHandoffRequestEntity::class,
         PetDialogueRevisionEntity::class,
+        ToolExperienceEntity::class,
+        ToolExperienceEvidenceEntity::class,
+        ToolExperienceRevisionEntity::class,
     ],
     // v33 freezes the conversation-context limit with each queued capture so changing the
     // setting later cannot split or enlarge a batch that has already been accepted.
-    version = 39,
+    version = 40,
     autoMigrations = [
         AutoMigration(from = 1, to = 2),
         AutoMigration(from = 2, to = 3),
@@ -183,6 +190,8 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun pendingChatCommandDao(): PendingChatCommandDao
 
     abstract fun petDialogueDao(): PetDialogueDao
+
+    abstract fun toolExperienceDao(): ToolExperienceDao
 }
 
 object TokenUsageConverter {

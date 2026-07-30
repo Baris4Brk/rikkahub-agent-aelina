@@ -45,6 +45,7 @@ class RuntimeDiagnosticsProvider(
     private val toolExecutionPolicyResolver: ToolExecutionPolicyResolver,
     private val clockMillis: () -> Long = System::currentTimeMillis,
     private val executionConsistencyDoctor: ExecutionConsistencyDoctor? = null,
+    private val toolCatalogDiagnostics: ToolCatalogDiagnostics? = null,
 ) {
     private val appContext = context.applicationContext
 
@@ -121,6 +122,9 @@ class RuntimeDiagnosticsProvider(
         val executionConsistency = executionConsistencyDoctor?.let { doctor ->
             runCatching { doctor.inspect() }.getOrNull()
         }
+        val toolCatalog = toolCatalogDiagnostics?.let { diagnostics ->
+            runCatching { diagnostics.inspect() }.getOrNull()
+        }
         val extraItems = buildList {
             generation?.let {
                 add(RuntimeDiagnosticItem(
@@ -162,6 +166,28 @@ class RuntimeDiagnosticsProvider(
                         "missingHandle=${consistency.missingRuntimeHandleCount}; " +
                         "staleProbe=${consistency.staleProbeCount}; " +
                         "redactionViolation=${consistency.redactionViolationCount}",
+                ))
+            }
+            toolCatalog?.let { catalog ->
+                val breakdown = generation?.requestBreakdown
+                add(RuntimeDiagnosticItem(
+                    id = "second_user_tool_catalog",
+                    title = "Second-user tool directory and experience library",
+                    status = if (catalog.healthy) {
+                        RuntimeDiagnosticStatus.READY
+                    } else {
+                        RuntimeDiagnosticStatus.SERVICE_OFFLINE
+                    },
+                    detail = "baseline=${catalog.baselineToolCount}; " +
+                        "coverageGap=${catalog.coverageGapCount}; " +
+                        "metadataRedaction=${catalog.metadataRedactionViolationCount}; " +
+                        "experiences=${catalog.experiences.totalCount}; " +
+                        "active=${catalog.experiences.activeCount}; " +
+                        "stale=${catalog.experiences.staleCount}; " +
+                        "experienceRedaction=${catalog.experiences.redactionViolationCount}; " +
+                        "catalogCandidates=${breakdown?.toolCatalogCandidateCount ?: 0}; " +
+                        "catalogInjected=${breakdown?.toolCatalogSelectedSchemaCount ?: 0}; " +
+                        "catalogStage=${breakdown?.toolCatalogStage ?: "NONE"}",
                 ))
             }
         }

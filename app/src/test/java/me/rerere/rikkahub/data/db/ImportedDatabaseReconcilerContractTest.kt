@@ -5,10 +5,10 @@ import org.junit.Test
 
 class ImportedDatabaseReconcilerContractTest {
     @Test
-    fun `reconciler current version and identity match Room schema 39`() {
-        assertEquals(39, ImportedDatabaseReconciler.EXPECTED_VERSION)
+    fun `reconciler current version and identity match Room schema 40`() {
+        assertEquals(40, ImportedDatabaseReconciler.EXPECTED_VERSION)
         assertEquals(
-            "98db479b6258269f2aef18ce15e0f2f9",
+            "bf0cc9fcad994a73ac34982cf526e2ce",
             ImportedDatabaseReconciler.EXPECTED_IDENTITY_HASH,
         )
     }
@@ -25,12 +25,12 @@ class ImportedDatabaseReconcilerContractTest {
     }
 
     @Test
-    fun `current v39 skips raw framework SQLite reconciliation`() {
+    fun `current v40 skips raw framework SQLite reconciliation`() {
         assertEquals(
             ImportedDatabaseReconciler.ReconcilePlan.SKIP,
             ImportedDatabaseReconciler.reconcilePlan(
-                version = 39,
-                identityHash = "98db479b6258269f2aef18ce15e0f2f9",
+                version = 40,
+                identityHash = "bf0cc9fcad994a73ac34982cf526e2ce",
             ),
         )
     }
@@ -39,7 +39,18 @@ class ImportedDatabaseReconcilerContractTest {
     fun `unknown current schema still uses compatibility reconciliation`() {
         assertEquals(
             ImportedDatabaseReconciler.ReconcilePlan.FULL_COMPATIBILITY,
-            ImportedDatabaseReconciler.reconcilePlan(version = 39, identityHash = "upstream"),
+            ImportedDatabaseReconciler.reconcilePlan(version = 40, identityHash = "upstream"),
+        )
+    }
+
+    @Test
+    fun `previous v39 is reconciled before Room creates tool experience tables`() {
+        assertEquals(
+            ImportedDatabaseReconciler.ReconcilePlan.FULL_COMPATIBILITY,
+            ImportedDatabaseReconciler.reconcilePlan(
+                version = 39,
+                identityHash = "98db479b6258269f2aef18ce15e0f2f9",
+            ),
         )
     }
 

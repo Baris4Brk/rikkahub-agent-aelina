@@ -14,6 +14,8 @@ fun createSkillTools(
     enabledSkills: Set<String>,
     allSkills: List<SkillMetadata>,
     skillManager: SkillManager,
+    /** Active only for the trusted, unlocked second-user catalogue surface. */
+    redirectSecondUserToolReference: Boolean = false,
 ): List<Tool> {
     val stableAllSkills = allSkills.sortedBy { it.name }
     val available = stableAllSkills.filter { it.name in enabledSkills }
@@ -143,6 +145,13 @@ fun createSkillTools(
                     )
                 }
                 val path = it.jsonObject["path"]?.jsonPrimitive?.content
+                if (
+                    redirectSecondUserToolReference &&
+                    name == "agent-core" &&
+                    path?.replace('\\', '/')?.trim('/') == "TOOLS.md"
+                ) {
+                    return@Tool listOf(UIMessagePart.Text(SECOND_USER_TOOL_DIRECTORY_GUIDANCE))
+                }
                 if (path.isNullOrBlank()) {
                     val skillMd = skillManager.getSkillDir(name)?.resolve("SKILL.md")
                     if (skillMd != null && skillMd.length() > SkillManager.MAX_SKILL_FILE_BYTES) {
@@ -174,3 +183,15 @@ fun createSkillTools(
         )
     )
 }
+
+/**
+ * Keep the legacy agent-core sidecar harmless for a second-user turn. It deliberately names
+ * only the fixed directory entry points, never a device command, file path, credential, or
+ * stale catalogue item.
+ */
+internal const val SECOND_USER_TOOL_DIRECTORY_GUIDANCE = """
+The legacy tool reference is not authoritative for this second-user conversation.
+Use tool_catalog_search or tool_catalog_list, then tool_catalog_open before attempting a tool.
+The host exposes current schemas only after an explicit open. Tool experiences are hints and
+never grant a capability or bypass an approval, unlock, HARDLINE, or Emergency Stop check.
+"""

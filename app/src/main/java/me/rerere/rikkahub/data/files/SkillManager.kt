@@ -271,13 +271,29 @@ class SkillManager(
             val coreVersionFile = targetDir.resolve(".core-bundled-hash")
 
             if (isCoreSkill) {
-                // Core skills (auto_load=true) re-seed whenever the bundled content changes
-                // — typically across an APK upgrade. This keeps SOUL/HEARTBEAT/TOOLS in
-                // sync with the app version while still allowing the user to edit between
-                // upgrades (their edits stick until we ship a new bundled version).
+                // Core skills can be updated with the APK only while the installed copy is
+                // byte-for-byte the previous bundled version. A user-edited core skill is
+                // theirs: preserve it forever rather than replacing private instructions on
+                // an upgrade. This is particularly important for autonomous-agent, whose P2.1
+                // update removes unsafe workspace learning logs.
                 val bundledHash = computeBundledSkillHash(assetRoot, skillName)
                 val currentHash = if (coreVersionFile.exists()) coreVersionFile.readText().trim() else ""
                 if (bundledHash == currentHash) continue
+                val hasUnmanagedExistingSkill = targetDir.exists() &&
+                    !coreVersionFile.exists() &&
+                    targetDir.listFiles()?.any { it.name != ".seeded" } == true
+                if (hasUnmanagedExistingSkill) {
+                    Log.i(TAG, "seedDefaultSkillsIfNeeded: preserving user-owned core skill $skillName")
+                    continue
+                }
+                val installedHash = targetDir.takeIf(File::exists)?.let(::computeInstalledSkillHash)
+                if (currentHash.isNotBlank() && installedHash != currentHash) {
+                    // Record that this bundled version has been considered, preventing a noisy
+                    // check on every launch while still preserving the user-authored files.
+                    coreVersionFile.writeText(bundledHash)
+                    Log.i(TAG, "seedDefaultSkillsIfNeeded: preserving edited core skill $skillName")
+                    continue
+                }
                 try {
                     if (targetDir.exists()) targetDir.deleteRecursively()
                     copyAssetSkill(assetRoot, skillName, targetDir)
@@ -344,6 +360,33 @@ class SkillManager(
             }
         }
         walk("$assetRoot/$skillName")
+        return md.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    /** Mirrors [computeBundledSkillHash] for a seeded on-device directory. */
+    private fun computeInstalledSkillHash(skillDir: File): String {
+        val md = java.security.MessageDigest.getInstance("SHA-256")
+        fun walk(directory: File) {
+            directory.listFiles().orEmpty()
+                .filterNot { it.name in setOf(".seeded", ".core-bundled-hash") }
+                .sortedBy { it.name }
+                .forEach { child ->
+                    if (child.isDirectory) {
+                        walk(child)
+                    } else {
+                        md.update(child.name.toByteArray())
+                        child.inputStream().use { input ->
+                            val buffer = ByteArray(8 * 1024)
+                            while (true) {
+                                val count = input.read(buffer)
+                                if (count <= 0) break
+                                md.update(buffer, 0, count)
+                            }
+                        }
+                    }
+                }
+        }
+        walk(skillDir)
         return md.digest().joinToString("") { "%02x".format(it) }
     }
 

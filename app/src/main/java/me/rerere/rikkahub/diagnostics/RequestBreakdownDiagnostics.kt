@@ -37,6 +37,12 @@ data class RequestBreakdownDiagnostic(
     val requestMode: String,
     val messageCount: Int,
     val toolCount: Int,
+    /** Full eligible catalogue count before the second-user progressive selection. */
+    val toolCatalogCandidateCount: Int? = null,
+    /** Number of real selected schemas, excluding the fixed catalogue helpers. */
+    val toolCatalogSelectedSchemaCount: Int? = null,
+    /** Privacy-safe phase of the progressive second-user directory. */
+    val toolCatalogStage: String? = null,
     val memoryCount: Int,
     val enabledSkillNames: List<String>,
     val toolNames: List<String>,
@@ -66,6 +72,9 @@ data class RequestBreakdownDiagnostic(
         append(", messages=").append(estimatedMessageTokens)
         append(", schemas=").append(estimatedToolSchemaTokens)
         append(", tools=").append(toolCount)
+        toolCatalogCandidateCount?.let { append(", catalogCandidates=").append(it) }
+        toolCatalogSelectedSchemaCount?.let { append(", catalogSelected=").append(it) }
+        toolCatalogStage?.let { append(", catalogStage=").append(it) }
         append(", memories=").append(memoryCount)
         providerPromptTokens?.let { append(", providerPrompt=").append(it) }
         providerCachedTokens?.let { append(", cached=").append(it) }
@@ -82,6 +91,9 @@ data class RequestBreakdownDiagnostic(
         put("request_mode", requestMode.take(80))
         put("message_count", messageCount)
         put("tool_count", toolCount)
+        toolCatalogCandidateCount?.let { put("tool_catalog_candidate_count", it) }
+        toolCatalogSelectedSchemaCount?.let { put("tool_catalog_selected_schema_count", it) }
+        toolCatalogStage?.let { put("tool_catalog_stage", it.take(32)) }
         put("memory_count", memoryCount)
         put("enabled_skill_names", JsonArray(enabledSkillNames.map(::JsonPrimitive)))
         put("tool_names", JsonArray(toolNames.map(::JsonPrimitive)))
@@ -116,6 +128,9 @@ data class RequestBreakdownDiagnostic(
             dynamicSystemAddendum: String?,
             memoryCount: Int,
             enabledSkillNames: Collection<String>,
+            toolCatalogCandidateCount: Int? = null,
+            toolCatalogSelectedSchemaCount: Int? = null,
+            toolCatalogStage: String? = null,
         ): RequestBreakdownDiagnostic {
             val systemMessages = finalMessages.filter { it.role == MessageRole.SYSTEM }
             val nonSystemMessages = finalMessages.filterNot { it.role == MessageRole.SYSTEM }
@@ -134,6 +149,9 @@ data class RequestBreakdownDiagnostic(
                 requestMode = requestMode,
                 messageCount = finalMessages.size,
                 toolCount = tools.size,
+                toolCatalogCandidateCount = toolCatalogCandidateCount,
+                toolCatalogSelectedSchemaCount = toolCatalogSelectedSchemaCount,
+                toolCatalogStage = toolCatalogStage,
                 memoryCount = memoryCount.coerceAtLeast(0),
                 enabledSkillNames = enabledSkillNames.map { it.trim() }.filter { it.isNotEmpty() }.distinct().sorted(),
                 toolNames = tools.map(Tool::name).distinct().sorted(),
