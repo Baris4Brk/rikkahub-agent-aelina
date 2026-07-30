@@ -4,6 +4,8 @@ import kotlinx.coroutines.runBlocking
 import me.rerere.ai.provider.Model
 import me.rerere.ai.provider.Modality
 import me.rerere.ai.provider.ProviderSetting
+import me.rerere.rikkahub.assistant.SecondUserAdmissionSnapshot
+import me.rerere.rikkahub.assistant.SecondUserAuthorityRegistry
 import me.rerere.rikkahub.assistant.SecondUserTargetConversationReader
 import me.rerere.rikkahub.assistant.SecondUserTargetConversationTitleReader
 import me.rerere.rikkahub.assistant.SecondUserTargetResolver
@@ -13,11 +15,12 @@ import me.rerere.rikkahub.data.model.Assistant
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import me.rerere.rikkahub.data.ai.ToolCallOrigin
 import kotlin.uuid.Uuid
 
 class QuickCaptureTargetResolverTest {
     @Test
-    fun `temporary assistant wins over fixed and system target`() = runBlocking {
+    fun `global second user wins over temporary fixed and system compatibility targets`() = runBlocking {
         val first = target("Temporary")
         val fixed = target("Fixed")
         val system = target("System")
@@ -32,14 +35,16 @@ class QuickCaptureTargetResolverTest {
         )
         val resolver = resolver(settings, listOf(first, fixed, system))
 
-        val result = resolver.resolve(first.assistant.id) as QuickCaptureTargetResolution.Resolved
+        withAuthority(first) {
+            val result = resolver.resolve(first.assistant.id) as QuickCaptureTargetResolution.Resolved
 
-        assertEquals(first.assistant.id, result.target.assistantId)
-        assertEquals(QuickCaptureTargetSource.TEMPORARY, result.target.source)
+            assertEquals(first.assistant.id, result.target.assistantId)
+            assertEquals(QuickCaptureTargetSource.TEMPORARY, result.target.source)
+        }
     }
 
     @Test
-    fun `fixed assistant never falls back to global current assistant`() = runBlocking {
+    fun `stale fixed assistant cannot redirect a capture away from global second user`() = runBlocking {
         val configured = target("Configured")
         val unrelated = target("Unrelated")
         val settings = settings(
@@ -52,12 +57,12 @@ class QuickCaptureTargetResolverTest {
             models = listOf(configured.model, unrelated.model),
         ).copy(assistantId = unrelated.assistant.id)
 
-        val result = resolver(settings, listOf(configured, unrelated)).resolve()
+        withAuthority(configured) {
+            val result = resolver(settings, listOf(configured, unrelated)).resolve()
+                as QuickCaptureTargetResolution.Resolved
 
-        assertEquals(
-            QuickCaptureTargetFailure.ASSISTANT_NOT_FOUND,
-            (result as QuickCaptureTargetResolution.Unavailable).reason,
-        )
+            assertEquals(configured.assistant.id, result.target.assistantId)
+        }
     }
 
     @Test
@@ -72,9 +77,11 @@ class QuickCaptureTargetResolverTest {
             ocrModelId = ocr.id,
         )
 
-        val result = resolver(settings, listOf(destination)).resolve()
+        withAuthority(destination) {
+            val result = resolver(settings, listOf(destination)).resolve()
 
-        assertTrue(result is QuickCaptureTargetResolution.Resolved)
+            assertTrue(result is QuickCaptureTargetResolution.Resolved)
+        }
     }
 
     @Test
@@ -86,14 +93,18 @@ class QuickCaptureTargetResolverTest {
             quick = QuickCaptureSettings(),
             models = listOf(target.model),
         )
-        val resolved = resolver(settings, listOf(target)).resolve() as QuickCaptureTargetResolution.Resolved
+        val resolver = resolver(settings, listOf(target))
+        val resolved = withAuthority(target) {
+            resolver.resolve() as QuickCaptureTargetResolution.Resolved
+        }
         val changedAssistant = target.assistant.copy(privilegedConversationId = Uuid.random())
         val changedSettings = settings.copy(assistants = listOf(changedAssistant))
 
-        val result = resolver(changedSettings, listOf(target.copy(assistant = changedAssistant))).validateTargetSnapshot(resolved.target)
+        val result = resolver(changedSettings, listOf(target.copy(assistant = changedAssistant)))
+            .validateTargetSnapshot(resolved.target)
 
         assertEquals(
-            QuickCaptureTargetFailure.CONVERSATION_ASSISTANT_MISMATCH,
+            QuickCaptureTargetFailure.TARGET_NOT_SELECTED,
             (result as QuickCaptureTargetResolution.Unavailable).reason,
         )
     }
@@ -138,5 +149,22 @@ class QuickCaptureTargetResolverTest {
             settingsReader = QuickCaptureSettingsReader { settings },
             secondUserResolver = secondUser,
         )
+    }
+
+    private suspend fun <T> withAuthority(destination: Destination, block: suspend () -> T): T {
+        val conversationId = destination.assistant.privilegedConversationId!!
+        SecondUserAuthorityRegistry.install(
+            SecondUserAdmissionSnapshot.create(
+                assistantId = destination.assistant.id,
+                conversationId = conversationId,
+                authorityEpoch = 1L,
+                origin = ToolCallOrigin.QuickCapture,
+            ),
+        )
+        return try {
+            block()
+        } finally {
+            SecondUserAuthorityRegistry.install(null)
+        }
     }
 }

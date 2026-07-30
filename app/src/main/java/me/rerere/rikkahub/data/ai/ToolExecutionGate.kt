@@ -15,6 +15,7 @@ import me.rerere.rikkahub.data.capability.CapabilityKey
 import me.rerere.rikkahub.data.capability.CapabilityPolicyEngine
 import me.rerere.rikkahub.data.capability.CapabilityRequest
 import me.rerere.rikkahub.data.capability.CapabilitySubject
+import me.rerere.rikkahub.assistant.SecondUserAuthorityRegistry
 import me.rerere.rikkahub.data.capability.DefaultCapabilityPolicyEngine
 import me.rerere.rikkahub.data.capability.PolicyDecision
 import me.rerere.rikkahub.data.capability.ToolCapabilityResolver
@@ -437,6 +438,12 @@ class ToolExecutionGate(
 
         val deviceLocked = isDeviceLocked()
         capabilitySubject?.let { subject ->
+            if (
+                subject.type == me.rerere.rikkahub.data.capability.SubjectType.LOCAL_SECOND_USER &&
+                !SecondUserAuthorityRegistry.matches(subject.id, conversationId, origin)
+            ) {
+                return GateResult.Denied("second_user_authority_stale")
+            }
             val resolved = ToolCapabilityResolver.resolve(
                 toolName = toolName,
                 args = arguments ?: JsonObject(emptyMap()),

@@ -177,8 +177,17 @@ fun Route.conversationRoutes(
             val conversation = conversationRepo.getConversationById(uuid)
                 ?: throw NotFoundException("Conversation not found")
 
-            conversationRepo.deleteConversation(conversation)
-            call.respond(HttpStatusCode.NoContent)
+            when (conversationRepo.deleteConversation(conversation)) {
+                is me.rerere.rikkahub.data.repository.ConversationDeletionResult.Deleted,
+                is me.rerere.rikkahub.data.repository.ConversationDeletionResult.Missing,
+                -> call.respond(HttpStatusCode.NoContent)
+                is me.rerere.rikkahub.data.repository.ConversationDeletionResult.RetainedSecondUser -> {
+                    call.respond(
+                        HttpStatusCode.Conflict,
+                        mapOf("error" to "second_user_conversation_protected"),
+                    )
+                }
+            }
         }
 
         // POST /api/conversations/{id}/pin - Toggle pinned status

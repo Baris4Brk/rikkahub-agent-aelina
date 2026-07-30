@@ -1,5 +1,6 @@
 package me.rerere.rikkahub.service.chat
 
+import me.rerere.rikkahub.assistant.SecondUserAuthorityRegistry
 import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.data.model.Conversation
@@ -70,7 +71,6 @@ internal object SystemAssistantCommandSecurityPolicy {
         conversationId = conversationId,
         settings = settings,
         persistedConversation = persistedConversation,
-        requireCurrentSelection = true,
     )
 
     fun validateAcceptedTarget(
@@ -83,7 +83,6 @@ internal object SystemAssistantCommandSecurityPolicy {
         conversationId = conversationId,
         settings = settings,
         persistedConversation = persistedConversation,
-        requireCurrentSelection = false,
     )
 
     private fun validateTarget(
@@ -91,26 +90,26 @@ internal object SystemAssistantCommandSecurityPolicy {
         conversationId: Uuid,
         settings: Settings,
         persistedConversation: Conversation?,
-        requireCurrentSelection: Boolean,
     ): SystemAssistantTargetValidation {
         val assistantId = command.assistantIdSnapshot()
             ?: return SystemAssistantTargetValidation.Invalid(
                 SYSTEM_ASSISTANT_TARGET_SNAPSHOT_REQUIRED_REJECTION,
             )
-        if (requireCurrentSelection && settings.systemAssistantTargetAssistantId != assistantId) {
+        // The old systemAssistantTargetAssistantId preference is only a compatibility mirror.
+        // Every live admission is anchored to the global, epoch-bound authority instead.
+        val authority = SecondUserAuthorityRegistry.current()
+            ?: return SystemAssistantTargetValidation.Invalid(
+                SYSTEM_ASSISTANT_TARGET_CONVERSATION_CHANGED_REJECTION,
+            )
+        if (authority.assistantId != assistantId || authority.conversationId != conversationId) {
             return SystemAssistantTargetValidation.Invalid(
-                SYSTEM_ASSISTANT_TARGET_CHANGED_REJECTION,
+                SYSTEM_ASSISTANT_TARGET_CONVERSATION_CHANGED_REJECTION,
             )
         }
         val assistant = settings.assistants.firstOrNull { it.id == assistantId }
             ?: return SystemAssistantTargetValidation.Invalid(
                 SYSTEM_ASSISTANT_TARGET_ASSISTANT_MISSING_REJECTION,
             )
-        if (assistant.privilegedConversationId != conversationId) {
-            return SystemAssistantTargetValidation.Invalid(
-                SYSTEM_ASSISTANT_TARGET_CONVERSATION_CHANGED_REJECTION,
-            )
-        }
         val conversation = persistedConversation
             ?.takeIf { it.id == conversationId }
             ?: return SystemAssistantTargetValidation.Invalid(

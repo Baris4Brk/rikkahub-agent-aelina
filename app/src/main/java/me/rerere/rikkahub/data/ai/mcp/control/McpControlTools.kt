@@ -305,8 +305,10 @@ fun mcpAddTool(settingsStore: SettingsStore, manager: McpManager): Tool = Tool(
     description = """
         Add a new MCP server. Pass transport="sse" or "streamable_http", a unique name (≤60
         chars), an http(s) url, optional enabled (default true), and optional headers as a
-        list of {name, value} pairs (max 32 entries; sensitive values like Authorization or
-        X-Api-Key are redacted in display layers but stored verbatim).
+        list of {name, value} pairs (max 32 entries). Sensitive header values such as
+        Authorization or X-Api-Key must be the non-secret local reference
+        `rikkahub-vault-slot:<slot_id>`; literal credentials are rejected. Create and fill the
+        slot in the local Vault, then bind it to this server's returned id and header index.
 
         After registering, the tool waits up to connect_timeout_seconds (default 15, max 60)
         for the first sync to complete and returns the resulting status. If still CONNECTING
@@ -341,7 +343,7 @@ fun mcpAddTool(settingsStore: SettingsStore, manager: McpManager): Tool = Tool(
                 })
                 put("headers", buildJsonObject {
                     put("type", "array")
-                    put("description", "Optional HTTP headers as [{name, value}, ...]. Max 32 entries.")
+                    put("description", "Optional HTTP headers as [{name, value}, ...]. Max 32 entries. Sensitive values must be rikkahub-vault-slot:<slot_id>, never literal credentials.")
                     put("items", buildJsonObject {
                         put("type", "object")
                         put("properties", buildJsonObject {
@@ -439,8 +441,10 @@ fun mcpUpdateTool(settingsStore: SettingsStore, manager: McpManager): Tool = Too
         transport / URL / header changes take effect. The tool list is preserved across
         the update; sync runs automatically after re-add.
 
-        Like mcp_add, "Always Allow" is intentionally NOT offered: a hostile updated config
-        could exfiltrate everything the assistant has access to.
+        Like mcp_add, sensitive header values must be non-secret
+        `rikkahub-vault-slot:<slot_id>` references, never literal credentials. "Always Allow"
+        is intentionally NOT offered: a hostile updated config could exfiltrate everything the
+        assistant has access to.
     """.trimIndent(),
     parameters = {
         InputSchema.Obj(
@@ -452,6 +456,7 @@ fun mcpUpdateTool(settingsStore: SettingsStore, manager: McpManager): Tool = Too
                 put("enabled", buildJsonObject { put("type", "boolean") })
                 put("headers", buildJsonObject {
                     put("type", "array")
+                    put("description", "HTTP headers. Sensitive values must be rikkahub-vault-slot:<slot_id>, never literal credentials.")
                     put("items", buildJsonObject {
                         put("type", "object")
                         put("properties", buildJsonObject {

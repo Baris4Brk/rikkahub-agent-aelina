@@ -17,8 +17,14 @@ import me.rerere.rikkahub.data.model.Conversation
 import me.rerere.rikkahub.data.model.InjectionPosition
 import me.rerere.rikkahub.data.model.Lorebook
 import me.rerere.rikkahub.data.model.PromptInjection
+import me.rerere.rikkahub.data.repository.ConversationDeletionPolicy
 import me.rerere.rikkahub.data.repository.ConversationRepository
 import me.rerere.rikkahub.data.repository.WorkspaceRepository
+import me.rerere.rikkahub.security.SecretBinding
+import me.rerere.rikkahub.security.SecretBindingKind
+import me.rerere.rikkahub.security.SecretLeaseResult
+import me.rerere.rikkahub.security.SecretSlotMetadata
+import me.rerere.rikkahub.security.SecondUserSecretVault
 import me.rerere.rikkahub.ui.theme.findThemeById
 import me.rerere.rikkahub.utils.JsonInstant
 import me.rerere.rikkahub.workflow.repository.WorkflowRepository
@@ -35,6 +41,8 @@ class RepositoryPrivilegedManagementBackend(
     private val skillManager: SkillManager,
     private val workspaceRepository: WorkspaceRepository,
     private val workflowRepository: WorkflowRepository,
+    private val conversationDeletionPolicy: ConversationDeletionPolicy,
+    private val secretVault: SecondUserSecretVault,
     private val onConversationDeleted: (Uuid) -> Unit = {},
 ) : PrivilegedManagementBackend {
     override suspend fun execute(
@@ -55,6 +63,10 @@ class RepositoryPrivilegedManagementBackend(
             is PrivilegedManagementRequest.LorebookDelete -> lorebookDelete(request)
             is PrivilegedManagementRequest.ModeInjectionUpdate -> modeInjectionUpdate(request)
             is PrivilegedManagementRequest.AppSettingsUpdate -> appSettingsUpdate(request, context)
+            PrivilegedManagementRequest.SecretVaultList -> secretVaultList(context)
+            is PrivilegedManagementRequest.SecretVaultCreateSlot -> secretVaultCreateSlot(request, context)
+            is PrivilegedManagementRequest.SecretVaultSetBinding -> secretVaultSetBinding(request, context)
+            is PrivilegedManagementRequest.SecretVaultTestBinding -> secretVaultTestBinding(request, context)
         }
     } catch (cancelled: CancellationException) {
         throw cancelled
@@ -175,6 +187,146 @@ class RepositoryPrivilegedManagementBackend(
         return PrivilegedManagementResult.success("STATE", "Redacted state summary.", data)
     }
 
+    private suspend fun secretVaultList(
+        context: PrivilegedSessionContext,
+    ): PrivilegedManagementResult {
+        val subjectId = context.authoritySubjectId
+            ?: return PrivilegedManagementResult.failure("SECOND_USER_AUTHORITY_STALE", "No live second-user authority.")
+        val slots = secretVault.listMetadata(subjectId)
+        return PrivilegedManagementResult.success(
+            "SECRET_VAULT_METADATA",
+            "Secret slot metadata only. Values are never exposed.",
+            buildJsonObject {
+                put("slots", buildJsonArray {
+                    slots.forEach { slot ->
+                        add(buildJsonObject {
+                            put("slot_id", slot.slotId)
+                            put("label", slot.label)
+                            put("purpose", slot.purpose)
+                            put("binding_count", slot.bindings.size)
+                            put("updated_at_ms", slot.updatedAtMs)
+                        })
+                    }
+                })
+            },
+        )
+    }
+
+    private suspend fun secretVaultCreateSlot(
+        request: PrivilegedManagementRequest.SecretVaultCreateSlot,
+        context: PrivilegedSessionContext,
+    ): PrivilegedManagementResult {
+        val subjectId = context.authoritySubjectId
+            ?: return PrivilegedManagementResult.failure("SECOND_USER_AUTHORITY_STALE", "No live second-user authority.")
+        val now = System.currentTimeMillis()
+        val created = secretVault.createEmptySlot(
+            metadata = SecretSlotMetadata(
+                slotId = request.slotId,
+                label = request.label,
+                purpose = request.purpose,
+                authoritySubjectId = subjectId,
+                createdAtMs = now,
+                updatedAtMs = now,
+            ),
+            subjectId = subjectId,
+        )
+        return if (created) {
+            PrivilegedManagementResult.success(
+                "SECRET_SLOT_CREATED",
+                "Empty secret slot created. Only the user can enter a value after strong biometric verification.",
+                PrivilegedManagementResult.idData("slot_id", request.slotId),
+            )
+        } else {
+            PrivilegedManagementResult.failure("SECRET_SLOT_CREATE_REJECTED", "Slot ID is invalid, already exists, or authority changed.")
+        }
+    }
+
+    private suspend fun secretVaultSetBinding(
+        request: PrivilegedManagementRequest.SecretVaultSetBinding,
+        context: PrivilegedSessionContext,
+    ): PrivilegedManagementResult {
+        val subjectId = context.authoritySubjectId
+            ?: return PrivilegedManagementResult.failure("SECOND_USER_AUTHORITY_STALE", "No live second-user authority.")
+        val kind = SecretBindingKind.entries.firstOrNull { it.name == request.kind }
+            ?: return PrivilegedManagementResult.failure("INVALID_SECRET_BINDING", "Unknown secret binding kind.")
+        val targetId = request.targetId.trim()
+        if (targetId.isBlank() || targetId.length > 160) {
+            return PrivilegedManagementResult.failure("INVALID_SECRET_BINDING", "Binding target is invalid.")
+        }
+        val slot = secretVault.listMetadata(subjectId).firstOrNull { it.slotId == request.slotId }
+            ?: return PrivilegedManagementResult.failure("SECRET_SLOT_NOT_FOUND", "The current second user does not own this slot.")
+        val binding = SecretBinding(
+            kind = kind,
+            targetId = targetId,
+            allowPetSidecar = request.allowPetSidecar && kind in setOf(
+                SecretBindingKind.PROVIDER,
+                SecretBindingKind.TTS,
+            ),
+        )
+        val next = if (request.enabled) {
+            (slot.bindings.filterNot { it.kind == binding.kind && it.targetId == binding.targetId } + binding)
+        } else {
+            slot.bindings.filterNot { it.kind == binding.kind && it.targetId == binding.targetId }
+        }
+        return if (secretVault.updateBindings(slot.slotId, subjectId, next)) {
+            PrivilegedManagementResult.success("SECRET_BINDING_UPDATED", "Secret binding metadata updated.")
+        } else {
+            PrivilegedManagementResult.failure("SECRET_BINDING_REJECTED", "Secret binding update was rejected.")
+        }
+    }
+
+    private suspend fun secretVaultTestBinding(
+        request: PrivilegedManagementRequest.SecretVaultTestBinding,
+        context: PrivilegedSessionContext,
+    ): PrivilegedManagementResult {
+        val subjectId = context.authoritySubjectId
+            ?: return PrivilegedManagementResult.failure("SECOND_USER_AUTHORITY_STALE", "No live second-user authority.")
+        val kind = SecretBindingKind.entries.firstOrNull { it.name == request.kind }
+            ?: return PrivilegedManagementResult.failure("INVALID_SECRET_BINDING", "Unknown secret binding kind.")
+        val slot = secretVault.listMetadata(subjectId).firstOrNull { it.slotId == request.slotId }
+            ?: return PrivilegedManagementResult.failure("SECRET_SLOT_NOT_FOUND", "The current second user does not own this slot.")
+        val binding = slot.bindings.firstOrNull {
+            it.kind == kind && it.targetId == request.targetId.trim()
+        } ?: return PrivilegedManagementResult.failure("SECRET_BINDING_NOT_FOUND", "That binding is not configured for this slot.")
+        return when (val leaseResult = secretVault.withLease(slot.slotId, subjectId, binding) { lease ->
+            // This verifies decryptability and the scoped binding only. It intentionally does
+            // not expose a string or make a network request as part of a model-facing probe.
+            lease.use { it.isNotEmpty() }
+        }) {
+            is SecretLeaseResult.Success -> if (leaseResult.value) {
+                PrivilegedManagementResult.success(
+                    "SECRET_BINDING_READY",
+                    "Secret slot is available to its typed local adapter.",
+                )
+            } else {
+                PrivilegedManagementResult.failure(
+                    "SECRET_VALUE_NOT_SET",
+                    "The slot has no user-entered value yet.",
+                )
+            }
+            SecretLeaseResult.SlotMissing -> PrivilegedManagementResult.failure(
+                "SECRET_VALUE_NOT_SET",
+                "The slot has no user-entered value yet.",
+            )
+            SecretLeaseResult.BindingDenied -> PrivilegedManagementResult.failure(
+                "SECRET_BINDING_DENIED",
+                "The binding is not allowed for this slot.",
+            )
+            SecretLeaseResult.AuthorityDenied -> PrivilegedManagementResult.failure(
+                "SECOND_USER_AUTHORITY_STALE",
+                "Second-user authority changed.",
+            )
+            SecretLeaseResult.KeystoreUnavailable -> PrivilegedManagementResult.failure(
+                "SECRET_KEYSTORE_UNAVAILABLE",
+                "The Android Keystore could not unlock this slot.",
+            )
+            SecretLeaseResult.Corrupt -> PrivilegedManagementResult.failure(
+                "SECRET_SLOT_CORRUPT",
+                "The encrypted slot cannot be read.",
+            )
+        }
+    }
+
     private suspend fun conversationCreate(request: PrivilegedManagementRequest.ConversationCreate): PrivilegedManagementResult {
         val settings = settingsStore.settingsFlow.value
         if (settings.assistants.none { it.id == request.assistantId }) {
@@ -210,11 +362,26 @@ class RepositoryPrivilegedManagementBackend(
     private suspend fun conversationDelete(request: PrivilegedManagementRequest.ConversationDelete): PrivilegedManagementResult {
         val existing = conversationRepository.getConversationById(request.conversationId)
             ?: return PrivilegedManagementResult.failure("CONVERSATION_NOT_FOUND", "The conversation does not exist.")
+        if (!conversationDeletionPolicy.canDelete(existing)) {
+            return PrivilegedManagementResult.failure(
+                "SECOND_USER_CONVERSATION_PROTECTED",
+                "The configured second-user conversation cannot be deleted.",
+            )
+        }
         // Stop and detach any live runtime before deleting its Room rows. Otherwise an
         // in-flight generation can race the deletion and persist the conversation again.
         onConversationDeleted(existing.id)
-        conversationRepository.deleteConversation(existing)
-        return PrivilegedManagementResult.success("CONVERSATION_DELETED", "Conversation deleted.")
+        return when (conversationRepository.deleteConversation(existing)) {
+            is me.rerere.rikkahub.data.repository.ConversationDeletionResult.Deleted ->
+                PrivilegedManagementResult.success("CONVERSATION_DELETED", "Conversation deleted.")
+            is me.rerere.rikkahub.data.repository.ConversationDeletionResult.RetainedSecondUser ->
+                PrivilegedManagementResult.failure(
+                    "SECOND_USER_CONVERSATION_PROTECTED",
+                    "The configured second-user conversation cannot be deleted.",
+                )
+            is me.rerere.rikkahub.data.repository.ConversationDeletionResult.Missing ->
+                PrivilegedManagementResult.failure("CONVERSATION_NOT_FOUND", "The conversation does not exist.")
+        }
     }
 
     private suspend fun assistantUpdate(request: PrivilegedManagementRequest.AssistantUpdate): PrivilegedManagementResult {

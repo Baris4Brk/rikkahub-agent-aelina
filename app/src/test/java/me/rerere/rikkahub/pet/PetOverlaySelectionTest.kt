@@ -1,6 +1,8 @@
 package me.rerere.rikkahub.pet
 
 import kotlin.uuid.Uuid
+import me.rerere.rikkahub.assistant.SecondUserAuthorityConfig
+import me.rerere.rikkahub.assistant.SecondUserAuthorityState
 import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.model.Assistant
 import org.junit.Assert.assertEquals
@@ -21,7 +23,15 @@ class PetOverlaySelectionTest {
             petScale = 1.4f,
         )
 
-        val resolved = Settings(assistants = listOf(assistant)).resolvePetOverlaySelection()
+        val resolved = Settings(
+            assistants = listOf(assistant),
+            secondUserAuthority = SecondUserAuthorityConfig(
+                assistantId = assistant.id,
+                conversationId = conversation,
+                authorityEpoch = 1L,
+                state = SecondUserAuthorityState.ACTIVE,
+            ),
+        ).resolvePetOverlaySelection()
 
         assertTrue(resolved?.migratedFromLegacy == true)
         assertEquals(assistant.id, resolved?.selection?.ownerAssistantId)
@@ -43,6 +53,12 @@ class PetOverlaySelectionTest {
         val wrongConversation = Uuid.random()
         val settings = Settings(
             assistants = listOf(assistant),
+            secondUserAuthority = SecondUserAuthorityConfig(
+                assistantId = assistant.id,
+                conversationId = assistant.privilegedConversationId,
+                authorityEpoch = 1L,
+                state = SecondUserAuthorityState.ACTIVE,
+            ),
             petOverlaySelection = PetOverlaySelection(
                 ownerAssistantId = assistant.id,
                 privilegedConversationId = wrongConversation,

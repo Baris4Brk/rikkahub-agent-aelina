@@ -67,10 +67,46 @@ class SecondUserTargetResolver(
     private val conversationReader: SecondUserTargetConversationReader,
     private val conversationTitleReader: SecondUserTargetConversationTitleReader =
         SecondUserTargetConversationTitleReader { null },
+    private val authorityService: SecondUserAuthorityService? = null,
 ) {
     suspend fun resolve(): SecondUserTargetResolution {
         val settings = settingsReader.read()
+        authorityService?.let { service ->
+            return resolveActiveSecondUser(settings, service)
+        }
         return resolveAssistant(settings, settings.systemAssistantTargetAssistantId)
+    }
+
+    /**
+     * Resolve only the epoch-bound global authority.  Unlike [resolve], this never falls back
+     * to the historical system-assistant preference, so callers such as Quick Capture cannot
+     * silently target an old per-assistant compatibility field after a reassignment.
+     */
+    suspend fun resolveActiveSecondUser(): SecondUserTargetResolution {
+        val settings = settingsReader.read()
+        authorityService?.let { service -> return resolveActiveSecondUser(settings, service) }
+        val snapshot = SecondUserAuthorityRegistry.current()
+            ?: return SecondUserTargetResolution.TargetNotSelected
+        return resolveAssistant(
+            settings = settings,
+            assistantId = snapshot.assistantId,
+            requiredConversationId = snapshot.conversationId,
+        )
+    }
+
+    private suspend fun resolveActiveSecondUser(
+        settings: Settings,
+        service: SecondUserAuthorityService,
+    ): SecondUserTargetResolution = when (val authority = service.resolve()) {
+        is SecondUserAuthorityResolution.Active -> resolveAssistant(
+            settings = settings,
+            assistantId = authority.snapshot.assistantId,
+            requiredConversationId = authority.snapshot.conversationId,
+        )
+        is SecondUserAuthorityResolution.Pending,
+        is SecondUserAuthorityResolution.Invalid,
+        SecondUserAuthorityResolution.Unconfigured,
+        -> SecondUserTargetResolution.TargetNotSelected
     }
 
     /** Resolves a caller-selected assistant without ever falling back to global chat state. */
@@ -80,11 +116,17 @@ class SecondUserTargetResolver(
     suspend fun resolveAssistant(
         settings: Settings,
         assistantId: Uuid?,
+    ): SecondUserTargetResolution = resolveAssistant(settings, assistantId, requiredConversationId = null)
+
+    private suspend fun resolveAssistant(
+        settings: Settings,
+        assistantId: Uuid?,
+        requiredConversationId: Uuid?,
     ): SecondUserTargetResolution {
         assistantId ?: return SecondUserTargetResolution.TargetNotSelected
         val assistant = settings.assistants.firstOrNull { it.id == assistantId }
             ?: return SecondUserTargetResolution.AssistantNotFound(assistantId)
-        val conversationId = assistant.privilegedConversationId
+        val conversationId = requiredConversationId ?: assistant.privilegedConversationId
             ?: return SecondUserTargetResolution.PrivilegedConversationNotConfigured(assistantId)
         val actualAssistantId = conversationReader.findAssistantId(conversationId)
             ?: return SecondUserTargetResolution.ConversationNotFound(

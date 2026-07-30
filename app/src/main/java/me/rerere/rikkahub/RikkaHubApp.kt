@@ -82,6 +82,14 @@ class RikkaHubApp : Application() {
             modules(appModule, viewModelModule, dataSourceModule, repositoryModule)
         }
         dependencyGraphStarted = true
+        get<AppScope>().launch(Dispatchers.IO) {
+            runCatching {
+                get<me.rerere.rikkahub.assistant.SecondUserAuthorityService>()
+                    .initializeLegacyMigration()
+            }.onFailure { error ->
+                Log.e(TAG, "Second-user authority migration failed", error)
+            }
+        }
         runCatching {
             me.rerere.rikkahub.assistant.SystemAssistantSessionAdapterRegistry.install(
                 get<me.rerere.rikkahub.assistant.AndroidSystemAssistantSessionAdapter>()
@@ -198,7 +206,6 @@ class RikkaHubApp : Application() {
         // makes background sub-agents survivable across process death.
         runAgentRunBootRecovery()
         get<me.rerere.rikkahub.data.execution.ExecutionRetentionManager>().requestCleanup()
-        startExecutionProbeScheduler()
         runExecutionBootRecovery()
         refreshCapabilityPolicyGrants()
         reconcileMemoryV2Metadata()
@@ -333,8 +340,16 @@ class RikkaHubApp : Application() {
     private fun runExecutionBootRecovery() {
         get<AppScope>().launch(Dispatchers.IO) {
             runCatching {
+                // Authority migration/revocation deliberately precedes every approval and
+                // runtime sweep. A killed reassignment therefore continues revocation rather
+                // than giving an old queue, approval, or child process one recovery turn.
+                get<me.rerere.rikkahub.assistant.SecondUserAuthorityService>()
+                    .initializeLegacyMigration()
+                get<me.rerere.rikkahub.assistant.SecondUserAuthorityRevocationCoordinator>()
+                    .resumeIfNeeded()
                 get<me.rerere.rikkahub.data.execution.SecondUserApprovalRecovery>().runRecovery()
                 get<me.rerere.rikkahub.data.execution.ExecutionBootRecovery>().runRecovery()
+                startExecutionProbeScheduler()
             }.onFailure {
                 Log.w(TAG, "runExecutionBootRecovery failed", it)
             }

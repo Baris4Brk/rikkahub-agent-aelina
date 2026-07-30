@@ -158,6 +158,11 @@ class ExecutionRepository(
         subjectId: String,
     ): List<ExecutionRecord> = dao.getInFlightForSubject(conversationId, subjectId)
 
+    suspend fun getInFlightForConversationSubjectType(
+        conversationId: String,
+        subjectType: String,
+    ): List<ExecutionRecord> = dao.getInFlightForConversationSubjectType(conversationId, subjectType)
+
     suspend fun getChildren(parentExecutionId: String): List<ExecutionRecord> =
         dao.getChildren(parentExecutionId)
 

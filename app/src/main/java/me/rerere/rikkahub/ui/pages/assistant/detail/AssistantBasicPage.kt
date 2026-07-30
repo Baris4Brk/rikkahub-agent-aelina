@@ -36,6 +36,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import me.rerere.ai.provider.ModelType
 import me.rerere.rikkahub.R
+import me.rerere.rikkahub.Screen
 import me.rerere.rikkahub.data.db.entity.WorkspaceEntity
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.data.model.Conversation
@@ -47,6 +48,7 @@ import me.rerere.rikkahub.ui.components.ui.Select
 import me.rerere.rikkahub.ui.components.ui.TagsInput
 import me.rerere.rikkahub.ui.components.ui.UIAvatar
 import me.rerere.rikkahub.ui.hooks.heroAnimation
+import me.rerere.rikkahub.ui.context.LocalNavController
 import me.rerere.rikkahub.ui.theme.CustomColors
 import me.rerere.rikkahub.utils.toFixed
 import org.koin.androidx.compose.koinViewModel
@@ -109,6 +111,7 @@ internal fun AssistantBasicContent(
     onUpdate: (Assistant) -> Unit,
     vm: AssistantDetailVM
 ) {
+    val navigator = LocalNavController.current
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -176,18 +179,10 @@ internal fun AssistantBasicContent(
                 Select(
                     options = listOf<Conversation?>(null) + conversations,
                     selectedOption = selectedConversation,
-                    onOptionSelected = { conversation ->
-                        vm.updateAssistant { current ->
-                            current.copy(
-                                privilegedConversationId = conversation?.id,
-                                // Confirmation belongs to the selected session, not merely to
-                                // this assistant. Choosing another session requires a new local
-                                // confirmation before automatic approvals can be used.
-                                secondUserPolicyConfirmed = false,
-                                allowConversationHistoryRead = false,
-                            )
-                        }
-                    },
+                    // Global second-user authority is selected only from the local biometric
+                    // recovery page. The legacy field remains a display-only compatibility
+                    // mirror so this screen cannot create a second elevated target.
+                    onOptionSelected = { navigator.navigate(Screen.SecondUserAuthorityRecovery) },
                     modifier = Modifier.fillMaxWidth(),
                     optionToString = { conversation ->
                         conversation?.let {
@@ -514,21 +509,7 @@ internal fun AssistantBasicContent(
                     Switch(
                         checked = assistant.secondUserPolicyConfirmed,
                         enabled = assistant.privilegedConversationId != null,
-                        onCheckedChange = { confirmed ->
-                            onUpdate(
-                                assistant.copy(
-                                    secondUserPolicyConfirmed = confirmed,
-                                    allowConversationHistoryRead = if (confirmed) {
-                                        assistant.allowConversationHistoryRead
-                                    } else {
-                                        false
-                                    },
-                                    // Clear the legacy bypass marker only after a deliberate
-                                    // local confirmation (or opt-out) in this UI.
-                                    unrestricted = false,
-                                ),
-                            )
-                        },
+                        onCheckedChange = { navigator.navigate(Screen.SecondUserAuthorityRecovery) },
                     )
                 },
             )

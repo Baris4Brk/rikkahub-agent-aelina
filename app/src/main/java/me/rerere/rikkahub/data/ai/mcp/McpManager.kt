@@ -37,12 +37,16 @@ import kotlinx.serialization.json.JsonObject
 import me.rerere.ai.core.InputSchema
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.rikkahub.AppScope
+import me.rerere.rikkahub.assistant.SecondUserAuthorityRegistry
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.data.files.FilesManager
 import me.rerere.rikkahub.data.files.saveUploadFromBytes
 import me.rerere.rikkahub.utils.JsonInstant
 import me.rerere.rikkahub.utils.checkDifferent
+import me.rerere.rikkahub.security.SecondUserSecretVault
+import me.rerere.rikkahub.security.SecretBindingResolution
+import me.rerere.rikkahub.security.resolveMcpHeaderBindings
 import okhttp3.OkHttpClient
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
@@ -60,6 +64,7 @@ class McpManager(
     private val settingsStore: SettingsStore,
     private val appScope: AppScope,
     private val filesManager: FilesManager,
+    private val secretVault: SecondUserSecretVault,
 ) {
     private val okHttpClient: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
@@ -205,14 +210,16 @@ class McpManager(
         return UIMessagePart.Image(url = uri.toString())
     }
 
-    private fun getTransport(config: McpServerConfig): AbstractTransport = when (config) {
+    private suspend fun getTransport(config: McpServerConfig): AbstractTransport {
+        val resolvedHeaders = resolveTransportHeaders(config)
+        return when (config) {
         is McpServerConfig.SseTransportServer -> {
             SseClientTransport(
                 urlString = config.url,
                 client = client,
                 requestBuilder = {
                     headers.appendAll(StringValues.build {
-                        config.commonOptions.headers.forEach {
+                        resolvedHeaders.forEach {
                             append(it.first, it.second)
                         }
                     })
@@ -226,12 +233,37 @@ class McpManager(
                 client = client,
                 requestBuilder = {
                     headers.appendAll(StringValues.build {
-                        config.commonOptions.headers.forEach {
+                        resolvedHeaders.forEach {
                             append(it.first, it.second)
                         }
                     })
                 }
             )
+        }
+    }
+    }
+
+    /**
+     * A vault reference is deliberately useless without the live global second-user epoch. It
+     * fails closed before the HTTP transport is made, so reconnects never fall back to a stale
+     * plaintext value from Settings.
+     */
+    private suspend fun resolveTransportHeaders(config: McpServerConfig): List<Pair<String, String>> {
+        val configured = config.commonOptions.headers
+        if (configured.none { (_, value) -> McpVaultSecretReference.isReference(value) }) {
+            return configured
+        }
+        val subjectId = SecondUserAuthorityRegistry.current()?.subjectId
+            ?: throw IllegalStateException("mcp_secret_authority_stale")
+        return when (val result = secretVault.resolveMcpHeaderBindings(
+            serverId = config.id,
+            headers = configured,
+            subjectId = subjectId,
+        )) {
+            is SecretBindingResolution.Ready -> result.value
+            SecretBindingResolution.NotBound -> configured
+            is SecretBindingResolution.Unavailable ->
+                throw IllegalStateException(result.code)
         }
     }
 

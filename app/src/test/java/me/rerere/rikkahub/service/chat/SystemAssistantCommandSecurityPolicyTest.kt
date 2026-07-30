@@ -1,9 +1,12 @@
 package me.rerere.rikkahub.service.chat
 
 import me.rerere.ai.ui.UIMessagePart
+import me.rerere.rikkahub.assistant.SecondUserAdmissionSnapshot
+import me.rerere.rikkahub.assistant.SecondUserAuthorityRegistry
 import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.data.model.Conversation
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -11,6 +14,11 @@ import org.junit.Test
 import kotlin.uuid.Uuid
 
 class SystemAssistantCommandSecurityPolicyTest {
+    @After
+    fun clearAuthority() {
+        SecondUserAuthorityRegistry.install(null)
+    }
+
     @Test
     fun `emergency stop rejects every model-capable command but still permits stop`() {
         val message = SendMessageCommand(
@@ -58,7 +66,7 @@ class SystemAssistantCommandSecurityPolicyTest {
     }
 
     @Test
-    fun `admission requires the selected target while execution honors the accepted snapshot`() {
+    fun `system assistant follows global authority rather than legacy target preference`() {
         val conversationId = Uuid.random()
         val acceptedAssistant = Assistant(privilegedConversationId = conversationId)
         val replacementAssistant = Assistant(privilegedConversationId = Uuid.random())
@@ -74,6 +82,7 @@ class SystemAssistantCommandSecurityPolicyTest {
         val changedSettings = acceptedSettings.copy(
             systemAssistantTargetAssistantId = replacementAssistant.id,
         )
+        installAuthority(acceptedAssistant, conversationId)
 
         assertTrue(
             SystemAssistantCommandSecurityPolicy.validateAdmissionTarget(
@@ -83,14 +92,13 @@ class SystemAssistantCommandSecurityPolicyTest {
                 persistedConversation = conversation,
             ) is SystemAssistantTargetValidation.Valid,
         )
-        assertEquals(
-            SYSTEM_ASSISTANT_TARGET_CHANGED_REJECTION,
-            (SystemAssistantCommandSecurityPolicy.validateAdmissionTarget(
+        assertTrue(
+            SystemAssistantCommandSecurityPolicy.validateAdmissionTarget(
                 command = command,
                 conversationId = conversationId,
                 settings = changedSettings,
                 persistedConversation = conversation,
-            ) as SystemAssistantTargetValidation.Invalid).reason,
+            ) is SystemAssistantTargetValidation.Valid,
         )
         assertTrue(
             SystemAssistantCommandSecurityPolicy.validateAcceptedTarget(
@@ -100,10 +108,28 @@ class SystemAssistantCommandSecurityPolicyTest {
                 persistedConversation = conversation,
             ) is SystemAssistantTargetValidation.Valid,
         )
+
+        SecondUserAuthorityRegistry.install(
+            SecondUserAdmissionSnapshot.create(
+                assistantId = replacementAssistant.id,
+                conversationId = checkNotNull(replacementAssistant.privilegedConversationId),
+                authorityEpoch = 2L,
+                origin = me.rerere.rikkahub.data.ai.ToolCallOrigin.SystemAssistant,
+            ),
+        )
+        assertEquals(
+            SYSTEM_ASSISTANT_TARGET_CONVERSATION_CHANGED_REJECTION,
+            (SystemAssistantCommandSecurityPolicy.validateAcceptedTarget(
+                command = command,
+                conversationId = conversationId,
+                settings = changedSettings,
+                persistedConversation = conversation,
+            ) as SystemAssistantTargetValidation.Invalid).reason,
+        )
     }
 
     @Test
-    fun `accepted target fails closed when its assistant or privileged conversation changes`() {
+    fun `accepted target fails closed when authority or persisted ownership changes`() {
         val conversationId = Uuid.random()
         val assistant = Assistant(privilegedConversationId = conversationId)
         val conversation = Conversation.ofId(conversationId, assistant.id)
@@ -115,30 +141,52 @@ class SystemAssistantCommandSecurityPolicyTest {
             systemAssistantTargetAssistantId = assistant.id,
             assistants = listOf(assistant),
         )
+        installAuthority(assistant, conversationId)
 
-        val cases = listOf(
-            settings.copy(assistants = emptyList()) to
-                (conversation to SYSTEM_ASSISTANT_TARGET_ASSISTANT_MISSING_REJECTION),
-            settings.copy(
-                assistants = listOf(assistant.copy(privilegedConversationId = Uuid.random())),
-            ) to (conversation to SYSTEM_ASSISTANT_TARGET_CONVERSATION_CHANGED_REJECTION),
-            settings to (null to SYSTEM_ASSISTANT_TARGET_CONVERSATION_MISSING_REJECTION),
-            settings to (
-                Conversation.ofId(conversationId, Uuid.random()) to
-                    SYSTEM_ASSISTANT_TARGET_CONVERSATION_MISMATCH_REJECTION
-                ),
-        )
-
-        cases.forEach { (caseSettings, conversationAndReason) ->
-            val (caseConversation, expectedReason) = conversationAndReason
-            val validation = SystemAssistantCommandSecurityPolicy.validateAcceptedTarget(
+        fun reason(caseSettings: Settings, caseConversation: Conversation?): String =
+            (SystemAssistantCommandSecurityPolicy.validateAcceptedTarget(
                 command = command,
                 conversationId = conversationId,
                 settings = caseSettings,
                 persistedConversation = caseConversation,
-            ) as SystemAssistantTargetValidation.Invalid
-            assertEquals(expectedReason, validation.reason)
-        }
+            ) as SystemAssistantTargetValidation.Invalid).reason
+
+        assertEquals(
+            SYSTEM_ASSISTANT_TARGET_ASSISTANT_MISSING_REJECTION,
+            reason(settings.copy(assistants = emptyList()), conversation),
+        )
+        // The old assistant mirror cannot revoke a globally active second user.
+        assertTrue(
+            SystemAssistantCommandSecurityPolicy.validateAcceptedTarget(
+                command = command,
+                conversationId = conversationId,
+                settings = settings.copy(
+                    assistants = listOf(assistant.copy(privilegedConversationId = Uuid.random())),
+                ),
+                persistedConversation = conversation,
+            ) is SystemAssistantTargetValidation.Valid,
+        )
+        assertEquals(
+            SYSTEM_ASSISTANT_TARGET_CONVERSATION_MISSING_REJECTION,
+            reason(settings, null),
+        )
+        assertEquals(
+            SYSTEM_ASSISTANT_TARGET_CONVERSATION_MISMATCH_REJECTION,
+            reason(settings, Conversation.ofId(conversationId, Uuid.random())),
+        )
+
+        SecondUserAuthorityRegistry.install(
+            SecondUserAdmissionSnapshot.create(
+                assistantId = assistant.id,
+                conversationId = Uuid.random(),
+                authorityEpoch = 2L,
+                origin = me.rerere.rikkahub.data.ai.ToolCallOrigin.SystemAssistant,
+            ),
+        )
+        assertEquals(
+            SYSTEM_ASSISTANT_TARGET_CONVERSATION_CHANGED_REJECTION,
+            reason(settings, conversation),
+        )
     }
 
     @Test
@@ -159,5 +207,16 @@ class SystemAssistantCommandSecurityPolicyTest {
         ) as SystemAssistantTargetValidation.Invalid
 
         assertEquals(SYSTEM_ASSISTANT_TARGET_SNAPSHOT_REQUIRED_REJECTION, validation.reason)
+    }
+
+    private fun installAuthority(assistant: Assistant, conversationId: Uuid) {
+        SecondUserAuthorityRegistry.install(
+            SecondUserAdmissionSnapshot.create(
+                assistantId = assistant.id,
+                conversationId = conversationId,
+                authorityEpoch = 1L,
+                origin = me.rerere.rikkahub.data.ai.ToolCallOrigin.SystemAssistant,
+            ),
+        )
     }
 }

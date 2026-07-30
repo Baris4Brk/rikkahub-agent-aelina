@@ -1,5 +1,6 @@
 package me.rerere.rikkahub.service.chat
 
+import me.rerere.rikkahub.assistant.SecondUserAuthorityRegistry
 import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.data.model.Conversation
@@ -70,7 +71,12 @@ internal object QuickCaptureCommandSecurityPolicy {
     ): QuickCaptureTargetValidation {
         val assistant = settings.assistants.firstOrNull { it.id == assistantId }
             ?: return QuickCaptureTargetValidation.Invalid(QUICK_CAPTURE_TARGET_ASSISTANT_MISSING_REJECTION)
-        if (assistant.privilegedConversationId != conversationId) {
+        val authority = SecondUserAuthorityRegistry.current()
+        if (
+            authority == null ||
+            authority.assistantId != assistantId ||
+            authority.conversationId != conversationId
+        ) {
             return QuickCaptureTargetValidation.Invalid(QUICK_CAPTURE_TARGET_CONVERSATION_CHANGED_REJECTION)
         }
         val conversation = persistedConversation?.takeIf { it.id == conversationId }

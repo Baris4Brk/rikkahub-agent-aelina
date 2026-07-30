@@ -67,6 +67,7 @@ import me.rerere.rikkahub.CHAT_COMPLETED_NOTIFICATION_CHANNEL_ID
 import me.rerere.rikkahub.CHAT_LIVE_UPDATE_NOTIFICATION_CHANNEL_ID
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.RouteActivity
+import me.rerere.rikkahub.assistant.SecondUserAuthorityRegistry
 import me.rerere.rikkahub.data.ai.GenerationChunk
 import me.rerere.rikkahub.data.ai.GenerationHandler
 import me.rerere.rikkahub.data.ai.GenerationPersistenceBarrier
@@ -453,6 +454,9 @@ class ChatService(
         me.rerere.rikkahub.data.capability.CapabilityGrantRepository,
     private val workspaceRepository: WorkspaceRepository,
     private val workflowRepository: WorkflowRepository,
+    private val conversationDeletionPolicy:
+        me.rerere.rikkahub.data.repository.ConversationDeletionPolicy,
+    private val secondUserSecretVault: me.rerere.rikkahub.security.SecondUserSecretVault,
     private val durableCommandQueue: DurableCommandQueue,
     private val secondUserApprovalLifecycle:
         me.rerere.rikkahub.data.execution.SecondUserApprovalLifecycle,
@@ -483,13 +487,17 @@ class ChatService(
         privilegedActionGuard,
     )
     private val privilegedManagementBackend by lazy {
-        me.rerere.rikkahub.privilege.RepositoryPrivilegedManagementBackend(
-            settingsStore = settingsStore,
-            conversationRepository = conversationRepo,
-            skillManager = skillManager,
-            workspaceRepository = workspaceRepository,
-            workflowRepository = workflowRepository,
-            onConversationDeleted = ::dropSession,
+        me.rerere.rikkahub.privilege.HostCapabilityRegistry(
+            backend = me.rerere.rikkahub.privilege.RepositoryPrivilegedManagementBackend(
+                settingsStore = settingsStore,
+                conversationRepository = conversationRepo,
+                skillManager = skillManager,
+                workspaceRepository = workspaceRepository,
+                workflowRepository = workflowRepository,
+                conversationDeletionPolicy = conversationDeletionPolicy,
+                secretVault = secondUserSecretVault,
+                onConversationDeleted = ::dropSession,
+            ),
         )
     }
 
@@ -672,7 +680,9 @@ class ChatService(
     ): me.rerere.rikkahub.data.capability.CapabilitySubject {
         if (privilege?.isPrivileged == true && privilege.expandLocalTools) {
             return me.rerere.rikkahub.data.capability.CapabilitySubject(
-                id = "${assistant.id}:$conversationId",
+                id = requireNotNull(privilege.authoritySubjectId) {
+                    "second_user_authority_snapshot_missing"
+                },
                 type = me.rerere.rikkahub.data.capability.SubjectType.LOCAL_SECOND_USER,
                 privilegedConversationId = privilege.conversationId.toString(),
             )
@@ -1797,6 +1807,18 @@ class ChatService(
             origin != CommandOrigin.APP_UI
         ) {
             return RunOutcome.Rejected("approval_requires_trusted_app")
+        }
+        if (
+            approvalProjection != null &&
+            approvalProjection.subjectType ==
+                me.rerere.rikkahub.data.capability.SubjectType.LOCAL_SECOND_USER.name &&
+            approvalProjection.subjectId != SecondUserAuthorityRegistry.current()?.subjectId &&
+            decision !is ToolDecision.Denied
+        ) {
+            // A positive decision (including an answer that resumes execution) is tied to the
+            // exact authority epoch that created the projection. A stale epoch can only be
+            // revoked/denied; it can never resume a tool after reassignment.
+            return RunOutcome.Rejected("second_user_authority_stale")
         }
         val newApprovalState = when {
             answer != null -> ToolApprovalState.Answered(answer)

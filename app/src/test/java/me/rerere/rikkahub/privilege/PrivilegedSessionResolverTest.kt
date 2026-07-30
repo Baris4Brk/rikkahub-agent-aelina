@@ -3,8 +3,12 @@ package me.rerere.rikkahub.privilege
 import me.rerere.rikkahub.data.ai.ToolCallOrigin
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.data.model.Conversation
+import me.rerere.rikkahub.assistant.SecondUserAdmissionSnapshot
+import me.rerere.rikkahub.assistant.SecondUserAuthorityRegistry
+import org.junit.After
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
 import kotlin.uuid.Uuid
 
@@ -18,6 +22,23 @@ class PrivilegedSessionResolverTest {
         privilegedIdentityName = "第二用户",
         secondUserPolicyConfirmed = true,
     )
+
+    @Before
+    fun installGlobalAuthority() {
+        SecondUserAuthorityRegistry.install(
+            SecondUserAdmissionSnapshot.create(
+                assistantId = assistantId,
+                conversationId = privilegedConversationId,
+                authorityEpoch = 7L,
+                origin = ToolCallOrigin.LocalChat,
+            ),
+        )
+    }
+
+    @After
+    fun clearGlobalAuthority() {
+        SecondUserAuthorityRegistry.install(null)
+    }
 
     @Test
     fun `confirmed selected local conversation gets expanded tools and auto approval without bypass`() {
@@ -121,7 +142,7 @@ class PrivilegedSessionResolverTest {
     }
 
     @Test
-    fun `selected session requires explicit local policy confirmation`() {
+    fun `legacy assistant confirmation flag cannot revoke active global authority`() {
         val context = DefaultPrivilegedSessionResolver.resolve(
             assistant = assistant.copy(secondUserPolicyConfirmed = false),
             conversation = conversation(privilegedConversationId),
@@ -129,8 +150,8 @@ class PrivilegedSessionResolverTest {
         )
 
         assertTrue(context.isPrivileged)
-        assertFalse(context.expandLocalTools)
-        assertFalse(context.autoApproveTools)
+        assertTrue(context.expandLocalTools)
+        assertTrue(context.autoApproveTools)
         assertFalse(context.unrestrictedOverride)
     }
 

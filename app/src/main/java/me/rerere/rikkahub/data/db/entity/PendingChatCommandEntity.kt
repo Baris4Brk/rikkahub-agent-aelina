@@ -10,6 +10,7 @@ import androidx.room.Index
         Index(value = ["conversationId", "state", "priority", "sequence"]),
         Index("leaseUntil"),
         Index("dedupeKey"),
+        Index("authoritySubjectId"),
         Index(value = ["idempotencyKey"], unique = true),
     ],
 )
@@ -17,6 +18,8 @@ data class PendingChatCommandEntity(
     @androidx.room.PrimaryKey val id: String,
     val schemaVersion: Int,
     val conversationId: String,
+    /** Exact global second-user subject at admission; null is never elevated on recovery. */
+    val authoritySubjectId: String? = null,
     val type: String,
     val payloadJson: String,
     val state: String,

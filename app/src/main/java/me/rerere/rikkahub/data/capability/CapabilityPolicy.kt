@@ -189,22 +189,10 @@ class DefaultCapabilityPolicyEngine(
                     message = "The local second-user profile is available only from an unlocked local surface.",
                 )
             }
-            val requiresGrant = request.capabilities.any { capability ->
-                capability.value.startsWith("linux.") ||
-                    capability.value.startsWith("phone.shared.")
-            }
-            if (!requiresGrant) return PolicyDecision.Allowed("local_second_user_profile")
-            val matched = request.capabilities.all { capability ->
-                grants().any { grant -> grant.matches(request, capability, nowMs()) }
-            }
-            return if (matched) {
-                PolicyDecision.Allowed("second_user_scoped_grant")
-            } else {
-                PolicyDecision.Denied(
-                    code = "second_user_grant_required",
-                    message = "Enable the persistent Linux/shared-storage grant for this selected conversation.",
-                )
-            }
+            // The active, local second user is the user's explicit all-grantable automatic
+            // profile. ToolExecutionGate still applies hard denies, capability availability,
+            // lock-screen and system-consent checks before this policy can allow execution.
+            return PolicyDecision.Allowed("local_second_user_automatic")
         }
 
         val matched = request.capabilities.all { capability ->

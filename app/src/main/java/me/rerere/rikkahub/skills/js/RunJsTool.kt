@@ -23,7 +23,7 @@ import me.rerere.rikkahub.data.files.SkillManager
  *   - skill_name: required, the skill's frontmatter name
  *   - script: optional, defaults to `index.html` (the convention)
  *   - data: optional, JSON string passed as the first arg to the JS function
- *   - secret_key: optional, name of a stored secret to pass as the second JS arg (skill API keys)
+ *   - secret_key: deprecated and rejected; generic JS never receives raw secret values
  *
  * Approval: ALWAYS_ASK — JS skill code can issue arbitrary network requests on behalf of
  * the user. The user reviews each invocation. Eligible for "Always allow" once trusted.
@@ -36,6 +36,7 @@ fun runJsTool(
     context: Context,
     skillManager: SkillManager,
     runner: JsSkillRunner,
+    @Suppress("UNUSED_PARAMETER")
     secretsStore: SkillSecretsStore,
 ): Tool = Tool(
     name = "run_js",
@@ -45,7 +46,7 @@ fun runJsTool(
         `ai_edge_gallery_get_result(data, secret)` that returns a JSON object. Use this
         for skills that need to compute something with rich logic (calculate-hash,
         query-wikipedia), render rich UI (interactive-map, qr-code), or use a third-party
-        API (with secret_key).
+        API through a typed host capability.
     """.trimIndent().replace("\n", " "),
     parameters = {
         InputSchema.Obj(
@@ -64,7 +65,7 @@ fun runJsTool(
                 })
                 put("secret_key", buildJsonObject {
                     put("type", "string")
-                    put("description", "Optional name of a stored secret to pass as the JS function's second argument. Use for skills that need an API key. The user manages secrets via Settings.")
+                    put("description", "Deprecated. Generic JavaScript skills cannot receive raw secret values. Use a typed host capability instead.")
                 })
             },
             required = listOf("skill_name"),
@@ -82,7 +83,14 @@ fun runJsTool(
             return@Tool err("data_too_large", "data exceeds 64KB cap")
         }
         val secretKey = params["secret_key"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
-        val secret = secretKey?.let { secretsStore.get(skillName, it) }.orEmpty()
+        if (secretKey != null) {
+            // Generic JS is not a trusted secret adapter. Passing an API key as the second
+            // script argument would expose it to arbitrary user-installed code and tool output.
+            return@Tool err(
+                "secret_ref_requires_typed_host",
+                "Generic JavaScript skills cannot receive secret values. Use a typed host capability.",
+            )
+        }
 
         val skillDir = skillManager.getSkillDir(skillName)
             ?: return@Tool err("skill_not_found", "no installed skill named '$skillName'")
@@ -92,7 +100,7 @@ fun runJsTool(
             return@Tool err("script_not_found", "no file at '${scriptName}' inside skill '$skillName'")
         }
 
-        val outcome = runner.runScript(scriptFile = scriptFile, skillRootDir = skillDir, data = data, secret = secret)
+        val outcome = runner.runScript(scriptFile = scriptFile, skillRootDir = skillDir, data = data, secret = "")
         when (outcome) {
             is JsSkillRunner.Result.Err -> err(outcome.code, outcome.detail)
             is JsSkillRunner.Result.Ok -> {

@@ -4,6 +4,7 @@ import me.rerere.rikkahub.data.ai.ToolCallOrigin
 import me.rerere.rikkahub.data.ai.InvocationSurfacePolicy
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.data.model.Conversation
+import me.rerere.rikkahub.assistant.SecondUserAuthorityRegistry
 import kotlin.uuid.Uuid
 
 /** Immutable privilege decision for one generation run. */
@@ -17,6 +18,9 @@ data class PrivilegedSessionContext(
     val expandLocalTools: Boolean,
     val autoApproveTools: Boolean,
     val unrestrictedOverride: Boolean,
+    /** Exact global authority snapshot; null means fail closed as an ordinary session. */
+    val authoritySubjectId: String? = null,
+    val authorityEpoch: Long? = null,
 ) {
     companion object {
         fun ordinary(
@@ -34,6 +38,8 @@ data class PrivilegedSessionContext(
             expandLocalTools = false,
             autoApproveTools = false,
             unrestrictedOverride = unrestrictedOverride,
+            authoritySubjectId = null,
+            authorityEpoch = null,
         )
     }
 }
@@ -52,9 +58,11 @@ object DefaultPrivilegedSessionResolver : PrivilegedSessionResolver {
         conversation: Conversation,
         origin: ToolCallOrigin,
     ): PrivilegedSessionContext {
-        val selectedId = assistant.privilegedConversationId
-        val isPrivileged = selectedId != null &&
-            selectedId == conversation.id &&
+        val authority = SecondUserAuthorityRegistry.current()
+        val selectedId = authority?.conversationId
+        val isPrivileged = authority != null &&
+            authority.assistantId == assistant.id &&
+            authority.conversationId == conversation.id &&
             conversation.assistantId == assistant.id
         val identityName = assistant.privilegedIdentityName.trim()
             .ifEmpty { DEFAULT_PRIVILEGED_IDENTITY_NAME }
@@ -62,9 +70,7 @@ object DefaultPrivilegedSessionResolver : PrivilegedSessionResolver {
         // authority. The local user must confirm the migration in the foreground UI, and no
         // remote origin is allowed to inherit this profile. `Assistant.unrestricted` is kept
         // only as an on-disk migration marker and deliberately has no runtime effect.
-        val localSecondUser = isPrivileged &&
-            assistant.secondUserPolicyConfirmed &&
-            origin in InvocationSurfacePolicy.CONFIRMED_LOCAL_SECOND_USER
+        val localSecondUser = isPrivileged && origin in InvocationSurfacePolicy.CONFIRMED_LOCAL_SECOND_USER
 
         return PrivilegedSessionContext(
             assistantId = assistant.id,
@@ -76,6 +82,8 @@ object DefaultPrivilegedSessionResolver : PrivilegedSessionResolver {
             expandLocalTools = localSecondUser,
             autoApproveTools = localSecondUser,
             unrestrictedOverride = false,
+            authoritySubjectId = authority?.subjectId,
+            authorityEpoch = authority?.authorityEpoch,
         )
     }
 

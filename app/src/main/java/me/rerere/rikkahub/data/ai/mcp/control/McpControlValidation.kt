@@ -1,6 +1,7 @@
 package me.rerere.rikkahub.data.ai.mcp.control
 
 import me.rerere.rikkahub.data.ai.mcp.McpServerConfig
+import me.rerere.rikkahub.data.ai.mcp.McpVaultSecretReference
 
 /**
  * Argument-validation helpers for the mcp_* tools. Returns either [Ok] with a typed
@@ -89,6 +90,15 @@ object McpControlValidation {
                     "value for header '$name' contains CR or LF — header-injection blocked"
                 )
             }
+        }
+        val secretReferenceError = headers.firstOrNull { (name, value) ->
+            McpHeaderRedactor.isSensitive(name) && !McpVaultSecretReference.isReference(value)
+        }
+        if (secretReferenceError != null) {
+            return Result.Reject(
+                "secret_header_requires_vault_ref",
+                "sensitive MCP headers must reference a local Vault slot",
+            )
         }
         return Result.Ok(headers)
     }

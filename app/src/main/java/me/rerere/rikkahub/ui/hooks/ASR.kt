@@ -6,6 +6,7 @@ import android.media.AudioFocusRequest
 import android.media.AudioManager
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
@@ -20,6 +21,10 @@ import me.rerere.asr.providers.OpenAIRealtimeASRController
 import me.rerere.asr.providers.VolcengineASRController
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.datastore.getSelectedASRProvider
+import me.rerere.rikkahub.assistant.SecondUserAuthorityRegistry
+import me.rerere.rikkahub.security.SecondUserSecretVault
+import me.rerere.rikkahub.security.SecretBindingResolution
+import me.rerere.rikkahub.security.resolveAsrBinding
 import okhttp3.OkHttpClient
 import org.koin.compose.koinInject
 
@@ -28,15 +33,28 @@ fun rememberCustomAsrState(): CustomAsrState {
     val context = LocalContext.current
     val settingsStore = koinInject<SettingsStore>()
     val httpClient = koinInject<OkHttpClient>()
+    val secretVault = koinInject<SecondUserSecretVault>()
     val settings by settingsStore.settingsFlow.collectAsStateWithLifecycle()
 
     val asrState = remember {
         CustomAsrStateImpl(context.applicationContext, httpClient)
     }
 
-    DisposableEffect(settings.selectedASRProviderId, settings.asrProviders) {
-        asrState.updateProvider(settings.getSelectedASRProvider())
-        onDispose { }
+    LaunchedEffect(settings.selectedASRProviderId, settings.asrProviders, settings.secondUserAuthority) {
+        val configured = settings.getSelectedASRProvider()
+        val subjectId = SecondUserAuthorityRegistry.current()?.subjectId
+        val resolved = if (configured == null || subjectId == null) {
+            SecretBindingResolution.NotBound
+        } else {
+            secretVault.resolveAsrBinding(configured, subjectId)
+        }
+        asrState.updateProvider(
+            when (resolved) {
+                SecretBindingResolution.NotBound -> configured
+                is SecretBindingResolution.Ready -> resolved.value
+                is SecretBindingResolution.Unavailable -> null
+            },
+        )
     }
 
     DisposableEffect(asrState) {

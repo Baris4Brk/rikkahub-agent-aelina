@@ -1,5 +1,6 @@
 package me.rerere.rikkahub.data.ai.mcp.control
 
+import me.rerere.rikkahub.data.ai.mcp.McpVaultSecretReference
 import me.rerere.rikkahub.data.ai.mcp.McpCommonOptions
 import me.rerere.rikkahub.data.ai.mcp.McpServerConfig
 import org.junit.Assert.assertEquals
@@ -91,12 +92,27 @@ class McpControlValidationTest {
     @Test fun `valid headers accepted including duplicate names`() {
         val r = McpControlValidation.validateHeaders(
             listOf(
-                "Authorization" to "Bearer abc",
-                "X-Api-Key" to "k1",
-                "X-Api-Key" to "k2",
+                "Authorization" to McpVaultSecretReference.encode("mcp.auth.1"),
+                "X-Api-Key" to McpVaultSecretReference.encode("mcp.key.1"),
+                "X-Api-Key" to McpVaultSecretReference.encode("mcp.key.2"),
                 "Content-Type" to "application/json",
             )
         )
         assertTrue(r is McpControlValidation.Result.Ok)
+    }
+
+    @Test fun `literal sensitive header is rejected from model control tools`() {
+        val r = McpControlValidation.validateHeaders(listOf("Authorization" to "Bearer secret"))
+
+        assertEquals("secret_header_requires_vault_ref", (r as McpControlValidation.Result.Reject).error)
+    }
+
+    @Test fun `vault header reference is an opaque whole value`() {
+        assertEquals(
+            "mcp.auth.1",
+            McpVaultSecretReference.slotIdOrNull("rikkahub-vault-slot:mcp.auth.1"),
+        )
+        assertEquals(null, McpVaultSecretReference.slotIdOrNull("Bearer rikkahub-vault-slot:mcp.auth.1"))
+        assertEquals(null, McpVaultSecretReference.slotIdOrNull("rikkahub-vault-slot:bad space"))
     }
 }

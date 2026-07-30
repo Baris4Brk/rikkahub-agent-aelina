@@ -25,6 +25,7 @@ import me.rerere.rikkahub.data.model.AssistantMemory
 import me.rerere.rikkahub.data.model.Avatar
 import me.rerere.rikkahub.data.model.Tag
 import me.rerere.rikkahub.pet.PetOverlaySelection
+import me.rerere.rikkahub.assistant.SecondUserAuthorityState
 import me.rerere.rikkahub.data.repository.MemoryRepository
 import me.rerere.rikkahub.data.repository.ConversationRepository
 import me.rerere.rikkahub.data.repository.WorkspaceRepository
@@ -254,7 +255,12 @@ class AssistantDetailVM(
                 checkAvatarDelete(old = prior, new = next)
                 checkBackgroundDelete(old = prior, new = next)
                 val selection = when {
-                    next.petEnabled && next.privilegedConversationId != null -> {
+                    next.petEnabled && next.privilegedConversationId != null &&
+                        current.secondUserAuthority.normalized().let { authority ->
+                            authority.state == SecondUserAuthorityState.ACTIVE &&
+                                authority.assistantId == next.id &&
+                                authority.conversationId == next.privilegedConversationId
+                        } -> {
                         val existing = current.petOverlaySelection
                             ?.takeIf {
                                 it.ownerAssistantId == next.id &&

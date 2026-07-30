@@ -201,4 +201,50 @@ internal class FakePendingChatCommandDao(
         publish()
         return ids.size
     }
+
+    override suspend fun cancelByAuthoritySubject(
+        subjectId: String,
+        finishedAt: Long,
+        code: String,
+        message: String,
+    ): Int = cancelRows(
+        finishedAt = finishedAt,
+        code = code,
+        message = message,
+    ) { it.authoritySubjectId == subjectId }
+
+    override suspend fun cancelLegacyUnscopedForConversation(
+        conversationId: String,
+        finishedAt: Long,
+        code: String,
+        message: String,
+    ): Int = cancelRows(
+        finishedAt = finishedAt,
+        code = code,
+        message = message,
+    ) { it.conversationId == conversationId && it.authoritySubjectId == null }
+
+    private fun cancelRows(
+        finishedAt: Long,
+        code: String,
+        message: String,
+        predicate: (PendingChatCommandEntity) -> Boolean,
+    ): Int {
+        var count = 0
+        rows.forEach { (id, row) ->
+            if (predicate(row) && row.state in setOf("PENDING", "INTERRUPTED", "WAITING_APPROVAL", "RUNNING")) {
+                rows[id] = row.copy(
+                    state = "CANCELLED",
+                    finishedAt = finishedAt,
+                    claimedBy = null,
+                    leaseUntil = null,
+                    lastErrorCode = code,
+                    lastErrorMessage = message,
+                )
+                count++
+            }
+        }
+        if (count > 0) publish()
+        return count
+    }
 }

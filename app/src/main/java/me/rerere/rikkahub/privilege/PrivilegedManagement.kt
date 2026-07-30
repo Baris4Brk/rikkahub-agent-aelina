@@ -90,6 +90,25 @@ sealed interface PrivilegedManagementRequest {
         val webServerLocalhostOnly: Boolean?,
         val aiLogLevel: String?,
     ) : PrivilegedManagementRequest
+    /** Metadata-only operations: no request type carries a secret value or decrypt operation. */
+    data object SecretVaultList : PrivilegedManagementRequest
+    data class SecretVaultCreateSlot(
+        val slotId: String,
+        val label: String,
+        val purpose: String,
+    ) : PrivilegedManagementRequest
+    data class SecretVaultSetBinding(
+        val slotId: String,
+        val kind: String,
+        val targetId: String,
+        val allowPetSidecar: Boolean,
+        val enabled: Boolean,
+    ) : PrivilegedManagementRequest
+    data class SecretVaultTestBinding(
+        val slotId: String,
+        val kind: String,
+        val targetId: String,
+    ) : PrivilegedManagementRequest
 }
 
 enum class CollectionOperation { ADD, REMOVE, REPLACE }

@@ -23,6 +23,10 @@ import me.rerere.rikkahub.data.datastore.findProvider
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.pet.action.PetVisualHint
 import me.rerere.rikkahub.pet.action.toSemanticAction
+import me.rerere.rikkahub.assistant.SecondUserAuthorityRegistry
+import me.rerere.rikkahub.security.SecondUserSecretVault
+import me.rerere.rikkahub.security.SecretBindingResolution
+import me.rerere.rikkahub.security.resolveProviderBinding
 
 @Serializable
 data class PetModelHandoff(
@@ -57,6 +61,7 @@ sealed interface PetGenerationResult {
 class PetDialogueGenerator(
     private val settingsStore: SettingsStore,
     private val providerManager: ProviderManager,
+    private val secretVault: SecondUserSecretVault? = null,
     private val json: Json = Json { ignoreUnknownKeys = true },
 ) {
     suspend fun generate(
@@ -74,7 +79,23 @@ class PetDialogueGenerator(
         val selection = selectPetGenerationModel(settings, assistant)
             ?: return PetGenerationResult.Failure("pet_provider_unavailable")
         val model = selection.model
-        val providerSetting = selection.provider
+        val providerSetting = when (
+            val active = SecondUserAuthorityRegistry.current()?.takeIf {
+                it.assistantId == persona.assistantId
+            }
+        ) {
+            null -> selection.provider
+            else -> when (val secret = secretVault?.resolveProviderBinding(
+                provider = selection.provider,
+                subjectId = active.subjectId,
+                petSidecar = true,
+            ) ?: SecretBindingResolution.NotBound) {
+                SecretBindingResolution.NotBound -> selection.provider
+                is SecretBindingResolution.Ready -> secret.value
+                is SecretBindingResolution.Unavailable ->
+                    return PetGenerationResult.Failure("pet_secret_${secret.code}")
+            }
+        }
         val provider = providerManager.getProviderByType(providerSetting)
         val historyText = history.takeLast(MAX_PET_DIALOGUE_ROUNDS).joinToString("\n") { turn ->
             "用户：${turn.userInput}\n桌宠：${turn.assistantText.orEmpty()}"

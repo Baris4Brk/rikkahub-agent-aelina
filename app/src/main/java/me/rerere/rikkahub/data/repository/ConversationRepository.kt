@@ -36,6 +36,7 @@ class ConversationRepository(
     private val database: AppDatabase,
     private val filesManager: FilesManager,
     private val messageFtsManager: MessageFtsManager,
+    private val deletionPolicy: ConversationDeletionPolicy,
 ) {
     companion object {
         private const val PAGE_SIZE = 20
@@ -266,11 +267,20 @@ class ConversationRepository(
         messageFtsManager.indexConversation(conversation)
     }
 
-    suspend fun updateConversation(conversation: Conversation) {
+    suspend fun updateConversation(conversation: Conversation): ConversationUpdateResult {
+        // Read the stored owner before writing. A caller can update title, prompt, pinned state,
+        // and message graph on the protected second-user session, but no in-app route may move
+        // that session to another assistant and thereby evade its deletion/authority guard.
+        val stored = getConversationById(conversation.id)
+            ?: return ConversationUpdateResult.Missing(conversation.id)
+        if (stored.assistantId != conversation.assistantId && !deletionPolicy.canReassignAssistant(stored)) {
+            return ConversationUpdateResult.RetainedSecondUser(stored.id)
+        }
         database.withTransaction {
             persistConversationInCurrentTransaction(conversation, insert = false)
         }
         messageFtsManager.indexConversation(conversation)
+        return ConversationUpdateResult.Updated(conversation.id)
     }
 
     /**
@@ -312,21 +322,22 @@ class ConversationRepository(
         )
     }
 
-    suspend fun deleteConversation(conversation: Conversation) {
+    suspend fun deleteConversation(conversation: Conversation): ConversationDeletionResult {
         // 获取完整的 Conversation（包含 messageNodes）以正确清理文件
-        val fullConversation = if (conversation.messageNodes.isEmpty()) {
-            getConversationById(conversation.id) ?: conversation
-        } else {
-            conversation
+        val fullConversation = getConversationById(conversation.id)
+            ?: return ConversationDeletionResult.Missing(conversation.id)
+        if (!deletionPolicy.canDelete(fullConversation)) {
+            return ConversationDeletionResult.RetainedSecondUser(fullConversation.id)
         }
-        messageFtsManager.deleteConversation(conversation.id.toString())
+        messageFtsManager.deleteConversation(fullConversation.id.toString())
         database.withTransaction {
             // message_node 会通过 CASCADE 自动删除
             conversationDAO.delete(
-                conversationToConversationEntity(conversation)
+                conversationToConversationEntity(fullConversation)
             )
         }
         filesManager.deleteChatFiles(fullConversation.files)
+        return ConversationDeletionResult.Deleted(fullConversation.id)
     }
 
     suspend fun searchMessages(
@@ -367,10 +378,17 @@ class ConversationRepository(
         return total
     }
 
-    suspend fun deleteConversationOfAssistant(assistantId: Uuid) {
+    suspend fun deleteConversationOfAssistant(assistantId: Uuid): ConversationBatchDeletionResult {
+        var deleted = 0
+        val retained = mutableListOf<Uuid>()
         getConversationsOfAssistant(assistantId).first().forEach { conversation ->
-            deleteConversation(conversation)
+            when (deleteConversation(conversation)) {
+                is ConversationDeletionResult.Deleted -> deleted++
+                is ConversationDeletionResult.RetainedSecondUser -> retained += conversation.id
+                is ConversationDeletionResult.Missing -> Unit
+            }
         }
+        return ConversationBatchDeletionResult(deleted, retained)
     }
 
     fun conversationToConversationEntity(conversation: Conversation): ConversationEntity {

@@ -28,6 +28,8 @@ import me.rerere.rikkahub.data.ai.GenerationRunControl
 import me.rerere.rikkahub.data.ai.tools.CancelRequestResult
 import me.rerere.rikkahub.data.ai.tools.ToolCancelReason
 import me.rerere.rikkahub.data.db.entity.PendingChatCommandEntity
+import me.rerere.rikkahub.assistant.SecondUserAuthorityRegistry
+import me.rerere.rikkahub.data.ai.ToolCallOrigin
 import kotlin.time.Clock
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
@@ -338,6 +340,7 @@ class ConversationRuntime(
             id = envelope.id.toString(),
             schemaVersion = 1,
             conversationId = envelope.conversationId.toString(),
+            authoritySubjectId = authoritySubjectFor(envelope),
             type = encoded.first,
             payloadJson = encoded.second,
             state = DurableCommandState.PENDING.name,
@@ -665,6 +668,15 @@ class ConversationRuntime(
                 if (acceptedCommands.containsKey(commandId) || commandId in terminalizingCommandIds) {
                     return@forEach
                 }
+                if (!isCurrentAuthorityRow(row)) {
+                    queue.resolvePending(
+                        row.id,
+                        DurableCommandState.CANCELLED,
+                        errorCode = "SECOND_USER_AUTHORITY_REVOKED",
+                        errorMessage = "Second-user authority changed before this command resumed",
+                    )
+                    return@forEach
+                }
                 val envelope = queue.decodeEnvelope(row) ?: run {
                     queue.resolvePending(
                         row.id,
@@ -733,6 +745,51 @@ class ConversationRuntime(
                 }
             }
         refreshQueueStatus()
+    }
+
+    private fun authoritySubjectFor(envelope: CommandEnvelope<out ChatCommand>): String? {
+        val active = SecondUserAuthorityRegistry.current() ?: return null
+        if (active.conversationId != envelope.conversationId) return null
+        return when (envelope.origin) {
+            CommandOrigin.APP_UI,
+            CommandOrigin.SYSTEM_ASSISTANT,
+            CommandOrigin.QUICK_CAPTURE,
+            CommandOrigin.PET_HANDOFF_CONFIRMED,
+            -> active.subjectId
+            else -> null
+        }
+    }
+
+    private fun isCurrentAuthorityRow(row: PendingChatCommandEntity): Boolean {
+        val commandOrigin = CommandCodec.decodeDurableOrigin(row.payloadJson)
+        val subject = row.authoritySubjectId
+        if (subject == null) {
+            if (commandOrigin !in setOf(
+                    CommandOrigin.APP_UI,
+                    CommandOrigin.SYSTEM_ASSISTANT,
+                    CommandOrigin.QUICK_CAPTURE,
+                    CommandOrigin.PET_HANDOFF_CONFIRMED,
+                )
+            ) {
+                return true
+            }
+            // v38 had no authority epoch.  A row inside today's protected conversation must
+            // never silently inherit the v39 authority after confirmation/reassignment.  Rows
+            // outside that conversation remain ordinary local-chat work and keep their legacy
+            // recovery behavior.
+            val active = SecondUserAuthorityRegistry.current() ?: return true
+            return active.conversationId != runCatching { Uuid.parse(row.conversationId) }.getOrNull()
+        }
+        val origin = when (commandOrigin) {
+            CommandOrigin.APP_UI -> ToolCallOrigin.LocalChat
+            CommandOrigin.SYSTEM_ASSISTANT -> ToolCallOrigin.SystemAssistant
+            CommandOrigin.QUICK_CAPTURE -> ToolCallOrigin.QuickCapture
+            CommandOrigin.PET_HANDOFF_CONFIRMED -> ToolCallOrigin.PetHandoffConfirmed
+            else -> return false
+        }
+        return runCatching {
+            SecondUserAuthorityRegistry.matches(subject, Uuid.parse(row.conversationId), origin)
+        }.getOrDefault(false)
     }
 
     private suspend fun eventLoop() {

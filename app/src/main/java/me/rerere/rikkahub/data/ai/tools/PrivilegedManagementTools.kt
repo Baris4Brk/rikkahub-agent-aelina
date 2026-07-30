@@ -104,6 +104,43 @@ private fun managementToolSpecs(): List<ManagementToolSpec> = listOf(
         properties("section" to stringProperty("Optional section name; omit for all summaries")),
     ),
     ManagementToolSpec(
+        "secret_vault_list",
+        "List metadata for the current second-user secret slots. Secret values are never returned.",
+        properties(),
+    ),
+    ManagementToolSpec(
+        "secret_vault_create_slot",
+        "Create an empty second-user secret slot. The user must enter the value in the biometric-protected app page.",
+        properties(
+            "slot_id" to stringProperty("Stable local slot ID, letters/numbers/dot/dash/underscore"),
+            "label" to stringProperty("Safe human-readable label"),
+            "purpose" to stringProperty("Safe purpose description; never put a secret here"),
+        ),
+        listOf("slot_id"),
+    ),
+    ManagementToolSpec(
+        "secret_vault_set_binding",
+        "Bind or unbind metadata for a typed local Provider, TTS, ASR, MCP, or Skill adapter. This never reads a value.",
+        properties(
+            "slot_id" to stringProperty("Existing secret slot ID"),
+            "kind" to enumProperty("provider", "tts", "asr", "mcp", "skill"),
+            "target_id" to stringProperty("Typed local adapter identifier"),
+            "enabled" to booleanProperty("True binds; false unbinds"),
+            "allow_pet_sidecar" to booleanProperty("Only valid for Provider or TTS bindings"),
+        ),
+        listOf("slot_id", "kind", "target_id", "enabled"),
+    ),
+    ManagementToolSpec(
+        "secret_vault_test_binding",
+        "Verify that a typed local binding can obtain its secret lease without exposing the value or making a network request.",
+        properties(
+            "slot_id" to stringProperty("Existing secret slot ID"),
+            "kind" to enumProperty("provider", "tts", "asr", "mcp", "skill"),
+            "target_id" to stringProperty("Typed local adapter identifier"),
+        ),
+        listOf("slot_id", "kind", "target_id"),
+    ),
+    ManagementToolSpec(
         "conversation_create",
         "Create a conversation owned by an existing assistant.",
         properties(
@@ -270,6 +307,32 @@ private fun parseManagementRequest(name: String, obj: JsonObject): ParsedRequest
     return try {
         val request = when (name) {
             "rikkahub_state_get" -> PrivilegedManagementRequest.StateGet(obj.string("section")?.trim())
+            "secret_vault_list" -> PrivilegedManagementRequest.SecretVaultList
+            "secret_vault_create_slot" -> PrivilegedManagementRequest.SecretVaultCreateSlot(
+                slotId = obj.string("slot_id")?.trim()?.takeIf { it.isNotEmpty() }?.take(96)
+                    ?: throw IllegalArgumentException("slot_id is required."),
+                label = obj.string("label")?.trim()?.take(96).orEmpty(),
+                purpose = obj.string("purpose")?.trim()?.take(160).orEmpty(),
+            )
+            "secret_vault_set_binding" -> PrivilegedManagementRequest.SecretVaultSetBinding(
+                slotId = obj.string("slot_id")?.trim()?.takeIf { it.isNotEmpty() }?.take(96)
+                    ?: throw IllegalArgumentException("slot_id is required."),
+                kind = obj.string("kind")?.trim()?.uppercase()
+                    ?: throw IllegalArgumentException("kind is required."),
+                targetId = obj.string("target_id")?.trim()?.takeIf { it.isNotEmpty() }?.take(160)
+                    ?: throw IllegalArgumentException("target_id is required."),
+                allowPetSidecar = obj.boolean("allow_pet_sidecar") ?: false,
+                enabled = obj.boolean("enabled")
+                    ?: throw IllegalArgumentException("enabled is required."),
+            )
+            "secret_vault_test_binding" -> PrivilegedManagementRequest.SecretVaultTestBinding(
+                slotId = obj.string("slot_id")?.trim()?.takeIf { it.isNotEmpty() }?.take(96)
+                    ?: throw IllegalArgumentException("slot_id is required."),
+                kind = obj.string("kind")?.trim()?.uppercase()
+                    ?: throw IllegalArgumentException("kind is required."),
+                targetId = obj.string("target_id")?.trim()?.takeIf { it.isNotEmpty() }?.take(160)
+                    ?: throw IllegalArgumentException("target_id is required."),
+            )
             "conversation_create" -> PrivilegedManagementRequest.ConversationCreate(
                 requiredUuid("assistant_id"), obj.string("title")?.trim().orEmpty().take(200)
             )

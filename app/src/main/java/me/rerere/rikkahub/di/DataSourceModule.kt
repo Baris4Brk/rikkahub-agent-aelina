@@ -50,6 +50,7 @@ import me.rerere.rikkahub.data.db.migrations.MIGRATION_34_35
 import me.rerere.rikkahub.data.db.migrations.MIGRATION_35_36
 import me.rerere.rikkahub.data.db.migrations.MIGRATION_36_37
 import me.rerere.rikkahub.data.db.migrations.MIGRATION_37_38
+import me.rerere.rikkahub.data.db.migrations.MIGRATION_38_39
 import me.rerere.rikkahub.data.repository.MemorySearchIndex
 import me.rerere.rikkahub.data.repository.MemoryRetriever
 import me.rerere.rikkahub.memory.AndroidMemoryWorkScheduler
@@ -125,6 +126,7 @@ val dataSourceModule = module {
                 MIGRATION_35_36,
                 MIGRATION_36_37,
                 MIGRATION_37_38,
+                MIGRATION_38_39,
             )
             .addCallback(object : RoomDatabase.Callback() {
                 override fun onOpen(db: SupportSQLiteDatabase) {
@@ -256,13 +258,14 @@ val dataSourceModule = module {
             dialogueRepository = get(),
             conversationRepository = get(),
             chatService = get(),
+            authority = get(),
             appScope = get<AppScope>(),
         )
     }
     single { PetHandoffRecovery(dao = get(), coordinator = get()) }
     single { PetDiaryToolProvider(dao = get(), repository = get()) }
     single { PetPersonaSource(settingsStore = get()) }
-    single { PetDialogueGenerator(settingsStore = get(), providerManager = get()) }
+    single { PetDialogueGenerator(settingsStore = get(), providerManager = get(), secretVault = get()) }
     single { PetDiarySummarizer(settingsStore = get(), providerManager = get()) }
     single { PetActionTraceStore() }
     single { PetRuntimeDiagnostics() }
@@ -321,6 +324,7 @@ val dataSourceModule = module {
             conversationRepository = get(),
             approvalDao = get(),
             lifecycle = get(),
+            authorityService = get(),
         )
     }
     single { get<AppDatabase>().capabilityGrantDao() }
@@ -407,7 +411,15 @@ val dataSourceModule = module {
     single { AlarmRepository(get()) }
     single { AlarmScheduler(context = get(), repository = get()) }
 
-    single { McpManager(context = get(), settingsStore = get(), appScope = get(), filesManager = get()) }
+    single {
+        McpManager(
+            context = get(),
+            settingsStore = get(),
+            appScope = get(),
+            filesManager = get(),
+            secretVault = get(),
+        )
+    }
 
     single {
         GenerationHandler(
@@ -424,6 +436,7 @@ val dataSourceModule = module {
             toolExecutionBatchCoordinator = get(),
             contextBroker = get(),
             contextDiagnosticsStore = get(),
+            secondUserSecretVault = get(),
         )
     }
 

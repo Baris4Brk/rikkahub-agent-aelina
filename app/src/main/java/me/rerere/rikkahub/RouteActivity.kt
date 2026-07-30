@@ -31,6 +31,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
@@ -132,6 +133,8 @@ import me.rerere.rikkahub.ui.pages.setting.SettingSearchPage
 import me.rerere.rikkahub.ui.pages.setting.SettingTTSPage
 import me.rerere.rikkahub.ui.pages.setting.SettingSpeechPage
 import me.rerere.rikkahub.ui.pages.setting.SettingSystemAssistantPage
+import me.rerere.rikkahub.ui.pages.setting.SecondUserAuthorityRecoveryPage
+import me.rerere.rikkahub.ui.pages.setting.SecondUserSecretVaultPage
 import me.rerere.rikkahub.ui.pages.setting.SettingTelegramPage
 import me.rerere.rikkahub.ui.pages.setting.SettingWebPage
 import me.rerere.rikkahub.ui.pages.share.handler.ShareHandlerPage
@@ -276,6 +279,13 @@ class RouteActivity : ComponentActivity() {
                     )
                 }
             }
+            source.action == Intent.ACTION_SEND -> Screen.ShareHandler(
+                text = source.getStringExtra(Intent.EXTRA_TEXT).orEmpty(),
+                streamUri = source.getStringExtra(Intent.EXTRA_STREAM),
+            )
+            source.action == Intent.ACTION_PROCESS_TEXT -> Screen.ShareHandler(
+                text = source.getCharSequenceExtra(Intent.EXTRA_PROCESS_TEXT)?.toString().orEmpty(),
+            )
             else -> null
         }
         source.removeExtra(EXTRA_OPEN_SYSTEM_ASSISTANT_SETTINGS)
@@ -311,21 +321,48 @@ class RouteActivity : ComponentActivity() {
         val migrationState by DatabaseMigrationTracker.state.collectAsStateWithLifecycle()
 
         val requestedStartScreen = remember { consumeNavigationDestination(intent) }
-        val startScreen = requestedStartScreen ?: Screen.Chat(
-            id = if (readBooleanPreference("create_new_conversation_on_start", true)) {
-                Uuid.random().toString()
-            } else {
-                readStringPreference(
-                    "lastConversationId",
+        val startResolver = koinInject<me.rerere.rikkahub.assistant.AppStartDestinationResolver>()
+        val implicitStart by produceState<me.rerere.rikkahub.assistant.AppStartDestination?>(
+            initialValue = null,
+            requestedStartScreen,
+        ) {
+            if (requestedStartScreen == null) value = startResolver.resolveImplicitStart()
+        }
+        val startScreen = requestedStartScreen ?: when (implicitStart) {
+            is me.rerere.rikkahub.assistant.AppStartDestination.SecondUserConversation ->
+                Screen.Chat((implicitStart as me.rerere.rikkahub.assistant.AppStartDestination.SecondUserConversation)
+                    .conversationId.toString())
+            me.rerere.rikkahub.assistant.AppStartDestination.AuthorityRecovery ->
+                Screen.SecondUserAuthorityRecovery
+            me.rerere.rikkahub.assistant.AppStartDestination.LegacyDefault -> Screen.Chat(
+                id = if (readBooleanPreference("create_new_conversation_on_start", true)) {
                     Uuid.random().toString()
-                ) ?: Uuid.random().toString()
+                } else {
+                    readStringPreference(
+                        "lastConversationId",
+                        Uuid.random().toString(),
+                    ) ?: Uuid.random().toString()
+                },
+            )
+            null -> null
+        }
+
+        if (startScreen == null) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(MaterialTheme.colorScheme.background),
+                contentAlignment = Alignment.Center,
+            ) {
+                CircularProgressIndicator()
             }
-        )
+            return
+        }
 
         val backStack = rememberNavBackStack(startScreen)
         SideEffect { this@RouteActivity.navStack = backStack }
 
-        ShareHandler(backStack)
+        if (requestedStartScreen !is Screen.ShareHandler) ShareHandler(backStack)
 
         SharedTransitionLayout {
             CompositionLocalProvider(
@@ -404,6 +441,13 @@ class RouteActivity : ComponentActivity() {
 
                             entry<Screen.Assistant> {
                                 AssistantPage()
+                            }
+
+                            entry<Screen.SecondUserAuthorityRecovery> {
+                                SecondUserAuthorityRecoveryPage()
+                            }
+                            entry<Screen.SecondUserSecretVault> {
+                                SecondUserSecretVaultPage()
                             }
 
                             entry<Screen.AssistantDetail> { key ->
@@ -729,6 +773,12 @@ sealed interface Screen : NavKey {
 
     @Serializable
     data object Assistant : Screen
+
+    @Serializable
+    data object SecondUserAuthorityRecovery : Screen
+
+    @Serializable
+    data object SecondUserSecretVault : Screen
 
     @Serializable
     data class AssistantDetail(val id: String) : Screen

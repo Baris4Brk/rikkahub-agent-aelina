@@ -81,6 +81,18 @@ interface ExecutionRecordDao {
         subjectId: String,
     ): List<ExecutionRecord>
 
+    /** Covers legacy pre-epoch second-user records during an explicit revocation. */
+    @Query(
+        "SELECT * FROM execution_records WHERE conversation_id = :conversationId " +
+            "AND subject_type = :subjectType AND status NOT IN " +
+            "('succeeded', 'failed', 'cancelled', 'timed_out', 'orphaned', 'unknown') " +
+            "ORDER BY updated_at_ms ASC",
+    )
+    suspend fun getInFlightForConversationSubjectType(
+        conversationId: String,
+        subjectType: String,
+    ): List<ExecutionRecord>
+
     @Query(
         "SELECT * FROM execution_records WHERE conversation_id = :conversationId " +
             "AND subject_id = :subjectId AND status NOT IN " +

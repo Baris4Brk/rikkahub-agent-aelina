@@ -1,16 +1,24 @@
 package me.rerere.rikkahub.service.chat
 
 import me.rerere.ai.ui.UIMessagePart
+import me.rerere.rikkahub.assistant.SecondUserAdmissionSnapshot
+import me.rerere.rikkahub.assistant.SecondUserAuthorityRegistry
 import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.data.model.Conversation
 import me.rerere.rikkahub.quickcapture.QuickCaptureInvocationRegistry
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import kotlin.uuid.Uuid
 
 class QuickCaptureCommandSecurityPolicyTest {
+    @After
+    fun clearAuthority() {
+        SecondUserAuthorityRegistry.install(null)
+    }
+
     @Test
     fun `admission needs the exact visible overlay lease and execution rechecks target binding`() {
         val conversationId = Uuid.random()
@@ -24,6 +32,14 @@ class QuickCaptureCommandSecurityPolicyTest {
             quickCaptureSessionId = sessionId,
         )
         val settings = Settings(assistants = listOf(assistant))
+        SecondUserAuthorityRegistry.install(
+            SecondUserAdmissionSnapshot.create(
+                assistantId = assistant.id,
+                conversationId = conversationId,
+                authorityEpoch = 1L,
+                origin = me.rerere.rikkahub.data.ai.ToolCallOrigin.QuickCapture,
+            ),
+        )
 
         assertEquals(
             QUICK_CAPTURE_TOKEN_REQUIRED_REJECTION,
@@ -58,6 +74,23 @@ class QuickCaptureCommandSecurityPolicyTest {
 
             val rebound = settings.copy(
                 assistants = listOf(assistant.copy(privilegedConversationId = Uuid.random())),
+            )
+            // The old assistant mirror is no longer a live authority source.
+            assertTrue(
+                QuickCaptureCommandSecurityPolicy.validateAccepted(
+                    command = command,
+                    conversationId = conversationId,
+                    settings = rebound,
+                    persistedConversation = conversation,
+                ) is QuickCaptureTargetValidation.Valid,
+            )
+            SecondUserAuthorityRegistry.install(
+                SecondUserAdmissionSnapshot.create(
+                    assistantId = assistant.id,
+                    conversationId = Uuid.random(),
+                    authorityEpoch = 2L,
+                    origin = me.rerere.rikkahub.data.ai.ToolCallOrigin.QuickCapture,
+                ),
             )
             assertEquals(
                 QUICK_CAPTURE_TARGET_CONVERSATION_CHANGED_REJECTION,

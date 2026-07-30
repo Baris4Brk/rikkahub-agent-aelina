@@ -5,6 +5,8 @@ import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import me.rerere.ai.ui.UIMessagePart
+import me.rerere.rikkahub.assistant.SecondUserAuthorityResolution
+import me.rerere.rikkahub.assistant.SecondUserAuthorityService
 import me.rerere.rikkahub.data.ai.ToolCallOrigin
 import me.rerere.rikkahub.data.capability.SubjectType
 import me.rerere.rikkahub.data.datastore.SettingsStore
@@ -22,13 +24,16 @@ class SecondUserApprovalRecovery(
     private val conversationRepository: ConversationRepository,
     private val approvalDao: PendingToolApprovalDao,
     private val lifecycle: SecondUserApprovalLifecycle,
+    private val authorityService: SecondUserAuthorityService,
 ) {
     suspend fun runRecovery(): ApprovalRecoverySummary {
         val settings = settingsStore.settingsFlow.first { !it.init }
-        val targetAssistant = settings.systemAssistantTargetAssistantId?.let { selected ->
-            settings.assistants.firstOrNull { it.id == selected }
+        val resolvedAuthority = authorityService.resolve()
+        val activeSnapshot = (resolvedAuthority as? SecondUserAuthorityResolution.Active)?.snapshot
+        val targetAssistant = activeSnapshot?.let { snapshot ->
+            settings.assistants.firstOrNull { it.id == snapshot.assistantId }
         }
-        val targetConversationId = targetAssistant?.privilegedConversationId?.toString()
+        val targetConversationId = activeSnapshot?.conversationId?.toString()
         var restored = 0
         var invalidated = 0
         var retained = 0
@@ -51,7 +56,7 @@ class SecondUserApprovalRecovery(
             return ApprovalRecoverySummary(restored, invalidated, retained)
         }
 
-        val conversationId = checkNotNull(targetAssistant.privilegedConversationId)
+        val conversationId = checkNotNull(activeSnapshot).conversationId
         val loadedConversation = conversationRepository.getConversationById(conversationId)
         if (loadedConversation == null || loadedConversation.assistantId != targetAssistant.id) {
             for (projection in approvalDao.getPendingForConversation(targetConversationId)) {
@@ -68,15 +73,31 @@ class SecondUserApprovalRecovery(
         }
         var conversation = checkNotNull(loadedConversation)
 
+        val pendingByTool = approvalDao.getPendingForConversation(targetConversationId)
+            .associateBy { it.toolCallId }
+            .toMutableMap()
+
+        // A durable approval is an epoch-bound admission artifact.  A v38/old-epoch pending
+        // approval must not become approvable merely because a new second user now owns the
+        // same conversation after a process restart.
+        for (projection in pendingByTool.values.filter { it.subjectId != activeSnapshot.subjectId }) {
+            conversation = lifecycle.invalidateProjection(
+                projection = projection,
+                conversation = conversation,
+                reasonCode = "second_user_authority_stale",
+                orphaned = true,
+                source = ExecutionStateSource.RECOVERY,
+            ) ?: conversation
+            invalidated++
+            pendingByTool.remove(projection.toolCallId)
+        }
+
         val pendingTools = conversation.messageNodes
             .flatMap { it.messages }
             .flatMap { it.parts }
             .filterIsInstance<UIMessagePart.Tool>()
             .filter { it.isPending }
             .distinctBy { it.toolCallId }
-        val pendingByTool = approvalDao.getPendingForConversation(targetConversationId)
-            .associateBy { it.toolCallId }
-            .toMutableMap()
 
         for (projection in pendingByTool.values.filter { existing ->
             pendingTools.none { it.toolCallId == existing.toolCallId }
@@ -96,7 +117,7 @@ class SecondUserApprovalRecovery(
             runId = recoveryRunId(targetConversationId),
             commandId = null,
             conversationId = targetConversationId,
-            subjectId = "${targetAssistant.id}:$targetConversationId",
+            subjectId = activeSnapshot.subjectId,
             subjectType = SubjectType.LOCAL_SECOND_USER,
             origin = ToolCallOrigin.SystemAssistant,
         )

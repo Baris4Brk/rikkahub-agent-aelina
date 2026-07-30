@@ -6,6 +6,8 @@ import kotlin.uuid.Uuid
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.ai.ui.UIMessageAnnotation
 import me.rerere.ai.ui.UIMessageState
+import me.rerere.rikkahub.assistant.SecondUserAuthorityResolution
+import me.rerere.rikkahub.assistant.SecondUserAuthorityService
 import me.rerere.ai.core.MessageRole
 import me.rerere.rikkahub.data.db.AppDatabase
 import me.rerere.rikkahub.data.db.dao.PendingChatCommandDao
@@ -49,6 +51,7 @@ class PetHandoffCoordinator(
     private val dialogueRepository: PetDialogueRepository,
     private val conversationRepository: ConversationRepository,
     private val chatService: ChatService,
+    private val authority: SecondUserAuthorityService,
     private val appScope: CoroutineScope,
     private val nowMs: () -> Long = System::currentTimeMillis,
 ) {
@@ -114,6 +117,14 @@ class PetHandoffCoordinator(
                 else -> current.copy(status = "CONFLICT")
             }
         } ?: return PetHandoffSubmitResult.Missing
+
+        val active = authority.resolve() as? SecondUserAuthorityResolution.Active
+            ?: return PetHandoffSubmitResult.Rejected("second_user_authority_inactive")
+        if (active.snapshot.assistantId.toString() != claimed.assistantId ||
+            active.snapshot.conversationId.toString() != claimed.privilegedConversationId
+        ) {
+            return PetHandoffSubmitResult.Rejected("second_user_authority_changed")
+        }
 
         when (claimed.status) {
             PetHandoffStatus.EXPIRED.name -> return PetHandoffSubmitResult.Expired

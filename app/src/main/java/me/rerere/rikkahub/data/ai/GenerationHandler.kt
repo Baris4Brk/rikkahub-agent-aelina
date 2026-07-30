@@ -98,6 +98,7 @@ import me.rerere.rikkahub.data.datastore.findProvider
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.data.model.AssistantMemory
 import me.rerere.rikkahub.data.repository.ConversationRepository
+import me.rerere.rikkahub.security.resolveProviderBinding
 import me.rerere.rikkahub.data.repository.MemoryRepository
 import me.rerere.rikkahub.utils.applyPlaceholders
 import java.util.Locale
@@ -424,6 +425,7 @@ class GenerationHandler(
     private val toolExecutionBatchCoordinator: ToolExecutionBatchCoordinator,
     private val contextBroker: me.rerere.rikkahub.context.ContextBroker,
     private val contextDiagnosticsStore: me.rerere.rikkahub.context.ContextDiagnosticsStore,
+    private val secondUserSecretVault: me.rerere.rikkahub.security.SecondUserSecretVault? = null,
 ) {
     fun generateText(
         settings: Settings,
@@ -478,7 +480,15 @@ class GenerationHandler(
         val _compat = Pair(unrestrictedOverride, commandId)
         @Suppress("UNUSED_VARIABLE")
         val _emergency = isEmergencyStopActive
-        val provider = model.findProvider(settings.providers) ?: error("Provider not found")
+        val configuredProvider = model.findProvider(settings.providers) ?: error("Provider not found")
+        // A second-user Provider binding is resolved only in the local execution layer. Its
+        // plaintext never becomes part of settings, model messages, tool output, or diagnostics.
+        val provider = resolveSecondUserProviderBinding(
+            configuredProvider = configuredProvider,
+            capabilitySubject = capabilitySubject,
+            conversationId = conversationId,
+            origin = callOrigin,
+        )
         val providerImpl = providerManager.getProviderByType(provider)
 
         // Replay safety: scan the input messages for tools that were Approved + began
@@ -2039,6 +2049,7 @@ class GenerationHandler(
         }
 
     }
+
         .onStart {
             // Reset per-turn navigation tracking and surface the overlay so the user
             // sees that automation is happening even when the agent runs from Telegram.
@@ -2050,6 +2061,33 @@ class GenerationHandler(
             handleAutoReturnAfterTurn()
         }
         .flowOn(Dispatchers.IO)
+
+    private suspend fun resolveSecondUserProviderBinding(
+        configuredProvider: ProviderSetting,
+        capabilitySubject: CapabilitySubject?,
+        conversationId: Uuid?,
+        origin: ToolCallOrigin,
+    ): ProviderSetting {
+        val subject = capabilitySubject
+            ?.takeIf { it.type == me.rerere.rikkahub.data.capability.SubjectType.LOCAL_SECOND_USER }
+            ?: return configuredProvider
+        val vault = secondUserSecretVault ?: return configuredProvider
+        if (!me.rerere.rikkahub.assistant.SecondUserAuthorityRegistry.matches(
+                subject.id,
+                conversationId,
+                origin,
+            )
+        ) return configuredProvider
+        return when (val resolution = vault.resolveProviderBinding(
+            provider = configuredProvider,
+            subjectId = subject.id,
+        )) {
+            me.rerere.rikkahub.security.SecretBindingResolution.NotBound -> configuredProvider
+            is me.rerere.rikkahub.security.SecretBindingResolution.Ready -> resolution.value
+            is me.rerere.rikkahub.security.SecretBindingResolution.Unavailable ->
+                error("second_user_secret_${resolution.code}")
+        }
+    }
 
     /**
      * If the agent navigated away from RikkaHub during this turn (launch_app / open_url) and

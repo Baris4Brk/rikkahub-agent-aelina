@@ -114,4 +114,35 @@ interface PendingChatCommandDao {
 
     @Query("DELETE FROM pending_chat_commands WHERE conversationId = :conversationId AND state = 'PENDING'")
     suspend fun clearPending(conversationId: String): Int
+
+    @Query(
+        "UPDATE pending_chat_commands SET state = 'CANCELLED', finishedAt = :finishedAt, " +
+            "claimedBy = NULL, leaseUntil = NULL, lastErrorCode = :code, lastErrorMessage = :message " +
+            "WHERE authoritySubjectId = :subjectId " +
+            "AND state IN ('PENDING', 'INTERRUPTED', 'WAITING_APPROVAL', 'RUNNING')",
+    )
+    suspend fun cancelByAuthoritySubject(
+        subjectId: String,
+        finishedAt: Long,
+        code: String = "SECOND_USER_AUTHORITY_REVOKED",
+        message: String = "Second-user authority was reassigned or revoked",
+    ): Int
+
+    /**
+     * v38 rows did not carry an authority epoch.  During revocation the old protected
+     * conversation is the only safe scope for those rows: do not replay them into a newly
+     * assigned authority subject.
+     */
+    @Query(
+        "UPDATE pending_chat_commands SET state = 'CANCELLED', finishedAt = :finishedAt, " +
+            "claimedBy = NULL, leaseUntil = NULL, lastErrorCode = :code, lastErrorMessage = :message " +
+            "WHERE conversationId = :conversationId AND authoritySubjectId IS NULL " +
+            "AND state IN ('PENDING', 'INTERRUPTED', 'WAITING_APPROVAL', 'RUNNING')",
+    )
+    suspend fun cancelLegacyUnscopedForConversation(
+        conversationId: String,
+        finishedAt: Long,
+        code: String = "SECOND_USER_AUTHORITY_LEGACY_UNSCOPED",
+        message: String = "Legacy command requires a new second-user submission",
+    ): Int
 }

@@ -2,6 +2,7 @@ package me.rerere.rikkahub.pet
 
 import kotlinx.serialization.Serializable
 import kotlin.uuid.Uuid
+import me.rerere.rikkahub.assistant.SecondUserAuthorityState
 import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.model.Assistant
 
@@ -68,15 +69,25 @@ data class ResolvedPetOverlaySelection(
 
 /** Fail closed for a malformed saved choice; never silently choose a different assistant. */
 fun Settings.resolvePetOverlaySelection(): ResolvedPetOverlaySelection? {
+    val authority = secondUserAuthority.normalized()
+        .takeIf { it.state == SecondUserAuthorityState.ACTIVE }
+        ?: return null
     val explicit = petOverlaySelection?.normalized()
     if (explicit != null) {
         val assistant = assistants.firstOrNull { it.id == explicit.ownerAssistantId }
             ?: return null
-        if (!explicit.enabled || assistant.privilegedConversationId != explicit.privilegedConversationId) return null
+        if (!explicit.enabled ||
+            explicit.ownerAssistantId != authority.assistantId ||
+            explicit.privilegedConversationId != authority.conversationId
+        ) return null
         return ResolvedPetOverlaySelection(explicit, assistant, migratedFromLegacy = false)
     }
     val candidates = assistants.mapNotNull { assistant ->
         PetOverlaySelection.fromLegacy(assistant)
+            ?.takeIf {
+                it.ownerAssistantId == authority.assistantId &&
+                    it.privilegedConversationId == authority.conversationId
+            }
             ?.takeIf { it.enabled }
             ?.let { selection -> ResolvedPetOverlaySelection(selection, assistant, migratedFromLegacy = true) }
     }

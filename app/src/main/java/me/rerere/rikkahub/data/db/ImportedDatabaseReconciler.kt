@@ -47,12 +47,12 @@ object ImportedDatabaseReconciler {
 
     /**
      * Room's schema version and identity hash for [AppDatabase]. Both are copied verbatim
-     * from app/schemas/me.rerere.rikkahub.data.db.AppDatabase/38.json. When the schema
+     * from app/schemas/me.rerere.rikkahub.data.db.AppDatabase/39.json. When the schema
      * version is bumped, update BOTH constants (and the table DDL below if the fork-only
      * tables changed) or this reconciliation will silently stop matching.
      */
-    internal const val EXPECTED_VERSION = 38
-    internal const val EXPECTED_IDENTITY_HASH = "70e847d8db457399fbc4fbc9c21a41b0"
+    internal const val EXPECTED_VERSION = 39
+    internal const val EXPECTED_IDENTITY_HASH = "98db479b6258269f2aef18ce15e0f2f9"
     internal const val PRE_STORAGE_MODE_V35_IDENTITY_HASH = "2a74d694211f0df9f9094c7571ec71dd"
 
     internal enum class ReconcilePlan {
@@ -108,7 +108,7 @@ object ImportedDatabaseReconciler {
         "CREATE TABLE IF NOT EXISTS `alarms` (`id` TEXT NOT NULL, `label` TEXT NOT NULL, `note` TEXT, `scheduleType` TEXT NOT NULL, `time` TEXT, `hour` INTEGER, `minute` INTEGER, `daysOfWeek` TEXT, `timezone` TEXT NOT NULL, `enabled` INTEGER NOT NULL, `vibrate` INTEGER NOT NULL, `createdAtMs` INTEGER NOT NULL, `updatedAtMs` INTEGER NOT NULL, `lastFiredAtMs` INTEGER, `nextFireAtMs` INTEGER, PRIMARY KEY(`id`))",
         "DROP INDEX IF EXISTS `index_alarms_enabled_nextFireAtMs`",
         "CREATE TABLE IF NOT EXISTS `pending_chat_commands` (" +
-            "`id` TEXT NOT NULL, `schemaVersion` INTEGER NOT NULL, `conversationId` TEXT NOT NULL, " +
+            "`id` TEXT NOT NULL, `schemaVersion` INTEGER NOT NULL, `conversationId` TEXT NOT NULL, `authoritySubjectId` TEXT, " +
             "`type` TEXT NOT NULL, `payloadJson` TEXT NOT NULL, `state` TEXT NOT NULL, " +
             "`priority` INTEGER NOT NULL, `sequence` INTEGER NOT NULL, " +
             "`expectedTargetVersion` INTEGER, `expectedBranchHeadMessageId` TEXT, `dedupeKey` TEXT, " +
@@ -124,6 +124,8 @@ object ImportedDatabaseReconciler {
             "ON `pending_chat_commands` (`leaseUntil`)",
         "CREATE INDEX IF NOT EXISTS `index_pending_chat_commands_dedupeKey` " +
             "ON `pending_chat_commands` (`dedupeKey`)",
+        "CREATE INDEX IF NOT EXISTS `index_pending_chat_commands_authoritySubjectId` " +
+            "ON `pending_chat_commands` (`authoritySubjectId`)",
         "CREATE UNIQUE INDEX IF NOT EXISTS `index_pending_chat_commands_idempotencyKey` " +
             "ON `pending_chat_commands` (`idempotencyKey`)",
         "CREATE TABLE IF NOT EXISTS `memory_captures` (`id` TEXT NOT NULL, `assistant_id` TEXT NOT NULL, `scope_id` TEXT NOT NULL, `conversation_id` TEXT NOT NULL, `user_message_id` TEXT NOT NULL, `assistant_message_id` TEXT NOT NULL, `origin` TEXT NOT NULL, `capture_source` TEXT NOT NULL DEFAULT 'AUTOMATIC_TURN', `auto_save_mode` TEXT NOT NULL, `user_text` TEXT NOT NULL, `assistant_text` TEXT NOT NULL, `state` TEXT NOT NULL DEFAULT 'PENDING', `retry_count` INTEGER NOT NULL DEFAULT 0, `last_error_code` TEXT, `last_error_message` TEXT, `created_at_ms` INTEGER NOT NULL, `updated_at_ms` INTEGER NOT NULL, `lease_owner` TEXT, `lease_until_ms` INTEGER, `processed_at_ms` INTEGER, PRIMARY KEY(`id`))",
@@ -435,6 +437,19 @@ object ImportedDatabaseReconciler {
         ).forEach(db::execSQL)
     }
 
+    /** Additive same-version guard for backups restored from a pre-v39 fork build. */
+    private fun ensurePendingCommandAuthorityV39Schema(db: SQLiteDatabase) {
+        ensureColumns(
+            db,
+            "pending_chat_commands",
+            listOf("authoritySubjectId" to "TEXT"),
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS `index_pending_chat_commands_authoritySubjectId` " +
+                "ON `pending_chat_commands` (`authoritySubjectId`)",
+        )
+    }
+
     private fun ensureCapabilityGrantsV35Schema(db: SQLiteDatabase) {
         listOf(
             "CREATE TABLE IF NOT EXISTS `capability_grants` (`id` TEXT NOT NULL, `subject_id` TEXT NOT NULL, `subject_type` TEXT NOT NULL, `capability_key` TEXT NOT NULL, `resource_kind` TEXT NOT NULL, `resource_identifier` TEXT NOT NULL, `allowed_origins` TEXT NOT NULL, `scope` TEXT NOT NULL, `expires_at_ms` INTEGER, `revoked` INTEGER NOT NULL, `created_at_ms` INTEGER NOT NULL, `updated_at_ms` INTEGER NOT NULL, PRIMARY KEY(`id`))",
@@ -496,6 +511,7 @@ object ImportedDatabaseReconciler {
             )
             ensureExecutionV35Schema(db)
             ensureCapabilityGrantsV35Schema(db)
+            ensurePendingCommandAuthorityV39Schema(db)
             stampCurrentIdentity(db)
             db.setTransactionSuccessful()
         } finally {
@@ -575,6 +591,7 @@ object ImportedDatabaseReconciler {
                     }
                     if (version >= 37) ensureExecutionV37Schema(db)
                     if (version >= 38) ensurePetV38Schema(db)
+                    if (version >= 39) ensurePendingCommandAuthorityV39Schema(db)
 
                     // Older backups must keep their original user_version so Room can run
                     // every real migration (including 28→29). Precreating fork-only tables

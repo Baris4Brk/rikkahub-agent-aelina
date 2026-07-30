@@ -42,16 +42,20 @@ class QuickCaptureTargetResolver(
     private val settingsReader: QuickCaptureSettingsReader,
     private val secondUserResolver: SecondUserTargetResolver,
 ) {
+    /**
+     * The compatibility target-mode fields now control only the display source.  A capture is
+     * always delivered to the live global second-user authority; a stale fixed/temporary
+     * assistant must never become an alternate privileged target.
+     */
     suspend fun resolve(temporaryAssistantId: Uuid? = null): QuickCaptureTargetResolution {
         val settings = settingsReader.read()
         val quick = settings.quickCaptureSettings
-        val (assistantId, source) = when {
-            temporaryAssistantId != null -> temporaryAssistantId to QuickCaptureTargetSource.TEMPORARY
-            quick.targetMode == QuickCaptureTargetMode.FIXED_ASSISTANT && quick.fixedAssistantId != null ->
-                quick.fixedAssistantId to QuickCaptureTargetSource.FIXED
-            else -> settings.systemAssistantTargetAssistantId to QuickCaptureTargetSource.SYSTEM_ASSISTANT
+        val source = when {
+            temporaryAssistantId != null -> QuickCaptureTargetSource.TEMPORARY
+            quick.targetMode == QuickCaptureTargetMode.FIXED_ASSISTANT -> QuickCaptureTargetSource.FIXED
+            else -> QuickCaptureTargetSource.SYSTEM_ASSISTANT
         }
-        val resolved = secondUserResolver.resolveAssistant(settings, assistantId)
+        val resolved = secondUserResolver.resolveActiveSecondUser()
         val target = when (resolved) {
             is SecondUserTargetResolution.Resolved -> QuickCaptureTarget(
                 assistantId = resolved.assistantId,
@@ -72,7 +76,7 @@ class QuickCaptureTargetResolver(
      */
     suspend fun validateTargetSnapshot(target: QuickCaptureTarget): QuickCaptureTargetResolution {
         val settings = settingsReader.read()
-        val resolved = secondUserResolver.resolveAssistant(settings, target.assistantId)
+        val resolved = secondUserResolver.resolveActiveSecondUser()
         val rebound = when (resolved) {
             is SecondUserTargetResolution.Resolved -> QuickCaptureTarget(
                 assistantId = resolved.assistantId,

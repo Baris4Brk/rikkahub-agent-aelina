@@ -2300,4 +2300,21 @@
   <string name="system_assistant_execution_succeeded_recently">Execution completed</string>
   <string name="system_assistant_execution_background_service_running">Background service running</string>
   <string name="system_assistant_view_approval">View authorization</string>
+  <string name="second_user_authority_recovery_title">Second-user authority</string>
+  <string name="second_user_authority_recovery_desc">Confirm or repair the protected second-user conversation before continuing.</string>
+  <string name="second_user_authority_confirm">Confirm second user</string>
+  <string name="second_user_authority_pending">Second-user authority is waiting for local biometric confirmation.</string>
+  <string name="second_user_authority_invalid">The selected second-user conversation needs repair.</string>
+  <string name="second_user_vault_title">Second-user secret vault</string>
+  <string name="second_user_vault_desc">Secret values stay on this device and require strong biometric verification to view or change.</string>
+  <string name="second_user_vault_empty">No secret slots yet</string>
+  <string name="second_user_vault_add">Add empty slot</string>
+  <string name="second_user_vault_save">Save secret</string>
+  <string name="second_user_vault_delete">Delete</string>
+  <string name="second_user_vault_slot_label">Slot ID</string>
+  <string name="second_user_vault_secret">Secret value</string>
+  <string name="second_user_vault_rebind">Rebind to current second user</string>
+  <string name="second_user_vault_open">Open secret vault</string>
+  <string name="second_user_vault_migrate_legacy">Migrate legacy secrets</string>
+  <string name="second_user_vault_migration_result">Migrated %1$d secret(s); %2$d item(s) still need manual handling.</string>
 </resources>

@@ -65,6 +65,12 @@ interface CapabilityGrantDao {
 
     @Query("SELECT * FROM capability_grants WHERE id = :id LIMIT 1")
     suspend fun getById(id: String): CapabilityGrantEntity?
+
+    @Query(
+        "UPDATE capability_grants SET revoked = 1, updated_at_ms = :updatedAtMs " +
+            "WHERE subject_id = :subjectId AND revoked = 0",
+    )
+    suspend fun revokeBySubject(subjectId: String, updatedAtMs: Long): Int
 }
 
 /**
@@ -127,6 +133,13 @@ class CapabilityGrantRepository(
         dao.update(existing.copy(revoked = true, updatedAtMs = nowMs()))
         refresh()
         return true
+    }
+
+    /** Reassignment invalidates every grant captured under the old epoch. */
+    suspend fun revokeSubject(subjectId: String): Int {
+        val changed = dao.revokeBySubject(subjectId, nowMs())
+        refresh()
+        return changed
     }
 
     private fun CapabilityGrantEntity.toAccessGrant(): AccessGrant? = runCatching {

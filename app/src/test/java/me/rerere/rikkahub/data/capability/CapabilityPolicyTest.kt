@@ -20,7 +20,7 @@ class CapabilityPolicyTest {
             ),
         )
 
-        assertEquals(PolicyDecision.Allowed("local_second_user_profile"), allowed)
+        assertEquals(PolicyDecision.Allowed("local_second_user_automatic"), allowed)
     }
 
     @Test
@@ -63,29 +63,20 @@ class CapabilityPolicyTest {
             ),
         )
 
-        assertEquals(PolicyDecision.Allowed("local_second_user_profile"), confirmed)
+        assertEquals(PolicyDecision.Allowed("local_second_user_automatic"), confirmed)
         assertTrue(automatic is PolicyDecision.Denied)
     }
 
     @Test
-    fun `second user Linux capability requires exact conversation grant`() {
+    fun `second user uses every grantable capability automatically after local admission`() {
         val subject = CapabilitySubject("assistant-1:conversation-1", SubjectType.LOCAL_SECOND_USER)
         val linux = CapabilityKey.of("linux.execute")
         val request = request(subject, ToolCallOrigin.LocalChat, unlocked = true, selected = true)
             .copy(capabilities = setOf(linux), resource = ResourceScope.Workspace("workspace-1"))
-        assertTrue(DefaultCapabilityPolicyEngine().evaluate(request) is PolicyDecision.Denied)
-
-        val granted = DefaultCapabilityPolicyEngine(grants = { listOf(AccessGrant(
-            id = "linux-grant",
-            subjectId = subject.id,
-            subjectType = subject.type,
-            capability = linux,
-            resourceKind = "workspace",
-            resourceIdentifier = "*",
-            allowedOrigins = setOf(ToolCallOrigin.LocalChat),
-            scope = GrantScope.CONVERSATION,
-        )) }).evaluate(request)
-        assertEquals(PolicyDecision.Allowed("second_user_scoped_grant"), granted)
+        assertEquals(
+            PolicyDecision.Allowed("local_second_user_automatic"),
+            DefaultCapabilityPolicyEngine().evaluate(request),
+        )
     }
 
     @Test

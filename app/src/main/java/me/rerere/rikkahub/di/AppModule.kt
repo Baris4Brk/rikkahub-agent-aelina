@@ -241,6 +241,21 @@ val appModule = module {
     single { me.rerere.rikkahub.data.keyboard.KeyboardApiClient(get()) }
 
     single { me.rerere.rikkahub.assistant.SystemAssistantRoleController(get()) }
+    single { me.rerere.rikkahub.security.SecondUserSecretVault(get()) }
+    single { me.rerere.rikkahub.security.SecondUserLegacySecretMigration(get(), get(), get()) }
+    single { me.rerere.rikkahub.security.StrongBiometricAuthenticator(get(), get()) }
+    single {
+        me.rerere.rikkahub.assistant.SecondUserAuthorityService(
+            settingsStore = get(),
+            conversations = me.rerere.rikkahub.assistant.SecondUserAuthorityConversationReader { id ->
+                get<me.rerere.rikkahub.data.db.AppDatabase>().conversationDao()
+                    .getAssistantIdByConversationId(id.toString())
+                    ?.let { raw -> runCatching { kotlin.uuid.Uuid.parse(raw) }.getOrNull() }
+            },
+            appScope = get(),
+        )
+    }
+    single { me.rerere.rikkahub.assistant.AppStartDestinationResolver(get()) }
     single {
         val settingsStore = get<me.rerere.rikkahub.data.datastore.SettingsStore>()
         val conversationRepository = get<me.rerere.rikkahub.data.repository.ConversationRepository>()
@@ -255,6 +270,7 @@ val appModule = module {
                     conversationId ->
                 conversationRepository.getConversationById(conversationId)?.title
             },
+            authorityService = get(),
         )
     }
     single {
@@ -453,6 +469,7 @@ val appModule = module {
             settingsStore = get(),
             ttsManager = get(),
             appScope = get(),
+            secretVault = get(),
         )
     }
     single { me.rerere.rikkahub.tts.TtsLibraryToolProvider(get()) }
@@ -754,6 +771,8 @@ val appModule = module {
             capabilityGrantRepository = get(),
             workspaceRepository = get(),
             workflowRepository = get(),
+            conversationDeletionPolicy = get(),
+            secondUserSecretVault = get(),
             durableCommandQueue = get(),
             secondUserApprovalLifecycle = get(),
             toolExecutionGate = get(),
@@ -767,6 +786,19 @@ val appModule = module {
             subAgentExecutionProfileRegistry = get(),
             setupTransactionCoordinator = get(),
             displayAutomationRuntime = get(),
+        )
+    }
+    single {
+        me.rerere.rikkahub.assistant.SecondUserAuthorityRevocationCoordinator(
+            authority = get(),
+            queue = get(),
+            grants = get(),
+            approvalDao = get(),
+            approvalLifecycle = get(),
+            conversations = get(),
+            executions = get(),
+            cancellation = get(),
+            chatService = get(),
         )
     }
 

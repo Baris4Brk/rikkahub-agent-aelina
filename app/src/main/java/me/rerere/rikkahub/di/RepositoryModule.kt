@@ -25,7 +25,18 @@ import java.io.File
 
 val repositoryModule = module {
     single {
-        ConversationRepository(get(), get(), get(), get(), get(), get())
+        ConversationRepository(get(), get(), get(), get(), get(), get(), get())
+    }
+
+    single { me.rerere.rikkahub.data.repository.ConversationDeletionPolicy(get()) }
+    single {
+        me.rerere.rikkahub.data.repository.AssistantRemovalService(
+            settingsStore = get(),
+            memoryRepository = get(),
+            conversations = get(),
+            filesManager = get(),
+            authority = get(),
+        )
     }
 
     single {

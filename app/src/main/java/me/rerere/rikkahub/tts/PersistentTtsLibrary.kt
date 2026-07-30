@@ -19,6 +19,10 @@ import kotlinx.serialization.json.Json
 import me.rerere.rikkahub.AppScope
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.datastore.getSelectedTTSProvider
+import me.rerere.rikkahub.assistant.SecondUserAuthorityRegistry
+import me.rerere.rikkahub.security.SecondUserSecretVault
+import me.rerere.rikkahub.security.SecretBindingResolution
+import me.rerere.rikkahub.security.resolveTtsBinding
 import me.rerere.tts.controller.AudioPlayer
 import me.rerere.tts.controller.TextChunker
 import me.rerere.tts.controller.TtsSynthesizer
@@ -211,6 +215,7 @@ class PersistentTtsLibrary(
     private val settingsStore: SettingsStore,
     ttsManager: TTSManager,
     private val appScope: AppScope,
+    private val secretVault: SecondUserSecretVault? = null,
 ) {
     private val applicationContext = context.applicationContext
     private val store = TtsArtifactStore(File(applicationContext.filesDir, LIBRARY_FOLDER))
@@ -226,13 +231,35 @@ class PersistentTtsLibrary(
 
     suspend fun synthesizeSaveAndQueue(text: String, ownerKey: String? = null): TtsLibraryEntry {
         require(text.isNotBlank()) { "text is required" }
-        val provider = settingsStore.settingsFlow.value.getSelectedTTSProvider()
+        val configuredProvider = settingsStore.settingsFlow.value.getSelectedTTSProvider()
             ?: error("No TTS provider is configured")
+        val provider = resolveSecondUserTtsBinding(configuredProvider, ownerKey)
         val chunks = chunker.split(text)
         val responses = chunks.map { chunk -> synthesizer.synthesize(provider, chunk) }
         val entry = store.save(text = text, responses = responses, ownerKey = ownerKey)
         check(queueReplay(entry.artifactId, ownerKey)) { "Saved TTS audio could not be queued" }
         return entry
+    }
+
+    private suspend fun resolveSecondUserTtsBinding(
+        configuredProvider: me.rerere.tts.provider.TTSProviderSetting,
+        ownerKey: String?,
+    ): me.rerere.tts.provider.TTSProviderSetting {
+        val active = SecondUserAuthorityRegistry.current() ?: return configuredProvider
+        val expectedOwner = TtsPlaybackOwner.secondUser(
+            assistantId = active.assistantId.toString(),
+            conversationId = active.conversationId.toString(),
+        )
+        if (ownerKey != expectedOwner) return configuredProvider
+        val vault = secretVault ?: return configuredProvider
+        return when (val resolution = vault.resolveTtsBinding(
+            provider = configuredProvider,
+            subjectId = active.subjectId,
+        )) {
+            SecretBindingResolution.NotBound -> configuredProvider
+            is SecretBindingResolution.Ready -> resolution.value
+            is SecretBindingResolution.Unavailable -> error("second_user_secret_${resolution.code}")
+        }
     }
 
     /** Returns only after the entry is known to exist; playback then runs in application scope. */

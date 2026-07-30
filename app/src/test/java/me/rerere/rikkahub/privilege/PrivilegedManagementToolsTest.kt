@@ -28,6 +28,10 @@ class PrivilegedManagementToolsTest {
         assertEquals(
             setOf(
                 "rikkahub_state_get",
+                "secret_vault_list",
+                "secret_vault_create_slot",
+                "secret_vault_set_binding",
+                "secret_vault_test_binding",
                 "conversation_create",
                 "conversation_update",
                 "conversation_delete",
@@ -56,6 +60,15 @@ class PrivilegedManagementToolsTest {
         assertFalse("emergency_stop" in appSchema.properties)
         assertFalse("database_version" in appSchema.properties)
         assertFalse("backup_internal_version" in appSchema.properties)
+
+        val createSecretSchema = tools.single { it.name == "secret_vault_create_slot" }
+            .parameters() as InputSchema.Obj
+        val bindingSchema = tools.single { it.name == "secret_vault_set_binding" }
+            .parameters() as InputSchema.Obj
+        assertFalse("secret" in createSecretSchema.properties)
+        assertFalse("value" in createSecretSchema.properties)
+        assertFalse("secret" in bindingSchema.properties)
+        assertFalse("value" in bindingSchema.properties)
     }
 
     @Test

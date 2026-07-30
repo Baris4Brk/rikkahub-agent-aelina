@@ -32,14 +32,17 @@ This repository follows the original [ExTV/RikkaHub Agent](https://github.com/Ex
 
 | Area | Added in this fork |
 | --- | --- |
-| Second-user assistant | A scoped privileged conversation with explicit local-device policy, isolated run identity, and a dedicated Linux/runtime capability surface. |
+| Second-user assistant | One global, fixed privileged conversation with explicit local-device policy, epoch-bound run identity, a dedicated Linux/runtime capability surface, and direct startup routing after confirmation. |
+| Protected second-user state | The fixed conversation is retained across in-app delete, clear, reset, assistant-removal, queue recovery, and reassignment paths. Reassignment first revokes the old epoch's grants, approvals, queued work, and managed executions. |
+| Local secret vault | Provider, TTS, ASR, and MCP credentials can be stored in an Android-Keystore AES-GCM Vault outside backups. Only the user can reveal or edit a value after BIOMETRIC_STRONG; local adapters receive scoped leases and the model never receives plaintext. |
+| Desktop-pet sidecar | A second-user-bound desktop pet provides isolated short dialogue, diary archiving, safe task handoff, TTS state, and presentation-driven actions without inheriting tool permissions directly. |
 | Quick screenshot Q&A | A floating quick-capture flow with region capture, background auto-send, draft hand-off when auto-send is disabled, and an explicit “open current conversation” action. |
 | Cross-conversation reading | Opt-in, read-only tools for listing, reading, and searching other conversations. Raw content is transient, command-scoped, and sanitized before persistence. |
 | Run control | Steering messages can be applied during a live generation and cancelled cleanly; continuation and regenerate paths preserve a stable command identity. |
 | Context and OCR | Better turn selection, OCR attachment handling, context budgeting, and request-size diagnostics for large multimodal conversations. |
 | Reliability | Database migration safeguards, import reconciliation, FTS recovery, Base64 draft compatibility, and targeted regression tests for the customized paths. |
 
-The security model remains opt-in. The second-user and cross-conversation features stay disabled until they are explicitly enabled for an assistant. This fork is independently maintained; report fork-specific issues in [AAAelina/rikkahub-agent](https://github.com/AAAelina/rikkahub-agent/issues), not to either upstream project.
+The security model remains opt-in. The global second-user authority stays inactive until it is selected and confirmed locally with strong biometric authentication; system permissions, Emergency Stop, HARDLINE, and source-specific approval rules remain in force. This fork is independently maintained; report fork-specific issues in [AAAelina/rikkahub-agent](https://github.com/AAAelina/rikkahub-agent/issues), not to either upstream project.
 
 ---
 

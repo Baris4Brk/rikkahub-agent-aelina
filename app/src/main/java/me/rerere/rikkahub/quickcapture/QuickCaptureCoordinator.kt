@@ -24,6 +24,7 @@ import me.rerere.ai.core.MessageRole
 import me.rerere.ai.ui.UIMessageAnnotation
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.rikkahub.AppScope
+import me.rerere.rikkahub.assistant.SecondUserAuthorityRegistry
 import me.rerere.rikkahub.data.ai.AgentSafetySettings
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.files.FilesManager
@@ -105,7 +106,12 @@ class QuickCaptureCoordinator(
     }
 
     fun setTemporaryAssistant(assistantId: Uuid?) {
-        temporaryAssistantId = assistantId
+        // The selector remains as a compatibility affordance for existing overlays, but it
+        // cannot redirect a capture to another assistant.  Only the current global authority
+        // may be selected, and the resolver independently checks that same authority at submit.
+        temporaryAssistantId = assistantId?.takeIf {
+            SecondUserAuthorityRegistry.current()?.assistantId == it
+        }
     }
 
     suspend fun preflightStart(): QuickCaptureStartEligibility {
@@ -193,13 +199,15 @@ class QuickCaptureCoordinator(
 
     fun openSettings() = navigator.openSettings()
 
-    suspend fun availableTemporaryAssistants(): List<Pair<Uuid, String>> = settingsStore.settingsFlow
-        .first { !it.init }
-        .assistants
-        .asSequence()
-        .filter { it.privilegedConversationId != null }
-        .map { it.id to it.name }
-        .toList()
+    suspend fun availableTemporaryAssistants(): List<Pair<Uuid, String>> {
+        val active = SecondUserAuthorityRegistry.current() ?: return emptyList()
+        return settingsStore.settingsFlow
+            .first { !it.init }
+            .assistants
+            .firstOrNull { it.id == active.assistantId }
+            ?.let { listOf(it.id to it.name) }
+            .orEmpty()
+    }
 
     suspend fun updateBubblePosition(edge: QuickCaptureBubbleEdge, yFraction: Float) {
         settingsStore.update { current ->

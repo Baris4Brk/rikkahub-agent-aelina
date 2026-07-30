@@ -171,6 +171,26 @@ class DurableCommandQueue(
 
     suspend fun clearPending(conversationId: Uuid): Int = dao.clearPending(conversationId.toString())
 
+    /** An authority epoch is an admission capability, not a replayable queue attribute. */
+    suspend fun cancelByAuthoritySubject(subjectId: String): Int {
+        val changed = dao.cancelByAuthoritySubject(
+            subjectId = subjectId,
+            finishedAt = nowMillis(),
+        )
+        if (changed > 0) wakeUpListener(WakeUp)
+        return changed
+    }
+
+    /** Cancels pre-v39 second-user rows which have no epoch snapshot to validate. */
+    suspend fun cancelLegacyUnscopedForConversation(conversationId: Uuid): Int {
+        val changed = dao.cancelLegacyUnscopedForConversation(
+            conversationId = conversationId.toString(),
+            finishedAt = nowMillis(),
+        )
+        if (changed > 0) wakeUpListener(WakeUp)
+        return changed
+    }
+
     suspend fun countActive(conversationId: Uuid): Int = dao.countActive(conversationId.toString())
 
     suspend fun decideRecovery(command: PendingChatCommandEntity): RecoveryDecision = when {

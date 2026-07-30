@@ -63,6 +63,7 @@ import kotlin.uuid.Uuid
 import me.rerere.rikkahub.quickcapture.QuickCaptureSettings
 import me.rerere.rikkahub.pet.PetOverlaySelection
 import me.rerere.rikkahub.pet.resolvePetOverlaySelection
+import me.rerere.rikkahub.assistant.SecondUserAuthorityConfig
 
 private const val TAG = "PreferencesStore"
 
@@ -157,6 +158,7 @@ class SettingsStore(
         val ASSISTANTS = stringPreferencesKey("assistants")
         val ASSISTANT_TAGS = stringPreferencesKey("assistant_tags")
         val SYSTEM_ASSISTANT_TARGET_ASSISTANT = stringPreferencesKey("system_assistant_target_assistant")
+        val SECOND_USER_AUTHORITY = stringPreferencesKey("second_user_authority")
         val QUICK_CAPTURE_SETTINGS = stringPreferencesKey("quick_capture_settings")
         val PET_OVERLAY_SELECTION = stringPreferencesKey("pet_overlay_selection")
 
@@ -249,6 +251,10 @@ class SettingsStore(
                     ?: DEFAULT_ASSISTANT_ID,
                 systemAssistantTargetAssistantId = preferences[SYSTEM_ASSISTANT_TARGET_ASSISTANT]
                     ?.let { value -> runCatching { Uuid.parse(value) }.getOrNull() },
+                secondUserAuthority = preferences[SECOND_USER_AUTHORITY]?.let { value ->
+                    runCatching { JsonInstant.decodeFromString<SecondUserAuthorityConfig>(value).normalized() }
+                        .getOrNull()
+                } ?: SecondUserAuthorityConfig(),
                 quickCaptureSettings = preferences[QUICK_CAPTURE_SETTINGS]
                     ?.let { value ->
                         runCatching {
@@ -537,6 +543,9 @@ class SettingsStore(
             settings.systemAssistantTargetAssistantId?.let { assistantId ->
                 preferences[SYSTEM_ASSISTANT_TARGET_ASSISTANT] = assistantId.toString()
             } ?: preferences.remove(SYSTEM_ASSISTANT_TARGET_ASSISTANT)
+            preferences[SECOND_USER_AUTHORITY] = JsonInstant.encodeToString(
+                settings.secondUserAuthority.normalized(),
+            )
             preferences[QUICK_CAPTURE_SETTINGS] = JsonInstant.encodeToString(
                 settings.quickCaptureSettings.normalized()
             )
@@ -728,6 +737,7 @@ data class Settings(
     val finalAnswerReminderPrompt: String = DEFAULT_FINAL_ANSWER_REMINDER_PROMPT,
     val assistantId: Uuid = DEFAULT_ASSISTANT_ID,
     val systemAssistantTargetAssistantId: Uuid? = null,
+    val secondUserAuthority: SecondUserAuthorityConfig = SecondUserAuthorityConfig(),
     val quickCaptureSettings: QuickCaptureSettings = QuickCaptureSettings(),
     val petOverlaySelection: PetOverlaySelection? = null,
     val providers: List<ProviderSetting> = DEFAULT_PROVIDERS,
