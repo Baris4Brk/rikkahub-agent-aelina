@@ -40,7 +40,6 @@ import me.rerere.ai.provider.bufferProviderStream
 import me.rerere.ai.provider.deliverProviderChunk
 import me.rerere.ai.provider.providers.PartGroup
 import me.rerere.ai.provider.providers.groupPartsByToolBoundary
-import me.rerere.ai.registry.ModelRegistry
 import me.rerere.ai.ui.MessageChunk
 import me.rerere.ai.ui.GenerationTerminal
 import me.rerere.ai.ui.UIMessage
@@ -370,6 +369,7 @@ class ChatCompletionsAPI(
         stream: Boolean = false,
     ): JsonObject {
         val host = providerSetting.baseUrl.toHttpUrl().host
+        val compatibility = ModelCompatibilityResolver.resolve(providerSetting, params.model)
         // OpenRouter prompt caching: add per-block cache_control breakpoints for every model.
         // Anthropic/Gemini/Qwen need them explicitly; providers that cache automatically
         // (OpenAI/DeepSeek/Grok/MiniMax) have the field stripped by OpenRouter. So this is safe
@@ -388,7 +388,7 @@ class ChatCompletionsAPI(
             put("model", params.model.modelId)
             put("messages", messagesArray)
 
-            if (isModelAllowTemperature(params.model)) {
+            if (compatibility.allowTemperature) {
                 if (params.temperature != null) put("temperature", params.temperature)
                 if (params.topP != null) put("top_p", params.topP)
             }
@@ -507,6 +507,9 @@ class ChatCompletionsAPI(
                     "api.moonshot.cn" -> {
                         put("thinking", buildJsonObject {
                             put("type", if (!level.isEnabled) "disabled" else "enabled")
+                            if (level.isEnabled && compatibility.retainThinkingHistory) {
+                                put("keep", "all")
+                            }
                         })
                     }
 
@@ -670,10 +673,6 @@ class ChatCompletionsAPI(
             else -> return this
         }
         return JsonObject(this + ("content" to newContent))
-    }
-
-    private fun isModelAllowTemperature(model: Model): Boolean {
-        return !ModelRegistry.OPENAI_O_MODELS.match(model.modelId) && !ModelRegistry.GPT_5.match(model.modelId)
     }
 
     private fun requiresToolReasoningContent(modelId: String): Boolean =

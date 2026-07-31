@@ -27,6 +27,7 @@ import me.rerere.ai.provider.Provider
 import me.rerere.ai.provider.ProviderSetting
 import me.rerere.ai.provider.TextGenerationParams
 import me.rerere.ai.provider.providers.openai.ChatCompletionsAPI
+import me.rerere.ai.provider.providers.openai.ModelCompatibilityResolver
 import me.rerere.ai.provider.providers.openai.ResponseAPI
 import me.rerere.ai.provider.providers.openai.openRouterModelFromJson
 import me.rerere.ai.provider.providers.openai.parseImageDataUri
@@ -259,6 +260,7 @@ class OpenAIProvider(
         }
 
         val key = keyRoulette.next(providerSetting.apiKey, providerSetting.id.toString())
+        val compatibility = ModelCompatibilityResolver.resolve(providerSetting, params.model)
 
         // OpenRouter has no /images/generations endpoint (that 404s to its website). Image
         // generation goes through /chat/completions with modalities:["image","text"].
@@ -272,13 +274,15 @@ class OpenAIProvider(
                 put("model", params.model.modelId)
                 put("prompt", params.prompt)
                 put("n", params.numOfImages)
-                put(
-                    "size", when (params.aspectRatio) {
-                        ImageAspectRatio.SQUARE -> "1024x1024"
-                        ImageAspectRatio.LANDSCAPE -> "1536x1024"
-                        ImageAspectRatio.PORTRAIT -> "1024x1536"
-                    }
-                )
+                if (!compatibility.omitImageSize) {
+                    put(
+                        "size", when (params.aspectRatio) {
+                            ImageAspectRatio.SQUARE -> "1024x1024"
+                            ImageAspectRatio.LANDSCAPE -> "1536x1024"
+                            ImageAspectRatio.PORTRAIT -> "1024x1536"
+                        }
+                    )
+                }
             }
                 .mergeCustomBody(params.customBody)
         )
@@ -379,18 +383,21 @@ class OpenAIProvider(
         }
 
         val key = keyRoulette.next(providerSetting.apiKey, providerSetting.id.toString())
+        val compatibility = ModelCompatibilityResolver.resolve(providerSetting, params.model)
         val bodyBuilder = MultipartBody.Builder()
             .setType(MultipartBody.FORM)
             .addFormDataPart("model", params.model.modelId)
             .addFormDataPart("prompt", params.prompt)
             .addFormDataPart("n", params.numOfImages.toString())
-            .addFormDataPart(
+        if (!compatibility.omitImageSize) {
+            bodyBuilder.addFormDataPart(
                 "size", when (params.aspectRatio) {
                     ImageAspectRatio.SQUARE -> "1024x1024"
                     ImageAspectRatio.LANDSCAPE -> "1536x1024"
                     ImageAspectRatio.PORTRAIT -> "1024x1536"
                 }
             )
+        }
 
         val imageFieldName = if (params.images.size == 1) "image" else "image[]"
         params.images.forEach { path ->

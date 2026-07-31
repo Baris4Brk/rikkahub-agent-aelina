@@ -36,7 +36,6 @@ import me.rerere.ai.provider.bufferProviderStream
 import me.rerere.ai.provider.deliverProviderChunk
 import me.rerere.ai.provider.providers.PartGroup
 import me.rerere.ai.provider.providers.groupPartsByToolBoundary
-import me.rerere.ai.registry.ModelRegistry
 import me.rerere.ai.ui.MessageChunk
 import me.rerere.ai.ui.FinishCategory
 import me.rerere.ai.ui.GenerationTerminal
@@ -219,12 +218,13 @@ class ResponseAPI(
     ): JsonObject {
         val host = providerSetting.baseUrl.toHttpUrl().host
         val capabilities = resolveResponseProviderCapabilities(host)
+        val compatibility = ModelCompatibilityResolver.resolve(providerSetting, params.model)
         return buildJsonObject {
             put("model", params.model.modelId)
             put("stream", stream)
             put("store", false)
 
-            if (isModelAllowTemperature(params.model)) {
+            if (compatibility.allowTemperature) {
                 if (params.temperature != null) put("temperature", params.temperature)
                 if (params.topP != null) put("top_p", params.topP)
             }
@@ -856,10 +856,6 @@ class ResponseAPI(
                 ?: 0
         )
     }
-}
-
-private fun isModelAllowTemperature(model: Model): Boolean {
-    return !ModelRegistry.OPENAI_O_MODELS.match(model.modelId) && !ModelRegistry.GPT_5.match(model.modelId)
 }
 
 private fun List<UIMessagePart>.isOnlyTextPart(): Boolean {
