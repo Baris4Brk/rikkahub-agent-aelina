@@ -54,9 +54,9 @@ suspend fun createWorkspaceTools(
     val shellCwd = cwd?.removePrefix("/workspace/")?.removePrefix("/workspace")
 
     return listOf(
-        createReadFileTool(workspaceId, ::needsApproval, workspaceRepository),
-        createWriteFileTool(workspaceId, ::needsApproval, workspaceRepository),
-        createEditFileTool(workspaceId, ::needsApproval, workspaceRepository),
+        createReadFileTool(workspaceId, ::needsApproval, workspaceRepository, allowSharedStorage),
+        createWriteFileTool(workspaceId, ::needsApproval, workspaceRepository, allowSharedStorage),
+        createEditFileTool(workspaceId, ::needsApproval, workspaceRepository, allowSharedStorage),
         createShellTool(
             workspaceId,
             ::needsApproval,
@@ -76,6 +76,7 @@ private fun createReadFileTool(
     workspaceId: String,
     needsApproval: (String) -> Boolean,
     workspaceRepository: WorkspaceRepository,
+    allowSharedStorage: Boolean,
 ) = Tool(
     name = "workspace_read_file",
     description = """
@@ -96,9 +97,9 @@ private fun createReadFileTool(
     execute = {
         val path = it.jsonObject.absolutePath("path")
         if (path.isImagePath()) {
-            workspaceRepository.readImageInRootfs(workspaceId, path)
+            workspaceRepository.readImageInRootfs(workspaceId, path, allowSharedStorage)
         } else {
-            val text = workspaceRepository.readTextInRootfs(workspaceId, path)
+            val text = workspaceRepository.readTextInRootfs(workspaceId, path, allowSharedStorage)
             listOf(
                 UIMessagePart.Text(
                     buildJsonObject {
@@ -115,6 +116,7 @@ private fun createWriteFileTool(
     workspaceId: String,
     needsApproval: (String) -> Boolean,
     workspaceRepository: WorkspaceRepository,
+    allowSharedStorage: Boolean,
 ) = Tool(
     name = "workspace_write_file",
     description = """
@@ -144,7 +146,13 @@ private fun createWriteFileTool(
         val path = params.absolutePath("path")
         val text = params.string("text") ?: error("text is required")
         val overwrite = params["overwrite"]?.jsonPrimitive?.contentOrNull?.toBooleanStrictOrNull() ?: true
-        val entry = workspaceRepository.writeTextInRootfs(workspaceId, path, text, overwrite)
+        val entry = workspaceRepository.writeTextInRootfs(
+            workspaceId,
+            path,
+            text,
+            overwrite,
+            allowSharedStorage,
+        )
         listOf(UIMessagePart.Text(entry.toJson().toString()))
     },
 )
@@ -153,6 +161,7 @@ private fun createEditFileTool(
     workspaceId: String,
     needsApproval: (String) -> Boolean,
     workspaceRepository: WorkspaceRepository,
+    allowSharedStorage: Boolean,
 ) = Tool(
     name = "workspace_edit_file",
     description = """
@@ -191,14 +200,20 @@ private fun createEditFileTool(
         val replaceAll = params["replace_all"]?.jsonPrimitive?.contentOrNull?.toBooleanStrictOrNull() ?: false
         require(oldText.isNotEmpty()) { "old_text must not be empty" }
 
-        val original = workspaceRepository.readTextInRootfs(workspaceId, path)
+        val original = workspaceRepository.readTextInRootfs(workspaceId, path, allowSharedStorage)
         // 逐级尝试 exact -> line_trimmed -> block_anchor 替换器, 见 TextReplacers.kt
         val result = try {
             replaceText(original, oldText, newText, replaceAll)
         } catch (e: IllegalArgumentException) {
             error("${e.message} (path: $path)")
         }
-        val entry = workspaceRepository.writeTextInRootfs(workspaceId, path, result.updated, overwrite = true)
+        val entry = workspaceRepository.writeTextInRootfs(
+            workspaceId,
+            path,
+            result.updated,
+            overwrite = true,
+            allowSharedStorage = allowSharedStorage,
+        )
         val diff = generateUnifiedDiff(original, result.updated, entry.path)
         listOf(
             UIMessagePart.Text(
@@ -304,33 +319,24 @@ private fun kotlinx.serialization.json.JsonObject.string(name: String): String? 
 private suspend fun WorkspaceRepository.readTextInRootfs(
     workspaceId: String,
     path: String,
+    allowSharedStorage: Boolean,
 ): String {
-    val (area, relativePath) = rootfsPathToAreaAndRelative(path)
-    val size = fileSize(workspaceId, area, relativePath)
+    val size = rootfsFileSize(workspaceId, path, allowSharedStorage)
     require(size <= MAX_READ_FILE_BYTES) {
         "File is too large to read: $path (${size / 1024 / 1024}MB, max ${MAX_READ_FILE_BYTES / 1024 / 1024}MB). Use shell commands like head, tail, or grep to read parts of it."
     }
     val buffer = ByteArrayOutputStream(size.toInt())
-    exportFile(workspaceId, area, relativePath, buffer)
+    exportRootfsFile(workspaceId, path, buffer, allowSharedStorage)
     return buffer.toString(Charsets.UTF_8.name())
-}
-
-private fun rootfsPathToAreaAndRelative(path: String): Pair<WorkspaceStorageArea, String> {
-    val trimmed = path.trimEnd('/')
-    return if (trimmed == "/workspace" || trimmed.startsWith("/workspace/")) {
-        WorkspaceStorageArea.FILES to trimmed.removePrefix("/workspace").trimStart('/')
-    } else {
-        WorkspaceStorageArea.LINUX to trimmed.trimStart('/')
-    }
 }
 
 private suspend fun WorkspaceRepository.readImageInRootfs(
     workspaceId: String,
     path: String,
+    allowSharedStorage: Boolean,
 ): List<UIMessagePart> {
-    val (area, relativePath) = rootfsPathToAreaAndRelative(path)
     val buffer = ByteArrayOutputStream()
-    exportFile(workspaceId, area, relativePath, buffer)
+    exportRootfsFile(workspaceId, path, buffer, allowSharedStorage)
     val bytes = buffer.toByteArray()
 
     val filesManager = getKoin().get<FilesManager>()
@@ -351,6 +357,7 @@ private suspend fun WorkspaceRepository.writeTextInRootfs(
     path: String,
     text: String,
     overwrite: Boolean,
+    allowSharedStorage: Boolean,
 ): WorkspaceFileEntry {
     val pathArg = path.shellQuote()
     val result = runRootfsCommand(
@@ -371,6 +378,7 @@ private suspend fun WorkspaceRepository.writeTextInRootfs(
             ${statEntryCommand(path)}
         """.trimIndent(),
         stdin = text.toByteArray(Charsets.UTF_8),
+        allowSharedStorage = allowSharedStorage,
     )
     return result.stdout.parseRootfsEntry()
 }
@@ -380,12 +388,14 @@ private suspend fun WorkspaceRepository.runRootfsCommand(
     action: String,
     command: String,
     stdin: ByteArray? = null,
+    allowSharedStorage: Boolean = false,
 ): WorkspaceCommandResult {
     val result = executeCommand(
         id = workspaceId,
         command = command,
         timeoutMillis = WorkspaceManager.DEFAULT_COMMAND_TIMEOUT_MS,
         stdin = stdin,
+        allowSharedStorage = allowSharedStorage,
     )
     if (result.timedOut) {
         error("$action timed out")

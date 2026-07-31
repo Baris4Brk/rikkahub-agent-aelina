@@ -15,6 +15,7 @@ import me.rerere.workspace.ProotShellRunner
 import me.rerere.workspace.RootfsInstaller
 import me.rerere.workspace.WorkspaceBindMount
 import me.rerere.workspace.WorkspaceManager
+import me.rerere.workspace.WorkspaceMountResolver
 import me.rerere.workspace.WorkspaceProcessHost
 import me.rerere.workspace.WorkspaceProcessManager
 import me.rerere.workspace.WorkspaceProcessPersistence
@@ -57,8 +58,7 @@ val repositoryModule = module {
 
     single {
         val context: Context = get()
-        ProotShellRunner(
-            nativeLibraryDir = File(context.applicationInfo.nativeLibraryDir),
+        WorkspaceMountResolver(
             sharedStorageBindMount = WorkspaceBindMount(
                 source = android.os.Environment.getExternalStorageDirectory(),
                 target = "/sdcard",
@@ -72,7 +72,15 @@ val repositoryModule = module {
                     source = File(context.filesDir, FileFolders.TOOL_OUTPUTS).apply { mkdirs() },
                     target = "/tool_outputs",
                 ),
-            )
+            ),
+        )
+    }
+
+    single {
+        val context: Context = get()
+        ProotShellRunner(
+            nativeLibraryDir = File(context.applicationInfo.nativeLibraryDir),
+            mountResolver = get(),
         )
     }
 
@@ -85,6 +93,7 @@ val repositoryModule = module {
                 "${SharedExchangeDirectory.DIRECTORY_NAME}/workspaces",
             ),
             shellRunner = get<ProotShellRunner>(),
+            mountResolver = get(),
         )
     }
 

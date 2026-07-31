@@ -44,18 +44,8 @@ class WorkspaceRepository(
         for (workspace in workspaces) {
             val dir = manager.workspaceDir(workspace.root)
             if (!dir.exists()) {
-                val stopped = processManager.stopByWorkspace(workspace.id, force = true)
-                if (!stopped.ok) {
-                    Log.e(
-                        TAG,
-                        "Missing Workspace retained because managed processes did not stop: " +
-                            "id=${workspace.id}, processes=${stopped.failedProcessIds}",
-                    )
-                    continue
-                }
-                Log.w(TAG, "Workspace directory missing, removing record: id=${workspace.id}, root=${workspace.root}")
-                dao.deleteById(workspace.id)
-                cleanupAssistantReferences(workspace.id)
+                Log.w(TAG, "Workspace directory missing, retaining as BROKEN: id=${workspace.id}")
+                updateShellState(workspace.id, WorkspaceShellStatus.BROKEN.name)
                 continue
             }
             manager.ensureWorkspace(workspace.root, workspace.storageModeValue())
@@ -295,6 +285,25 @@ class WorkspaceRepository(
     ) = withContext(Dispatchers.IO) {
         val workspace = dao.getById(id) ?: error("Workspace not found: $id")
         manager.exportFile(workspace.root, path, area, outputStream)
+    }
+
+    suspend fun rootfsFileSize(
+        id: String,
+        path: String,
+        allowSharedStorage: Boolean = false,
+    ): Long = withContext(Dispatchers.IO) {
+        val workspace = dao.getById(id) ?: error("Workspace not found: $id")
+        manager.rootfsFileSize(workspace.root, path, allowSharedStorage)
+    }
+
+    suspend fun exportRootfsFile(
+        id: String,
+        path: String,
+        outputStream: OutputStream,
+        allowSharedStorage: Boolean = false,
+    ) = withContext(Dispatchers.IO) {
+        val workspace = dao.getById(id) ?: error("Workspace not found: $id")
+        manager.exportRootfsFile(workspace.root, path, outputStream, allowSharedStorage)
     }
 
     suspend fun deleteFile(

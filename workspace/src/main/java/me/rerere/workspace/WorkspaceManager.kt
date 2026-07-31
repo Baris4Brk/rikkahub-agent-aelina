@@ -11,6 +11,7 @@ class WorkspaceManager(
     private val sharedFilesBaseDir: File? = null,
     private val config: WorkspaceConfig = WorkspaceConfig(),
     private val shellRunner: WorkspaceShellRunner = HostShellRunner(),
+    private val mountResolver: WorkspaceMountResolver = WorkspaceMountResolver(),
 ) {
     private val fileSystem = WorkspaceFileSystem(config)
 
@@ -128,6 +129,25 @@ class WorkspaceManager(
         outputStream: OutputStream,
     ) {
         val file = fileSystem.resolve(areaDir(root, area), path)
+        require(file.exists()) { "File does not exist: $path" }
+        require(file.isFile) { "Path is not a file: $path" }
+        outputStream.use { out -> file.inputStream().use { it.copyTo(out) } }
+    }
+
+    fun rootfsFileSize(root: String, path: String, allowSharedStorage: Boolean = false): Long {
+        val file = mountResolver.resolve(filesDir(root), linuxDir(root), path, allowSharedStorage)
+        require(file.exists()) { "File does not exist: $path" }
+        require(file.isFile) { "Path is not a file: $path" }
+        return file.length()
+    }
+
+    fun exportRootfsFile(
+        root: String,
+        path: String,
+        outputStream: OutputStream,
+        allowSharedStorage: Boolean = false,
+    ) {
+        val file = mountResolver.resolve(filesDir(root), linuxDir(root), path, allowSharedStorage)
         require(file.exists()) { "File does not exist: $path" }
         require(file.isFile) { "Path is not a file: $path" }
         outputStream.use { out -> file.inputStream().use { it.copyTo(out) } }

@@ -15,9 +15,11 @@ class ProotShellRunner(
     private val nativeLibraryDir: File,
     private val extraBindMounts: List<WorkspaceBindMount> = emptyList(),
     private val sharedStorageBindMount: WorkspaceBindMount? = null,
+    mountResolver: WorkspaceMountResolver? = null,
     private val patcher: RootfsPatcher = RootfsPatcher(),
 ) : WorkspaceShellRunner, ManagedWorkspaceProcessLauncher {
     private val patchLock = Any()
+    private val mounts = mountResolver ?: WorkspaceMountResolver(extraBindMounts, sharedStorageBindMount)
 
     override fun execute(context: WorkspaceShellContext): WorkspaceCommandResult {
         if (!context.linuxDir.hasUsableRootfs()) {
@@ -119,21 +121,11 @@ class ProotShellRunner(
             linuxDir.absolutePath,
             "-w",
             cwd,
-            "-b",
-            "${filesDir.absolutePath}:$WORKSPACE_DIR",
         )
 
-        extraBindMounts.forEach { mount ->
-            if (mount.source.exists()) {
-                command += "-b"
-                command += "${mount.source.absolutePath}:${mount.target.trimEnd('/')}"
-            }
-        }
-        if (allowSharedStorage) {
-            sharedStorageBindMount?.takeIf { it.source.exists() }?.let { mount ->
-                command += "-b"
-                command += "${mount.source.absolutePath}:${mount.target.trimEnd('/')}"
-            }
+        mounts.bindMounts(filesDir, allowSharedStorage).forEach { mount ->
+            command += "-b"
+            command += "${mount.source.absolutePath}:${mount.target.trimEnd('/')}"
         }
 
         listOf("/dev", "/proc", "/sys").forEach { path ->
