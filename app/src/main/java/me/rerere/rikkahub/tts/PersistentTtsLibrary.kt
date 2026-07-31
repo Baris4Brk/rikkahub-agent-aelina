@@ -19,6 +19,7 @@ import kotlinx.serialization.json.Json
 import me.rerere.rikkahub.AppScope
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.datastore.getSelectedTTSProvider
+import me.rerere.rikkahub.data.datastore.normalizedTtsPlaybackSpeed
 import me.rerere.rikkahub.assistant.SecondUserAuthorityRegistry
 import me.rerere.rikkahub.security.SecondUserSecretVault
 import me.rerere.rikkahub.security.SecretBindingResolution
@@ -289,6 +290,12 @@ class PersistentTtsLibrary(
                     playbackMutex.withLock {
                         val player = withContext(Dispatchers.Main.immediate) {
                             audioPlayer ?: AudioPlayer(applicationContext).also { audioPlayer = it }
+                        }
+                        withContext(Dispatchers.Main.immediate) {
+                            player.setSpeed(
+                                settingsStore.settingsFlow.value.defaultTTSPlaybackSpeed
+                                    .normalizedTtsPlaybackSpeed(),
+                            )
                         }
                         artifact.audio.forEach { response ->
                             withContext(Dispatchers.Main.immediate) { player.play(response) }

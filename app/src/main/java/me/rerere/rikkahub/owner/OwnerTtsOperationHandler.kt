@@ -9,6 +9,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import me.rerere.rikkahub.data.datastore.SettingsStore
+import me.rerere.rikkahub.data.datastore.normalizedTtsPlaybackSpeed
 import me.rerere.rikkahub.privilege.PrivilegedSessionContext
 import me.rerere.rikkahub.security.SecretBinding
 import me.rerere.rikkahub.security.SecretBindingKind
@@ -57,6 +58,12 @@ class OwnerTtsOperationHandler(
                 return invalid("SECRET_SLOT_MISSING", "Vault slot does not exist for this authority epoch.")
             }
         }
+        if (action.type == "tts_set_playback_speed") {
+            val speed = action.arguments.string("speed")?.toFloatOrNull()
+            if (speed == null || !speed.isFinite() || speed !in 0.5f..2.0f) {
+                return invalid("TTS_PLAYBACK_SPEED_INVALID", "speed must be between 0.5 and 2.0.")
+            }
+        }
         return OwnerActionValidation(true, "TTS_ACTION_VALID", "TTS action validated.")
     }
 
@@ -74,6 +81,8 @@ class OwnerTtsOperationHandler(
             "tts_test" -> test(index, request, action)
             "tts_play" -> play(index, request, action)
             "tts_set_default" -> setDefault(index, action)
+            "tts_get_playback_speed" -> getPlaybackSpeed(index)
+            "tts_set_playback_speed" -> setPlaybackSpeed(index, action)
             else -> failure(index, action.type, "OWNER_ACTION_UNSUPPORTED", "Unsupported TTS action.")
         }
     }.getOrElse {
@@ -122,6 +131,9 @@ class OwnerTtsOperationHandler(
                 is TtsReceipt.PreviousDefault -> settingsStore.update {
                     it.copy(selectedTTSProviderId = receipt.id)
                 }
+                is TtsReceipt.PreviousPlaybackSpeed -> settingsStore.update {
+                    it.copy(defaultTTSPlaybackSpeed = receipt.speed)
+                }
             }
             OwnerCompensationResult(true, "TTS_STATE_RESTORED")
         }.getOrElse { OwnerCompensationResult(false, "TTS_COMPENSATION_FAILED") }
@@ -130,6 +142,7 @@ class OwnerTtsOperationHandler(
     private fun list(index: Int): OwnerAppliedAction = success(index, "tts_list", "TTS_LIST", "TTS Provider metadata returned.", buildJsonObject {
         val settings = settingsStore.settingsFlow.value
         put("selected_tts_provider_id", settings.selectedTTSProviderId.toString())
+        put("default_playback_speed", settings.defaultTTSPlaybackSpeed.normalizedTtsPlaybackSpeed())
         put("providers", buildJsonArray {
             settings.ttsProviders.forEach { provider ->
                 add(buildJsonObject {
@@ -274,6 +287,35 @@ class OwnerTtsOperationHandler(
         )
     }
 
+    private fun getPlaybackSpeed(index: Int): OwnerAppliedAction = success(
+        index = index,
+        type = "tts_get_playback_speed",
+        code = "TTS_PLAYBACK_SPEED",
+        message = "Default local TTS playback speed returned.",
+        data = buildJsonObject {
+            put(
+                "speed",
+                settingsStore.settingsFlow.value.defaultTTSPlaybackSpeed.normalizedTtsPlaybackSpeed(),
+            )
+        },
+    )
+
+    private suspend fun setPlaybackSpeed(index: Int, action: OwnerAction): OwnerAppliedAction {
+        val requested = action.arguments.string("speed")?.toFloatOrNull()
+            ?: return failure(index, action.type, "TTS_PLAYBACK_SPEED_INVALID", "speed is required.")
+        val previous = settingsStore.settingsFlow.value.defaultTTSPlaybackSpeed
+        val normalized = requested.normalizedTtsPlaybackSpeed()
+        settingsStore.update { it.copy(defaultTTSPlaybackSpeed = normalized) }
+        return success(
+            index = index,
+            type = action.type,
+            code = "TTS_PLAYBACK_SPEED_UPDATED",
+            message = "Default local TTS playback speed updated.",
+            data = buildJsonObject { put("speed", normalized) },
+            receipt = TtsReceipt.PreviousPlaybackSpeed(previous),
+        )
+    }
+
     private suspend fun removeBindings(id: Uuid, authoritySubjectId: String) {
         vault.listMetadata(authoritySubjectId).forEach { slot ->
             val retained = slot.bindings.filterNot {
@@ -373,6 +415,7 @@ class OwnerTtsOperationHandler(
             val bindings: Map<String, List<SecretBinding>>,
         ) : TtsReceipt
         data class PreviousDefault(val id: Uuid) : TtsReceipt
+        data class PreviousPlaybackSpeed(val speed: Float) : TtsReceipt
     }
 
     private companion object {
@@ -389,6 +432,8 @@ class OwnerTtsOperationHandler(
             "tts_test" to setOf("tts_provider_id", "text"),
             "tts_play" to setOf("artifact_id", "text"),
             "tts_set_default" to setOf("tts_provider_id"),
+            "tts_get_playback_speed" to emptySet(),
+            "tts_set_playback_speed" to setOf("speed"),
         )
     }
 }

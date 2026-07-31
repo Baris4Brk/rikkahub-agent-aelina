@@ -40,6 +40,7 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
@@ -65,6 +66,9 @@ import me.rerere.rikkahub.R
 import me.rerere.asr.ASRProviderSetting
 import me.rerere.rikkahub.data.datastore.DEFAULT_SYSTEM_TTS_ID
 import me.rerere.rikkahub.data.datastore.Settings
+import me.rerere.rikkahub.data.datastore.MAX_TTS_PLAYBACK_SPEED
+import me.rerere.rikkahub.data.datastore.MIN_TTS_PLAYBACK_SPEED
+import me.rerere.rikkahub.data.datastore.normalizedTtsPlaybackSpeed
 import me.rerere.rikkahub.ui.components.nav.BackButton
 import me.rerere.rikkahub.ui.components.ui.AutoAIIcon
 import me.rerere.rikkahub.ui.components.ui.Tag
@@ -309,6 +313,9 @@ private fun TTSProviderList(
         verticalArrangement = Arrangement.spacedBy(8.dp),
         state = lazyListState
     ) {
+        item(key = "default_tts_playback_speed") {
+            TtsPlaybackSpeedCard(settings, onUpdateSettings)
+        }
         items(settings.ttsProviders, key = { it.id }) { provider ->
             ReorderableItem(
                 state = reorderableState,
@@ -359,6 +366,45 @@ private fun TTSProviderList(
                     }
                 )
             }
+        }
+    }
+}
+
+@Composable
+private fun TtsPlaybackSpeedCard(
+    settings: Settings,
+    onUpdateSettings: (Settings) -> Unit,
+) {
+    var speed by remember(settings.defaultTTSPlaybackSpeed) {
+        mutableStateOf(settings.defaultTTSPlaybackSpeed.normalizedTtsPlaybackSpeed())
+    }
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CustomColors.cardColorsOnSurfaceContainer,
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(
+                text = stringResource(R.string.setting_tts_default_playback_speed),
+                style = MaterialTheme.typography.titleMedium,
+            )
+            Text(
+                text = stringResource(R.string.setting_tts_default_playback_speed_desc),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text("x${"%.1f".format(speed)}")
+            Slider(
+                value = speed,
+                onValueChange = { speed = it.normalizedTtsPlaybackSpeed() },
+                onValueChangeFinished = {
+                    onUpdateSettings(settings.copy(defaultTTSPlaybackSpeed = speed))
+                },
+                valueRange = MIN_TTS_PLAYBACK_SPEED..MAX_TTS_PLAYBACK_SPEED,
+                steps = 14,
+            )
         }
     }
 }

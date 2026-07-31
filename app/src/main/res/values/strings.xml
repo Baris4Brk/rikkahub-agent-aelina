@@ -2358,4 +2358,6 @@
   <string name="conversation_delete_missing">The conversation no longer exists. The list has been refreshed.</string>
   <string name="conversation_delete_failed">Unable to delete the conversation.</string>
   <string name="history_page_delete_all_result">Deleted %1$d conversations; retained %2$d protected conversations.</string>
+  <string name="setting_tts_default_playback_speed">Default playback speed</string>
+  <string name="setting_tts_default_playback_speed_desc">Applied to normal reading, saved TTS playback, and cached replays. Provider synthesis speed remains separate.</string>
 </resources>

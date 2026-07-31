@@ -1971,4 +1971,6 @@
   <string name="conversation_delete_missing">Диалог больше не существует. Список обновлён.</string>
   <string name="conversation_delete_failed">Не удалось удалить диалог.</string>
   <string name="history_page_delete_all_result">Удалено диалогов: %1$d; сохранено защищённых: %2$d.</string>
+  <string name="setting_tts_default_playback_speed">Скорость воспроизведения</string>
+  <string name="setting_tts_default_playback_speed_desc">Применяется к обычному чтению, сохранённому TTS и повторам из кэша. Скорость синтеза Provider настраивается отдельно.</string>
 </resources>

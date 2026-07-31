@@ -18,6 +18,7 @@ import kotlinx.coroutines.launch
 import me.rerere.tts.model.PlaybackState
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.datastore.getSelectedTTSProvider
+import me.rerere.rikkahub.data.datastore.normalizedTtsPlaybackSpeed
 import me.rerere.rikkahub.utils.stripMarkdown
 import me.rerere.tts.model.TTSResponse
 import me.rerere.tts.provider.TTSManager
@@ -48,8 +49,15 @@ fun rememberCustomTtsState(): CustomTtsState {
     }
 
     // Update the provider when settings change
-    DisposableEffect(settings.selectedTTSProviderId, settings.ttsProviders) {
-        ttsState.updateProvider(settings.getSelectedTTSProvider())
+    DisposableEffect(
+        settings.selectedTTSProviderId,
+        settings.ttsProviders,
+        settings.defaultTTSPlaybackSpeed,
+    ) {
+        ttsState.updateConfiguration(
+            provider = settings.getSelectedTTSProvider(),
+            playbackSpeed = settings.defaultTTSPlaybackSpeed,
+        )
         onDispose { }
     }
 
@@ -134,8 +142,9 @@ private class CustomTtsStateImpl(
     override val totalChunks: StateFlow<Int> get() = controller.totalChunks
     override val playbackState: StateFlow<PlaybackState> get() = controller.playbackState
 
-    fun updateProvider(provider: TTSProviderSetting?) {
+    fun updateConfiguration(provider: TTSProviderSetting?, playbackSpeed: Float) {
         controller.setProvider(provider)
+        controller.setSpeed(playbackSpeed.normalizedTtsPlaybackSpeed())
     }
 
     override fun speak(text: String, flushCalled: Boolean) {
@@ -166,7 +175,7 @@ private class CustomTtsStateImpl(
     }
 
     override fun setSpeed(speed: Float) {
-        controller.setSpeed(speed)
+        controller.setSpeed(speed.normalizedTtsPlaybackSpeed())
     }
 
     override fun cleanup() {

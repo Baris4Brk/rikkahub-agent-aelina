@@ -2222,4 +2222,6 @@ mDNS 地址：使用 .local 主机名，同一网络中的其他设备可通过�
   <string name="conversation_delete_missing">该会话已不存在，列表已刷新。</string>
   <string name="conversation_delete_failed">无法删除该会话。</string>
   <string name="history_page_delete_all_result">已删除 %1$d 个会话；保留了 %2$d 个受保护会话。</string>
+  <string name="setting_tts_default_playback_speed">默认播放速度</string>
+  <string name="setting_tts_default_playback_speed_desc">应用于普通朗读、已保存的 TTS 播放和缓存重播；Provider 合成语速保持独立。</string>
 </resources>

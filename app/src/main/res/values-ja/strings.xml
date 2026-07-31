@@ -1972,4 +1972,6 @@ mDNSアドレス: .localホスト名を使用し、IPを知らなくても同じ
   <string name="conversation_delete_missing">会話は既に存在しません。リストを更新しました。</string>
   <string name="conversation_delete_failed">会話を削除できませんでした。</string>
   <string name="history_page_delete_all_result">%1$d 件の会話を削除し、保護された %2$d 件を保持しました。</string>
+  <string name="setting_tts_default_playback_speed">既定の再生速度</string>
+  <string name="setting_tts_default_playback_speed_desc">通常の読み上げ、保存済み TTS、キャッシュ再生に適用します。Provider の合成速度とは別です。</string>
 </resources>
