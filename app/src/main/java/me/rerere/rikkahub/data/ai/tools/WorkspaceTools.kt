@@ -12,6 +12,7 @@ import me.rerere.ai.ui.DiffMetadata
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.ai.ui.toMetadata
 import me.rerere.rikkahub.data.files.FilesManager
+import me.rerere.rikkahub.data.files.ImageFormatDetector
 import me.rerere.rikkahub.data.repository.WorkspaceRepository
 import me.rerere.rikkahub.utils.generateUnifiedDiff
 import me.rerere.workspace.WorkspaceCommandResult
@@ -67,11 +68,6 @@ suspend fun createWorkspaceTools(
     )
 }
 
-private val IMAGE_EXTENSIONS = setOf("png", "jpg", "jpeg", "gif", "webp", "bmp", "svg")
-
-private fun String.isImagePath(): Boolean =
-    substringAfterLast('.', "").lowercase() in IMAGE_EXTENSIONS
-
 private fun createReadFileTool(
     workspaceId: String,
     needsApproval: (String) -> Boolean,
@@ -83,7 +79,8 @@ private fun createReadFileTool(
         Read a file using the assistant's bound workspace Rootfs. Paths must be absolute inside Rootfs.
         Use /workspace for the workspace files area. This is not the Android phone storage root;
         use direct phone file tools for Android shared-storage files.
-        Supports UTF-8 text files and image files (png, jpg, jpeg, gif, webp, bmp).
+        Supports UTF-8 text and header-verified PNG, JPEG, WebP, GIF, BMP, safe SVG,
+        HEIC, HEIF, AVIF, and ICO files. Unsupported images are returned as ordinary files.
     """.trimIndent().replace("\n", " "),
     parameters = {
         InputSchema.Obj(
@@ -96,19 +93,7 @@ private fun createReadFileTool(
     needsApproval = { needsApproval("workspace_read_file") },
     execute = {
         val path = it.jsonObject.absolutePath("path")
-        if (path.isImagePath()) {
-            workspaceRepository.readImageInRootfs(workspaceId, path, allowSharedStorage)
-        } else {
-            val text = workspaceRepository.readTextInRootfs(workspaceId, path, allowSharedStorage)
-            listOf(
-                UIMessagePart.Text(
-                    buildJsonObject {
-                        put("path", path)
-                        put("text", text)
-                    }.toString()
-                )
-            )
-        }
+        workspaceRepository.readFileInRootfs(workspaceId, path, allowSharedStorage)
     },
 )
 
@@ -316,40 +301,90 @@ private fun createShellTool(
 private fun kotlinx.serialization.json.JsonObject.string(name: String): String? =
     this[name]?.jsonPrimitive?.contentOrNull
 
+private suspend fun WorkspaceRepository.readFileInRootfs(
+    workspaceId: String,
+    path: String,
+    allowSharedStorage: Boolean,
+): List<UIMessagePart> {
+    val bytes = readRootfsBytes(workspaceId, path, allowSharedStorage)
+    val originalName = path.substringAfterLast('/').ifBlank { "file" }
+    val detected = ImageFormatDetector.detect(bytes, originalName)
+    val imageExtensionClaimed = originalName.substringAfterLast('.', "").lowercase() in
+        ImageFormatDetector.knownExtensions
+    if (detected == null && !imageExtensionClaimed) {
+        return listOf(
+            UIMessagePart.Text(
+                buildJsonObject {
+                    put("path", path)
+                    put("text", bytes.toString(Charsets.UTF_8))
+                }.toString()
+            )
+        )
+    }
+    val filesManager = getKoin().get<FilesManager>()
+    val displayName = detected?.normalizedDisplayName(originalName) ?: originalName
+    val mimeType = detected?.mimeType ?: "application/octet-stream"
+    val saved = filesManager.createChatFileByBytes(
+        bytes = bytes,
+        displayName = displayName,
+        mimeType = mimeType,
+        expectImage = detected != null,
+    )
+    if (detected != null && saved.imageRenderable) {
+        return listOf(
+            UIMessagePart.Image(url = saved.uri.toString()),
+            UIMessagePart.Text(
+                buildJsonObject {
+                    put("path", path)
+                    put("file_name", saved.displayName)
+                    put("mime_type", saved.mimeType)
+                    put("description", "Image file read successfully")
+                }.toString()
+            ),
+        )
+    }
+    return listOf(
+        UIMessagePart.Document(
+            url = saved.uri.toString(),
+            fileName = saved.displayName,
+            mime = saved.mimeType,
+        ),
+        UIMessagePart.Text(
+            buildJsonObject {
+                put("path", path)
+                put("file_name", saved.displayName)
+                put("mime_type", saved.mimeType)
+                put(
+                    "description",
+                    if (detected == null) {
+                        "The file claims to be an image, but its header is unsupported or unsafe; returned as an ordinary file."
+                    } else {
+                        "This Android runtime cannot decode the detected image format; returned as an ordinary file."
+                    },
+                )
+            }.toString()
+        )
+    )
+}
+
 private suspend fun WorkspaceRepository.readTextInRootfs(
     workspaceId: String,
     path: String,
     allowSharedStorage: Boolean,
-): String {
+): String = readRootfsBytes(workspaceId, path, allowSharedStorage).toString(Charsets.UTF_8)
+
+private suspend fun WorkspaceRepository.readRootfsBytes(
+    workspaceId: String,
+    path: String,
+    allowSharedStorage: Boolean,
+): ByteArray {
     val size = rootfsFileSize(workspaceId, path, allowSharedStorage)
     require(size <= MAX_READ_FILE_BYTES) {
         "File is too large to read: $path (${size / 1024 / 1024}MB, max ${MAX_READ_FILE_BYTES / 1024 / 1024}MB). Use shell commands like head, tail, or grep to read parts of it."
     }
     val buffer = ByteArrayOutputStream(size.toInt())
     exportRootfsFile(workspaceId, path, buffer, allowSharedStorage)
-    return buffer.toString(Charsets.UTF_8.name())
-}
-
-private suspend fun WorkspaceRepository.readImageInRootfs(
-    workspaceId: String,
-    path: String,
-    allowSharedStorage: Boolean,
-): List<UIMessagePart> {
-    val buffer = ByteArrayOutputStream()
-    exportRootfsFile(workspaceId, path, buffer, allowSharedStorage)
-    val bytes = buffer.toByteArray()
-
-    val filesManager = getKoin().get<FilesManager>()
-    val uris = filesManager.createChatFilesByByteArrays(listOf(bytes))
-    return listOf(
-        UIMessagePart.Image(url = uris.first().toString()),
-        UIMessagePart.Text(
-            buildJsonObject {
-                put("path", path)
-                put("description", "Image file read successfully")
-            }.toString()
-        ),
-    )
+    return buffer.toByteArray()
 }
 
 private suspend fun WorkspaceRepository.writeTextInRootfs(

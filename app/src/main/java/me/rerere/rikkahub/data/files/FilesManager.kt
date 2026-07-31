@@ -27,6 +27,13 @@ import me.rerere.rikkahub.utils.getActivity
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
 
+data class ManagedChatFile(
+    val uri: Uri,
+    val displayName: String,
+    val mimeType: String,
+    val imageRenderable: Boolean,
+)
+
 class FilesManager(
     private val context: Context,
     private val repository: FilesRepository,
@@ -199,30 +206,49 @@ class FilesManager(
     }
 
     fun createChatFilesByByteArrays(byteArrays: List<ByteArray>): List<Uri> {
-        val newUris = mutableListOf<Uri>()
-        val dir = context.filesDir.resolve(FileFolders.UPLOAD)
-        if (!dir.exists()) {
-            dir.mkdirs()
+        return byteArrays.map { byteArray ->
+            createChatFileByBytes(
+                bytes = byteArray,
+                displayName = "image.png",
+                mimeType = "image/png",
+                expectImage = true,
+            ).uri
         }
-        byteArrays.forEach { byteArray ->
-            val fileName = buildUuidFileName(displayName = "image.png", mimeType = "image/png")
-            val file = dir.resolve(fileName)
-            if (!file.exists()) {
-                file.createNewFile()
-            }
-            val newUri = file.toUri()
-            file.outputStream().use { outputStream ->
-                outputStream.write(byteArray)
-            }
+    }
+
+    fun createChatFileByBytes(
+        bytes: ByteArray,
+        displayName: String,
+        mimeType: String,
+        expectImage: Boolean,
+    ): ManagedChatFile {
+        val dir = context.filesDir.resolve(FileFolders.UPLOAD).also { it.mkdirs() }
+        val file = dir.resolve(buildUuidFileName(displayName = displayName, mimeType = mimeType))
+        try {
+            file.writeBytes(bytes)
             trackManagedFile(
                 folder = FileFolders.UPLOAD,
                 file = file,
-                displayName = "image.png",
-                mimeType = "image/png"
+                displayName = displayName,
+                mimeType = mimeType,
             )
-            newUris.add(newUri)
+            return ManagedChatFile(
+                uri = file.toUri(),
+                displayName = displayName,
+                mimeType = mimeType,
+                imageRenderable = expectImage && isImageRenderable(file, mimeType),
+            )
+        } catch (failure: Throwable) {
+            runCatching { file.delete() }
+            throw failure
         }
-        return newUris
+    }
+
+    private fun isImageRenderable(file: File, mimeType: String): Boolean {
+        if (mimeType == ImageFormat.SVG.mimeType) return true // validated SVG; Coil owns decoding
+        val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(file.path, options)
+        return options.outWidth > 0 && options.outHeight > 0
     }
 
     @OptIn(ExperimentalEncodingApi::class)

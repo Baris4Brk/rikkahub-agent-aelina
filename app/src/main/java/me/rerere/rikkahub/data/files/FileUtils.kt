@@ -81,6 +81,7 @@ object FileUtils {
     }
 
     fun guessMimeType(file: File, fileName: String): String {
+        ImageFormatDetector.detect(file, fileName)?.let { return it.mimeType }
         val ext = fileName.substringAfterLast('.', "").lowercase()
         if (ext.isNotEmpty()) {
             return MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
