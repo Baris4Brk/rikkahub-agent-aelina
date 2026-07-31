@@ -7,8 +7,11 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import me.rerere.ai.core.InputSchema
 import me.rerere.ai.core.MessageRole
 import me.rerere.ai.core.ReasoningLevel
+import me.rerere.ai.core.Tool
+import me.rerere.ai.provider.BuiltInTools
 import me.rerere.ai.provider.Modality
 import me.rerere.ai.provider.Model
 import me.rerere.ai.provider.ModelAbility
@@ -504,6 +507,47 @@ class ResponseAPIMessageTest {
                 requestBody["reasoning"]?.jsonObject?.get("effort")?.jsonPrimitive?.content,
             )
         }
+    }
+
+    @Test
+    fun `function and builtin tools coexist in one Response API array`() {
+        val functionTool = Tool(
+            name = "owner_tts_manage",
+            description = "Owner tool",
+            parameters = { InputSchema.Obj(JsonObject(emptyMap())) },
+            execute = { emptyList() },
+        )
+        val requestBody = invokeBuildRequestBody(
+            providerSetting = ProviderSetting.OpenAI(baseUrl = "https://api.openai.com/v1"),
+            messages = emptyList(),
+            params = TextGenerationParams(
+                model = Model(
+                    modelId = "gpt-test",
+                    displayName = "gpt-test",
+                    abilities = listOf(ModelAbility.TOOL),
+                    tools = setOf(BuiltInTools.Search, BuiltInTools.ImageGeneration),
+                ),
+                tools = listOf(functionTool),
+            ),
+        )
+
+        val tools = requestBody["tools"]!!.jsonArray
+        assertEquals(3, tools.size)
+        assertTrue(tools.any { it.jsonObject["type"]?.jsonPrimitive?.content == "function" })
+        assertTrue(tools.any { it.jsonObject["type"]?.jsonPrimitive?.content == "web_search" })
+        assertTrue(tools.any { it.jsonObject["type"]?.jsonPrimitive?.content == "image_generation" })
+        assertTrue(tools.any { it.jsonObject["name"]?.jsonPrimitive?.content == "owner_tts_manage" })
+    }
+
+    @Test
+    fun `Response API omits tools key only when both tool surfaces are empty`() {
+        val requestBody = invokeBuildRequestBody(
+            providerSetting = ProviderSetting.OpenAI(),
+            messages = emptyList(),
+            params = createReasoningParams(),
+        )
+
+        assertFalse(requestBody.containsKey("tools"))
     }
 
     @Test
