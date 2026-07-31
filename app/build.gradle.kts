@@ -341,6 +341,8 @@ dependencies {
     implementation(project(":web"))
     implementation(project(":document"))
     implementation(project(":highlight"))
+    // eval_javascript remains an app capability; syntax highlighting no longer owns QuickJS.
+    implementation(libs.quickjs)
     implementation(project(":search"))
     implementation(project(":speech"))
     implementation(project(":common"))
