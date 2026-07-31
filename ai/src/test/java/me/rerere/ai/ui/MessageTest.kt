@@ -41,6 +41,39 @@ class MessageTest {
     }
 
     @Test
+    fun `staircase context keeps the same prefix across a stride`() {
+        val messages = createTestMessages(100)
+        val first = messages.take(41).limitContext(40)
+        val middle = messages.take(55).limitContext(40)
+        val edge = messages.take(60).limitContext(40)
+        val next = messages.take(61).limitContext(40)
+
+        assertEquals(messages[20].id, first.first().id)
+        assertEquals(first.first().id, middle.first().id)
+        assertEquals(first.first().id, edge.first().id)
+        assertEquals(messages[40].id, next.first().id)
+    }
+
+    @Test
+    fun `staircase context is deterministic`() {
+        val messages = createTestMessages(123)
+        val first = messages.limitContext(40)
+        val second = messages.limitContext(40)
+
+        assertEquals(first.map { it.id }, second.map { it.id })
+    }
+
+    @Test
+    fun `staircase context starts at a complete user turn`() {
+        val messages = createTestMessages(12)
+
+        val selected = messages.limitContext(5)
+
+        assertEquals(MessageRole.USER, selected.first().role)
+        assertEquals(messages[8].id, selected.first().id)
+    }
+
+    @Test
     fun `limitContext with executed tool at start should include corresponding tool call`() {
         val messages = listOf(
             UIMessage(role = MessageRole.USER, parts = listOf(UIMessagePart.Text("User message"))),

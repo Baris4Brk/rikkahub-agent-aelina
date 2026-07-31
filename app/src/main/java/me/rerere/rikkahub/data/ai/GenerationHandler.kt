@@ -78,6 +78,7 @@ import me.rerere.rikkahub.diagnostics.RecentGenerationDiagnostics
 import me.rerere.rikkahub.diagnostics.GenerationDiagnosticHandle
 import me.rerere.rikkahub.diagnostics.RequestBreakdownDiagnostic
 import java.io.File
+import java.security.MessageDigest
 import me.rerere.rikkahub.data.ai.transformers.onGenerationFinish
 import me.rerere.rikkahub.data.ai.transformers.transforms
 import me.rerere.rikkahub.data.ai.transformers.visualTransforms
@@ -2255,10 +2256,24 @@ class GenerationHandler(
         toolDiscoveryMetrics: ToolDiscoveryMetrics? = null,
         usageBase: TokenUsage? = null,
     ): GenerationTerminal {
+        val sourceContext = contextMessages ?: messages
+        val selectedContext = sourceContext.selectOrdinaryChatContext(assistant.contextMessageSize)
+        if (selectedContext.size < sourceContext.size) {
+            val boundaryHash = selectedContext.firstOrNull()?.id
+                ?.toString()
+                ?.toByteArray()
+                ?.let { MessageDigest.getInstance("SHA-256").digest(it) }
+                ?.take(6)
+                ?.joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+                ?: "empty"
+            Log.i(
+                TAG,
+                "context staircase total=${sourceContext.size} retained=${selectedContext.size} " +
+                    "start=${sourceContext.size - selectedContext.size} boundary=$boundaryHash",
+            )
+        }
         val persistentSteeringContext = preparePersistentSteeringContext(
-            (contextMessages ?: messages)
-                .selectOrdinaryChatContext(assistant.contextMessageSize)
-                .ageOldToolImages(),
+            selectedContext.ageOldToolImages(),
         )
         val invocationSurfaceAddendum = conversationId?.let { id ->
             invocationSurfaceContextProvider

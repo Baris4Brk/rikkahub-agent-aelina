@@ -14,8 +14,8 @@ class ManualCompressionContextPolicyTest {
 
         val selected = messages.selectOrdinaryChatContext(messageLimit = 512)
 
-        assertEquals(512, selected.size)
-        assertSame(messages[8], selected.first())
+        assertEquals(264, selected.size)
+        assertSame(messages[256], selected.first())
     }
 
     @Test

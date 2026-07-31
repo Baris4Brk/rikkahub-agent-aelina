@@ -307,7 +307,18 @@ fun List<UIMessagePart>.isEmptyUIMessage(): Boolean {
 fun List<UIMessage>.limitContext(size: Int): List<UIMessage> {
     if (size <= 0 || this.size <= size) return this
 
-    val startIndex = this.size - size
+    // Move the boundary in large deterministic strides instead of sliding it by one message on
+    // every turn. For limit=40 the first overflow keeps roughly 20 messages, then the same prefix
+    // remains cacheable for the next ~20 appended messages.
+    val retainedFloor = (size / 2).coerceAtLeast(1)
+    val stride = (size - retainedFloor).coerceAtLeast(1)
+    val overflow = this.size - size
+    val steps = (overflow + stride - 1) / stride
+    val startIndex = (steps * stride).coerceAtMost(lastIndex)
+    return subList(alignContextStart(startIndex), this.size)
+}
+
+private fun List<UIMessage>.alignContextStart(startIndex: Int): Int {
     var adjustedStartIndex = startIndex
 
     // 循环往前查找，直到满足所有依赖条件
@@ -346,7 +357,15 @@ fun List<UIMessage>.limitContext(size: Int): List<UIMessage> {
         }
     }
 
-    return this.subList(adjustedStartIndex, this.size)
+    // A context window starts at a complete user turn. This also keeps any assistant/tool
+    // messages belonging to that turn together instead of exposing an orphaned response.
+    if (this[adjustedStartIndex].role != MessageRole.USER) {
+        adjustedStartIndex = (adjustedStartIndex - 1 downTo 0)
+            .firstOrNull { this[it].role == MessageRole.USER }
+            ?: 0
+    }
+
+    return adjustedStartIndex
 }
 
 @Serializable
