@@ -912,6 +912,9 @@ private fun ChatFilesPickerSheet(
             inputState.addImages(filesManager.createChatFilesByContents(listOf(croppedUri)))
             dismissAll()
         },
+        onCropError = { error ->
+            toaster.show(error.message ?: context.getString(R.string.backup_page_unknown_error), type = ToastType.Error)
+        },
         onCleanup = {
             cameraOutputFile?.delete()
             cameraOutputFile = null
@@ -952,6 +955,9 @@ private fun ChatFilesPickerSheet(
         onCroppedImageReady = { croppedUri ->
             inputState.addImages(filesManager.createChatFilesByContents(listOf(croppedUri)))
             dismissAll()
+        },
+        onCropError = { error ->
+            toaster.show(error.message ?: context.getString(R.string.backup_page_unknown_error), type = ToastType.Error)
         },
         onCleanup = {
             preCropTempFile?.delete()

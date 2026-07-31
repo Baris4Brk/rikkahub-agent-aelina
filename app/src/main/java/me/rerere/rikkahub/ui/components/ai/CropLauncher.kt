@@ -20,7 +20,9 @@ import java.io.File
 
 @Composable
 internal fun useCropLauncher(
-    onCroppedImageReady: (Uri) -> Unit, onCleanup: (() -> Unit)? = null
+    onCroppedImageReady: (Uri) -> Unit,
+    onCropError: (Throwable) -> Unit = {},
+    onCleanup: (() -> Unit)? = null,
 ): Pair<ActivityResultLauncher<Intent>, (Uri) -> Unit> {
     val context = LocalContext.current
     var cropOutputUri by remember { mutableStateOf<Uri?>(null) }
@@ -28,18 +30,31 @@ internal fun useCropLauncher(
     val cropActivityLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
+        val resultIntent = result.data
+        val returnedOutput = resultIntent?.let(UCrop::getOutput)
         if (result.resultCode == android.app.Activity.RESULT_OK) {
-            cropOutputUri?.let { croppedUri ->
-                onCroppedImageReady(croppedUri)
+            val error = resultIntent?.let(UCrop::getError)
+            when {
+                error != null -> onCropError(error)
+                returnedOutput == null -> onCropError(IllegalStateException("Image crop returned no output"))
+                !runCatching { returnedOutput.toFile().isFile }.getOrDefault(false) ->
+                    onCropError(IllegalStateException("Image crop output is missing"))
+                else -> onCroppedImageReady(returnedOutput)
             }
+        } else if (result.resultCode == UCrop.RESULT_ERROR) {
+            onCropError(
+                resultIntent?.let(UCrop::getError)
+                    ?: IllegalStateException("Image crop failed without an error detail"),
+            )
         }
         cropOutputUri?.toFile()?.delete()
+        if (returnedOutput != cropOutputUri) returnedOutput?.let { runCatching { it.toFile().delete() } }
         cropOutputUri = null
         onCleanup?.invoke()
     }
 
     val launchCrop: (Uri) -> Unit = { sourceUri ->
-        val outputFile = File(context.appTempFolder, "crop_output_${System.currentTimeMillis()}.jpg")
+        val outputFile = File(context.appTempFolder, "crop_output_${System.currentTimeMillis()}.png")
         cropOutputUri = Uri.fromFile(outputFile)
 
         val cropIntent = UCrop.of(sourceUri, cropOutputUri!!).withOptions(UCrop.Options().apply {

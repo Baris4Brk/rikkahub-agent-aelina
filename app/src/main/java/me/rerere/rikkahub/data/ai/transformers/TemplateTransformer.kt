@@ -10,7 +10,22 @@ import me.rerere.rikkahub.utils.toLocalTime
 import java.io.Reader
 import java.io.StringReader
 import java.io.StringWriter
-import java.time.Instant
+import kotlinx.datetime.TimeZone
+import kotlinx.datetime.toInstant
+
+internal data class TemplateMessageClock(val time: String, val date: String)
+
+internal fun templateMessageClock(createdAt: kotlinx.datetime.LocalDateTime): TemplateMessageClock {
+    val timestamp = createdAt.toInstant(TimeZone.currentSystemDefault())
+    val instant = java.time.Instant.ofEpochSecond(
+        timestamp.epochSeconds,
+        timestamp.nanosecondsOfSecond.toLong(),
+    )
+    return TemplateMessageClock(
+        time = instant.toLocalTime(),
+        date = instant.toLocalDate(),
+    )
+}
 
 class TemplateTransformer(
     private val engine: PebbleEngine,
@@ -22,6 +37,7 @@ class TemplateTransformer(
     ): List<UIMessage> {
         val template = engine.getTemplate(ctx.assistant.id.toString())
         return messages.map { message ->
+            val messageClock = templateMessageClock(message.createdAt)
             message.copy(
                 parts = message.parts.map { part ->
                     when (part) {
@@ -31,8 +47,8 @@ class TemplateTransformer(
                                 result, mapOf(
                                     "message" to part.text,
                                     "role" to message.role.name.lowercase(),
-                                    "time" to Instant.now().toLocalTime(),
-                                    "date" to Instant.now().toLocalDate(),
+                                    "time" to messageClock.time,
+                                    "date" to messageClock.date,
                                 )
                             )
                             part.copy(
