@@ -1,6 +1,7 @@
 package me.rerere.rikkahub.data.ai.tools.local
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -65,6 +66,33 @@ class TermuxSessionToolTest {
     }
 
     @Test
+    fun evaluatePoll_waitForDoesNotTreatQuietPaneAsCompletion() {
+        val samples = listOf(
+            PaneSample(0, "pip is running"),
+            PaneSample(800, "pip is running"),
+        )
+        assertEquals(
+            PollResult.Continue,
+            evaluatePoll(samples, settleMs = 600, timeoutMs = 20_000, waitFor = "Successfully installed")
+        )
+    }
+
+    @Test
+    fun evaluatePoll_waitForReturnsRealTimeoutWhenPatternNeverAppears() {
+        val samples = listOf(
+            PaneSample(0, "pip is running"),
+            PaneSample(20_000, "pip is running"),
+        )
+        val result = evaluatePoll(
+            samples,
+            settleMs = 600,
+            timeoutMs = 20_000,
+            waitFor = "Successfully installed",
+        )
+        assertEquals(PollResult.Reason.TIMEOUT, (result as PollResult.Done).reason)
+    }
+
+    @Test
     fun evaluatePoll_settlesWhenStableLongEnough() {
         val samples = listOf(
             PaneSample(0, "a"),
@@ -87,6 +115,51 @@ class TermuxSessionToolTest {
         val samples = listOf(PaneSample(0, "a"), PaneSample(20_000, "b"))
         val r = evaluatePoll(samples, settleMs = 600, timeoutMs = 20_000, waitFor = null)
         assertEquals(PollResult.Reason.TIMEOUT, (r as PollResult.Done).reason)
+    }
+
+    @Test
+    fun trackedCommandMarkerCannotMatchTerminalCommandEcho() {
+        val token = "0123456789abcdef0123456789abcdef"
+        val tracked = buildTrackedTermuxCommand("printf '%s' done", token)
+        val marker = "__RIKKAHUB_COMMAND_DONE_${token}__"
+
+        assertFalse(tracked.wireText.contains(marker))
+        assertTrue(waitForMatches("$marker:0", tracked.waitForPattern))
+        assertEquals(token, tracked.completionToken)
+    }
+
+    @Test
+    fun trackedCommandParsesSuccessAndFailureExitCodes() {
+        val token = "fedcba9876543210fedcba9876543210"
+        val marker = "__RIKKAHUB_COMMAND_DONE_${token}__"
+
+        assertEquals(0, parseTrackedTermuxExitCode("output\n$marker:0\n", token))
+        assertEquals(37, parseTrackedTermuxExitCode("failed\n$marker:37\n", token))
+        assertEquals(null, parseTrackedTermuxExitCode("still running", token))
+        assertEquals(null, parseTrackedTermuxExitCode("$marker:0", "invalid"))
+    }
+
+    @Test
+    fun trackedCommandClassifiesSuccessFailureAndRealTimeout() {
+        val token = "abcdef0123456789abcdef0123456789"
+        val marker = "__RIKKAHUB_COMMAND_DONE_${token}__"
+
+        val success = classifyTrackedTermuxResult("$marker:0", token, PollResult.Reason.MATCHED)
+        assertEquals(TrackedTermuxStatus.SUCCEEDED, success.status)
+        assertEquals(0, success.exitCode)
+        assertTrue(success.commandFinished)
+        assertFalse(success.commandStillRunning)
+
+        val failure = classifyTrackedTermuxResult("$marker:9", token, PollResult.Reason.MATCHED)
+        assertEquals(TrackedTermuxStatus.FAILED, failure.status)
+        assertEquals(9, failure.exitCode)
+        assertTrue(failure.commandFinished)
+
+        val timeout = classifyTrackedTermuxResult("still running", token, PollResult.Reason.TIMEOUT)
+        assertEquals(TrackedTermuxStatus.TIMED_OUT, timeout.status)
+        assertEquals(null, timeout.exitCode)
+        assertFalse(timeout.commandFinished)
+        assertTrue(timeout.commandStillRunning)
     }
 
     @Test

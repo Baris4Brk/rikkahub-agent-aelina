@@ -31,4 +31,54 @@ class UsageTest {
         val merged = TokenUsage(promptTokens = 1).merge(TokenUsage(completionTokens = 1))
         assertNull(merged.cost)
     }
+
+    @Test
+    fun `merge resets stale cache when a new prompt snapshot reports no cache`() {
+        val merged = TokenUsage(
+            promptTokens = 336_512,
+            completionTokens = 100,
+            cachedTokens = 336_128,
+        ).merge(
+            TokenUsage(promptTokens = 25_399, completionTokens = 225, cachedTokens = 0)
+        )
+
+        assertEquals(25_399, merged.promptTokens)
+        assertEquals(0, merged.cachedTokens)
+        assertEquals(25_624, merged.totalTokens)
+    }
+
+    @Test
+    fun `accumulate sums complete provider calls without violating cache invariant`() {
+        val accumulated = TokenUsage(
+            promptTokens = 336_512,
+            completionTokens = 100,
+            cachedTokens = 336_128,
+            cost = 0.01,
+        ).accumulate(
+            TokenUsage(
+                promptTokens = 25_399,
+                completionTokens = 225,
+                cachedTokens = 0,
+                cost = 0.02,
+            )
+        )
+
+        assertEquals(361_911, accumulated.promptTokens)
+        assertEquals(325, accumulated.completionTokens)
+        assertEquals(336_128, accumulated.cachedTokens)
+        assertEquals(362_236, accumulated.totalTokens)
+        assertEquals(0.03, accumulated.cost!!, 1e-9)
+    }
+
+    @Test
+    fun `normalized clamps provider cache to prompt`() {
+        val normalized = TokenUsage(
+            promptTokens = 10,
+            completionTokens = 2,
+            cachedTokens = 99,
+        ).normalized()
+
+        assertEquals(10, normalized.cachedTokens)
+        assertEquals(12, normalized.totalTokens)
+    }
 }

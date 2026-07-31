@@ -91,7 +91,9 @@ internal fun waitForMatches(pane: String, pattern: String): Boolean {
 /**
  * Decide whether the polling loop should stop, given every pane snapshot taken so far
  * (chronological, each with its elapsed time since the send). Order of precedence:
- * wait_for match, then settle (screen unchanged for >= settleMs), then timeout.
+ * wait_for match, then timeout. Screen settling is only a completion signal when no wait_for was
+ * requested: long-running installers routinely keep the pane unchanged for seconds or minutes,
+ * so treating a quiet pane as completion would turn a requested 180s wait into a ~600ms read.
  */
 internal fun evaluatePoll(
     samples: List<PaneSample>,
@@ -103,12 +105,14 @@ internal fun evaluatePoll(
     if (!waitFor.isNullOrEmpty() && waitForMatches(cur.content, waitFor)) {
         return PollResult.Done(PollResult.Reason.MATCHED, cur.content)
     }
-    var stableSince = cur.elapsedMs
-    for (i in samples.indices.reversed()) {
-        if (samples[i].content == cur.content) stableSince = samples[i].elapsedMs else break
-    }
-    if (samples.size >= 2 && cur.elapsedMs - stableSince >= settleMs) {
-        return PollResult.Done(PollResult.Reason.SETTLED, cur.content)
+    if (waitFor.isNullOrEmpty()) {
+        var stableSince = cur.elapsedMs
+        for (i in samples.indices.reversed()) {
+            if (samples[i].content == cur.content) stableSince = samples[i].elapsedMs else break
+        }
+        if (samples.size >= 2 && cur.elapsedMs - stableSince >= settleMs) {
+            return PollResult.Done(PollResult.Reason.SETTLED, cur.content)
+        }
     }
     if (cur.elapsedMs >= timeoutMs) {
         return PollResult.Done(PollResult.Reason.TIMEOUT, cur.content)
@@ -258,6 +262,147 @@ private fun reasonTag(r: PollResult.Reason): String = when (r) {
     PollResult.Reason.TIMEOUT -> "TIMEOUT"
 }
 
+private data class SessionReadOutcome(
+    val capture: CaptureResult,
+    val reason: PollResult.Reason?,
+    val elapsedMs: Long,
+)
+
+private const val COMMAND_COMPLETION_PREFIX = "__RIKKAHUB_COMMAND_DONE_"
+private val COMMAND_COMPLETION_TOKEN = Regex("[a-f0-9]{32}")
+
+internal data class TrackedTermuxCommand(
+    val wireText: String,
+    val completionToken: String,
+    val waitForPattern: String,
+)
+
+internal enum class TrackedTermuxStatus(val wire: String) {
+    SUCCEEDED("succeeded"),
+    FAILED("failed"),
+    TIMED_OUT("timed_out"),
+    UNKNOWN("unknown"),
+}
+
+internal data class TrackedTermuxResult(
+    val status: TrackedTermuxStatus,
+    val exitCode: Int?,
+    val commandFinished: Boolean,
+    val commandStillRunning: Boolean,
+)
+
+/**
+ * Wrap a one-shot shell command with an unambiguous completion marker and real exit code.
+ * The marker is split into two shell variables so the complete value does not appear in the
+ * terminal's command echo and accidentally satisfy wait_for before the command has run.
+ */
+internal fun buildTrackedTermuxCommand(
+    command: String,
+    completionToken: String = UUID.randomUUID().toString().replace("-", ""),
+): TrackedTermuxCommand {
+    require(COMMAND_COMPLETION_TOKEN.matches(completionToken)) { "Invalid completion token" }
+    val markerSuffix = "${completionToken}__"
+    val marker = COMMAND_COMPLETION_PREFIX + markerSuffix
+    val wireText = buildString {
+        append("bash -lc ")
+        append(shellSingleQuote(command))
+        append("; __rikkahub_rc=\$?; __rikkahub_marker_a=")
+        append(shellSingleQuote(COMMAND_COMPLETION_PREFIX))
+        append("; __rikkahub_marker_b=")
+        append(shellSingleQuote(markerSuffix))
+        append("; printf '\\n%s%s:%s\\n' \"\$__rikkahub_marker_a\" \"\$__rikkahub_marker_b\" \"\$__rikkahub_rc\"")
+    }
+    return TrackedTermuxCommand(
+        wireText = wireText,
+        completionToken = completionToken,
+        waitForPattern = Regex.escape(marker) + ":(-?\\d+)",
+    )
+}
+
+internal fun parseTrackedTermuxExitCode(screen: String, completionToken: String): Int? {
+    if (!COMMAND_COMPLETION_TOKEN.matches(completionToken)) return null
+    val marker = COMMAND_COMPLETION_PREFIX + completionToken + "__"
+    return Regex(Regex.escape(marker) + ":(-?\\d+)")
+        .find(screen)
+        ?.groupValues
+        ?.getOrNull(1)
+        ?.toIntOrNull()
+}
+
+internal fun classifyTrackedTermuxResult(
+    screen: String,
+    completionToken: String,
+    reason: PollResult.Reason?,
+): TrackedTermuxResult {
+    val exitCode = parseTrackedTermuxExitCode(screen, completionToken)
+    val status = when {
+        exitCode == 0 -> TrackedTermuxStatus.SUCCEEDED
+        exitCode != null -> TrackedTermuxStatus.FAILED
+        reason == PollResult.Reason.TIMEOUT -> TrackedTermuxStatus.TIMED_OUT
+        else -> TrackedTermuxStatus.UNKNOWN
+    }
+    return TrackedTermuxResult(
+        status = status,
+        exitCode = exitCode,
+        commandFinished = exitCode != null,
+        commandStillRunning = status == TrackedTermuxStatus.TIMED_OUT,
+    )
+}
+
+private fun stripTrackedTermuxMarker(screen: String, completionToken: String): String {
+    val marker = COMMAND_COMPLETION_PREFIX + completionToken + "__"
+    return screen.replace(Regex(Regex.escape(marker) + ":-?\\d+"), "").trimEnd()
+}
+
+private fun trackedCommandEnvelope(
+    capture: CaptureResult.Success,
+    outcome: SessionReadOutcome,
+    completionToken: String,
+): List<UIMessagePart> {
+    val result = classifyTrackedTermuxResult(capture.stdout, completionToken, outcome.reason)
+    val timedOut = result.status == TrackedTermuxStatus.TIMED_OUT
+    return listOf(UIMessagePart.Text(buildJsonObject {
+        put("success", result.status == TrackedTermuxStatus.SUCCEEDED)
+        put("status", result.status.wire)
+        put("screen", truncateOut(stripTrackedTermuxMarker(capture.stdout, completionToken)))
+        put("command_finished", result.commandFinished)
+        put("command_still_running", result.commandStillRunning)
+        put("matched_wait_for", result.commandFinished)
+        put("timed_out", timedOut)
+        put("elapsed_ms", outcome.elapsedMs)
+        put("completion_token", completionToken)
+        result.exitCode?.let { put("exit_code", it) }
+        if (timedOut) {
+            put(
+                "recovery",
+                "The full timeout elapsed and the command may still be running. Do not poll immediately. " +
+                    "Later call termux_session_read with this completion_token to get its real exit status."
+            )
+        }
+    }.toString()))
+}
+
+private fun waitOutcomeEnvelope(
+    capture: CaptureResult.Success,
+    outcome: SessionReadOutcome,
+): List<UIMessagePart> {
+    val waitStatus = when (outcome.reason) {
+        PollResult.Reason.MATCHED -> "matched"
+        PollResult.Reason.TIMEOUT -> "timed_out"
+        PollResult.Reason.SETTLED -> "settled"
+        null -> "snapshot"
+    }
+    return listOf(UIMessagePart.Text(buildJsonObject {
+        put("success", waitStatus != "timed_out")
+        put("status", waitStatus)
+        put("screen", truncateOut(capture.stdout))
+        put("matched_wait_for", outcome.reason == PollResult.Reason.MATCHED)
+        put("timed_out", outcome.reason == PollResult.Reason.TIMEOUT)
+        put("settled", outcome.reason == PollResult.Reason.SETTLED)
+        put("elapsed_ms", outcome.elapsedMs)
+    }.toString()))
+}
+
 /**
  * Poll capture-pane until settled / matched / timed out. Encodes the outcome in a
  * [CaptureResult.Success] where stdout is the screen and stderr carries the reason tag
@@ -269,7 +414,7 @@ private suspend fun readUntilDone(
     lines: Int,
     waitFor: String?,
     timeoutMs: Long,
-): CaptureResult {
+): SessionReadOutcome {
     val start = android.os.SystemClock.elapsedRealtime()
     val samples = ArrayList<PaneSample>()
     while (true) {
@@ -278,14 +423,27 @@ private suspend fun readUntilDone(
             val elapsed = android.os.SystemClock.elapsedRealtime() - start
             samples.add(PaneSample(elapsed, cap.stdout))
             when (val d = evaluatePoll(samples, SETTLE_MS, timeoutMs, waitFor)) {
-                is PollResult.Done -> return CaptureResult.Success(d.content, reasonTag(d.reason), 0)
+                is PollResult.Done -> return SessionReadOutcome(
+                    capture = CaptureResult.Success(d.content, reasonTag(d.reason), 0),
+                    reason = d.reason,
+                    elapsedMs = elapsed,
+                )
                 PollResult.Continue -> {}
             }
         } else {
-            return cap
+            return SessionReadOutcome(
+                capture = cap,
+                reason = null,
+                elapsedMs = android.os.SystemClock.elapsedRealtime() - start,
+            )
         }
         if (android.os.SystemClock.elapsedRealtime() - start >= timeoutMs) {
-            return CaptureResult.Success(samples.lastOrNull()?.content.orEmpty(), "TIMEOUT", 0)
+            val elapsed = android.os.SystemClock.elapsedRealtime() - start
+            return SessionReadOutcome(
+                capture = CaptureResult.Success(samples.lastOrNull()?.content.orEmpty(), "TIMEOUT", 0),
+                reason = PollResult.Reason.TIMEOUT,
+                elapsedMs = elapsed,
+            )
         }
         delay(POLL_INTERVAL_MS)
     }
@@ -293,7 +451,10 @@ private suspend fun readUntilDone(
 
 private fun sessionErrorEnvelope(error: String, recovery: String) = listOf(
     UIMessagePart.Text(buildJsonObject {
-        put("error", error); put("recovery", recovery)
+        put("success", false)
+        put("status", "failed")
+        put("error", error)
+        put("recovery", recovery)
     }.toString())
 )
 
@@ -379,7 +540,13 @@ fun termuxSessionStartTool(context: Context): Tool = Tool(
         // The session is already created at this point, so a failed screen read (Timeout/
         // Denied/OtherError from readUntilDone) must not crash or report start failure —
         // the model would retry the start and hit too_many_sessions.
-        val read = readUntilDone(context, name, DEFAULT_READ_LINES, null, DEFAULT_TIMEOUT_S * 1000L) as? CaptureResult.Success
+        val read = readUntilDone(
+            context,
+            name,
+            DEFAULT_READ_LINES,
+            null,
+            DEFAULT_TIMEOUT_S * 1000L,
+        ).capture as? CaptureResult.Success
         listOf(UIMessagePart.Text(buildJsonObject {
             put("success", true); put("session_id", name)
             put("screen", read?.let { truncateOut(it.stdout) } ?: "")
@@ -390,7 +557,7 @@ fun termuxSessionStartTool(context: Context): Tool = Tool(
 
 fun termuxSessionSendTool(context: Context): Tool = Tool(
     name = "termux_session_send",
-    description = "Type input into a session and read what comes back. Set enter=false to type without a newline (e.g. answering a prompt). Use keys for control keys (tmux names: 'C-c', 'Enter', 'Up', 'Tab'). Pass wait_for (substring/regex) to return as soon as expected text appears (e.g. 'password:'). Returns the screen, matched_wait_for, timed_out.",
+    description = "Type input into a session and read what comes back. For a non-interactive install, build, or deployment command, set wait_for_exit=true: the host waits for the real shell exit code and returns status=succeeded/failed/timed_out before the model continues. A timeout does not kill the command; use the returned completion_token with termux_session_read later and do not poll immediately. For interactive prompts, leave wait_for_exit=false and use wait_for. With wait_for present, an unchanged screen never counts as completion. Set enter=false to type without a newline and use keys for control keys (tmux names: 'C-c', 'Enter', 'Up', 'Tab').",
     parameters = {
         InputSchema.Obj(properties = buildJsonObject {
             put("session_id", buildJsonObject { put("type", "string"); put("description", "Session id from termux_session_start.") })
@@ -398,6 +565,7 @@ fun termuxSessionSendTool(context: Context): Tool = Tool(
             put("enter", buildJsonObject { put("type", "boolean"); put("description", "Press Enter after input. Default true.") })
             put("keys", buildJsonObject { put("type", "array"); put("description", "tmux key names to send (e.g. ['C-c']).") ; put("items", buildJsonObject { put("type", "string") }) })
             put("wait_for", buildJsonObject { put("type", "string"); put("description", "Return as soon as this substring/regex appears on screen.") })
+            put("wait_for_exit", buildJsonObject { put("type", "boolean"); put("description", "For a one-shot non-interactive command, wait for its real exit code and return succeeded/failed/timed_out. Do not use for passwords, REPL input, cd, export, ssh, or other stateful/interactive input.") })
             put("timeout_seconds", buildJsonObject { put("type", "integer"); put("description", "Default $DEFAULT_TIMEOUT_S, max $MAX_TIMEOUT_S.") })
         })
     },
@@ -409,12 +577,23 @@ fun termuxSessionSendTool(context: Context): Tool = Tool(
         val enter = input.jsonObject["enter"]?.jsonPrimitive?.booleanOrNull ?: true
         val keys = input.jsonObject["keys"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList()
         val waitFor = input.jsonObject["wait_for"]?.jsonPrimitive?.contentOrNull
+        val waitForExit = input.jsonObject["wait_for_exit"]?.jsonPrimitive?.booleanOrNull ?: false
         val timeoutMs = resolveTimeoutMs(input)
-        if (!text.isNullOrEmpty()) {
-            HardlineCommandGuard.checkCommand(text)?.let {
+        if (waitForExit && (text.isNullOrBlank() || !enter || keys.isNotEmpty())) {
+            return@Tool sessionErrorEnvelope(
+                "invalid_exit_tracking_request",
+                "wait_for_exit requires one non-empty command, enter=true, and no control keys. " +
+                    "Use ordinary wait_for for interactive input."
+            )
+        }
+        val tracked = if (waitForExit) buildTrackedTermuxCommand(text.orEmpty()) else null
+        val textToSend = tracked?.wireText ?: text
+        val effectiveWaitFor = tracked?.waitForPattern ?: waitFor
+        if (!textToSend.isNullOrEmpty()) {
+            HardlineCommandGuard.checkCommand(text.orEmpty())?.let {
                 return@Tool sessionErrorEnvelope("blocked_by_safety_floor", it)
             }
-            val sent = tmux(context, TmuxOps.sendTextArgv(session, text))
+            val sent = tmux(context, TmuxOps.sendTextArgv(session, textToSend))
             if (sent is CaptureResult.OtherError && isSessionNotFound(sent.message)) {
                 return@Tool sessionNotFoundEnvelope(context, session)
             }
@@ -434,29 +613,27 @@ fun termuxSessionSendTool(context: Context): Tool = Tool(
                 return@Tool sessionNotFoundEnvelope(context, session)
             }
         }
-        val read = readUntilDone(context, session, DEFAULT_READ_LINES, waitFor, timeoutMs)
+        val outcome = readUntilDone(context, session, DEFAULT_READ_LINES, effectiveWaitFor, timeoutMs)
+        val read = outcome.capture
         if (read is CaptureResult.OtherError && isSessionNotFound(read.message)) {
             return@Tool sessionNotFoundEnvelope(context, session)
         }
         val r = read as? CaptureResult.Success
             ?: return@Tool sessionErrorEnvelope("read_failed", "Input was sent, but the screen read failed. Use termux_session_read to see the result.")
-        listOf(UIMessagePart.Text(buildJsonObject {
-            put("success", true)
-            put("screen", truncateOut(r.stdout))
-            put("matched_wait_for", r.stderr == "MATCHED")
-            put("timed_out", r.stderr == "TIMEOUT")
-        }.toString()))
+        tracked?.let { trackedCommandEnvelope(r, outcome, it.completionToken) }
+            ?: waitOutcomeEnvelope(r, outcome)
     }
 )
 
 fun termuxSessionReadTool(context: Context): Tool = Tool(
     name = "termux_session_read",
-    description = "Re-read a session's screen without sending input (e.g. check on a long-running command). Optional wait_for + timeout_seconds to wait for expected text; otherwise returns the current screen immediately. lines sets scrollback depth (default $DEFAULT_READ_LINES).",
+    description = "Re-read a session without sending input. Pass completion_token returned by a timed-out wait_for_exit command to wait for its real succeeded/failed/timed_out result. Otherwise optional wait_for waits until that pattern or the full timeout; a quiet screen does not complete it. Without either field this returns a snapshot immediately. Do not immediately poll again after a real timeout.",
     parameters = {
         InputSchema.Obj(properties = buildJsonObject {
             put("session_id", buildJsonObject { put("type", "string"); put("description", "Session id.") })
             put("wait_for", buildJsonObject { put("type", "string"); put("description", "Optional substring/regex to wait for.") })
-            put("timeout_seconds", buildJsonObject { put("type", "integer"); put("description", "Used only with wait_for. Default $DEFAULT_TIMEOUT_S.") })
+            put("completion_token", buildJsonObject { put("type", "string"); put("description", "Token returned by termux_session_send wait_for_exit after a timeout; waits for and parses the real command exit code.") })
+            put("timeout_seconds", buildJsonObject { put("type", "integer"); put("description", "Used with wait_for or completion_token. Default $DEFAULT_TIMEOUT_S, max $MAX_TIMEOUT_S.") })
             put("lines", buildJsonObject { put("type", "integer"); put("description", "Scrollback lines (default $DEFAULT_READ_LINES).") })
         })
     },
@@ -465,20 +642,35 @@ fun termuxSessionReadTool(context: Context): Tool = Tool(
         val session = input.jsonObject["session_id"]?.jsonPrimitive?.contentOrNull
             ?: return@Tool sessionErrorEnvelope("missing_session_id", "Pass session_id from termux_session_start.")
         val waitFor = input.jsonObject["wait_for"]?.jsonPrimitive?.contentOrNull
-        val lines = input.jsonObject["lines"]?.jsonPrimitive?.intOrNull ?: DEFAULT_READ_LINES
-        val read = if (waitFor.isNullOrEmpty()) {
-            tmux(context, TmuxOps.capturePaneArgv(session, lines))
-        } else {
-            readUntilDone(context, session, lines, waitFor, resolveTimeoutMs(input))
+        val completionToken = input.jsonObject["completion_token"]?.jsonPrimitive?.contentOrNull
+        if (completionToken != null && !COMMAND_COMPLETION_TOKEN.matches(completionToken)) {
+            return@Tool sessionErrorEnvelope(
+                "invalid_completion_token",
+                "Pass the unmodified completion_token returned by termux_session_send."
+            )
         }
+        val effectiveWaitFor = completionToken?.let {
+            Regex.escape(COMMAND_COMPLETION_PREFIX + it + "__") + ":(-?\\d+)"
+        } ?: waitFor
+        val lines = input.jsonObject["lines"]?.jsonPrimitive?.intOrNull ?: DEFAULT_READ_LINES
+        val outcome = if (effectiveWaitFor.isNullOrEmpty()) {
+            val started = android.os.SystemClock.elapsedRealtime()
+            SessionReadOutcome(
+                capture = tmux(context, TmuxOps.capturePaneArgv(session, lines)),
+                reason = null,
+                elapsedMs = android.os.SystemClock.elapsedRealtime() - started,
+            )
+        } else {
+            readUntilDone(context, session, lines, effectiveWaitFor, resolveTimeoutMs(input))
+        }
+        val read = outcome.capture
         if (read is CaptureResult.OtherError && isSessionNotFound(read.message)) {
             return@Tool sessionNotFoundEnvelope(context, session)
         }
         val r = read as? CaptureResult.Success
             ?: return@Tool sessionErrorEnvelope("read_failed", "Could not read session.")
-        listOf(UIMessagePart.Text(buildJsonObject {
-            put("success", true); put("screen", truncateOut(r.stdout))
-        }.toString()))
+        completionToken?.let { trackedCommandEnvelope(r, outcome, it) }
+            ?: waitOutcomeEnvelope(r, outcome)
     }
 )
 

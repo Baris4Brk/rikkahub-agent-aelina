@@ -41,6 +41,8 @@ import kotlinx.serialization.json.put
 import me.rerere.ai.core.MessageRole
 import me.rerere.ai.core.ReasoningLevel
 import me.rerere.ai.core.Tool
+import me.rerere.ai.core.TokenUsage
+import me.rerere.ai.core.accumulate
 import me.rerere.ai.core.merge
 import me.rerere.ai.provider.CustomBody
 import me.rerere.ai.provider.Model
@@ -544,6 +546,12 @@ class GenerationHandler(
             }
             if (newParts == msg.parts) msg else msg.copy(parts = newParts)
         }
+        // One assistant UI message can span many provider calls separated by tool execution.
+        // Keep a call-level accumulator outside generateInternal so the displayed usage is the
+        // real total for the whole turn instead of a field-wise mix of unrelated calls.
+        var accumulatedUsage: TokenUsage? = messages.lastOrNull()
+            ?.takeIf { it.role == MessageRole.ASSISTANT }
+            ?.usage
         fun parseToolArguments(tool: UIMessagePart.Tool): Result<JsonElement> {
             val sensitive = sensitiveOwnerToolInputs.remove(tool.toolCallId)
             return try {
@@ -820,6 +828,7 @@ class GenerationHandler(
                         conversationId = conversationId,
                         commandId = commandId,
                         toolDiscoveryMetrics = toolDiscoverySession?.metrics(),
+                        usageBase = accumulatedUsage,
                     )
                 } catch (t: Throwable) {
                     if (t is CancellationException &&
@@ -855,6 +864,7 @@ class GenerationHandler(
                     }
                     throw t
                 }
+                accumulatedUsage = messages.lastOrNull()?.usage ?: accumulatedUsage
                 messages = messages.onGenerationFinish(
                     transformers = outputTransformers,
                     context = context,
@@ -1009,6 +1019,7 @@ class GenerationHandler(
                                             callOrigin = callOrigin,
                                             conversationId = conversationId,
                                             commandId = commandId,
+                                            usageBase = accumulatedUsage,
                                         )
                                     }
                                 } else {
@@ -1032,6 +1043,9 @@ class GenerationHandler(
                             } finally {
                                 processingStatus.value = null
                             }
+
+                            accumulatedUsage = recoveredMessages.lastOrNull()?.usage
+                                ?: accumulatedUsage
 
                             currentCoroutineContext().ensureActive()
                             if (runControl?.hasUndeliveredSteering() == true) {
@@ -2239,6 +2253,7 @@ class GenerationHandler(
         conversationId: Uuid? = null,
         commandId: Uuid? = null,
         toolDiscoveryMetrics: ToolDiscoveryMetrics? = null,
+        usageBase: TokenUsage? = null,
     ): GenerationTerminal {
         val persistentSteeringContext = preparePersistentSteeringContext(
             (contextMessages ?: messages)
@@ -2389,6 +2404,7 @@ class GenerationHandler(
             },
         )
         var providerStarted = false
+        var providerCallUsage: TokenUsage? = null
         fun markProviderStarted() {
             if (providerStarted) return
             providerStarted = true
@@ -2463,9 +2479,11 @@ class GenerationHandler(
                             messages = redactor.redactMessages(messages)
                         }
                         chunk.usage?.let { usage ->
+                            providerCallUsage = providerCallUsage.merge(usage)
+                            val accumulated = usageBase.accumulate(providerCallUsage)
                             messages = messages.mapIndexed { index, message ->
                                 if (index == messages.lastIndex) {
-                                    message.copy(usage = message.usage.merge(usage))
+                                    message.copy(usage = accumulated)
                                 } else {
                                     message
                                 }
@@ -2483,10 +2501,32 @@ class GenerationHandler(
             if (!providerStarted) runControl?.markSteeringDeliveryFailed(steeringDeliveries)
             throw CancellationException("Provider child was cancelled for newer guidance")
         }
-        val trackedTerminal = terminalTracker.finish()
+        val dsmlRecovery = messages.lastOrNull()?.recoverDsmlToolCalls(
+            allowedToolNames = tools.mapTo(linkedSetOf(), Tool::name),
+        )
+        if (dsmlRecovery?.detected == true) {
+            messages = messages.replaceLastMessage(dsmlRecovery.message)
+            dsmlRecovery.recoveredTools
+                .filter { tool ->
+                    tool.toolName == "owner_secret_manage" &&
+                        runtimeSecretRedactor?.containsKnownSecret(tool.input) == true
+                }
+                .forEach(onRawSensitiveToolInput)
+            runtimeSecretRedactor?.let { redactor ->
+                messages = redactor.redactMessages(messages)
+            }
+            onUpdateMessages(messages)
+        }
+        val trackedTerminal = if (dsmlRecovery?.malformed == true) {
+            GenerationTerminal.missingTransportTerminal(
+                "Malformed DSML tool call was suppressed before persistence.",
+            )
+        } else {
+            terminalTracker.finish()
+        }
         val terminal = messages.lastOrNull()?.let(trackedTerminal::withMessageStats)
             ?: trackedTerminal
-        messages.lastOrNull()?.usage?.let { usage ->
+        providerCallUsage?.let { usage ->
             diagnosticHandle.recordProviderUsage(
                 filesDir = context.filesDir,
                 promptTokens = usage.promptTokens,
