@@ -162,10 +162,10 @@ fun SkillsPage() {
                 }
             }
 
-            items(skills, key = { it.name }) { skill ->
+            items(skills, key = { it.directoryId }) { skill ->
                 SkillCard(
                     skill = skill,
-                    onClick = { navController.navigate(Screen.SkillDetail(skill.name)) },
+                    onClick = { navController.navigate(Screen.SkillDetail(skill.directoryId)) },
                     onDelete = { deleteTarget = skill },
                 )
             }
@@ -235,7 +235,7 @@ fun SkillsPage() {
         confirmText = stringResource(R.string.delete),
         dismissText = stringResource(R.string.cancel),
         onConfirm = {
-            deleteTarget?.let { vm.deleteSkill(it.name) }
+            deleteTarget?.let { vm.deleteSkill(it.directoryId) }
             deleteTarget = null
         },
         onDismiss = { deleteTarget = null },

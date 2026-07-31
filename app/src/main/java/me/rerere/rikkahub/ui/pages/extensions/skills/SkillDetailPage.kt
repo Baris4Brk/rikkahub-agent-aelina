@@ -85,6 +85,7 @@ fun SkillDetailPage(skillName: String) {
     LaunchedEffect(skillName) { vm.init(skillName) }
 
     val tree by vm.tree.collectAsStateWithLifecycle()
+    val displayName by vm.displayName.collectAsStateWithLifecycle()
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
     val toaster = LocalToaster.current
 
@@ -107,7 +108,7 @@ fun SkillDetailPage(skillName: String) {
     Scaffold(
         topBar = {
             LargeFlexibleTopAppBar(
-                title = { Text(skillName) },
+                title = { Text(displayName.ifBlank { skillName }) },
                 navigationIcon = { BackButton() },
                 actions = {
                     IconButton(onClick = { showTester = true }) {
@@ -196,7 +197,8 @@ fun SkillDetailPage(skillName: String) {
 
     if (showTester) {
         SkillTesterSheet(
-            skillName = skillName,
+            skillId = skillName,
+            displayName = displayName.ifBlank { skillName },
             onDismiss = { showTester = false },
         )
     }
@@ -204,7 +206,7 @@ fun SkillDetailPage(skillName: String) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun SkillTesterSheet(skillName: String, onDismiss: () -> Unit) {
+private fun SkillTesterSheet(skillId: String, displayName: String, onDismiss: () -> Unit) {
     val runner = koinInject<SkillTestRunner>()
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var prompt by rememberSaveable { mutableStateOf("") }
@@ -225,7 +227,7 @@ private fun SkillTesterSheet(skillName: String, onDismiss: () -> Unit) {
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    text = stringResource(R.string.skill_tester_title, skillName),
+                    text = stringResource(R.string.skill_tester_title, displayName),
                     style = MaterialTheme.typography.titleLarge,
                     modifier = Modifier.weight(1f),
                 )
@@ -260,7 +262,7 @@ private fun SkillTesterSheet(skillName: String, onDismiss: () -> Unit) {
                     val current = prompt
                     isEnqueued = true
                     scope.launch {
-                        runner.runOnce(skillName, current).collect { stateFlow.value = it }
+                        runner.runOnce(skillId, current).collect { stateFlow.value = it }
                     }
                 },
                 enabled = prompt.isNotBlank() && !isEnqueued

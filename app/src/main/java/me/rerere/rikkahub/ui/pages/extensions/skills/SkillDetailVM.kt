@@ -34,18 +34,21 @@ class SkillDetailVM(
 
     private val _tree = MutableStateFlow<List<SkillFileNode>>(emptyList())
     val tree = _tree.asStateFlow()
+    private val _displayName = MutableStateFlow("")
+    val displayName = _displayName.asStateFlow()
 
-    private var skillName = ""
+    private var skillId = ""
 
-    fun init(name: String) {
-        if (skillName == name) return
-        skillName = name
+    fun init(id: String) {
+        if (skillId == id) return
+        skillId = id
+        _displayName.value = skillManager.getContent(id)?.name ?: id
         loadFiles()
     }
 
     fun loadFiles() {
         viewModelScope.launch(Dispatchers.IO) {
-            val dir = skillManager.getSkillDir(skillName) ?: return@launch
+            val dir = skillManager.getSkillDir(skillId) ?: return@launch
             _tree.value = buildTree(dir, dir)
         }
     }
@@ -70,14 +73,14 @@ class SkillDetailVM(
         viewModelScope.launch(Dispatchers.IO) {
             if (relativePath == "SKILL.md") {
                 val name = SkillFrontmatterParser.parse(content)["name"]
-                if (name != skillName) {
+                if (name != _displayName.value) {
                     withContext(Dispatchers.Main) {
-                        onResult(context.getString(R.string.skill_detail_name_immutable, skillName))
+                        onResult(context.getString(R.string.skill_detail_name_immutable, _displayName.value))
                     }
                     return@launch
                 }
             }
-            val success = skillManager.saveSkillFile(skillName, relativePath, content)
+            val success = skillManager.saveSkillFile(skillId, relativePath, content)
             loadFiles()
             withContext(Dispatchers.Main) {
                 onResult(if (success) null else context.getString(R.string.skill_detail_save_failed))
@@ -87,7 +90,7 @@ class SkillDetailVM(
 
     fun deleteFile(skillFile: SkillFile, onResult: (Boolean) -> Unit) {
         viewModelScope.launch(Dispatchers.IO) {
-            val success = skillManager.deleteSkillFile(skillName, skillFile.relativePath)
+            val success = skillManager.deleteSkillFile(skillId, skillFile.relativePath)
             if (success) loadFiles()
             withContext(Dispatchers.Main) { onResult(success) }
         }

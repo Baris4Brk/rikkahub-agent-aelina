@@ -429,7 +429,25 @@ class SkillManager(
     }
 
     private fun resolveSkillDir(skillName: String): File? {
-        return SkillPaths.resolveSkillDir(getSkillsDir(), skillName)
+        val skillsRoot = getSkillsDir()
+        val direct = SkillPaths.resolveSkillDir(skillsRoot, skillName) ?: return null
+        if (direct.isDirectory) return direct
+        if (direct.exists()) return null
+
+        // Compatibility for older settings/tool calls that stored the frontmatter display name
+        // rather than the real directory identity. Ambiguous duplicate display names fail closed.
+        return skillsRoot.listFiles()
+            .orEmpty()
+            .asSequence()
+            .filter(File::isDirectory)
+            .filter { candidate ->
+                val skillFile = candidate.resolve("SKILL.md")
+                skillFile.isFile && skillFile.length() <= MAX_SKILL_FILE_BYTES && runCatching {
+                    SkillFrontmatterParser.parse(skillFile.readText())["name"] == skillName
+                }.getOrDefault(false)
+            }
+            .toList()
+            .singleOrNull()
     }
 
     private fun createTempSkillDir(skillsRoot: File, skillName: String, suffix: String): File? {
@@ -487,6 +505,8 @@ data class SkillMetadata(
     val skillDir: File,
 ) {
     val skillFile: File get() = skillDir.resolve("SKILL.md")
+    /** Stable on-disk identity. Frontmatter [name] remains presentation text. */
+    val directoryId: String get() = skillDir.name
 }
 
 /**

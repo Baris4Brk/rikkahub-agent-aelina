@@ -18,7 +18,7 @@ fun createSkillTools(
     redirectSecondUserToolReference: Boolean = false,
 ): List<Tool> {
     val stableAllSkills = allSkills.sortedBy { it.name }
-    val available = stableAllSkills.filter { it.name in enabledSkills }
+    val available = stableAllSkills.filter { it.name in enabledSkills || it.directoryId in enabledSkills }
     if (available.isEmpty()) return emptyList()
 
     return listOf(
@@ -51,9 +51,9 @@ fun createSkillTools(
                         // re-read SOUL/HEARTBEAT/etc from disk every time.
                         val body = runCatching {
                             if (path.isNullOrBlank()) {
-                                skillManager.readSkillBody(skill.name)
+                                skillManager.readSkillBody(skill.directoryId)
                             } else {
-                                skillManager.readSkillFileCached(skill.name, path)
+                                skillManager.readSkillFileCached(skill.directoryId, path)
                             }
                         }.getOrNull()
                         if (!body.isNullOrBlank()) {
@@ -138,33 +138,37 @@ fun createSkillTools(
                         "missing_required_arg",
                         "use_skill requires a 'name' argument identifying which skill to load.",
                     )
-                if (name !in enabledSkills) {
+                val selectedSkill = available.firstOrNull { skill ->
+                    name == skill.name || name == skill.directoryId
+                }
+                if (selectedSkill == null) {
                     return@Tool err(
                         "skill_not_enabled",
                         "Skill '$name' is not in the enabled-skills set for this assistant.",
                     )
                 }
+                val skillId = selectedSkill.directoryId
                 val path = it.jsonObject["path"]?.jsonPrimitive?.content
                 if (
                     redirectSecondUserToolReference &&
-                    name == "agent-core" &&
+                    selectedSkill.name == "agent-core" &&
                     path?.replace('\\', '/')?.trim('/') == "TOOLS.md"
                 ) {
                     return@Tool listOf(UIMessagePart.Text(SECOND_USER_TOOL_DIRECTORY_GUIDANCE))
                 }
                 if (path.isNullOrBlank()) {
-                    val skillMd = skillManager.getSkillDir(name)?.resolve("SKILL.md")
+                    val skillMd = skillManager.getSkillDir(skillId)?.resolve("SKILL.md")
                     if (skillMd != null && skillMd.length() > SkillManager.MAX_SKILL_FILE_BYTES) {
                         return@Tool tooLargeErr(skillMd)
                     }
-                    val content = skillManager.readSkillBody(name)
+                    val content = skillManager.readSkillBody(skillId)
                         ?: return@Tool err(
                             "skill_body_not_found",
                             "Skill '$name' is enabled but its SKILL.md body could not be read on disk.",
                         )
                     return@Tool listOf(UIMessagePart.Text(content))
                 }
-                val target = skillManager.resolveSkillFile(name, path)
+                val target = skillManager.resolveSkillFile(skillId, path)
                     ?: return@Tool err(
                         "path_outside_skill",
                         "Path '$path' resolves outside the '$name' skill directory.",
