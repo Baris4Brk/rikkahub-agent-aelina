@@ -80,6 +80,21 @@ class TermuxManagedExecutionTest {
     }
 
     @Test
+    fun `tool cancellation remains unknown when stopped identity is not verified`() = runBlocking {
+        val supervisor = FakeSupervisor().apply {
+            verifyStoppedIdentity = false
+        }
+        val handle = startable(supervisor, InMemoryLedger()).start(
+            buildJsonObject { put("command", "sleep 120") },
+            executionContext,
+        )
+
+        handle.requestCancel(ToolCancelReason.USER_STOPPED)
+
+        assertEquals(ToolTerminationState.Unknown, handle.awaitTermination(100.milliseconds))
+    }
+
+    @Test
     fun `capture timeout confirms termination after forced kill`() = runBlocking {
         val supervisor = FakeSupervisor().apply {
             gracefulStopKeepsRunning = true
@@ -167,6 +182,7 @@ class TermuxManagedExecutionTest {
         var identity = TermuxSupervisorIdentity("tx_12345678", 101, 101, 8080)
         val stopForces = mutableListOf<Boolean>()
         var gracefulStopKeepsRunning = false
+        var verifyStoppedIdentity = true
         var stopAfterGracefulStatusChecks: Int? = null
         private var gracefulStatusChecksRemaining: Int? = null
         private var running = true
@@ -196,7 +212,7 @@ class TermuxManagedExecutionTest {
                     identity = identity.copy(nativeId = nativeId),
                     state = if (running) "running" else "stopped",
                     running = running,
-                    identityVerified = running,
+                    identityVerified = running || verifyStoppedIdentity,
                 )
             )
         }
