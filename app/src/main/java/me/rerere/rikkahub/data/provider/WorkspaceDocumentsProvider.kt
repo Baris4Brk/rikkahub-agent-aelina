@@ -154,6 +154,52 @@ class WorkspaceDocumentsProvider : DocumentsProvider() {
         return buildDocId(target.root, relPathOf(target.root, dest))
     }
 
+    override fun copyDocument(sourceDocumentId: String, targetParentDocumentId: String): String {
+        val source = parseDocId(sourceDocumentId)
+        val targetParent = parseDocId(targetParentDocumentId)
+        require(!source.isRoot && source.relPath.isNotEmpty()) { "Cannot copy this document" }
+        require(!targetParent.isRoot) { "Choose a Workspace destination" }
+        val sourceFile = resolveFile(source.root, source.relPath)
+        val parentDir = resolveFile(targetParent.root, targetParent.relPath)
+        require(parentDir.isDirectory) { "Destination is not a directory" }
+        val destination = uniqueChild(parentDir, sourceFile.name)
+        val copied = WorkspaceDocumentFileOps.copyVerified(
+            source = sourceFile,
+            sourceBase = manager().filesDir(source.root),
+            destination = destination,
+            destinationBase = manager().filesDir(targetParent.root),
+        )
+        notifyChange(targetParentDocumentId)
+        return buildDocId(targetParent.root, relPathOf(targetParent.root, copied))
+    }
+
+    override fun moveDocument(
+        sourceDocumentId: String,
+        sourceParentDocumentId: String,
+        targetParentDocumentId: String,
+    ): String {
+        val source = parseDocId(sourceDocumentId)
+        val sourceParent = parseDocId(sourceParentDocumentId)
+        val targetParent = parseDocId(targetParentDocumentId)
+        require(!source.isRoot && source.relPath.isNotEmpty()) { "Cannot move this document" }
+        require(!sourceParent.isRoot && sourceParent.root == source.root) { "Invalid source parent" }
+        require(source.relPath.substringBeforeLast('/', "") == sourceParent.relPath) { "Invalid source parent" }
+        require(!targetParent.isRoot) { "Choose a Workspace destination" }
+        val sourceFile = resolveFile(source.root, source.relPath)
+        val parentDir = resolveFile(targetParent.root, targetParent.relPath)
+        require(parentDir.isDirectory) { "Destination is not a directory" }
+        val destination = uniqueChild(parentDir, sourceFile.name)
+        val moved = WorkspaceDocumentFileOps.moveVerified(
+            source = sourceFile,
+            sourceBase = manager().filesDir(source.root),
+            destination = destination,
+            destinationBase = manager().filesDir(targetParent.root),
+        )
+        notifyChange(sourceParentDocumentId)
+        notifyChange(targetParentDocumentId)
+        return buildDocId(targetParent.root, relPathOf(targetParent.root, moved))
+    }
+
     override fun getDocumentType(documentId: String): String {
         val target = parseDocId(documentId)
         if (target.isRoot) return Document.MIME_TYPE_DIR
@@ -179,9 +225,11 @@ class WorkspaceDocumentsProvider : DocumentsProvider() {
             // workspace 根目录：仅允许在其内部创建文件，不能删除/重命名 workspace 本身
             relPath.isEmpty() -> Document.FLAG_DIR_SUPPORTS_CREATE
             isDir -> Document.FLAG_DIR_SUPPORTS_CREATE or
-                Document.FLAG_SUPPORTS_DELETE or Document.FLAG_SUPPORTS_RENAME
+                Document.FLAG_SUPPORTS_DELETE or Document.FLAG_SUPPORTS_RENAME or
+                Document.FLAG_SUPPORTS_COPY or Document.FLAG_SUPPORTS_MOVE
             else -> Document.FLAG_SUPPORTS_WRITE or
-                Document.FLAG_SUPPORTS_DELETE or Document.FLAG_SUPPORTS_RENAME
+                Document.FLAG_SUPPORTS_DELETE or Document.FLAG_SUPPORTS_RENAME or
+                Document.FLAG_SUPPORTS_COPY or Document.FLAG_SUPPORTS_MOVE
         }
         cursor.newRow().apply {
             add(Document.COLUMN_DOCUMENT_ID, buildDocId(root, relPath))
@@ -202,7 +250,11 @@ class WorkspaceDocumentsProvider : DocumentsProvider() {
     }
 
     private fun uniqueChild(parent: File, name: String): File {
-        val safe = name.replace('/', '_').ifBlank { "untitled" }
+        val safe = name
+            .replace('/', '_')
+            .replace('\\', '_')
+            .replace('\u0000', '_')
+            .ifBlank { "untitled" }
         var candidate = File(parent, safe)
         if (!candidate.exists()) return candidate
         val stem = candidate.nameWithoutExtension
