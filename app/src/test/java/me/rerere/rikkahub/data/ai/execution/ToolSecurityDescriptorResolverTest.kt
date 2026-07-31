@@ -5,6 +5,7 @@ import me.rerere.rikkahub.data.ai.tools.ToolExecutionContext
 import me.rerere.rikkahub.data.capability.CapabilityCatalog
 import me.rerere.rikkahub.data.capability.ImplementationState
 import me.rerere.rikkahub.privilege.PRIVILEGED_SHELL_TOOL_NAME
+import me.rerere.rikkahub.owner.OwnerToolFamily
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -68,6 +69,21 @@ class ToolSecurityDescriptorResolverTest {
         }
 
         assertEquals(emptyList<String>(), missing)
+    }
+
+    @Test
+    fun `every compact owner tool has security and execution policy`() {
+        val policy = DefaultToolExecutionPolicyResolver()
+        val missing = OwnerToolFamily.entries.filter { family ->
+            resolver.resolve(family.toolName, context) == null ||
+                policy.resolve(
+                    family.toolName,
+                    kotlinx.serialization.json.buildJsonObject {},
+                    context,
+                ) == ToolExecutionPolicy.UNKNOWN
+        }
+
+        assertEquals(emptyList<OwnerToolFamily>(), missing)
     }
 
     @Test

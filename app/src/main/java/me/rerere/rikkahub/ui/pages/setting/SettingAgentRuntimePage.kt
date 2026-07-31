@@ -63,8 +63,13 @@ fun SettingAgentRuntimePage(
     val notice by vm.notice.collectAsState()
     val managedCoordinator = koinInject<ManagedExecutionCoordinator>()
     val displayRuntime = koinInject<DisplayAutomationRuntime>()
+    val database = koinInject<me.rerere.rikkahub.data.db.AppDatabase>()
+    val plaintextSessions = koinInject<me.rerere.rikkahub.security.SecretPlaintextSessionManager>()
     val managedState by managedCoordinator.state.collectAsState()
     val displayState by displayRuntime.state.collectAsState()
+    val ownerOperations by database.hostOperationDao().observeRecent(10).collectAsState(initial = emptyList())
+    val ownerServices by database.hostLocalServiceDao().observeEnabled().collectAsState(initial = emptyList())
+    val plaintextState by plaintextSessions.state.collectAsState()
     val navController = LocalNavController.current
     val scope = rememberCoroutineScope()
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
@@ -119,6 +124,50 @@ fun SettingAgentRuntimePage(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(vertical = 8.dp),
                 )
+            }
+
+            item("owner-runtime") {
+                RuntimeSectionCard(
+                    title = stringResource(R.string.owner_runtime_section_title),
+                    description = stringResource(R.string.owner_runtime_section_desc),
+                ) {
+                    val authority = me.rerere.rikkahub.assistant.SecondUserAuthorityRegistry.current()
+                    Text(
+                        text = "Authority: ${if (authority == null) "NOT_ACTIVE" else "ACTIVE (epoch ${authority.authorityEpoch})"}",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Text(
+                        text = "Direct Owner tools: ${me.rerere.rikkahub.owner.OwnerToolFamily.entries.size}",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Text(
+                        text = "Plaintext session: ${if (plaintextState is me.rerere.rikkahub.security.SecretPlaintextSessionState.Open) "OPEN" else "CLOSED"}",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Text(
+                        text = "Enabled local services: ${ownerServices.size}",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    if (ownerOperations.isEmpty()) {
+                        Text("No Owner operation has been recorded.", style = MaterialTheme.typography.bodySmall)
+                    } else {
+                        ownerOperations.take(5).forEachIndexed { index, operation ->
+                            if (index > 0) HorizontalDivider()
+                            Text("${operation.toolFamily} · ${operation.state}", fontWeight = FontWeight.Medium)
+                            Text(
+                                "${operation.resultCode ?: operation.recoveryCode ?: "IN_PROGRESS"} · ${operation.requestId.take(12)}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                    OutlinedButton(
+                        onClick = { navController.navigate(Screen.SecondUserSecretVault) },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(stringResource(R.string.second_user_vault_title))
+                    }
+                }
             }
 
             notice?.let { currentNotice ->

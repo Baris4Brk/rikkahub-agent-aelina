@@ -76,6 +76,11 @@ import me.rerere.rikkahub.workflow.db.WorkflowDao
 import me.rerere.rikkahub.workflow.db.WorkflowEntity
 import me.rerere.rikkahub.workflow.db.WorkflowRunDao
 import me.rerere.rikkahub.workflow.db.WorkflowRunEntity
+import me.rerere.rikkahub.owner.db.HostLocalServiceDao
+import me.rerere.rikkahub.owner.db.HostLocalServiceEntity
+import me.rerere.rikkahub.owner.db.HostOperationDao
+import me.rerere.rikkahub.owner.db.HostOperationEntity
+import me.rerere.rikkahub.owner.db.HostOperationEventEntity
 
 @Database(
     entities = [
@@ -116,10 +121,13 @@ import me.rerere.rikkahub.workflow.db.WorkflowRunEntity
         ToolExperienceEvidenceEntity::class,
         ToolExperienceRevisionEntity::class,
         ToolShortcutEntity::class,
+        HostOperationEntity::class,
+        HostOperationEventEntity::class,
+        HostLocalServiceEntity::class,
     ],
     // v33 freezes the conversation-context limit with each queued capture so changing the
     // setting later cannot split or enlarge a batch that has already been accepted.
-    version = 41,
+    version = 42,
     autoMigrations = [
         AutoMigration(from = 1, to = 2),
         AutoMigration(from = 2, to = 3),
@@ -197,6 +205,10 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun toolExperienceDao(): ToolExperienceDao
 
     abstract fun toolShortcutDao(): ToolShortcutDao
+
+    abstract fun hostOperationDao(): HostOperationDao
+
+    abstract fun hostLocalServiceDao(): HostLocalServiceDao
 }
 
 object TokenUsageConverter {

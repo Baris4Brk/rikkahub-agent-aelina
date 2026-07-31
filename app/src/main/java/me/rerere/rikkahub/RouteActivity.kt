@@ -363,6 +363,29 @@ class RouteActivity : ComponentActivity() {
         val backStack = rememberNavBackStack(startScreen)
         SideEffect { this@RouteActivity.navStack = backStack }
 
+        LaunchedEffect(backStack) {
+            me.rerere.rikkahub.owner.OwnerNavigationMailbox.targets.collect { target ->
+                target ?: return@collect
+                val destination = when (target) {
+                    is me.rerere.rikkahub.owner.OwnerNavigationTarget.Conversation ->
+                        Screen.Chat(target.conversationId)
+                    is me.rerere.rikkahub.owner.OwnerNavigationTarget.Screen -> when (target.route) {
+                        "provider" -> target.targetId?.let(Screen::SettingProviderDetail) ?: Screen.SettingProvider
+                        "tts" -> Screen.SettingTTS
+                        "mcp" -> Screen.SettingMcp
+                        "skills" -> Screen.Skills
+                        "workflows" -> Screen.SettingWorkflows
+                        "owner_runtime" -> Screen.SettingAgentRuntime
+                        "vault" -> Screen.SecondUserSecretVault
+                        "doctor" -> Screen.SettingDoctor
+                        else -> Screen.Setting
+                    }
+                }
+                if (backStack.lastOrNull() != destination) backStack.add(destination)
+                me.rerere.rikkahub.owner.OwnerNavigationMailbox.acknowledge(target)
+            }
+        }
+
         if (requestedStartScreen !is Screen.ShareHandler) ShareHandler(backStack)
 
         SharedTransitionLayout {

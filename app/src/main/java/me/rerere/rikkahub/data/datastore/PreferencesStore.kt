@@ -159,6 +159,7 @@ class SettingsStore(
         val ASSISTANT_TAGS = stringPreferencesKey("assistant_tags")
         val SYSTEM_ASSISTANT_TARGET_ASSISTANT = stringPreferencesKey("system_assistant_target_assistant")
         val SECOND_USER_AUTHORITY = stringPreferencesKey("second_user_authority")
+        val SECOND_USER_SECRET_ACCESS_MODE = stringPreferencesKey("second_user_secret_access_mode")
         val QUICK_CAPTURE_SETTINGS = stringPreferencesKey("quick_capture_settings")
         val PET_OVERLAY_SELECTION = stringPreferencesKey("pet_overlay_selection")
 
@@ -255,6 +256,10 @@ class SettingsStore(
                     runCatching { JsonInstant.decodeFromString<SecondUserAuthorityConfig>(value).normalized() }
                         .getOrNull()
                 } ?: SecondUserAuthorityConfig(),
+                secondUserSecretAccessMode = preferences[SECOND_USER_SECRET_ACCESS_MODE]?.let { raw ->
+                    me.rerere.rikkahub.security.SecondUserSecretAccessMode.entries
+                        .firstOrNull { it.name == raw }
+                } ?: me.rerere.rikkahub.security.SecondUserSecretAccessMode.USE_ONLY,
                 quickCaptureSettings = preferences[QUICK_CAPTURE_SETTINGS]
                     ?.let { value ->
                         runCatching {
@@ -546,6 +551,7 @@ class SettingsStore(
             preferences[SECOND_USER_AUTHORITY] = JsonInstant.encodeToString(
                 settings.secondUserAuthority.normalized(),
             )
+            preferences[SECOND_USER_SECRET_ACCESS_MODE] = settings.secondUserSecretAccessMode.name
             preferences[QUICK_CAPTURE_SETTINGS] = JsonInstant.encodeToString(
                 settings.quickCaptureSettings.normalized()
             )
@@ -738,6 +744,8 @@ data class Settings(
     val assistantId: Uuid = DEFAULT_ASSISTANT_ID,
     val systemAssistantTargetAssistantId: Uuid? = null,
     val secondUserAuthority: SecondUserAuthorityConfig = SecondUserAuthorityConfig(),
+    val secondUserSecretAccessMode: me.rerere.rikkahub.security.SecondUserSecretAccessMode =
+        me.rerere.rikkahub.security.SecondUserSecretAccessMode.USE_ONLY,
     val quickCaptureSettings: QuickCaptureSettings = QuickCaptureSettings(),
     val petOverlaySelection: PetOverlaySelection? = null,
     val providers: List<ProviderSetting> = DEFAULT_PROVIDERS,

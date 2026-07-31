@@ -242,8 +242,47 @@ val appModule = module {
 
     single { me.rerere.rikkahub.assistant.SystemAssistantRoleController(get()) }
     single { me.rerere.rikkahub.security.SecondUserSecretVault(get()) }
+    single { me.rerere.rikkahub.security.RuntimeSecretRedactor() }
+    single {
+        me.rerere.rikkahub.security.SecretPlaintextSessionManager(
+            context = get(),
+            settingsStore = get(),
+            vault = get(),
+            safetySettings = get(),
+            redactor = get(),
+            appScope = get(),
+        )
+    }
+    single { me.rerere.rikkahub.security.SecretEgressGuard(get()) }
+    single {
+        me.rerere.rikkahub.security.EphemeralToolResultStore(
+            egressGuard = get<me.rerere.rikkahub.security.SecretEgressGuard>(),
+        ).also { store ->
+            get<me.rerere.rikkahub.security.SecretPlaintextSessionManager>()
+                .addCloseListener(store::clear)
+        }
+    }
+    single {
+        me.rerere.rikkahub.owner.OwnerLocalServiceSupervisor(
+            dao = get<me.rerere.rikkahub.data.db.AppDatabase>().hostLocalServiceDao(),
+            manager = get(),
+            safety = get(),
+            httpClient = get(),
+            scope = get(),
+            specStore = get(),
+            termux = get(),
+        )
+    }
     single { me.rerere.rikkahub.security.SecondUserLegacySecretMigration(get(), get(), get()) }
     single { me.rerere.rikkahub.security.StrongBiometricAuthenticator(get(), get()) }
+    single { me.rerere.rikkahub.owner.OwnerServiceSpecStore(get()) }
+    single {
+        me.rerere.rikkahub.owner.OwnerTermuxServiceLauncher(
+            context = get(),
+            factory = get(),
+            coordinator = get(),
+        )
+    }
     single {
         me.rerere.rikkahub.assistant.SecondUserAuthorityService(
             settingsStore = get(),
@@ -594,6 +633,9 @@ val appModule = module {
     single<me.rerere.rikkahub.execution.ExecutionTokenProvider> {
         me.rerere.rikkahub.execution.AndroidKeystoreExecutionTokenProvider()
     }
+    single<me.rerere.rikkahub.owner.OwnerOperationFingerprinter> {
+        me.rerere.rikkahub.owner.KeystoreOwnerOperationFingerprinter(get())
+    }
     single<me.rerere.rikkahub.execution.TermuxManagedSupervisor> {
         me.rerere.rikkahub.execution.AndroidTermuxManagedSupervisor(get())
     }
@@ -790,6 +832,23 @@ val appModule = module {
             toolExperienceRepository = get(),
             toolShortcutRepository = get(),
             secondUserAuthorityService = get(),
+            hostOperationDao = get<me.rerere.rikkahub.data.db.AppDatabase>().hostOperationDao(),
+            secretPlaintextSessions = get(),
+            ephemeralToolResults = get(),
+            runtimeSecretRedactor = get(),
+            assistantRemovalService = get(),
+            persistentTtsLibrary = get(),
+            workspaceManagedProcessStarter = get(),
+            hostLocalServiceDao = get<me.rerere.rikkahub.data.db.AppDatabase>().hostLocalServiceDao(),
+            ownerHttpClient = get(),
+            workflowActionRunner = get(),
+            doctorChecks = get(),
+            executionConsistencyDoctor = get(),
+            ownerLocalServiceSupervisor = get(),
+            agentRunRepository = get(),
+            ownerServiceSpecStore = get(),
+            ownerTermuxServiceLauncher = get(),
+            ownerOperationFingerprinter = get(),
         )
     }
     single {

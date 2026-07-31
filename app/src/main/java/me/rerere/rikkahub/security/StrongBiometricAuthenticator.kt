@@ -38,6 +38,15 @@ class StrongBiometricAuthenticator(
             .takeIf { it }
             ?.let { SecretVaultUserAuthorization(System.currentTimeMillis()) }
 
+    /** Opens one process-local remote plaintext session; no device-credential fallback. */
+    suspend fun authorizeSecretPlaintextSession(
+        title: String,
+        subtitle: String? = null,
+    ): SecretPlaintextSessionAuthorization? =
+        authenticateStrong(title, subtitle)
+            .takeIf { it }
+            ?.let { SecretPlaintextSessionAuthorization(System.currentTimeMillis()) }
+
     private suspend fun authenticateStrong(title: String, subtitle: String? = null): Boolean {
         val requestId = UUID.randomUUID().toString()
         val deferred = buffer.register(requestId)

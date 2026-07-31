@@ -217,6 +217,67 @@ class SecondUserSecretVault(context: Context) {
         withDecrypted(slotId) { chars -> block(SecretLease(chars)) }
     }
 
+    /** Process-local plaintext-session path. Exact session binding is enforced by its manager. */
+    internal suspend fun <T> withRemoteSessionSecret(
+        slotId: String,
+        subjectId: String,
+        block: (CharArray) -> T,
+    ): SecretLeaseResult<T> = mutex.withLock {
+        if (!safeSlotId(slotId) || !isCurrentSubject(subjectId)) {
+            return@withLock SecretLeaseResult.AuthorityDenied
+        }
+        val metadata = readIndex().slots.firstOrNull {
+            it.slotId == slotId && it.authoritySubjectId == subjectId
+        } ?: return@withLock SecretLeaseResult.SlotMissing
+        @Suppress("UNUSED_VARIABLE") val owner = metadata.authoritySubjectId
+        withDecrypted(slotId, block)
+    }
+
+    /** Local transforms avoid sending a complete secret back through another model turn. */
+    internal suspend fun transformForRemoteSession(
+        slotId: String,
+        subjectId: String,
+        transform: (CharArray) -> CharArray,
+    ): SecretLeaseResult<Unit> = mutex.withLock {
+        if (!safeSlotId(slotId) || !isCurrentSubject(subjectId)) {
+            return@withLock SecretLeaseResult.AuthorityDenied
+        }
+        val index = readIndex()
+        val metadata = index.slots.firstOrNull {
+            it.slotId == slotId && it.authoritySubjectId == subjectId
+        } ?: return@withLock SecretLeaseResult.SlotMissing
+        when (val current = withDecrypted(slotId) { chars ->
+            val transformed = transform(chars)
+            try {
+                transformed.copyOf()
+            } finally {
+                transformed.fill('\u0000')
+            }
+        }) {
+            is SecretLeaseResult.Success -> {
+                val replacement = current.value
+                val plain = replacement.concatToString().encodeToByteArray()
+                try {
+                    writeEncrypted(slotId, plain)
+                    writeIndex(index.copy(slots = index.slots.map { slot ->
+                        if (slot.slotId == metadata.slotId) slot.copy(updatedAtMs = System.currentTimeMillis()) else slot
+                    }))
+                    SecretLeaseResult.Success(Unit)
+                } catch (_: Throwable) {
+                    SecretLeaseResult.KeystoreUnavailable
+                } finally {
+                    plain.fill(0)
+                    replacement.fill('\u0000')
+                }
+            }
+            SecretLeaseResult.SlotMissing -> SecretLeaseResult.SlotMissing
+            SecretLeaseResult.BindingDenied -> SecretLeaseResult.BindingDenied
+            SecretLeaseResult.AuthorityDenied -> SecretLeaseResult.AuthorityDenied
+            SecretLeaseResult.KeystoreUnavailable -> SecretLeaseResult.KeystoreUnavailable
+            SecretLeaseResult.Corrupt -> SecretLeaseResult.Corrupt
+        }
+    }
+
     suspend fun deleteForUser(authorization: SecretVaultUserAuthorization, slotId: String): Boolean = mutex.withLock {
         if (!safeSlotId(slotId) || !isFreshUserAuthorization(authorization.issuedAtMs)) return@withLock false
         val index = readIndex()

@@ -53,6 +53,7 @@ import me.rerere.rikkahub.data.db.migrations.MIGRATION_37_38
 import me.rerere.rikkahub.data.db.migrations.MIGRATION_38_39
 import me.rerere.rikkahub.data.db.migrations.MIGRATION_39_40
 import me.rerere.rikkahub.data.db.migrations.MIGRATION_40_41
+import me.rerere.rikkahub.data.db.migrations.MIGRATION_41_42
 import me.rerere.rikkahub.data.repository.MemorySearchIndex
 import me.rerere.rikkahub.data.repository.MemoryRetriever
 import me.rerere.rikkahub.memory.AndroidMemoryWorkScheduler
@@ -131,6 +132,7 @@ val dataSourceModule = module {
                 MIGRATION_38_39,
                 MIGRATION_39_40,
                 MIGRATION_40_41,
+                MIGRATION_41_42,
             )
             .addCallback(object : RoomDatabase.Callback() {
                 override fun onOpen(db: SupportSQLiteDatabase) {
@@ -157,6 +159,7 @@ val dataSourceModule = module {
     }
 
     single { DurableCommandQueue(get<AppDatabase>().pendingChatCommandDao()) }
+    single { me.rerere.rikkahub.owner.OwnerOperationBootRecovery(get<AppDatabase>().hostOperationDao()) }
 
     single {
         AssistantTemplateLoader(settingsStore = get())
@@ -458,6 +461,9 @@ val dataSourceModule = module {
             contextBroker = get(),
             contextDiagnosticsStore = get(),
             secondUserSecretVault = get(),
+            secretPlaintextSessions = get(),
+            ephemeralToolResults = get(),
+            runtimeSecretRedactor = get(),
             toolExperienceRecorder = get(),
         )
     }

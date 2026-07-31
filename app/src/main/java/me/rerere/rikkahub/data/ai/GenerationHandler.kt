@@ -430,6 +430,9 @@ class GenerationHandler(
     private val contextBroker: me.rerere.rikkahub.context.ContextBroker,
     private val contextDiagnosticsStore: me.rerere.rikkahub.context.ContextDiagnosticsStore,
     private val secondUserSecretVault: me.rerere.rikkahub.security.SecondUserSecretVault? = null,
+    private val secretPlaintextSessions: me.rerere.rikkahub.security.SecretPlaintextSessionManager? = null,
+    private val ephemeralToolResults: me.rerere.rikkahub.security.EphemeralToolResultStore? = null,
+    private val runtimeSecretRedactor: me.rerere.rikkahub.security.RuntimeSecretRedactor? = null,
     private val toolExperienceRecorder: ToolExperienceRecorder? = null,
 ) {
     fun generateText(
@@ -446,6 +449,8 @@ class GenerationHandler(
         selectedPrivilegedConversation: Boolean = false,
         memories: List<AssistantMemory>? = null,
         tools: List<Tool> = emptyList(),
+        /** Definitions used only to resume already-persisted calls; never sent to a Provider. */
+        runtimeOnlyTools: List<Tool> = emptyList(),
         /** Per-parent-run progressive directory selection for the active second user only. */
         toolDiscoverySession: ToolDiscoverySession? = null,
         /** False for a restricted child profile that did not inherit `memory_tool`. */
@@ -480,7 +485,10 @@ class GenerationHandler(
         isSubAgent: Boolean = false,
         invocationSurfaceContextProvider: InvocationSurfaceContextProvider? = null,
         isEmergencyStopActive: suspend () -> Boolean = { false },
-    ): Flow<GenerationChunk> = flow {
+    ): Flow<GenerationChunk> {
+        val sensitiveOwnerToolInputs =
+            mutableMapOf<String, me.rerere.rikkahub.security.SensitiveToolArgument>()
+        return flow {
         // Suppress unused warnings for API-compat params restored for ChatService call sites.
         // (No thinking/answer finalize experiment — intentionally not used here.)
         @Suppress("UNUSED_EXPRESSION", "UNUSED_VARIABLE")
@@ -497,6 +505,24 @@ class GenerationHandler(
             origin = callOrigin,
         )
         val providerImpl = providerManager.getProviderByType(provider)
+        val secretEgressBinding = capabilitySubject
+            ?.takeIf { it.type == me.rerere.rikkahub.data.capability.SubjectType.LOCAL_SECOND_USER }
+            ?.let { subject ->
+                val active = me.rerere.rikkahub.assistant.SecondUserAuthorityRegistry.current()
+                if (active?.subjectId == subject.id &&
+                    active.assistantId == assistant.id &&
+                    active.conversationId == conversationId
+                ) {
+                    me.rerere.rikkahub.security.SecretPlaintextSessionBinding(
+                        authoritySubjectId = active.subjectId,
+                        authorityEpoch = active.authorityEpoch,
+                        assistantId = assistant.id.toString(),
+                        conversationId = active.conversationId.toString(),
+                        modelId = model.id.toString(),
+                        providerId = provider.id.toString(),
+                    )
+                } else null
+            }
 
         // Replay safety: scan the input messages for tools that were Approved + began
         // execution but never produced output (process killed mid-execute). Without this
@@ -517,6 +543,20 @@ class GenerationHandler(
                 } else part
             }
             if (newParts == msg.parts) msg else msg.copy(parts = newParts)
+        }
+        fun parseToolArguments(tool: UIMessagePart.Tool): Result<JsonElement> {
+            val sensitive = sensitiveOwnerToolInputs.remove(tool.toolCallId)
+            return try {
+                if (sensitive == null) {
+                    runCatching { json.parseToJsonElement(tool.input.ifBlank { "{}" }) }
+                } else {
+                    sensitive.use { chars ->
+                        runCatching { json.parseToJsonElement(chars.concatToString().ifBlank { "{}" }) }
+                    }
+                }
+            } finally {
+                sensitive?.close()
+            }
         }
 
         val turnStartMs = android.os.SystemClock.elapsedRealtime()
@@ -684,7 +724,7 @@ class GenerationHandler(
                 addAll(tools)
             }
             val candidateSurface = ToolSurfaceBuilder.build(candidateTools)
-            val toolsInternal = buildList {
+            val providerToolsInternal = buildList {
                 Log.i(TAG, "generateInternal: build tools($assistant)")
                 if (!forceFinalization || completingAlreadyAcceptedTools) {
                     val pinnedToolNames = pendingTools.mapTo(linkedSetOf()) { it.toolName }
@@ -695,6 +735,8 @@ class GenerationHandler(
                     }
                 }
             }
+            val toolsInternal = (providerToolsInternal + runtimeOnlyTools)
+                .distinctBy { it.name }
 
             // Mixed-state guard: if the last message has tools STILL in Pending (waiting
             // on user approval keyboard) but nothing canResumeExecution, the existing
@@ -745,7 +787,7 @@ class GenerationHandler(
                         model = model,
                         providerImpl = providerImpl,
                         provider = provider,
-                        tools = toolsInternal,
+                        tools = providerToolsInternal,
                         memories = memories ?: emptyList(),
                         stream = if (forceFinalization) false else assistant.streamOutput,
                         processingStatus = processingStatus,
@@ -769,6 +811,12 @@ class GenerationHandler(
                         steeringDeliveries = steeringDeliveries,
                         invocationSurfaceContextProvider = invocationSurfaceContextProvider,
                         callOrigin = callOrigin,
+                        secretEgressBinding = secretEgressBinding,
+                        onRawSensitiveToolInput = { tool ->
+                            sensitiveOwnerToolInputs.remove(tool.toolCallId)?.close()
+                            sensitiveOwnerToolInputs[tool.toolCallId] =
+                                me.rerere.rikkahub.security.SensitiveToolArgument.from(tool.input)
+                        },
                         conversationId = conversationId,
                         commandId = commandId,
                         toolDiscoveryMetrics = toolDiscoverySession?.metrics(),
@@ -1378,9 +1426,7 @@ class GenerationHandler(
                         // which includes the entire failed input — lands in the LLM-facing
                         // `detail` field, can be thousands of tokens, and the model often
                         // retries the same too-big call.
-                        val parsedArgs = runCatching {
-                            json.parseToJsonElement(tool.input.ifBlank { "{}" })
-                        }
+                        val parsedArgs = parseToolArguments(tool)
                         if (parsedArgs.isFailure) {
                             val cause = parsedArgs.exceptionOrNull()
                             Log.w(
@@ -1942,9 +1988,7 @@ class GenerationHandler(
                                 continue
                             }
 
-                            val parsedArgs = runCatching {
-                                json.parseToJsonElement(tool.input.ifBlank { "{}" })
-                            }
+                            val parsedArgs = parseToolArguments(tool)
                             val args = parsedArgs.getOrNull()
                             if (args !is JsonObject) {
                                 flushReadySegment()
@@ -2083,10 +2127,13 @@ class GenerationHandler(
             AgentOverlay.show(context)
         }
         .onCompletion {
+            sensitiveOwnerToolInputs.values.forEach { it.close() }
+            sensitiveOwnerToolInputs.clear()
             AgentOverlay.hide(context)
             handleAutoReturnAfterTurn()
         }
         .flowOn(Dispatchers.IO)
+    }
 
     private suspend fun resolveSecondUserProviderBinding(
         configuredProvider: ProviderSetting,
@@ -2187,6 +2234,8 @@ class GenerationHandler(
         steeringDeliveries: List<SteeringDelivery> = emptyList(),
         invocationSurfaceContextProvider: InvocationSurfaceContextProvider? = null,
         callOrigin: ToolCallOrigin = ToolCallOrigin.LocalChat,
+        secretEgressBinding: me.rerere.rikkahub.security.SecretPlaintextSessionBinding? = null,
+        onRawSensitiveToolInput: (UIMessagePart.Tool) -> Unit = {},
         conversationId: Uuid? = null,
         commandId: Uuid? = null,
         toolDiscoveryMetrics: ToolDiscoveryMetrics? = null,
@@ -2264,8 +2313,18 @@ class GenerationHandler(
             )
         }
         val contextPreparer = GenerationProviderContextPreparer()
+        val providerIdentityMessages = prepareSecondUserProviderMessages(systemPromptLayout.initialMessages)
+        val providerEphemeralMessages = if (
+            secretEgressBinding != null &&
+            secretPlaintextSessions?.isOpenFor(secretEgressBinding) == true
+        ) {
+            ephemeralToolResults?.materializeForProvider(providerIdentityMessages, secretEgressBinding)
+                ?: providerIdentityMessages
+        } else {
+            providerIdentityMessages
+        }
         val initialContextPreparation = contextPreparer.prepareOrdinaryChat(
-            messages = prepareSecondUserProviderMessages(systemPromptLayout.initialMessages),
+            messages = providerEphemeralMessages,
             configuredContextWindowTokens = model.userContextWindowTokens,
             advertisedContextWindowTokens = model.contextLength,
         )
@@ -2393,6 +2452,16 @@ class GenerationHandler(
                         markProviderStarted()
                         terminalTracker.observe(chunk)
                         messages = messages.handleMessageChunk(chunk = chunk, model = model)
+                        messages.lastOrNull()?.parts
+                            ?.filterIsInstance<UIMessagePart.Tool>()
+                            ?.filter { tool ->
+                                tool.toolName == "owner_secret_manage" &&
+                                    runtimeSecretRedactor?.containsKnownSecret(tool.input) == true
+                            }
+                            ?.forEach(onRawSensitiveToolInput)
+                        runtimeSecretRedactor?.let { redactor ->
+                            messages = redactor.redactMessages(messages)
+                        }
                         chunk.usage?.let { usage ->
                             messages = messages.mapIndexed { index, message ->
                                 if (index == messages.lastIndex) {

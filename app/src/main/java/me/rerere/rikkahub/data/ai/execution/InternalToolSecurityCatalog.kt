@@ -1,5 +1,7 @@
 package me.rerere.rikkahub.data.ai.execution
 
+import me.rerere.rikkahub.owner.OwnerToolFamily
+
 /**
  * Application-owned model tools that are intentionally outside [CapabilityCatalog].
  * Keeping the names here prevents a trusted-but-uncatalogued surface (memory, skills, setup,
@@ -73,7 +75,7 @@ object InternalToolSecurityCatalog {
         "pet_diary_restore",
         "secret_vault_create_slot",
         "secret_vault_set_binding",
-    )
+    ) + OwnerToolFamily.entries.mapTo(linkedSetOf()) { it.toolName }
 
     val ARGUMENT_DEPENDENT: Set<String> = setOf("memory_tool")
     val ALL: Set<String> = READ_ONLY + MUTATING + ARGUMENT_DEPENDENT

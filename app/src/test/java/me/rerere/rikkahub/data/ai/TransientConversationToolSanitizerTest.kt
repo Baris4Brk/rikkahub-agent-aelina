@@ -69,4 +69,83 @@ class TransientConversationToolSanitizerTest {
         assertFalse(shouldSpillToolOutputToFile("conversation_search", 100_000, true))
         assertTrue(shouldSpillToolOutputToFile("workspace_shell", 100_000, true))
     }
+
+    @Test
+    fun `secret owner input and ephemeral token never reach the persisted conversation`() {
+        val secret = "secret-that-must-not-persist"
+        val token = "ephemeral-token-that-must-not-persist"
+        val tool = UIMessagePart.Tool(
+            toolCallId = "owner-secret",
+            toolName = "owner_secret_manage",
+            input = """{"request_id":"secret-request","actions":[{"type":"secret_replace","arguments":{"slot_id":"slot","find":"$secret","replacement":"new-secret"}}]}""",
+            output = listOf(
+                UIMessagePart.Text(
+                    """{"ok":true,"code":"SECRET_REVEALED","value":"$secret","_ephemeral_secret_token":"$token"}""",
+                ),
+            ),
+        )
+
+        val persisted = listOf(UIMessage(role = MessageRole.ASSISTANT, parts = listOf(tool)))
+            .sanitizeTransientConversationToolResults()
+            .toString()
+
+        assertFalse(persisted.contains(secret))
+        assertFalse(persisted.contains(token))
+        assertTrue(persisted.contains("SECRET_ARGUMENT_REDACTED"))
+        assertTrue(persisted.contains("SECRET_REVEALED"))
+    }
+
+    @Test
+    fun `provider credential inventory endpoint and keys stay transient`() {
+        val secret = "provider-secret-that-must-not-persist"
+        val endpoint = "https://private-provider.example/v1"
+        val token = "provider-ephemeral-token"
+        val tool = UIMessagePart.Tool(
+            toolCallId = "owner-provider-credentials",
+            toolName = "owner_secret_manage",
+            input = """{"request_id":"provider-credentials","actions":[{"type":"secret_provider_credentials_reveal","arguments":{"provider_ids":["provider-1"]}}]}""",
+            output = listOf(UIMessagePart.Text(
+                """{"ok":true,"actions":[{"type":"secret_provider_credentials_reveal","data":{"providers":[{"provider_id":"provider-1","base_url":"$endpoint","value":"$secret","_ephemeral_secret_token":"$token"}]}}]}""",
+            )),
+        )
+
+        val persisted = listOf(UIMessage(role = MessageRole.ASSISTANT, parts = listOf(tool)))
+            .sanitizeTransientConversationToolResults()
+            .toString()
+
+        assertFalse(persisted.contains(secret))
+        assertFalse(persisted.contains(endpoint))
+        assertFalse(persisted.contains(token))
+        assertTrue(persisted.contains("PROVIDER_URL_REDACTED"))
+        assertTrue(persisted.contains("SECRET_ARGUMENT_REDACTED"))
+    }
+
+    @Test
+    fun `owner operation bodies commands paths and headers are removed before persistence`() {
+        val privateValue = "OWNER_PRIVATE_VALUE_9137"
+        val tools = listOf(
+            UIMessagePart.Tool(
+                toolCallId = "service",
+                toolName = "owner_service_manage",
+                input = """{"request_id":"request-service","actions":[{"type":"service_register","arguments":{"command":"$privateValue","working_dir":"/$privateValue"}}]}""",
+            ),
+            UIMessagePart.Tool(
+                toolCallId = "tts",
+                toolName = "owner_tts_manage",
+                input = """{"request_id":"request-tts","actions":[{"type":"tts_create_generic_http","arguments":{"body_template":"$privateValue","headers":[{"name":"X-Test","value_template":"$privateValue"}]}}]}""",
+            ),
+            UIMessagePart.Tool(
+                toolCallId = "workflow",
+                toolName = "owner_workflow_manage",
+                input = """{"request_id":"request-workflow","actions":[{"type":"workflow_create","arguments":{"definition":{"private":"$privateValue"}}}]}""",
+            ),
+        )
+
+        val persisted = listOf(UIMessage(role = MessageRole.ASSISTANT, parts = tools))
+            .sanitizeTransientConversationToolResults()
+            .toString()
+
+        assertFalse(persisted.contains(privateValue))
+        assertTrue(persisted.contains("OWNER_ARGUMENT_REDACTED"))
+    }
 }

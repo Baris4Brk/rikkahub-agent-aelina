@@ -110,6 +110,7 @@ class ChatVM(
         .stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
 
     init {
+        chatService.onConversationVisible(_conversationId)
         // 添加对话引用
         chatService.addConversationReference(_conversationId)
 

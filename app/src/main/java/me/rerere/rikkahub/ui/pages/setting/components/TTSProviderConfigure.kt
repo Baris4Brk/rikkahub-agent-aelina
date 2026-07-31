@@ -23,6 +23,7 @@ import me.rerere.rikkahub.R
 import me.rerere.rikkahub.ui.components.ui.FormItem
 import me.rerere.rikkahub.ui.components.ui.OutlinedNumberInput
 import me.rerere.tts.provider.TTSProviderSetting
+import me.rerere.tts.provider.GenericHttpHeader
 
 @Composable
 fun TTSProviderConfigure(
@@ -57,6 +58,7 @@ fun TTSProviderConfigure(
                         is TTSProviderSetting.Groq -> "Groq"
                         is TTSProviderSetting.XAI -> "xAI"
                         is TTSProviderSetting.MiMo -> "MiMo"
+                        is TTSProviderSetting.GenericHttp -> stringResource(R.string.setting_tts_page_provider_generic_http)
                     },
                     onValueChange = {},
                     readOnly = true,
@@ -85,6 +87,7 @@ fun TTSProviderConfigure(
                                         TTSProviderSetting.Groq::class -> "Groq"
                                         TTSProviderSetting.XAI::class -> "xAI"
                                         TTSProviderSetting.MiMo::class -> "MiMo"
+                                        TTSProviderSetting.GenericHttp::class -> "Generic HTTP"
                                         else -> providerClass.simpleName ?: "Unknown"
                                     }
                                 )
@@ -137,6 +140,11 @@ fun TTSProviderConfigure(
                                         name = "MiMo TTS"
                                     )
 
+                                    TTSProviderSetting.GenericHttp::class -> TTSProviderSetting.GenericHttp(
+                                        id = setting.id,
+                                        name = "Generic HTTP TTS",
+                                    )
+
                                     else -> setting
                                 }
                                 onValueChange(newSetting)
@@ -173,6 +181,124 @@ fun TTSProviderConfigure(
             is TTSProviderSetting.Groq -> GroqTTSConfiguration(setting, onValueChange)
             is TTSProviderSetting.XAI -> XAITTSConfiguration(setting, onValueChange)
             is TTSProviderSetting.MiMo -> MiMoTTSConfiguration(setting, onValueChange)
+            is TTSProviderSetting.GenericHttp -> GenericHttpTTSConfiguration(setting, onValueChange)
+        }
+    }
+}
+
+@Composable
+private fun GenericHttpTTSConfiguration(
+    setting: TTSProviderSetting.GenericHttp,
+    onValueChange: (TTSProviderSetting) -> Unit,
+) {
+    FormItem(label = { Text(stringResource(R.string.setting_tts_generic_endpoint)) }) {
+        OutlinedTextField(
+            value = setting.endpoint,
+            onValueChange = { onValueChange(setting.copy(endpoint = it.take(4096))) },
+            modifier = Modifier.fillMaxWidth(),
+            placeholder = { Text("https://example.com/tts") },
+        )
+    }
+    GenericEnumField(
+        label = stringResource(R.string.setting_tts_generic_method),
+        value = setting.method,
+        values = me.rerere.tts.provider.GenericHttpMethod.entries,
+        onChange = { onValueChange(setting.copy(method = it)) },
+    )
+    GenericEnumField(
+        label = stringResource(R.string.setting_tts_generic_body_encoding),
+        value = setting.bodyEncoding,
+        values = me.rerere.tts.provider.GenericHttpBodyEncoding.entries,
+        onChange = { onValueChange(setting.copy(bodyEncoding = it)) },
+    )
+    FormItem(label = { Text(stringResource(R.string.setting_tts_generic_body_template)) }) {
+        OutlinedTextField(
+            value = setting.bodyTemplate,
+            onValueChange = { onValueChange(setting.copy(bodyTemplate = it.take(32 * 1024))) },
+            modifier = Modifier.fillMaxWidth(),
+            minLines = 3,
+        )
+    }
+    FormItem(label = { Text(stringResource(R.string.setting_tts_generic_headers)) }) {
+        OutlinedTextField(
+            value = setting.headers.joinToString("\n") { "${it.name}: ${it.valueTemplate}" },
+            onValueChange = { text ->
+                val headers = text.lineSequence().mapNotNull { line ->
+                    val split = line.split(':', limit = 2)
+                    if (split.size != 2 || split[0].isBlank()) null else {
+                        GenericHttpHeader(split[0].trim().take(128), split[1].trim().take(4096))
+                    }
+                }.take(32).toList()
+                onValueChange(setting.copy(headers = headers))
+            },
+            modifier = Modifier.fillMaxWidth(),
+            minLines = 2,
+            supportingText = { Text(stringResource(R.string.setting_tts_generic_secret_hint)) },
+        )
+    }
+    GenericEnumField(
+        label = stringResource(R.string.setting_tts_generic_response_mode),
+        value = setting.responseMode,
+        values = me.rerere.tts.provider.GenericHttpResponseMode.entries,
+        onChange = { onValueChange(setting.copy(responseMode = it)) },
+    )
+    FormItem(label = { Text(stringResource(R.string.setting_tts_generic_response_path)) }) {
+        OutlinedTextField(
+            value = setting.responseJsonPath,
+            onValueChange = { onValueChange(setting.copy(responseJsonPath = it.take(512))) },
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
+    GenericEnumField(
+        label = stringResource(R.string.setting_tts_generic_audio_format),
+        value = setting.audioFormat,
+        values = me.rerere.tts.model.AudioFormat.entries,
+        onChange = { onValueChange(setting.copy(audioFormat = it)) },
+    )
+    FormItem(label = { Text(stringResource(R.string.setting_tts_generic_allow_private)) }) {
+        androidx.compose.material3.Switch(
+            checked = setting.allowPrivateNetwork,
+            onCheckedChange = { onValueChange(setting.copy(allowPrivateNetwork = it)) },
+        )
+    }
+    FormItem(label = { Text(stringResource(R.string.setting_tts_generic_max_bytes)) }) {
+        OutlinedTextField(
+            value = setting.maxResponseBytes.toString(),
+            onValueChange = { raw ->
+                raw.toIntOrNull()?.coerceIn(1, 64 * 1024 * 1024)?.let { bytes ->
+                    onValueChange(setting.copy(maxResponseBytes = bytes))
+                }
+            },
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
+}
+
+@Composable
+private fun <T : Enum<T>> GenericEnumField(
+    label: String,
+    value: T,
+    values: List<T>,
+    onChange: (T) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    FormItem(label = { Text(label) }) {
+        ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = !expanded }) {
+            OutlinedTextField(
+                value = value.name,
+                onValueChange = {},
+                readOnly = true,
+                modifier = Modifier.fillMaxWidth().menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable),
+                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded) },
+            )
+            ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                values.forEach { candidate ->
+                    DropdownMenuItem(
+                        text = { Text(candidate.name) },
+                        onClick = { expanded = false; onChange(candidate) },
+                    )
+                }
+            }
         }
     }
 }

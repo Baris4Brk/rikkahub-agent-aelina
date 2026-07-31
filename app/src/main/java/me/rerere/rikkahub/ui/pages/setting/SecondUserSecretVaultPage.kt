@@ -15,10 +15,13 @@ import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -38,9 +41,14 @@ import me.rerere.rikkahub.security.SecondUserLegacySecretMigration
 import me.rerere.rikkahub.security.SecondUserLegacySecretMigrationResult
 import me.rerere.rikkahub.security.SecretSlotMetadata
 import me.rerere.rikkahub.security.SecondUserSecretVault
+import me.rerere.rikkahub.security.SecondUserSecretAccessMode
+import me.rerere.rikkahub.security.SecretPlaintextSessionManager
+import me.rerere.rikkahub.security.SecretPlaintextSessionState
 import me.rerere.rikkahub.security.StrongBiometricAuthenticator
+import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.ui.components.nav.BackButton
 import me.rerere.rikkahub.ui.theme.CustomColors
+import me.rerere.rikkahub.utils.getActivity
 import org.koin.compose.koinInject
 
 /**
@@ -52,8 +60,12 @@ fun SecondUserSecretVaultPage(
     vault: SecondUserSecretVault = koinInject(),
     legacyMigration: SecondUserLegacySecretMigration = koinInject(),
     biometric: StrongBiometricAuthenticator = koinInject(),
+    settingsStore: SettingsStore = koinInject(),
+    plaintextSessions: SecretPlaintextSessionManager = koinInject(),
 ) {
     val context = LocalContext.current
+    val settings by settingsStore.settingsFlow.collectAsState()
+    val plaintextState by plaintextSessions.state.collectAsState()
     val scope = rememberCoroutineScope()
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
     var slots by remember { mutableStateOf(emptyList<SecretSlotMetadata>()) }
@@ -62,6 +74,38 @@ fun SecondUserSecretVaultPage(
     var secretInput by remember { mutableStateOf("") }
     var editingSlotId by remember { mutableStateOf<String?>(null) }
     var migrationResult by remember { mutableStateOf<SecondUserLegacySecretMigrationResult?>(null) }
+    var confirmRemoteMode by remember { mutableStateOf(false) }
+
+    val activity = context.getActivity()
+    DisposableEffect(activity) {
+        activity?.window?.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+        onDispose {
+            activity?.window?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+        }
+    }
+
+    if (confirmRemoteMode) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { confirmRemoteMode = false },
+            title = { Text(stringResource(R.string.second_user_plaintext_mode_title)) },
+            text = { Text(stringResource(R.string.second_user_plaintext_mode_risk)) },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmRemoteMode = false
+                    scope.launch {
+                        settingsStore.update {
+                            it.copy(secondUserSecretAccessMode = SecondUserSecretAccessMode.PLAINTEXT_REMOTE_SESSION)
+                        }
+                    }
+                }) { Text(stringResource(R.string.second_user_plaintext_mode_confirm)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmRemoteMode = false }) {
+                    Text(stringResource(android.R.string.cancel))
+                }
+            },
+        )
+    }
 
     fun withUserAuthorization(action: suspend (me.rerere.rikkahub.security.SecretVaultUserAuthorization) -> Unit) {
         scope.launch {
@@ -103,6 +147,83 @@ fun SecondUserSecretVaultPage(
                     stringResource(R.string.second_user_vault_desc),
                     style = MaterialTheme.typography.bodyMedium,
                 )
+            }
+            item {
+                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Text(
+                            stringResource(R.string.second_user_plaintext_mode_title),
+                            style = MaterialTheme.typography.titleMedium,
+                        )
+                        androidx.compose.foundation.layout.Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                if (settings.secondUserSecretAccessMode == SecondUserSecretAccessMode.PLAINTEXT_REMOTE_SESSION) {
+                                    stringResource(R.string.second_user_plaintext_mode_remote)
+                                } else {
+                                    stringResource(R.string.second_user_plaintext_mode_use_only)
+                                },
+                                modifier = Modifier.weight(1f),
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                            Switch(
+                                checked = settings.secondUserSecretAccessMode == SecondUserSecretAccessMode.PLAINTEXT_REMOTE_SESSION,
+                                onCheckedChange = { enabled ->
+                                    if (enabled) {
+                                        confirmRemoteMode = true
+                                    } else {
+                                        plaintextSessions.close()
+                                        scope.launch {
+                                            settingsStore.update {
+                                                it.copy(secondUserSecretAccessMode = SecondUserSecretAccessMode.USE_ONLY)
+                                            }
+                                        }
+                                    }
+                                },
+                            )
+                        }
+                        when (val state = plaintextState) {
+                            is SecretPlaintextSessionState.Open -> {
+                                val formatted = remember(state.expiresAtMs) {
+                                    java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT)
+                                        .format(java.util.Date(state.expiresAtMs))
+                                }
+                                Text(stringResource(R.string.second_user_plaintext_session_active, formatted))
+                                Button(onClick = { plaintextSessions.close() }) {
+                                    Text(stringResource(R.string.second_user_plaintext_session_close))
+                                }
+                            }
+                            SecretPlaintextSessionState.Closed -> {
+                                Text(stringResource(R.string.second_user_plaintext_session_closed))
+                                Button(
+                                    enabled = !busy && settings.secondUserSecretAccessMode == SecondUserSecretAccessMode.PLAINTEXT_REMOTE_SESSION,
+                                    onClick = {
+                                        scope.launch {
+                                            if (busy) return@launch
+                                            busy = true
+                                            try {
+                                                biometric.authorizeSecretPlaintextSession(
+                                                    title = context.getString(R.string.second_user_plaintext_mode_title),
+                                                    subtitle = context.getString(R.string.second_user_plaintext_mode_risk),
+                                                )?.let { plaintextSessions.openForCurrent(it) }
+                                            } finally {
+                                                busy = false
+                                            }
+                                        }
+                                    },
+                                ) {
+                                    Text(stringResource(R.string.second_user_plaintext_session_open))
+                                }
+                            }
+                        }
+                    }
+                }
             }
             item {
                 Button(

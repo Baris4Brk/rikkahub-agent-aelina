@@ -241,6 +241,19 @@ class PersistentTtsLibrary(
         return entry
     }
 
+    /** Owner-runtime path for testing a typed Provider before making it the global default. */
+    suspend fun synthesizeProviderSaveAndQueue(
+        provider: me.rerere.tts.provider.TTSProviderSetting,
+        text: String,
+        ownerKey: String? = null,
+    ): TtsLibraryEntry {
+        require(text.isNotBlank()) { "text is required" }
+        val responses = chunker.split(text).map { chunk -> synthesizer.synthesize(provider, chunk) }
+        val entry = store.save(text = text, responses = responses, ownerKey = ownerKey)
+        check(queueReplay(entry.artifactId, ownerKey)) { "Saved TTS audio could not be queued" }
+        return entry
+    }
+
     private suspend fun resolveSecondUserTtsBinding(
         configuredProvider: me.rerere.tts.provider.TTSProviderSetting,
         ownerKey: String?,

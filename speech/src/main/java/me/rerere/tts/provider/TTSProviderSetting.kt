@@ -207,6 +207,28 @@ sealed class TTSProviderSetting {
         }
     }
 
+    @Serializable
+    @SerialName("generic_http")
+    data class GenericHttp(
+        override var id: Uuid = Uuid.random(),
+        override var name: String = "Generic HTTP TTS",
+        val endpoint: String = "",
+        val method: GenericHttpMethod = GenericHttpMethod.POST,
+        val bodyEncoding: GenericHttpBodyEncoding = GenericHttpBodyEncoding.JSON,
+        val bodyTemplate: String = "{\"text\":\"{{text}}\"}",
+        val headers: List<GenericHttpHeader> = emptyList(),
+        val responseMode: GenericHttpResponseMode = GenericHttpResponseMode.RAW_AUDIO,
+        val responseJsonPath: String = "audio",
+        val audioFormat: me.rerere.tts.model.AudioFormat = me.rerere.tts.model.AudioFormat.MP3,
+        val voice: String = "",
+        val language: String = "",
+        val allowPrivateNetwork: Boolean = false,
+        val maxResponseBytes: Int = 16 * 1024 * 1024,
+        @kotlinx.serialization.Transient val runtimeSecret: String = "",
+    ) : TTSProviderSetting() {
+        override fun copyProvider(id: Uuid, name: String): TTSProviderSetting = copy(id = id, name = name)
+    }
+
     companion object {
         val Types by lazy {
             listOf(
@@ -219,7 +241,24 @@ sealed class TTSProviderSetting {
                 Groq::class,
                 XAI::class,
                 MiMo::class,
+                GenericHttp::class,
             )
         }
     }
 }
+
+@Serializable
+enum class GenericHttpMethod { GET, POST }
+
+@Serializable
+enum class GenericHttpBodyEncoding { JSON, FORM }
+
+@Serializable
+enum class GenericHttpResponseMode { RAW_AUDIO, BASE64_JSON, URL_JSON }
+
+@Serializable
+data class GenericHttpHeader(
+    val name: String,
+    /** Safe literal/template. Use {{secret}} for the bound Vault slot. */
+    val valueTemplate: String,
+)

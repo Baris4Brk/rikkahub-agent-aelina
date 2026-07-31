@@ -681,6 +681,7 @@ private fun TTSProviderItem(
                             is TTSProviderSetting.Groq -> "Groq"
                             is TTSProviderSetting.XAI -> "xAI"
                             is TTSProviderSetting.MiMo -> "MiMo"
+                            is TTSProviderSetting.GenericHttp -> stringResource(R.string.setting_tts_page_provider_generic_http)
                         },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant

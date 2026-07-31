@@ -164,6 +164,7 @@ internal fun TTSProviderSetting.legacyApiKeyOrNull(): String? = when (this) {
     is TTSProviderSetting.XAI -> apiKey
     is TTSProviderSetting.MiMo -> apiKey
     is TTSProviderSetting.SystemTTS -> null
+    is TTSProviderSetting.GenericHttp -> null
 }
 
 internal fun TTSProviderSetting.clearLegacyApiKey(): TTSProviderSetting = when (this) {
@@ -176,6 +177,7 @@ internal fun TTSProviderSetting.clearLegacyApiKey(): TTSProviderSetting = when (
     is TTSProviderSetting.XAI -> copy(apiKey = "")
     is TTSProviderSetting.MiMo -> copy(apiKey = "")
     is TTSProviderSetting.SystemTTS -> this
+    is TTSProviderSetting.GenericHttp -> copy(runtimeSecret = "")
 }
 
 private fun TTSProviderSetting.withVaultApiKey(chars: CharArray): TTSProviderSetting? = when (this) {
@@ -188,6 +190,7 @@ private fun TTSProviderSetting.withVaultApiKey(chars: CharArray): TTSProviderSet
     is TTSProviderSetting.XAI -> copy(apiKey = chars.concatToString())
     is TTSProviderSetting.MiMo -> copy(apiKey = chars.concatToString())
     is TTSProviderSetting.SystemTTS -> null
+    is TTSProviderSetting.GenericHttp -> copy(runtimeSecret = chars.concatToString())
 }
 
 internal fun ASRProviderSetting.legacyApiKeyOrNull(): String? = when (this) {

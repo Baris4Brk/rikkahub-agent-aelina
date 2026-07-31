@@ -284,12 +284,12 @@ private fun managementToolSpecs(): List<ManagementToolSpec> = listOf(
     ),
 )
 
-private sealed interface ParsedRequest {
+internal sealed interface ParsedRequest {
     data class Value(val request: PrivilegedManagementRequest) : ParsedRequest
     data class Error(val code: String, val message: String) : ParsedRequest
 }
 
-private fun parseManagementRequest(name: String, obj: JsonObject): ParsedRequest {
+internal fun parseManagementRequest(name: String, obj: JsonObject): ParsedRequest {
     fun uuid(key: String): Uuid? {
         val raw = obj.string(key)?.trim()
         if (raw.isNullOrEmpty()) return null

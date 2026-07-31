@@ -13,6 +13,7 @@ import me.rerere.tts.provider.providers.OpenAITTSProvider
 import me.rerere.tts.provider.providers.QwenTTSProvider
 import me.rerere.tts.provider.providers.SystemTTSProvider
 import me.rerere.tts.provider.providers.XAITTSProvider
+import me.rerere.tts.provider.providers.GenericHttpTTSProvider
 
 class TTSManager(private val context: Context) {
     private val openAIProvider = OpenAITTSProvider()
@@ -24,21 +25,30 @@ class TTSManager(private val context: Context) {
     private val groqProvider = GroqTTSProvider()
     private val xaiProvider = XAITTSProvider()
     private val miMoProvider = MiMoTTSProvider()
+    private val genericHttpProvider = GenericHttpTTSProvider()
+    private val registry = TTSProviderFactoryRegistry(
+        listOf(
+            TTSProviderFactory { context, setting, request ->
+                when (setting) {
+                    is TTSProviderSetting.OpenAI -> openAIProvider.generateSpeech(context, setting, request)
+                    is TTSProviderSetting.Gemini -> geminiProvider.generateSpeech(context, setting, request)
+                    is TTSProviderSetting.SystemTTS -> systemProvider.generateSpeech(context, setting, request)
+                    is TTSProviderSetting.MiniMax -> miniMaxProvider.generateSpeech(context, setting, request)
+                    is TTSProviderSetting.Aura -> auraProvider.generateSpeech(context, setting, request)
+                    is TTSProviderSetting.Qwen -> qwenProvider.generateSpeech(context, setting, request)
+                    is TTSProviderSetting.Groq -> groqProvider.generateSpeech(context, setting, request)
+                    is TTSProviderSetting.XAI -> xaiProvider.generateSpeech(context, setting, request)
+                    is TTSProviderSetting.MiMo -> miMoProvider.generateSpeech(context, setting, request)
+                    is TTSProviderSetting.GenericHttp -> genericHttpProvider.generateSpeech(context, setting, request)
+                }
+            },
+        ),
+    )
 
     fun generateSpeech(
         providerSetting: TTSProviderSetting,
         request: TTSRequest
     ): Flow<AudioChunk> {
-        return when (providerSetting) {
-            is TTSProviderSetting.OpenAI -> openAIProvider.generateSpeech(context, providerSetting, request)
-            is TTSProviderSetting.Gemini -> geminiProvider.generateSpeech(context, providerSetting, request)
-            is TTSProviderSetting.SystemTTS -> systemProvider.generateSpeech(context, providerSetting, request)
-            is TTSProviderSetting.MiniMax -> miniMaxProvider.generateSpeech(context, providerSetting, request)
-            is TTSProviderSetting.Aura -> auraProvider.generateSpeech(context, providerSetting, request)
-            is TTSProviderSetting.Qwen -> qwenProvider.generateSpeech(context, providerSetting, request)
-            is TTSProviderSetting.Groq -> groqProvider.generateSpeech(context, providerSetting, request)
-            is TTSProviderSetting.XAI -> xaiProvider.generateSpeech(context, providerSetting, request)
-            is TTSProviderSetting.MiMo -> miMoProvider.generateSpeech(context, providerSetting, request)
-        }
+        return registry.generate(context, providerSetting, request)
     }
 }

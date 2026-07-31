@@ -97,11 +97,14 @@ sealed interface SecondUserAuthorityResolution {
  */
 object SecondUserAuthorityRegistry {
     private val snapshot = AtomicReference<SecondUserAdmissionSnapshot?>(null)
+    private val mutableFlow = kotlinx.coroutines.flow.MutableStateFlow<SecondUserAdmissionSnapshot?>(null)
+    val flow: kotlinx.coroutines.flow.StateFlow<SecondUserAdmissionSnapshot?> = mutableFlow
 
     fun current(): SecondUserAdmissionSnapshot? = snapshot.get()
 
     internal fun install(value: SecondUserAdmissionSnapshot?) {
         snapshot.set(value)
+        mutableFlow.value = value
     }
 
     fun matches(

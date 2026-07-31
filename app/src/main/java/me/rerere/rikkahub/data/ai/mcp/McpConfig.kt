@@ -10,7 +10,10 @@ data class McpCommonOptions(
     val enable: Boolean = true,
     val name: String = "",
     val headers: List<Pair<String, String>> = emptyList(),
-    val tools: List<McpTool> = emptyList()
+    val tools: List<McpTool> = emptyList(),
+    /** Immutable source metadata for Owner-installed configurations; never used as a credential. */
+    val ownerSource: String? = null,
+    val ownerPin: String? = null,
 )
 
 @Serializable

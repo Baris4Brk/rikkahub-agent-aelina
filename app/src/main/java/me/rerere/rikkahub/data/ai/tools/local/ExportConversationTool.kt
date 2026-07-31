@@ -44,86 +44,97 @@ fun exportConversationTool(currentConversationId: String?): Tool = Tool(
         val ctx: Context = KoinJavaComponent.get(Context::class.java)
 
         runBlocking {
-            val conversation = repo.getConversationById(conversationId)
-            if (conversation == null) return@runBlocking listOf(UIMessagePart.Text(buildJsonObject {
-                put("error", "NOT_FOUND"); put("message", "Conversation not found.")
-            }.toString()))
-
-            val messages = conversation.messageNodes.map { it.currentMessage }
-
-            val filename = "chat-export-${LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss"))}.md"
-            val content = buildString {
-                appendLine("# ${conversation.title}")
-                appendLine("*Exported on ${LocalDateTime.now()}*")
-                appendLine()
-                messages.forEach { msg ->
-                    val role = if (msg.role == me.rerere.ai.core.MessageRole.USER) "**User**" else "**Assistant**"
-                    appendLine("$role:")
-                    appendLine()
-                    msg.parts.forEach { part ->
-                        if (part is UIMessagePart.Text) {
-                            appendLine(part.text)
-                        }
-                    }
-                    appendLine()
-                    appendLine("---")
-                    appendLine()
-                }
-            }
-
-            val location = if (Build.VERSION.SDK_INT >= 29) {
-                val values = ContentValues().apply {
-                    put(MediaStore.Downloads.DISPLAY_NAME, filename)
-                    put(MediaStore.Downloads.MIME_TYPE, "text/markdown")
-                    put(
-                        MediaStore.Downloads.RELATIVE_PATH,
-                        "${Environment.DIRECTORY_DOWNLOADS}/chat-exports",
-                    )
-                    put(MediaStore.Downloads.IS_PENDING, 1)
-                }
-                val uri = ctx.contentResolver.insert(
-                    MediaStore.Downloads.EXTERNAL_CONTENT_URI,
-                    values,
-                ) ?: return@runBlocking listOf(UIMessagePart.Text(buildJsonObject {
-                    put("error", "EXPORT_CREATE_FAILED")
-                    put("message", "Unable to create the export in Downloads.")
+            when (val result = exportConversationToDownloads(ctx, repo, conversationId)) {
+                is ConversationExportResult.Failure -> listOf(UIMessagePart.Text(buildJsonObject {
+                    put("error", result.code)
+                    put("message", result.message)
                 }.toString()))
-                try {
-                    ctx.contentResolver.openOutputStream(uri, "w")?.bufferedWriter()?.use { writer ->
-                        writer.write(content)
-                    } ?: error("Unable to open the export destination.")
-                    val published = ctx.contentResolver.update(
-                        uri,
-                        ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) },
-                        null,
-                        null,
-                    )
-                    check(published == 1) { "Unable to publish the completed export." }
-                    uri.toString()
-                } catch (cancelled: CancellationException) {
-                    ctx.contentResolver.delete(uri, null, null)
-                    throw cancelled
-                } catch (error: Exception) {
-                    ctx.contentResolver.delete(uri, null, null)
-                    return@runBlocking listOf(UIMessagePart.Text(buildJsonObject {
-                        put("error", "EXPORT_WRITE_FAILED")
-                        put("message", error.message ?: "Unable to write the export.")
-                    }.toString()))
-                }
-            } else {
-                @Suppress("DEPRECATION")
-                val downloadDir = Environment.getExternalStoragePublicDirectory(
-                    Environment.DIRECTORY_DOWNLOADS,
-                )
-                val chatExportDir = File(downloadDir, "chat-exports").apply { mkdirs() }
-                File(chatExportDir, filename).apply { writeText(content) }.absolutePath
+                is ConversationExportResult.Success -> listOf(UIMessagePart.Text(buildJsonObject {
+                    put("success", true)
+                    put("file_path", result.location)
+                    put("message", "Saved to Downloads/chat-exports/${result.filename}")
+                }.toString()))
             }
-
-            listOf(UIMessagePart.Text(buildJsonObject {
-                put("success", true)
-                put("file_path", location)
-                put("message", "Saved to Downloads/chat-exports/$filename")
-            }.toString()))
         }
     }
 )
+
+internal sealed interface ConversationExportResult {
+    data class Success(val filename: String, val location: String) : ConversationExportResult
+    data class Failure(val code: String, val message: String) : ConversationExportResult
+}
+
+/** Shared typed export path used by both the legacy tool and the compact Owner transaction. */
+internal suspend fun exportConversationToDownloads(
+    context: Context,
+    repository: ConversationRepository,
+    conversationId: Uuid,
+): ConversationExportResult {
+    val conversation = repository.getConversationById(conversationId)
+        ?: return ConversationExportResult.Failure("NOT_FOUND", "Conversation not found.")
+    val now = LocalDateTime.now()
+    val filename = "chat-export-${now.format(DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss"))}.md"
+    val content = buildString {
+        appendLine("# ${conversation.title}")
+        appendLine("*Exported on $now*")
+        appendLine()
+        conversation.messageNodes.map { it.currentMessage }.forEach { message ->
+            val role = if (message.role == me.rerere.ai.core.MessageRole.USER) "**User**" else "**Assistant**"
+            appendLine("$role:")
+            appendLine()
+            message.parts.filterIsInstance<UIMessagePart.Text>().forEach { appendLine(it.text) }
+            appendLine()
+            appendLine("---")
+            appendLine()
+        }
+    }
+    val location = if (Build.VERSION.SDK_INT >= 29) {
+        val values = ContentValues().apply {
+            put(MediaStore.Downloads.DISPLAY_NAME, filename)
+            put(MediaStore.Downloads.MIME_TYPE, "text/markdown")
+            put(MediaStore.Downloads.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/chat-exports")
+            put(MediaStore.Downloads.IS_PENDING, 1)
+        }
+        val uri = context.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+            ?: return ConversationExportResult.Failure(
+                "EXPORT_CREATE_FAILED",
+                "Unable to create the export in Downloads.",
+            )
+        try {
+            context.contentResolver.openOutputStream(uri, "w")?.bufferedWriter()?.use { it.write(content) }
+                ?: error("Unable to open the export destination.")
+            val published = context.contentResolver.update(
+                uri,
+                ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) },
+                null,
+                null,
+            )
+            check(published == 1) { "Unable to publish the completed export." }
+            uri.toString()
+        } catch (cancelled: CancellationException) {
+            context.contentResolver.delete(uri, null, null)
+            throw cancelled
+        } catch (error: Exception) {
+            context.contentResolver.delete(uri, null, null)
+            return ConversationExportResult.Failure(
+                "EXPORT_WRITE_FAILED",
+                error.message?.take(500) ?: "Unable to write the export.",
+            )
+        }
+    } else {
+        try {
+            @Suppress("DEPRECATION")
+            val downloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+            val chatExportDir = File(downloadDir, "chat-exports").apply { mkdirs() }
+            File(chatExportDir, filename).apply { writeText(content) }.absolutePath
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            return ConversationExportResult.Failure(
+                "EXPORT_WRITE_FAILED",
+                error.message?.take(500) ?: "Unable to write the export.",
+            )
+        }
+    }
+    return ConversationExportResult.Success(filename, location)
+}

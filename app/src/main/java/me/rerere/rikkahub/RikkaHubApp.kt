@@ -211,6 +211,7 @@ class RikkaHubApp : Application() {
                 .onFailure { Log.w(TAG, "tool experience retention cleanup failed", it) }
         }
         runExecutionBootRecovery()
+        get<me.rerere.rikkahub.owner.OwnerLocalServiceSupervisor>().start()
         refreshCapabilityPolicyGrants()
         reconcileMemoryV2Metadata()
 
@@ -352,6 +353,7 @@ class RikkaHubApp : Application() {
                 get<me.rerere.rikkahub.assistant.SecondUserAuthorityRevocationCoordinator>()
                     .resumeIfNeeded()
                 get<me.rerere.rikkahub.data.execution.SecondUserApprovalRecovery>().runRecovery()
+                get<me.rerere.rikkahub.owner.OwnerOperationBootRecovery>().recover()
                 get<me.rerere.rikkahub.data.execution.ExecutionBootRecovery>().runRecovery()
                 startExecutionProbeScheduler()
             }.onFailure {

@@ -1,6 +1,11 @@
 package me.rerere.rikkahub.data.ai
 
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.addJsonObject
+import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
@@ -18,7 +23,11 @@ import me.rerere.rikkahub.utils.JsonInstant
  */
 internal fun List<UIMessage>.sanitizeTransientConversationToolResults(): List<UIMessage> = map { message ->
     message.copy(parts = message.parts.map { part ->
-        if (part is UIMessagePart.Tool && part.toolName in TRANSIENT_CONVERSATION_READER_TOOL_NAMES) {
+        if (part is UIMessagePart.Tool && part.toolName == "owner_secret_manage") {
+            sanitizeSecretOwnerTool(part)
+        } else if (part is UIMessagePart.Tool && part.toolName in REDACTED_OWNER_INPUT_TOOLS) {
+            part.copy(input = sanitizeOwnerOperationInput(part.input, OWNER_REDACTED_ARGUMENT_KEYS))
+        } else if (part is UIMessagePart.Tool && part.toolName in TRANSIENT_CONVERSATION_READER_TOOL_NAMES) {
             part.copy(
                 input = sanitizeTransientToolInput(part.input),
                 output = if (part.output.isEmpty()) {
@@ -32,6 +41,139 @@ internal fun List<UIMessage>.sanitizeTransientConversationToolResults(): List<UI
         }
     })
 }
+
+private fun sanitizeOwnerOperationInput(raw: String, redactedKeys: Set<String>): String {
+    val parsed = runCatching { JsonInstant.parseToJsonElement(raw).jsonObject }.getOrNull()
+        ?: return "{}"
+    val actions = parsed["actions"] as? JsonArray ?: JsonArray(emptyList())
+    return buildJsonObject {
+        parsed["request_id"]?.let { put("request_id", it) }
+        put("actions", buildJsonArray {
+            actions.forEach { element ->
+                val action = element as? JsonObject ?: return@forEach
+                addJsonObject {
+                    action["type"]?.let { put("type", it) }
+                    val arguments = action["arguments"] as? JsonObject ?: JsonObject(emptyMap())
+                    put("arguments", buildJsonObject {
+                        arguments.forEach { (key, value) ->
+                            put(key, if (key in redactedKeys) JsonPrimitive("[OWNER_ARGUMENT_REDACTED]") else value)
+                        }
+                    })
+                }
+            }
+        })
+    }.toString()
+}
+
+private fun sanitizeSecretOwnerTool(tool: UIMessagePart.Tool): UIMessagePart.Tool = tool.copy(
+    input = sanitizeSecretOwnerInput(tool.input),
+    output = tool.output.map { output ->
+        if (output is UIMessagePart.Text) {
+            output.copy(text = sanitizeSecretOwnerOutput(output.text))
+        } else output
+    },
+)
+
+private fun sanitizeSecretOwnerInput(raw: String): String {
+    val parsed = runCatching { JsonInstant.parseToJsonElement(raw).jsonObject }.getOrNull()
+        ?: return "{}"
+    val actions = parsed["actions"] as? JsonArray ?: JsonArray(emptyList())
+    return buildJsonObject {
+        parsed["request_id"]?.let { put("request_id", it) }
+        put("actions", buildJsonArray {
+            actions.forEach { element ->
+                val action = element as? JsonObject ?: return@forEach
+                val type = action["type"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                addJsonObject {
+                    put("type", type)
+                    val arguments = action["arguments"] as? JsonObject ?: JsonObject(emptyMap())
+                    put("arguments", if (type in SENSITIVE_SECRET_ACTIONS) {
+                        buildJsonObject {
+                            arguments["slot_id"]?.let { put("slot_id", it) }
+                            arguments.keys.filterNot { it == "slot_id" }.forEach { key ->
+                                put(key, "[SECRET_ARGUMENT_REDACTED]")
+                            }
+                        }
+                    } else arguments)
+                }
+            }
+        })
+    }.toString()
+}
+
+private fun sanitizeSecretOwnerOutput(raw: String): String {
+    val parsed = runCatching { JsonInstant.parseToJsonElement(raw).jsonObject }.getOrNull()
+        ?: return buildJsonObject {
+            put("ok", false)
+            put("code", "SECRET_RESULT_REDACTED")
+            put("value", "[SECRET_REVEALED]")
+        }.toString()
+    return sanitizeSecretJson(parsed).toString()
+}
+
+private fun sanitizeSecretJson(value: kotlinx.serialization.json.JsonElement): kotlinx.serialization.json.JsonElement =
+    when (value) {
+        is JsonObject -> buildJsonObject {
+            value.forEach { (key, child) ->
+                when {
+                    key == me.rerere.rikkahub.security.EphemeralToolResultStore.EPHEMERAL_TOKEN_FIELD -> Unit
+                    key in setOf("value", "secret", "plaintext") -> put(key, "[SECRET_REVEALED]")
+                    key == "base_url" -> put(key, "[PROVIDER_URL_REDACTED]")
+                    else -> put(key, sanitizeSecretJson(child))
+                }
+            }
+        }
+        is JsonArray -> buildJsonArray { value.forEach { add(sanitizeSecretJson(it)) } }
+        is JsonPrimitive -> value
+        else -> value
+    }
+
+private val SENSITIVE_SECRET_ACTIONS = setOf(
+    "secret_provider_credentials_reveal",
+    "secret_plaintext_reveal",
+    "secret_replace",
+    "secret_remove_prefix",
+)
+
+private val REDACTED_OWNER_INPUT_TOOLS = setOf(
+    "owner_assistant_manage",
+    "owner_conversation_manage",
+    "owner_provider_manage",
+    "owner_tts_manage",
+    "owner_service_manage",
+    "owner_mcp_manage",
+    "owner_skill_manage",
+    "owner_workflow_manage",
+)
+
+private val OWNER_REDACTED_ARGUMENT_KEYS = setOf(
+    "command",
+    "executable",
+    "arguments",
+    "cwd",
+    "working_dir",
+    "health_url",
+    "endpoint",
+    "base_url",
+    "source",
+    "source_url",
+    "archive_url",
+    "download_url",
+    "url",
+    "git_url",
+    "manifest",
+    "headers",
+    "tts_headers",
+    "body",
+    "body_template",
+    "tts_body_template",
+    "text",
+    "test_texts",
+    "system_prompt",
+    "custom_system_prompt",
+    "query",
+    "definition",
+)
 
 private fun sanitizeTransientToolInput(raw: String): String {
     val parsed = runCatching { JsonInstant.parseToJsonElement(raw).jsonObject }.getOrNull()

@@ -127,7 +127,8 @@ enum class AgentRunKind(val wire: String) {
     SubAgent("subagent"),
     Setup("setup"),
     Telegram("telegram"),
-    ExternalAutomation("external_automation");
+    ExternalAutomation("external_automation"),
+    OwnerHost("owner_host");
 
     companion object {
         fun fromWire(wire: String?): AgentRunKind? = entries.firstOrNull { it.wire == wire }

@@ -1,6 +1,7 @@
 package me.rerere.rikkahub.data.ai.tools
 
 import java.util.concurrent.atomic.AtomicReference
+import me.rerere.ai.core.Tool
 import me.rerere.rikkahub.data.ai.ToolCallOrigin
 import me.rerere.rikkahub.execution.ManagedExecutionCaller
 import me.rerere.rikkahub.execution.ManagedExecutionRuntime
@@ -52,6 +53,30 @@ class ToolNameSurface private constructor(
 }
 
 /**
+ * Process-local companion to [ToolNameSurface]. Owner workflow_run needs the exact tool
+ * implementations already built for this turn; it must not reconstruct a broader surface.
+ */
+class ToolExecutionSurface private constructor(
+    private val writable: Boolean,
+) {
+    constructor() : this(writable = true)
+
+    private val initial = emptyList<Tool>()
+    private val tools = AtomicReference(initial)
+
+    fun publish(value: List<Tool>): Boolean {
+        if (!writable) return false
+        return tools.compareAndSet(initial, value.toList())
+    }
+
+    fun snapshot(): List<Tool> = tools.get()
+
+    companion object {
+        val EMPTY = ToolExecutionSurface(writable = false)
+    }
+}
+
+/**
  * Phase 17 stability — context every tool factory in [LocalTools.getTools] sees about WHO
  * is invoking it. Until this layer existed, tools that needed to know the calling
  * conversation / assistant id (sub-agent recursion guard, workflow_create authoring-id
@@ -86,6 +111,7 @@ data class ToolInvocationContext(
     val callerAssistantId: String? = null,
     val callerConversationId: String? = null,
     val callerModelId: String? = null,
+    val callerProviderId: String? = null,
     val callerRunId: String? = null,
     val callerWorkspaceId: String? = null,
     val callOrigin: ToolCallOrigin? = null,
@@ -93,6 +119,7 @@ data class ToolInvocationContext(
     val modelCanSeeImages: Boolean = true,
     val privilege: PrivilegedSessionContext? = null,
     val toolNameSurface: ToolNameSurface = ToolNameSurface.EMPTY,
+    val toolExecutionSurface: ToolExecutionSurface = ToolExecutionSurface.EMPTY,
 ) {
     companion object {
         /** No-knowledge fallback. Factories that depend on context MUST handle this. */

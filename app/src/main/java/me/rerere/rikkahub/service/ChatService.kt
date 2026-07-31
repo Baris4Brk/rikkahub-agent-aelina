@@ -477,7 +477,34 @@ class ChatService(
     private val toolExperienceRepository: me.rerere.rikkahub.toolcatalog.ToolExperienceRepository,
     private val toolShortcutRepository: me.rerere.rikkahub.toolcatalog.ToolShortcutRepository,
     private val secondUserAuthorityService: me.rerere.rikkahub.assistant.SecondUserAuthorityService,
+    private val hostOperationDao: me.rerere.rikkahub.owner.db.HostOperationDao,
+    private val secretPlaintextSessions: me.rerere.rikkahub.security.SecretPlaintextSessionManager,
+    private val ephemeralToolResults: me.rerere.rikkahub.security.EphemeralToolResultStore,
+    private val runtimeSecretRedactor: me.rerere.rikkahub.security.RuntimeSecretRedactor,
+    private val assistantRemovalService: me.rerere.rikkahub.data.repository.AssistantRemovalService,
+    private val persistentTtsLibrary: me.rerere.rikkahub.tts.PersistentTtsLibrary,
+    private val workspaceManagedProcessStarter: me.rerere.rikkahub.execution.WorkspaceManagedProcessStarter,
+    private val hostLocalServiceDao: me.rerere.rikkahub.owner.db.HostLocalServiceDao,
+    private val ownerHttpClient: okhttp3.OkHttpClient,
+    private val workflowActionRunner: me.rerere.rikkahub.workflow.execution.WorkflowActionRunner,
+    private val doctorChecks: me.rerere.rikkahub.ui.pages.setting.doctor.DoctorChecks,
+    private val executionConsistencyDoctor: me.rerere.rikkahub.diagnostics.ExecutionConsistencyDoctor,
+    private val ownerLocalServiceSupervisor: me.rerere.rikkahub.owner.OwnerLocalServiceSupervisor,
+    private val agentRunRepository: me.rerere.rikkahub.data.agentrun.AgentRunRepository,
+    private val ownerServiceSpecStore: me.rerere.rikkahub.owner.OwnerServiceSpecStore,
+    private val ownerTermuxServiceLauncher: me.rerere.rikkahub.owner.OwnerTermuxServiceLauncher,
+    private val ownerOperationFingerprinter: me.rerere.rikkahub.owner.OwnerOperationFingerprinter,
 ) {
+    fun onConversationVisible(conversationId: Uuid) {
+        val session = secretPlaintextSessions.state.value as?
+            me.rerere.rikkahub.security.SecretPlaintextSessionState.Open ?: return
+        if (session.binding.conversationId != conversationId.toString()) {
+            secretPlaintextSessions.close(
+                me.rerere.rikkahub.security.SecretPlaintextSessionCloseReason.CONVERSATION_CHANGED,
+            )
+        }
+    }
+
     private val conversationLibraryReader =
         me.rerere.rikkahub.data.ai.tools.ConversationLibraryReader(conversationRepo)
     // workspace 系统提示注入 (依赖 workspaceRepository, 故在类内构�?
@@ -501,6 +528,83 @@ class ChatService(
                 secretVault = secondUserSecretVault,
                 onConversationDeleted = ::dropSession,
             ),
+        )
+    }
+    private val ownerOperationGateway by lazy {
+        val ownerTtsHandler = me.rerere.rikkahub.owner.OwnerTtsOperationHandler(
+            settingsStore = settingsStore,
+            vault = secondUserSecretVault,
+            library = persistentTtsLibrary,
+        )
+        val ownerServiceHandler = me.rerere.rikkahub.owner.OwnerLocalServiceOperationHandler(
+            dao = hostLocalServiceDao,
+            manager = workspaceProcessManager,
+            starter = workspaceManagedProcessStarter,
+            workspaces = workspaceRepository,
+            httpClient = ownerHttpClient,
+            specStore = ownerServiceSpecStore,
+            termux = ownerTermuxServiceLauncher,
+        )
+        val executor = me.rerere.rikkahub.owner.OwnerOperationExecutor(
+            dao = hostOperationDao,
+            handler = me.rerere.rikkahub.owner.CompositeOwnerOperationHandler(
+                me.rerere.rikkahub.security.SecretOwnerOperationHandler(
+                    sessions = secretPlaintextSessions,
+                    ephemeralResults = ephemeralToolResults,
+                    settingsStore = settingsStore,
+                    vault = secondUserSecretVault,
+                ),
+                me.rerere.rikkahub.owner.OwnerSettingsOperationHandler(
+                    context = context,
+                    settingsStore = settingsStore,
+                    conversations = conversationRepo,
+                    assistantRemoval = assistantRemovalService,
+                    providerManager = providerManager,
+                    vault = secondUserSecretVault,
+                ),
+                ownerTtsHandler,
+                me.rerere.rikkahub.owner.OwnerEmotionTtsOperationHandler(
+                    settingsStore = settingsStore,
+                    serviceHandler = ownerServiceHandler,
+                    ttsHandler = ownerTtsHandler,
+                ),
+                ownerServiceHandler,
+                me.rerere.rikkahub.owner.OwnerMcpOperationHandler(
+                    settingsStore = settingsStore,
+                    manager = mcpManager,
+                    httpClient = ownerHttpClient,
+                    vault = secondUserSecretVault,
+                ),
+                me.rerere.rikkahub.owner.OwnerSkillOperationHandler(
+                    settingsStore = settingsStore,
+                    skillManager = skillManager,
+                    httpClient = ownerHttpClient,
+                ),
+                me.rerere.rikkahub.owner.OwnerWorkflowOperationHandler(
+                    repository = workflowRepository,
+                    actionRunner = workflowActionRunner,
+                ),
+                me.rerere.rikkahub.owner.OwnerUiOperationHandler(),
+                me.rerere.rikkahub.owner.OwnerDoctorOperationHandler(
+                    checks = doctorChecks,
+                    executionDoctor = executionConsistencyDoctor,
+                    operationDao = hostOperationDao,
+                    serviceDao = hostLocalServiceDao,
+                    serviceSupervisor = ownerLocalServiceSupervisor,
+                    plaintextSessions = secretPlaintextSessions,
+                ),
+                me.rerere.rikkahub.owner.ExistingHostOwnerOperationHandler(
+                    privilegedManagementBackend,
+                ),
+            ),
+            isEmergencyStopActive = agentSafetySettings::isEmergencyStop,
+            containsRuntimeSecret = runtimeSecretRedactor::containsKnownSecret,
+            fingerprinter = ownerOperationFingerprinter,
+        )
+        me.rerere.rikkahub.owner.AgentRunOwnerOperationGateway(
+            delegate = executor,
+            operations = hostOperationDao,
+            runs = agentRunRepository,
         )
     }
 
@@ -2113,6 +2217,7 @@ class ChatService(
             val isHeadless = me.rerere.rikkahub.data.ai.tools.HeadlessConversations
                 .isHeadless(conversationId)
             val toolNameSurface = me.rerere.rikkahub.data.ai.tools.ToolNameSurface()
+            val toolExecutionSurface = me.rerere.rikkahub.data.ai.tools.ToolExecutionSurface()
             val invocationCtx = me.rerere.rikkahub.data.ai.tools.ToolInvocationContext(
                 callerAssistantId = assistant.id.toString(),
                 callerConversationId = conversationId.toString(),
@@ -2120,10 +2225,12 @@ class ChatService(
                 callerWorkspaceId = assistant.workspaceId?.toString(),
                 callOrigin = callOrigin,
                 callerModelId = model.id.toString(),
+                callerProviderId = resolvedProvider.id.toString(),
                 isHeadless = isHeadless,
                 modelCanSeeImages = Modality.IMAGE in model.inputModalities,
                 privilege = privilegeContext,
                 toolNameSurface = toolNameSurface,
+                toolExecutionSurface = toolExecutionSurface,
             )
             val workspaceShellSharedStorage =
                 me.rerere.rikkahub.data.ai.tools.canMountSecondUserSharedStorage(
@@ -2329,6 +2436,28 @@ class ChatService(
             } else {
                 null
             }
+            val ownerToolSurfaceAvailable =
+                me.rerere.rikkahub.data.ai.tools.isOwnerToolSurfaceAvailable(invocationCtx)
+            val legacyOwnerRuntimeTools = if (ownerToolSurfaceAvailable) {
+                buildList {
+                    addAll(
+                        me.rerere.rikkahub.data.ai.tools.createPrivilegedManagementTools(
+                            invocationContext = invocationCtx,
+                            guard = privilegedActionGuard,
+                            backend = privilegedManagementBackend,
+                            hardDenyPolicy = hardDenyPolicy,
+                        ),
+                    )
+                    addAll(
+                        me.rerere.rikkahub.setup.createSetupTools(
+                            invocationContext = invocationCtx,
+                            coordinator = setupTransactionCoordinator,
+                        ),
+                    )
+                }
+            } else {
+                emptyList()
+            }
             generationHandler.generateText(
                 settings = settings,
                 model = model,
@@ -2374,17 +2503,27 @@ class ChatService(
                     // ask_user_unavailable. In a headless run (cron / sub-agent) there's nobody to
                     // answer, so it still auto-approves there and falls through to that graceful
                     // envelope instead of hanging the turn.
-                    if (me.rerere.rikkahub.plugin.isPluginModelToolName(toolName)) {
-                        false
-                    } else if (toolName == "linux_grant_request" || toolName == "linux_grant_revoke") {
-                        false
-                    } else if (toolName == "ask_user") {
+                    if (toolName == "ask_user") {
                         me.rerere.rikkahub.data.ai.tools.HeadlessConversations
                             .shouldAutoApprove(conversationId)
                     } else if (callOrigin in me.rerere.rikkahub.data.ai.InvocationSurfacePolicy.REMOTE) {
                         // Telegram/Web/MCP/external origins are separate principals. They never
                         // inherit second-user, YOLO, or local allow-list decisions. A future
                         // scoped AccessGrant is the only path that may pre-authorize them.
+                        false
+                    } else if (me.rerere.rikkahub.owner.OwnerAutonomyPolicy.canAutoApprove(
+                            privilege = privilegeContext,
+                            origin = callOrigin,
+                            toolName = toolName,
+                        )) {
+                        true
+                    } else if (
+                        me.rerere.rikkahub.plugin.isPluginModelToolName(toolName) ||
+                        toolName == "linux_grant_request" ||
+                        toolName == "linux_grant_revoke"
+                    ) {
+                        // Ordinary assistants retain the existing fresh-approval floor. Only the
+                        // live local Owner principal above bypasses it.
                         false
                     } else {
                         privilegeContext.autoApproveTools ||
@@ -2400,6 +2539,7 @@ class ChatService(
                             toolApprovalPreferences.current().contains(toolName)
                     }
                 },
+                runtimeOnlyTools = legacyOwnerRuntimeTools,
                 messages = conversation.currentMessages.let {
                     if (messageRange != null) {
                         it.subList(messageRange.start, messageRange.endInclusive + 1)
@@ -2516,19 +2656,11 @@ class ChatService(
                                 },
                             )
                         )
-                        addAll(
-                            me.rerere.rikkahub.data.ai.tools.createPrivilegedManagementTools(
-                                invocationContext = invocationCtx,
-                                guard = privilegedActionGuard,
-                                backend = privilegedManagementBackend,
-                                hardDenyPolicy = hardDenyPolicy,
-                            )
-                        )
-                        if (me.rerere.rikkahub.setup.isSetupToolSurfaceAvailable(invocationCtx)) {
+                        if (ownerToolSurfaceAvailable) {
                             addAll(
-                                me.rerere.rikkahub.setup.createSetupTools(
+                                me.rerere.rikkahub.data.ai.tools.createOwnerManagementTools(
                                     invocationContext = invocationCtx,
-                                    coordinator = setupTransactionCoordinator,
+                                    gateway = ownerOperationGateway,
                                 ),
                             )
                         }
@@ -2640,6 +2772,9 @@ class ChatService(
                         }
                         check(toolNameSurface.publish(availableNames, knownNames)) {
                             "tool surface was already published for conversation $conversationId"
+                        }
+                        check(toolExecutionSurface.publish(definitions)) {
+                            "tool execution surface was already published for conversation $conversationId"
                         }
                     },
                 toolDiscoverySession = toolSurfaceSession,
