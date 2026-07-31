@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.datastore.SettingsStore
+import me.rerere.rikkahub.data.datastore.WebDavConfig
 import me.rerere.rikkahub.data.repository.ConversationRepository
 import me.rerere.rikkahub.data.sync.importer.ChatboxImporter
 import me.rerere.rikkahub.data.sync.importer.CherryStudioProviderImporter
@@ -82,13 +83,13 @@ class BackupVM(
     }
 
     suspend fun exportToFile(): File {
-        val file = webDavSync.prepareBackupFile(settings.value.webDavConfig.copy())
+        val file = webDavSync.prepareBackupFile(localBackupConfig(settings.value.webDavConfig))
         recordBackupTime()
         return file
     }
 
     suspend fun restoreFromLocalFile(file: File) {
-        webDavSync.restoreFromLocalFile(file, settings.value.webDavConfig)
+        webDavSync.restoreFromLocalFile(file, localBackupConfig(settings.value.webDavConfig))
     }
 
     suspend fun restoreFromChatBox(file: File): ChatboxRestoreResult {
@@ -198,6 +199,10 @@ class BackupVM(
         }
     }
 }
+
+internal fun localBackupConfig(base: WebDavConfig): WebDavConfig = base.copy(
+    items = WebDavConfig.BackupItem.entries.toList(),
+)
 
 data class ChatboxRestoreResult(
     val importedProviders: Int,
