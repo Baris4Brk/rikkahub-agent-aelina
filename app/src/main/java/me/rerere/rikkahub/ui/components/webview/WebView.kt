@@ -46,7 +46,7 @@ internal class MyWebChromeClient(private val state: WebViewState) : WebChromeCli
     }
 }
 
-internal class MyWebViewClient(private val state: WebViewState) : WebViewClient() {
+internal open class MyWebViewClient(private val state: WebViewState) : WebViewClient() {
     override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
         super.onPageStarted(view, url, favicon)
         state.isLoading = true
@@ -82,12 +82,14 @@ private fun WebView.resetState(
 fun WebView(
     state: WebViewState,
     modifier: Modifier = Modifier,
+    client: WebViewClient? = null,
     onCreated: (WebView) -> Unit = {},
     onUpdated: (WebView) -> Unit = {},
 ) {
     // Remember the clients based on the state
     val webChromeClient = remember { MyWebChromeClient(state) }
-    val webViewClient = remember { MyWebViewClient(state) }
+    val defaultWebViewClient = remember { MyWebViewClient(state) }
+    val resolvedWebViewClient = client ?: defaultWebViewClient
 
     Box(
         modifier = modifier
@@ -111,7 +113,7 @@ fun WebView(
 
                     // Use the created clients
                     this.webChromeClient = webChromeClient
-                    this.webViewClient = webViewClient
+                    this.webViewClient = resolvedWebViewClient
 
                     state.interfaces.forEach { (name, obj) ->
                         addJavascriptInterface(obj, name)
@@ -136,9 +138,8 @@ fun WebView(
                     webView.addJavascriptInterface(obj, name)
                 }
                 Log.d(TAG, "AndroidView: Updating WebView")
-                // Ensure clients are updated if state changes (though unlikely here)
-                // webView.webChromeClient = webChromeClient
-                // webView.webViewClient = webViewClient
+                webView.webChromeClient = webChromeClient
+                webView.webViewClient = resolvedWebViewClient
 
                 // Update settings that might change
                 webView.settings.javaScriptEnabled = state.javaScriptEnabled

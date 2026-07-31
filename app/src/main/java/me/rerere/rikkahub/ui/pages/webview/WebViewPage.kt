@@ -37,13 +37,19 @@ import androidx.compose.ui.unit.dp
 import me.rerere.hugeicons.stroke.MoreVertical
 import me.rerere.rikkahub.ui.components.nav.BackButton
 import me.rerere.rikkahub.ui.components.webview.WebView
+import me.rerere.rikkahub.ui.components.webview.MERMAID_ASSET_PATH
+import me.rerere.rikkahub.ui.components.webview.RIKKAHUB_LOCAL_ORIGIN
+import me.rerere.rikkahub.ui.components.webview.isBundledMermaidHtml
 import me.rerere.rikkahub.ui.components.webview.rememberWebViewState
+import me.rerere.rikkahub.ui.components.webview.rememberRikkaHubAssetWebViewClient
 import me.rerere.rikkahub.ui.theme.JetbrainsMono
 import me.rerere.rikkahub.utils.base64Decode
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun WebViewPage(url: String, content: String) {
+    val decodedContent = remember(content) { content.base64Decode() }
+    val bundledMermaid = url.isEmpty() && isBundledMermaidHtml(decodedContent)
     val state = if (url.isNotEmpty()) {
         rememberWebViewState(
             url = url,
@@ -55,16 +61,31 @@ fun WebViewPage(url: String, content: String) {
             })
     } else {
         rememberWebViewState(
-            data = content.base64Decode(),
-            baseUrl = "https://rikkahub.local",
+            data = decodedContent,
+            baseUrl = RIKKAHUB_LOCAL_ORIGIN,
             mimeType = "text/html",
             settings = {
                 builtInZoomControls = true
                 displayZoomControls = false
                 useWideViewPort = true
                 loadWithOverviewMode = true
+                if (bundledMermaid) {
+                    allowFileAccess = false
+                    allowContentAccess = false
+                    blockNetworkLoads = true
+                    javaScriptCanOpenWindowsAutomatically = false
+                    setSupportMultipleWindows(false)
+                }
             }
         )
+    }
+    val mermaidClient = if (bundledMermaid) {
+        rememberRikkaHubAssetWebViewClient(
+            state = state,
+            allowedPaths = setOf(MERMAID_ASSET_PATH),
+        )
+    } else {
+        null
     }
 
     var showDropdown by remember { mutableStateOf(false) }
@@ -139,6 +160,7 @@ fun WebViewPage(url: String, content: String) {
     ) {
         WebView(
             state = state,
+            client = mermaidClient,
             modifier = Modifier
                 .fillMaxSize()
                 .padding(it),

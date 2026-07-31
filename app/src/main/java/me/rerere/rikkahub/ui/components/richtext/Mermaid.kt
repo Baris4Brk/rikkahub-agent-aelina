@@ -29,7 +29,11 @@ import me.rerere.hugeicons.stroke.View
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.Screen
 import me.rerere.rikkahub.ui.components.webview.WebView
+import me.rerere.rikkahub.ui.components.webview.MERMAID_ASSET_PATH
+import me.rerere.rikkahub.ui.components.webview.MERMAID_RENDERER_MARKER
+import me.rerere.rikkahub.ui.components.webview.RIKKAHUB_LOCAL_ORIGIN
 import me.rerere.rikkahub.ui.components.webview.rememberWebViewState
+import me.rerere.rikkahub.ui.components.webview.rememberRikkaHubAssetWebViewClient
 import me.rerere.rikkahub.ui.context.LocalNavController
 import me.rerere.rikkahub.ui.context.LocalToaster
 import me.rerere.rikkahub.ui.theme.LocalDarkMode
@@ -92,6 +96,7 @@ fun Mermaid(
 
     val webViewState = rememberWebViewState(
         data = html,
+        baseUrl = RIKKAHUB_LOCAL_ORIGIN,
         mimeType = "text/html",
         encoding = "UTF-8",
         interfaces = mapOf(
@@ -102,7 +107,16 @@ fun Mermaid(
             displayZoomControls = false
             useWideViewPort = true
             loadWithOverviewMode = true
+            allowFileAccess = false
+            allowContentAccess = false
+            blockNetworkLoads = true
+            javaScriptCanOpenWindowsAutomatically = false
+            setSupportMultipleWindows(false)
         }
+    )
+    val restrictedClient = rememberRikkaHubAssetWebViewClient(
+        state = webViewState,
+        allowedPaths = setOf(MERMAID_ASSET_PATH),
     )
 
     Column(
@@ -110,6 +124,7 @@ fun Mermaid(
     ) {
         WebView(
             state = webViewState,
+            client = restrictedClient,
             modifier = Modifier
                 .clip(RoundedCornerShape(4.dp))
                 .height(200.dp),
@@ -180,8 +195,10 @@ private fun buildMermaidHtml(
         <html>
         <head>
             <meta charset="UTF-8">
+            <meta name="rikkahub-renderer" content="${MERMAID_RENDERER_MARKER}">
             <meta name="viewport" content="width=1024">
-            <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+            <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'">
+            <script src="${MERMAID_ASSET_PATH}"></script>
             <style>
                 body {
                     margin: 0;
@@ -198,15 +215,26 @@ private fun buildMermaidHtml(
                 .mermaid svg {
                     background: transparent !important;
                 }
+                .render-error {
+                    color: ${errorColor};
+                    white-space: pre-wrap;
+                    padding: 8px;
+                }
+                .diagram-source {
+                    color: ${onBackground};
+                    white-space: pre-wrap;
+                    padding: 8px;
+                }
             </style>
         </head>
         <body>
-            <pre class="mermaid">
-                ${code.escapeHtml()}
-            </pre>
+            <div id="diagram" class="mermaid"></div>
+            <pre id="diagram-source" class="diagram-source">${code.escapeHtml()}</pre>
+            <pre id="render-error" class="render-error" hidden></pre>
             <script>
               mermaid.initialize({
-                    startOnLoad: true,
+                    startOnLoad: false,
+                    securityLevel: 'strict',
                     theme: 'base',
                     themeVariables: {
                         primaryColor: '${primaryColor}',
@@ -249,9 +277,27 @@ private fun buildMermaidHtml(
                     }
               });
 
+              async function renderDiagram() {
+                const source = document.getElementById('diagram-source');
+                const target = document.getElementById('diagram');
+                const error = document.getElementById('render-error');
+                try {
+                    const result = await mermaid.render('rikkahub-mermaid-diagram', source.textContent);
+                    target.innerHTML = result.svg;
+                    source.hidden = true;
+                    error.hidden = true;
+                    if (result.bindFunctions) result.bindFunctions(target);
+                } catch (cause) {
+                    target.innerHTML = '';
+                    source.hidden = false;
+                    error.textContent = 'Mermaid render failed: ' + (cause && cause.message ? cause.message : String(cause));
+                    error.hidden = false;
+                }
+              }
+
               window.exportSvgToPng = function() {
                 try {
-                    const svgElement = document.querySelector('.mermaid svg');
+                    const svgElement = document.querySelector('#diagram svg');
                     if (!svgElement) {
                         AndroidInterface.exportImage('');
                         return;
@@ -292,6 +338,7 @@ private fun buildMermaidHtml(
                     AndroidInterface.exportImage('');
                 }
               };
+              renderDiagram();
             </script>
         </body>
         </html>
