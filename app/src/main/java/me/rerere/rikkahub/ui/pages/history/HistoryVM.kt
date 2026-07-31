@@ -14,6 +14,8 @@ import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.datastore.getCurrentAssistant
 import me.rerere.rikkahub.data.model.Conversation
 import me.rerere.rikkahub.data.repository.ConversationRepository
+import me.rerere.rikkahub.data.repository.ConversationBatchDeletionResult
+import me.rerere.rikkahub.data.repository.ConversationDeletionResult
 import kotlin.uuid.Uuid
 
 private const val TAG = "HistoryVM"
@@ -32,17 +34,12 @@ class HistoryVM(
         Log.e(TAG, "Error: ${it.message}")
     }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
-    fun deleteConversation(conversation: Conversation) {
-        viewModelScope.launch {
-            conversationRepo.deleteConversation(conversation)
-        }
-    }
+    suspend fun deleteConversation(conversation: Conversation): ConversationDeletionResult =
+        conversationRepo.deleteConversation(conversation)
 
-    fun deleteAllConversations() {
-        val assistant = assistant.value ?: return
-        viewModelScope.launch {
-            conversationRepo.deleteConversationOfAssistant(assistant.id)
-        }
+    suspend fun deleteAllConversations(): ConversationBatchDeletionResult {
+        val current = assistant.value ?: return ConversationBatchDeletionResult(0, emptyList())
+        return conversationRepo.deleteConversationOfAssistant(current.id)
     }
 
     fun togglePinStatus(conversationId: Uuid) {

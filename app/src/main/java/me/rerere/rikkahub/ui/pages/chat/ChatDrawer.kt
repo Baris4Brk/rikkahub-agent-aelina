@@ -46,9 +46,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.paging.compose.collectAsLazyPagingItems
+import com.dokar.sonner.ToastType
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import me.rerere.hugeicons.HugeIcons
 import me.rerere.hugeicons.stroke.ChartColumn
@@ -66,7 +66,7 @@ import me.rerere.rikkahub.Screen
 import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.data.model.Conversation
-import me.rerere.rikkahub.data.repository.ConversationRepository
+import me.rerere.rikkahub.data.repository.ConversationDeletionResult
 import me.rerere.rikkahub.ui.components.ai.AssistantPicker
 import me.rerere.rikkahub.ui.components.ui.BackupReminderCard
 import me.rerere.rikkahub.ui.components.ui.Greeting
@@ -74,6 +74,7 @@ import me.rerere.rikkahub.ui.components.ui.Tooltip
 import me.rerere.rikkahub.ui.components.ui.UIAvatar
 import me.rerere.rikkahub.ui.components.ui.UpdateCard
 import me.rerere.rikkahub.ui.context.Navigator
+import me.rerere.rikkahub.ui.context.LocalToaster
 import me.rerere.rikkahub.ui.hooks.EditStateContent
 import me.rerere.rikkahub.ui.hooks.readBooleanPreference
 import me.rerere.rikkahub.ui.hooks.rememberIsPlayStoreVersion
@@ -82,7 +83,6 @@ import me.rerere.rikkahub.ui.modifier.onClick
 import me.rerere.rikkahub.utils.navigateToChatPage
 import me.rerere.rikkahub.utils.toDp
 import org.koin.androidx.compose.koinViewModel
-import org.koin.compose.koinInject
 import kotlin.uuid.Uuid
 
 @Composable
@@ -95,7 +95,10 @@ fun ChatDrawerContent(
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val isPlayStore = rememberIsPlayStoreVersion()
-    val repo = koinInject<ConversationRepository>()
+    val toaster = LocalToaster.current
+    val protectedDeleteMessage = stringResource(R.string.conversation_delete_protected)
+    val missingDeleteMessage = stringResource(R.string.conversation_delete_missing)
+    val failedDeleteMessage = stringResource(R.string.conversation_delete_failed)
 
     val activity = context as ComponentActivity
     val drawerVm: ChatDrawerVM = koinViewModel(viewModelStoreOwner = activity)
@@ -230,13 +233,25 @@ fun ChatDrawerContent(
                     vm.generateTitle(it, true)
                 },
                 onDelete = {
-                    vm.deleteConversation(it)
-                    // Refresh the conversation list to immediately remove the deleted item
-                    // This fixes the issue where deleted conversations sometimes remain visible
-                    // until manually clicked (issue #747)
-                    conversations.refresh()
-                    if (it.id == current.id) {
-                        navigateToChatPage(navController)
+                    scope.launch {
+                        runCatching { vm.deleteConversation(it) }
+                            .onSuccess { result ->
+                                when (result) {
+                                    is ConversationDeletionResult.Deleted -> {
+                                        conversations.refresh()
+                                        if (it.id == current.id) navigateToChatPage(navController)
+                                    }
+                                    is ConversationDeletionResult.Missing -> {
+                                        conversations.refresh()
+                                        toaster.show(missingDeleteMessage, type = ToastType.Warning)
+                                    }
+                                    is ConversationDeletionResult.RetainedSecondUser ->
+                                        toaster.show(protectedDeleteMessage, type = ToastType.Warning)
+                                }
+                            }
+                            .onFailure {
+                                toaster.show(failedDeleteMessage, type = ToastType.Error)
+                            }
                     }
                 },
                 onPin = {
@@ -252,16 +267,14 @@ fun ChatDrawerContent(
             AssistantPicker(
                 settings = settings,
                 onUpdateSettings = {
-                    vm.updateSettings(it)
                     scope.launch {
-                        val id = if (context.readBooleanPreference("create_new_conversation_on_start", true)) {
-                            Uuid.random()
-                        } else {
-                            repo.getConversationsOfAssistant(it.assistantId)
-                                .first()
-                                .firstOrNull()
-                                ?.id ?: Uuid.random()
-                        }
+                        val id = vm.selectAssistantAndResolveConversation(
+                            newSettings = it,
+                            createNewConversation = context.readBooleanPreference(
+                                "create_new_conversation_on_start",
+                                true,
+                            ),
+                        ) ?: return@launch
                         navigateToChatPage(navigator = navController, chatId = id)
                     }
                 },

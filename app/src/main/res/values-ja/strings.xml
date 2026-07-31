@@ -1968,4 +1968,8 @@ mDNSアドレス: .localホスト名を使用し、IPを知らなくても同じ
   <string name="system_assistant_execution_succeeded_recently">実行が完了しました</string>
   <string name="system_assistant_execution_background_service_running">バックグラウンドサービス実行中</string>
   <string name="system_assistant_view_approval">承認を確認</string>
+  <string name="conversation_delete_protected">保護された第二ユーザーの会話は保持されました。</string>
+  <string name="conversation_delete_missing">会話は既に存在しません。リストを更新しました。</string>
+  <string name="conversation_delete_failed">会話を削除できませんでした。</string>
+  <string name="history_page_delete_all_result">%1$d 件の会話を削除し、保護された %2$d 件を保持しました。</string>
 </resources>

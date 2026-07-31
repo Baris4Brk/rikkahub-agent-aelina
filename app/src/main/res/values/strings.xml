@@ -2354,4 +2354,8 @@
   <string name="second_user_plaintext_mode_confirm">I understand, enable</string>
   <string name="owner_runtime_section_title">Owner Host Runtime</string>
   <string name="owner_runtime_section_desc">Direct one-call management, recoverable operations, local services, and redacted diagnostics for the active second user.</string>
+  <string name="conversation_delete_protected">The protected second-user conversation was retained.</string>
+  <string name="conversation_delete_missing">The conversation no longer exists. The list has been refreshed.</string>
+  <string name="conversation_delete_failed">Unable to delete the conversation.</string>
+  <string name="history_page_delete_all_result">Deleted %1$d conversations; retained %2$d protected conversations.</string>
 </resources>

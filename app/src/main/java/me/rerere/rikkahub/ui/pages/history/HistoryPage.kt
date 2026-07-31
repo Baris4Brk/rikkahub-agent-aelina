@@ -43,6 +43,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -51,6 +52,7 @@ import kotlinx.coroutines.launch
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.Screen
 import me.rerere.rikkahub.data.model.Conversation
+import me.rerere.rikkahub.data.repository.ConversationDeletionResult
 import me.rerere.rikkahub.ui.components.nav.BackButton
 import me.rerere.rikkahub.ui.context.LocalNavController
 import me.rerere.rikkahub.utils.navigateToChatPage
@@ -61,11 +63,15 @@ import org.koin.androidx.compose.koinViewModel
 @Composable
 fun HistoryPage(vm: HistoryVM = koinViewModel()) {
     val navController = LocalNavController.current
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
     var showDeleteAllDialog by remember { mutableStateOf(false) }
 
     val conversations by vm.conversations.collectAsStateWithLifecycle()
+    val protectedDeleteMessage = stringResource(R.string.conversation_delete_protected)
+    val missingDeleteMessage = stringResource(R.string.conversation_delete_missing)
+    val failedDeleteMessage = stringResource(R.string.conversation_delete_failed)
 
     Scaffold(
         topBar = {
@@ -117,16 +123,27 @@ fun HistoryPage(vm: HistoryVM = koinViewModel()) {
                         scope.launch {
                             // 先获取完整的对话数据（包含 messageNodes），用于撤销恢复
                             val fullConversation = vm.getFullConversation(conversation.id) ?: conversation
-                            vm.deleteConversation(conversation)
-                            val result = snackbarHostState.showSnackbar(
-                                message = snackMessageDeleted,
-                                actionLabel = snackMessageUndo,
-                                withDismissAction = true,
-                            )
-                            if (result == SnackbarResult.ActionPerformed) {
-                                vm.restoreConversation(fullConversation)
+                            runCatching { vm.deleteConversation(conversation) }
+                                .onSuccess { deletion ->
+                                    when (deletion) {
+                                        is ConversationDeletionResult.Deleted -> {
+                                            val result = snackbarHostState.showSnackbar(
+                                                message = snackMessageDeleted,
+                                                actionLabel = snackMessageUndo,
+                                                withDismissAction = true,
+                                            )
+                                            if (result == SnackbarResult.ActionPerformed) {
+                                                vm.restoreConversation(fullConversation)
+                                            }
+                                        }
+                                        is ConversationDeletionResult.RetainedSecondUser ->
+                                            snackbarHostState.showSnackbar(protectedDeleteMessage)
+                                        is ConversationDeletionResult.Missing ->
+                                            snackbarHostState.showSnackbar(missingDeleteMessage)
+                                    }
+                                }
+                                .onFailure { snackbarHostState.showSnackbar(failedDeleteMessage) }
                             }
-                        }
                     },
                     onTogglePin = { vm.togglePinStatus(conversation.id) },
                     modifier = Modifier
@@ -145,8 +162,21 @@ fun HistoryPage(vm: HistoryVM = koinViewModel()) {
             confirmButton = {
                 TextButton(
                     onClick = {
-                        vm.deleteAllConversations()
                         showDeleteAllDialog = false
+                        scope.launch {
+                            val result = runCatching { vm.deleteAllConversations() }
+                                .getOrElse {
+                                    snackbarHostState.showSnackbar(failedDeleteMessage)
+                                    return@launch
+                                }
+                            snackbarHostState.showSnackbar(
+                                message = context.resources.getString(
+                                    R.string.history_page_delete_all_result,
+                                    result.deleted,
+                                    result.retained.size,
+                                ),
+                            )
+                        }
                     }
                 ) {
                     Text(stringResource(R.string.history_page_delete))

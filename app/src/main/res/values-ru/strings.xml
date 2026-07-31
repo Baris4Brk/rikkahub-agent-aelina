@@ -1967,4 +1967,8 @@
   <string name="system_assistant_execution_succeeded_recently">Выполнение завершено</string>
   <string name="system_assistant_execution_background_service_running">Фоновая служба работает</string>
   <string name="system_assistant_view_approval">Просмотреть разрешение</string>
+  <string name="conversation_delete_protected">Защищённый диалог второго пользователя сохранён.</string>
+  <string name="conversation_delete_missing">Диалог больше не существует. Список обновлён.</string>
+  <string name="conversation_delete_failed">Не удалось удалить диалог.</string>
+  <string name="history_page_delete_all_result">Удалено диалогов: %1$d; сохранено защищённых: %2$d.</string>
 </resources>

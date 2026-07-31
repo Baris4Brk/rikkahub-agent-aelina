@@ -1967,4 +1967,8 @@ mDNS 주소: .local 호스트네임을 사용하며, IP를 몰라도 같은 네�
   <string name="system_assistant_execution_succeeded_recently">실행 완료</string>
   <string name="system_assistant_execution_background_service_running">백그라운드 서비스 실행 중</string>
   <string name="system_assistant_view_approval">승인 보기</string>
+  <string name="conversation_delete_protected">보호된 두 번째 사용자 대화가 유지되었습니다.</string>
+  <string name="conversation_delete_missing">대화가 더 이상 존재하지 않습니다. 목록을 새로 고쳤습니다.</string>
+  <string name="conversation_delete_failed">대화를 삭제할 수 없습니다.</string>
+  <string name="history_page_delete_all_result">대화 %1$d개를 삭제하고 보호된 대화 %2$d개를 유지했습니다.</string>
 </resources>

@@ -1965,4 +1965,8 @@
   <string name="system_assistant_execution_succeeded_recently">執行完成</string>
   <string name="system_assistant_execution_background_service_running">背景服務執行中</string>
   <string name="system_assistant_view_approval">查看授權</string>
+  <string name="conversation_delete_protected">受保護的第二使用者對話已保留。</string>
+  <string name="conversation_delete_missing">此對話已不存在，清單已重新整理。</string>
+  <string name="conversation_delete_failed">無法刪除此對話。</string>
+  <string name="history_page_delete_all_result">已刪除 %1$d 個對話；保留了 %2$d 個受保護對話。</string>
 </resources>

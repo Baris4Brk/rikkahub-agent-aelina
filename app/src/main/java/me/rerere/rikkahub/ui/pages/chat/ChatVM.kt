@@ -16,9 +16,12 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import me.rerere.rikkahub.data.ai.SteeringState
 import me.rerere.rikkahub.service.chat.CommandOrigin
 import me.rerere.rikkahub.service.chat.QueueStatus
@@ -46,6 +49,7 @@ import me.rerere.rikkahub.data.model.Conversation
 import me.rerere.rikkahub.data.model.MessageNode
 import me.rerere.rikkahub.data.model.NodeFavoriteTarget
 import me.rerere.rikkahub.data.repository.ConversationRepository
+import me.rerere.rikkahub.data.repository.ConversationDeletionResult
 import me.rerere.rikkahub.data.repository.FavoriteRepository
 import me.rerere.rikkahub.service.ChatError
 import me.rerere.rikkahub.service.ChatService
@@ -54,6 +58,7 @@ import me.rerere.rikkahub.ui.hooks.ChatInputState
 import me.rerere.rikkahub.utils.UiState
 import me.rerere.rikkahub.utils.UpdateChecker
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.uuid.Uuid
 
 private const val TAG = "ChatVM"
@@ -68,6 +73,8 @@ class ChatVM(
     private val filesManager: FilesManager,
     private val favoriteRepository: FavoriteRepository,
 ) : ViewModel() {
+    private val assistantSelectionMutex = Mutex()
+    private val assistantSelectionSequence = AtomicLong(0)
     private val _conversationId: Uuid = Uuid.parse(id)
     val conversation: StateFlow<Conversation> = chatService.getConversationFlow(_conversationId)
     var chatListInitialized by mutableStateOf(false) // 聊天列表是否已经滚动到底部
@@ -165,6 +172,40 @@ class ChatVM(
             // 检查用户头像是否有变化，如果有则删除旧头像
             checkUserAvatarDelete(oldSettings, newSettings)
             settingsStore.update(newSettings)
+        }
+    }
+
+    /**
+     * Persist an explicit assistant selection before resolving its destination conversation.
+     * A newer picker action supersedes an older in-flight action and is the only one allowed to
+     * navigate, so rapid taps cannot open a conversation belonging to the previous assistant.
+     */
+    suspend fun selectAssistantAndResolveConversation(
+        newSettings: Settings,
+        createNewConversation: Boolean,
+    ): Uuid? {
+        val sequence = assistantSelectionSequence.incrementAndGet()
+        return assistantSelectionMutex.withLock {
+            if (sequence != assistantSelectionSequence.get()) return@withLock null
+            checkUserAvatarDelete(settings.value, newSettings)
+            settingsStore.update(newSettings)
+            if (sequence != assistantSelectionSequence.get()) return@withLock null
+            val protectedConversationId = newSettings.secondUserAuthority
+                .normalized()
+                .takeIf { it.assistantId == newSettings.assistantId }
+                ?.conversationId
+            if (protectedConversationId != null) {
+                return@withLock protectedConversationId
+            }
+            if (createNewConversation) {
+                Uuid.random()
+            } else {
+                conversationRepo.getConversationsOfAssistant(newSettings.assistantId)
+                    .first()
+                    .firstOrNull()
+                    ?.id
+                    ?: Uuid.random()
+            }
         }
     }
 
@@ -433,11 +474,8 @@ class ChatVM(
         }
     }
 
-    fun deleteConversation(conversation: Conversation) {
-        viewModelScope.launch {
-            conversationRepo.deleteConversation(conversation)
-        }
-    }
+    suspend fun deleteConversation(conversation: Conversation): ConversationDeletionResult =
+        conversationRepo.deleteConversation(conversation)
 
     fun updatePinnedStatus(conversation: Conversation) {
         viewModelScope.launch {

@@ -2218,4 +2218,8 @@ mDNS 地址：使用 .local 主机名，同一网络中的其他设备可通过�
   <string name="system_assistant_execution_succeeded_recently">执行完成</string>
   <string name="system_assistant_execution_background_service_running">后台服务运行中</string>
   <string name="system_assistant_view_approval">查看授权</string>
+  <string name="conversation_delete_protected">受保护的第二用户会话已保留。</string>
+  <string name="conversation_delete_missing">该会话已不存在，列表已刷新。</string>
+  <string name="conversation_delete_failed">无法删除该会话。</string>
+  <string name="history_page_delete_all_result">已删除 %1$d 个会话；保留了 %2$d 个受保护会话。</string>
 </resources>
