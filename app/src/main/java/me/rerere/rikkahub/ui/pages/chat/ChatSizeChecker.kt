@@ -11,6 +11,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.res.stringResource
 import me.rerere.ai.core.MessageRole
+import me.rerere.ai.core.currentPromptTokens
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.data.model.Conversation
 
@@ -28,17 +29,19 @@ data class ConversationSizeInfo(
 
 @Composable
 fun rememberConversationSizeInfo(conversation: Conversation): ConversationSizeInfo {
-    // Key by node count + last node's id to avoid list-reference comparison on every recomp.
+    val lastAssistantInputTokens = conversation.messageNodes.asReversed()
+        .map { it.currentMessage }
+        .firstOrNull { it.role == MessageRole.ASSISTANT }
+        ?.usage
+        ?.currentPromptTokens
+        ?: 0
+    // Usage is updated while the current node keeps the same id, so include the latest request
+    // count in the key instead of retaining a stale cumulative warning decision.
     val nodesKey = conversation.messageNodes.size.toString() +
-        (conversation.messageNodes.lastOrNull()?.id?.toString() ?: "")
+        (conversation.messageNodes.lastOrNull()?.id?.toString() ?: "") +
+        lastAssistantInputTokens
     return remember(nodesKey) {
         val nodeCount = conversation.messageNodes.size
-        val lastAssistantInputTokens = conversation.messageNodes.asReversed()
-            .map { it.currentMessage }
-            .firstOrNull { it.role == MessageRole.ASSISTANT }
-            ?.usage
-            ?.promptTokens
-            ?: 0
         val exceedNodeCountThreshold = nodeCount > MESSAGE_NODE_WARNING_THRESHOLD
         val exceedInputTokenThreshold = lastAssistantInputTokens > LAST_ASSISTANT_INPUT_TOKEN_WARNING_THRESHOLD
         ConversationSizeInfo(

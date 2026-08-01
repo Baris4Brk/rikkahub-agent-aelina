@@ -5,6 +5,7 @@ import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessageAnnotation
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertSame
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ManualCompressionContextPolicyTest {
@@ -54,5 +55,37 @@ class ManualCompressionContextPolicyTest {
 
         assertEquals(536, selected.size)
         assertSame(summaries.first(), selected.first())
+    }
+
+    @Test
+    fun `tool loop keeps current turn and a stable recent user boundary`() {
+        val history = List(100) { index -> UIMessage.user("history-$index") }
+        val currentUser = UIMessage.user("current task")
+        val toolReply = UIMessage.assistant("tool result")
+        val messages = history + currentUser + toolReply
+
+        val selected = messages.selectToolLoopContinuationContext(recentHistoryMessageLimit = 8)
+
+        assertEquals(10, selected.size)
+        assertSame(history[92], selected.first())
+        assertSame(currentUser, selected[selected.lastIndex - 1])
+        assertSame(toolReply, selected.last())
+    }
+
+    @Test
+    fun `tool loop preserves explicit manual compression summaries without duplicating them`() {
+        val summary = UIMessage.user("summary").copy(
+            annotations = listOf(UIMessageAnnotation.ManualCompressionSummary(0, 1)),
+        )
+        val history = List(50) { index -> UIMessage.user("history-$index") }
+        val currentUser = UIMessage.user("current task")
+        val messages = listOf(summary) + history + currentUser + UIMessage.assistant("tool")
+
+        val selected = messages.selectToolLoopContinuationContext(recentHistoryMessageLimit = 4)
+
+        assertSame(summary, selected.first())
+        assertEquals(1, selected.count { it.id == summary.id })
+        assertTrue(selected.any { it.id == currentUser.id })
+        assertEquals(7, selected.size)
     }
 }

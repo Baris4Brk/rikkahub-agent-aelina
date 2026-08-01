@@ -1973,4 +1973,6 @@
   <string name="history_page_delete_all_result">Удалено диалогов: %1$d; сохранено защищённых: %2$d.</string>
   <string name="setting_tts_default_playback_speed">Скорость воспроизведения</string>
   <string name="setting_tts_default_playback_speed_desc">Применяется к обычному чтению, сохранённому TTS и повторам из кэша. Скорость синтеза Provider настраивается отдельно.</string>
+  <string name="chat_token_usage_latest">Текущий ввод: %1$s · Новые: %2$s · Кэш: %3$s</string>
+  <string name="chat_token_usage_turn">За ход: %1$s · вызовов: %2$d · вывод: %3$s</string>
 </resources>

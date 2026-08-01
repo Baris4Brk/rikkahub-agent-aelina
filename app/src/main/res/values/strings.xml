@@ -2360,4 +2360,6 @@
   <string name="history_page_delete_all_result">Deleted %1$d conversations; retained %2$d protected conversations.</string>
   <string name="setting_tts_default_playback_speed">Default playback speed</string>
   <string name="setting_tts_default_playback_speed_desc">Applied to normal reading, saved TTS playback, and cached replays. Provider synthesis speed remains separate.</string>
+  <string name="chat_token_usage_latest">Latest input %1$s · Fresh %2$s · Cache %3$s</string>
+  <string name="chat_token_usage_turn">Turn input %1$s · %2$d calls · Output %3$s</string>
 </resources>

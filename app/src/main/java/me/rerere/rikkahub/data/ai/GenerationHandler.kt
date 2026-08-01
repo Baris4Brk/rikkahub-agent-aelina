@@ -807,6 +807,8 @@ class GenerationHandler(
                         runControl = runControl,
                         contextMessages = if (forceFinalization) {
                             messages.currentTurnForFinalAnswer()
+                        } else if (messages.lastOrNull()?.getTools()?.isNotEmpty() == true) {
+                            messages.selectToolLoopContinuationContext()
                         } else {
                             null
                         },

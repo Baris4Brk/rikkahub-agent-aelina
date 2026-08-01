@@ -1,5 +1,6 @@
 package me.rerere.ai.core
 
+import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -68,6 +69,45 @@ class UsageTest {
         assertEquals(336_128, accumulated.cachedTokens)
         assertEquals(362_236, accumulated.totalTokens)
         assertEquals(0.03, accumulated.cost!!, 1e-9)
+        assertEquals(25_399, accumulated.currentPromptTokens)
+        assertEquals(225, accumulated.currentCompletionTokens)
+        assertEquals(0, accumulated.currentCachedTokens)
+        assertEquals(25_399, accumulated.currentFreshPromptTokens)
+        assertEquals(2, accumulated.providerCallCount)
+    }
+
+    @Test
+    fun `accumulate keeps latest request separate from a large turn total`() {
+        val accumulated = (null as TokenUsage?)
+            .accumulate(TokenUsage(promptTokens = 597_000, cachedTokens = 596_900))
+            .accumulate(TokenUsage(promptTokens = 598_000, cachedTokens = 597_800))
+            .accumulate(TokenUsage(promptTokens = 599_000, cachedTokens = 598_700))
+
+        assertEquals(1_794_000, accumulated.promptTokens)
+        assertEquals(599_000, accumulated.currentPromptTokens)
+        assertEquals(598_700, accumulated.currentCachedTokens)
+        assertEquals(300, accumulated.currentFreshPromptTokens)
+        assertEquals(3, accumulated.providerCallCount)
+    }
+
+    @Test
+    fun `legacy persisted usage falls back to its only available snapshot`() {
+        val legacy = TokenUsage(promptTokens = 17_000_000, cachedTokens = 16_900_000)
+
+        assertEquals(17_000_000, legacy.currentPromptTokens)
+        assertEquals(16_900_000, legacy.currentCachedTokens)
+        assertEquals(100_000, legacy.currentFreshPromptTokens)
+    }
+
+    @Test
+    fun `legacy usage json decodes without a database migration`() {
+        val legacy = Json.decodeFromString<TokenUsage>(
+            """{"promptTokens":597059,"completionTokens":554,"cachedTokens":596992,"totalTokens":597613}"""
+        )
+
+        assertEquals(597_059, legacy.currentPromptTokens)
+        assertEquals(596_992, legacy.currentCachedTokens)
+        assertEquals(0, legacy.providerCallCount)
     }
 
     @Test

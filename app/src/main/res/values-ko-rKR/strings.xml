@@ -1973,4 +1973,6 @@ mDNS 주소: .local 호스트네임을 사용하며, IP를 몰라도 같은 네�
   <string name="history_page_delete_all_result">대화 %1$d개를 삭제하고 보호된 대화 %2$d개를 유지했습니다.</string>
   <string name="setting_tts_default_playback_speed">기본 재생 속도</string>
   <string name="setting_tts_default_playback_speed_desc">일반 읽기, 저장된 TTS 재생 및 캐시 다시 재생에 적용됩니다. Provider 합성 속도는 별도입니다.</string>
+  <string name="chat_token_usage_latest">이번 입력 %1$s · 신규 %2$s · 캐시 %3$s</string>
+  <string name="chat_token_usage_turn">턴 입력 %1$s · %2$d회 호출 · 출력 %3$s</string>
 </resources>
