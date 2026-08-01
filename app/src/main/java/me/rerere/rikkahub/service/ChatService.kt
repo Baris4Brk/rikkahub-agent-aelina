@@ -571,6 +571,35 @@ class ChatService(
                     pluginInstaller = pluginPackageInstaller,
                     plugins = pluginRegistryStore,
                 ),
+                me.rerere.rikkahub.owner.OwnerRunOperationHandler(
+                    controller = object : me.rerere.rikkahub.owner.OwnerRunController {
+                        override suspend fun snapshot(conversationId: Uuid): me.rerere.rikkahub.owner.OwnerRunSnapshot {
+                            val exists = conversationRepo.existsConversationById(conversationId)
+                            if (!exists) return me.rerere.rikkahub.owner.OwnerRunSnapshot(false, "Missing", null, emptySet())
+                            val runtime = getRuntimeStateFlow(conversationId).value
+                            val queue = getQueueStatusFlow(conversationId).value
+                            return me.rerere.rikkahub.owner.OwnerRunSnapshot(
+                                exists = true,
+                                runtimeState = runtime::class.simpleName ?: "Unknown",
+                                activeCommandId = queue.activeCommandId,
+                                pendingCommandIds = queue.pendingCommandIds.toSet(),
+                            )
+                        }
+
+                        override suspend fun cancel(conversationId: Uuid, commandId: Uuid?): me.rerere.rikkahub.owner.OwnerRunSubmission {
+                            val queue = getQueueStatusFlow(conversationId).value
+                            val result = when {
+                                commandId != null && commandId in queue.pendingCommandIds -> cancelQueuedCommand(conversationId, commandId)
+                                commandId != null && commandId != queue.activeCommandId -> return me.rerere.rikkahub.owner.OwnerRunSubmission(false, "RUN_COMMAND_NOT_FOUND")
+                                else -> stopGeneration(conversationId)
+                            }
+                            return result.toOwnerRunSubmission()
+                        }
+
+                        override suspend fun retryLastAssistant(conversationId: Uuid): me.rerere.rikkahub.owner.OwnerRunSubmission =
+                            submitOwnerRetryLastAssistant(conversationId).toOwnerRunSubmission()
+                    },
+                ),
                 me.rerere.rikkahub.owner.OwnerApplicationControlHandler(
                     settingsStore = settingsStore,
                     plugins = pluginRegistryStore,
@@ -1832,6 +1861,23 @@ class ChatService(
                 )
             }
         }
+    }
+
+    private suspend fun submitOwnerRetryLastAssistant(conversationId: Uuid): SubmitResult {
+        val conversation = conversationRepo.getConversationById(conversationId)
+            ?: return SubmitResult.Rejected("Conversation not found")
+        val message = conversation.currentMessages.lastOrNull { it.role == MessageRole.ASSISTANT }
+            ?: return SubmitResult.Rejected("No assistant message to retry")
+        return submitCommand(
+            conversationId = conversationId,
+            command = RegenerateCommand(
+                targetMessageId = message.id,
+                expectedTargetVersion = 0L,
+                expectedBranchHeadMessageId = message.id,
+                policy = me.rerere.rikkahub.service.chat.RegeneratePolicy.REJECT_IF_BUSY,
+            ),
+            origin = CommandOrigin.APP_UI,
+        )
     }
 
     private suspend fun executeRegenerateInline(
@@ -3874,8 +3920,14 @@ class ChatService(
     }
 
     // 停止当前会话生成任务（不清理会话缓存�?
-    suspend fun stopGeneration(conversationId: Uuid) {
+    suspend fun stopGeneration(conversationId: Uuid): SubmitResult =
         submitEmergency(conversationId, StopCommand(), CommandOrigin.APP_UI)
-    }
 
+}
+
+private fun SubmitResult.toOwnerRunSubmission(): me.rerere.rikkahub.owner.OwnerRunSubmission = when (this) {
+    is SubmitResult.Accepted -> me.rerere.rikkahub.owner.OwnerRunSubmission(true, "RUN_CONTROL_ACCEPTED", commandId)
+    is SubmitResult.QueueFull -> me.rerere.rikkahub.owner.OwnerRunSubmission(false, "RUN_QUEUE_FULL")
+    is SubmitResult.RuntimeUnavailable -> me.rerere.rikkahub.owner.OwnerRunSubmission(false, "RUN_RUNTIME_UNAVAILABLE")
+    is SubmitResult.Rejected -> me.rerere.rikkahub.owner.OwnerRunSubmission(false, "RUN_CONTROL_REJECTED")
 }

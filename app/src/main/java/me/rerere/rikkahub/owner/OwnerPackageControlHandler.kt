@@ -102,7 +102,7 @@ class OwnerPackageControlHandler(
                 "PLUGIN_INSTALL_ROLLED_BACK",
             )
             is Receipt.PetInstalled -> OwnerCompensationResult(
-                !receipt.createdNew || deleteInstalledPet(receipt.packageId),
+                receipt.createdNew && deleteInstalledPet(receipt.packageId),
                 if (receipt.createdNew) "PET_INSTALL_ROLLED_BACK" else "PET_REPLACEMENT_NOT_REVERSIBLE",
             )
             is Receipt.PetSelectionChanged -> {

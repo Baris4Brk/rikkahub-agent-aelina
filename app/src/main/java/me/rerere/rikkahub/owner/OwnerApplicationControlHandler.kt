@@ -241,7 +241,11 @@ class OwnerApplicationControlHandler(
     private fun pluginMutation(index: Int, action: OwnerAction, transform: (InstalledPluginRecord) -> InstalledPluginRecord): OwnerAppliedAction {
         val id = action.arguments.string("plugin_id") ?: return failure(index, action, "PLUGIN_ID_REQUIRED", "plugin_id is required.")
         val before = plugins.get(id) ?: return failure(index, action, "PLUGIN_NOT_FOUND", "Plugin does not exist.")
-        plugins.update(id, transform)
+        val after = transform(before)
+        if (after == before) {
+            return success(index, action, "PLUGIN_ALREADY_CONFIGURED", "Plugin already matches the requested state.")
+        }
+        plugins.update(id) { after }
         return success(index, action, "PLUGIN_UPDATED", "Plugin registry updated.", receipt = ControlReceipt.PluginChanged(before))
     }
 
@@ -458,6 +462,9 @@ class OwnerApplicationControlHandler(
         action.arguments.boolean("background_automation")?.let { safety.setBackgroundAutomationEnabled(it) }
         action.arguments.boolean("allow_while_locked")?.let { safety.setAllowWhileDeviceLocked(it) }
         action.arguments.boolean("privileged_bridge")?.let { safety.setPrivilegedBridgeEnabled(it) }
+        if (safetySnapshot() == before) {
+            return success(index, action, "SAFETY_ALREADY_CONFIGURED", "Safety capability settings already match the requested state.")
+        }
         return success(index, action, "SAFETY_CAPABILITIES_UPDATED", "Safety capability settings updated; Emergency Stop was not changed.", receipt = ControlReceipt.SafetyChanged(before))
     }
 
@@ -505,7 +512,11 @@ class OwnerApplicationControlHandler(
         transform: (Settings) -> Settings,
     ): OwnerAppliedAction {
         val before = settingsStore.settingsFlow.value
-        settingsStore.update(transform)
+        val after = transform(before)
+        if (after == before) {
+            return success(index, action, "OWNER_SETTINGS_ALREADY_CONFIGURED", "Settings already match the requested state.", data)
+        }
+        settingsStore.update { after }
         return success(index, action, "OWNER_SETTINGS_UPDATED", "Settings updated through the shared domain facade.", data, ControlReceipt.SettingsChanged(before))
     }
 
