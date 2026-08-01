@@ -94,7 +94,7 @@ object OwnerActionRegistry {
             action("tts_list", OwnerOperationRisk.READ_ONLY),
             action("tts_create_generic_http", OwnerOperationRisk.REVERSIBLE_WRITE, "tts_provider_id?, name?, endpoint, method?, body_encoding?, body_template?, headers?, response_mode?, response_json_path?, audio_format?, voice?, language?, allow_private_network?, max_response_bytes?, vault_slot_id?"),
             action("tts_update", OwnerOperationRisk.REVERSIBLE_WRITE, "tts_provider_id, same optional Generic HTTP fields as create"),
-            action("tts_delete", OwnerOperationRisk.IRREVERSIBLE, "tts_provider_id"),
+            action("tts_delete", OwnerOperationRisk.IRREVERSIBLE, "tts_provider_id, replacement_tts_provider_id?"),
             action("tts_test", OwnerOperationRisk.EXTERNAL_SIDE_EFFECT, "tts_provider_id, text?"),
             action("tts_play", OwnerOperationRisk.EXTERNAL_SIDE_EFFECT, "artifact_id? or text?"),
             action("tts_library_list", OwnerOperationRisk.READ_ONLY, "limit?, offset?"),

@@ -9,6 +9,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import me.rerere.rikkahub.data.datastore.SettingsStore
+import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.datastore.normalizedTtsPlaybackSpeed
 import me.rerere.rikkahub.privilege.PrivilegedSessionContext
 import me.rerere.rikkahub.security.SecretBinding
@@ -137,6 +138,14 @@ class OwnerTtsOperationHandler(
                 is TtsReceipt.PreviousPlaybackSpeed -> settingsStore.update {
                     it.copy(defaultTTSPlaybackSpeed = receipt.speed)
                 }
+                is TtsReceipt.DeletedProvider -> {
+                    settingsStore.update { receipt.settings }
+                    restoreBindings(
+                        id = receipt.providerId,
+                        authoritySubjectId = request.authoritySubjectId,
+                        snapshot = receipt.bindings,
+                    )
+                }
             }
             OwnerCompensationResult(true, "TTS_STATE_RESTORED")
         }.getOrElse { OwnerCompensationResult(false, "TTS_COMPENSATION_FAILED") }
@@ -228,14 +237,44 @@ class OwnerTtsOperationHandler(
         val id = action.arguments.uuid("tts_provider_id")
             ?: return failure(index, action.type, "TTS_ID_REQUIRED", "tts_provider_id is required.")
         val settings = settingsStore.settingsFlow.value
-        if (id == settings.selectedTTSProviderId) return failure(index, action.type, "TTS_IN_USE", "Switch the default TTS Provider before deleting it.")
         if (settings.ttsProviders.none { it.id == id }) return failure(index, action.type, "TTS_NOT_FOUND", "TTS Provider does not exist.")
-        settingsStore.update { it.copy(ttsProviders = it.ttsProviders.filterNot { provider -> provider.id == id }) }
-        vault.listMetadata(request.authoritySubjectId).forEach { slot ->
-            val filtered = slot.bindings.filterNot { it.kind == SecretBindingKind.TTS && it.targetId == id.toString() }
-            if (filtered.size != slot.bindings.size) vault.updateBindings(slot.slotId, request.authoritySubjectId, filtered)
+        val replacementId = action.arguments.uuid("replacement_tts_provider_id")
+        if (action.arguments.string("replacement_tts_provider_id") != null && replacementId == null) {
+            return failure(index, action.type, "TTS_REPLACEMENT_INVALID", "replacement_tts_provider_id must be a UUID.")
         }
-        return success(index, action.type, "TTS_DELETED", "Unreferenced TTS Provider deleted.")
+        if (id == settings.selectedTTSProviderId && replacementId == null) {
+            return failure(index, action.type, "TTS_REPLACEMENT_REQUIRED", "Deleting the active TTS Provider requires replacement_tts_provider_id in the same action.")
+        }
+        if (replacementId != null && (replacementId == id || settings.ttsProviders.none { it.id == replacementId })) {
+            return failure(index, action.type, "TTS_REPLACEMENT_INVALID", "Replacement TTS Provider does not exist or equals the deleted Provider.")
+        }
+        val bindingSnapshot = snapshotBindings(id, request.authoritySubjectId)
+        val after = settings.copy(
+            ttsProviders = settings.ttsProviders.filterNot { provider -> provider.id == id },
+            selectedTTSProviderId = if (settings.selectedTTSProviderId == id) requireNotNull(replacementId)
+            else settings.selectedTTSProviderId,
+        )
+        settingsStore.update { after }
+        try {
+            removeBindings(id, request.authoritySubjectId)
+        } catch (error: Throwable) {
+            settingsStore.update { settings }
+            runCatching { restoreBindings(id, request.authoritySubjectId, bindingSnapshot) }
+            throw error
+        }
+        val verified = settingsStore.settingsFlow.value
+        if (verified.ttsProviders.any { it.id == id } || verified.selectedTTSProviderId == id) {
+            settingsStore.update { settings }
+            restoreBindings(id, request.authoritySubjectId, bindingSnapshot)
+            return failure(index, action.type, "TTS_DELETE_VERIFY_FAILED", "TTS replacement or deletion could not be confirmed.")
+        }
+        return success(
+            index,
+            action.type,
+            "TTS_DELETED",
+            "TTS Provider references were switched and the old Provider was deleted.",
+            receipt = TtsReceipt.DeletedProvider(settings, id, bindingSnapshot),
+        )
     }
 
     private suspend fun test(index: Int, request: OwnerOperationRequest, action: OwnerAction): OwnerAppliedAction {
@@ -451,6 +490,11 @@ class OwnerTtsOperationHandler(
         ) : TtsReceipt
         data class PreviousDefault(val id: Uuid) : TtsReceipt
         data class PreviousPlaybackSpeed(val speed: Float) : TtsReceipt
+        data class DeletedProvider(
+            val settings: Settings,
+            val providerId: Uuid,
+            val bindings: Map<String, List<SecretBinding>>,
+        ) : TtsReceipt
     }
 
     private companion object {
@@ -463,7 +507,7 @@ class OwnerTtsOperationHandler(
             "tts_list" to emptySet(),
             "tts_create_generic_http" to GENERIC_FIELDS + "tts_provider_id",
             "tts_update" to GENERIC_FIELDS + "tts_provider_id",
-            "tts_delete" to setOf("tts_provider_id"),
+            "tts_delete" to setOf("tts_provider_id", "replacement_tts_provider_id"),
             "tts_test" to setOf("tts_provider_id", "text"),
             "tts_play" to setOf("artifact_id", "text"),
             "tts_library_list" to setOf("limit", "offset"),
