@@ -464,6 +464,9 @@ class RikkaHubApp : Application() {
             // about is the LifecycleRegistry.addObserver call inside ChatService.<init>,
             // which Android requires to happen on the main thread.
             get<me.rerere.rikkahub.service.ChatService>()
+            // Installs the one-way Owner Emergency Stop bridge after ChatService exists,
+            // avoiding a DI cycle while keeping deactivation on the trusted user page only.
+            get<me.rerere.rikkahub.data.ai.EmergencyStopCoordinator>()
         } catch (t: Throwable) {
             Log.e(TAG, "eagerlyInitChatService failed", t)
         }

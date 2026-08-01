@@ -35,6 +35,9 @@ object QuickCaptureInvocationRegistry : InvocationSurfaceContextProvider {
         return QuickCaptureOverlayToken(id)
     }
 
+    /** Read-only host verification; it grants no run lease and exposes no conversation data. */
+    fun hasVisibleOverlay(): Boolean = overlays.isNotEmpty()
+
     internal fun acquireAcceptedRun(
         overlayId: Long,
         conversationId: Uuid,

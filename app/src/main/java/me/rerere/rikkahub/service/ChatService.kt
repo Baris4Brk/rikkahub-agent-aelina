@@ -605,6 +605,8 @@ class ChatService(
                     backups = localBackupFacade,
                     files = filesManager,
                 ),
+                me.rerere.rikkahub.owner.OwnerQuickCaptureOperationHandler(context),
+                me.rerere.rikkahub.owner.OwnerAndroidControlHandler(context, agentSafetySettings),
                 me.rerere.rikkahub.owner.OwnerApplicationControlHandler(
                     settingsStore = settingsStore,
                     plugins = pluginRegistryStore,

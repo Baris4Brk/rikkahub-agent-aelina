@@ -78,6 +78,10 @@ class EmergencyStopCoordinator(
     private val executionProbeScheduler: me.rerere.rikkahub.data.execution.ExecutionProbeScheduler? = null,
     private val executionRepository: me.rerere.rikkahub.data.execution.ExecutionRepository? = null,
 ) {
+    init {
+        EmergencyStopOwnerBridge.install(this)
+    }
+
     suspend fun setStopped(stopped: Boolean): EmergencyStopResult? {
         if (!stopped) {
             safetySettings.setEmergencyStop(false)
@@ -239,6 +243,19 @@ class EmergencyStopCoordinator(
                 )
             }
     }
+}
+
+/** Process-local narrow bridge: Owner may activate Emergency Stop, never deactivate it. */
+object EmergencyStopOwnerBridge {
+    @Volatile
+    private var coordinator: EmergencyStopCoordinator? = null
+
+    internal fun install(value: EmergencyStopCoordinator) {
+        coordinator = value
+    }
+
+    suspend fun activate(): EmergencyStopResult = coordinator?.setStopped(true)
+        ?: error("emergency_stop_coordinator_unavailable")
 }
 
 internal suspend fun activateEmergencyStop(
