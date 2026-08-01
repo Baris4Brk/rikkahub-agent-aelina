@@ -280,7 +280,7 @@ object OwnerActionRegistry {
             action("pet_list", OwnerOperationRisk.READ_ONLY),
             action("pet_import_managed", OwnerOperationRisk.EXTERNAL_SIDE_EFFECT, "managed_file_id, replace?"),
             action("pet_select", OwnerOperationRisk.REVERSIBLE_WRITE, "package_id, profile_id?, enabled?"),
-            action("pet_configure", OwnerOperationRisk.REVERSIBLE_WRITE, "enabled?, scale?, fps?, x?, y?, idle_pool_enabled?"),
+            action("pet_configure", OwnerOperationRisk.REVERSIBLE_WRITE, "no arguments reads current selection; otherwise enabled?, scale?, fps?, x?, y?, idle_pool_enabled?"),
             action("pet_delete", OwnerOperationRisk.IRREVERSIBLE, "package_id, replacement_package_id?"),
             action("pet_dialogue_state", OwnerOperationRisk.READ_ONLY),
         ),

@@ -56,6 +56,12 @@ class OwnerControlReportRegressionTest {
     }
 
     @Test
+    fun `pet configure advertises its no argument read path`() {
+        val guide = requireNotNull(OwnerActionRegistry.action(OwnerToolFamily.PET, "pet_configure")).argumentGuide
+        assertTrue(guide.contains("no arguments reads current selection"))
+    }
+
+    @Test
     fun `mcp owner status classifies errors without returning raw text`() {
         val data = ownerMcpStatusData(McpStatus.Error("HTTP 401 Unauthorized secret-body"))
         assertEquals("ERROR", data["status"]!!.jsonPrimitive.content)

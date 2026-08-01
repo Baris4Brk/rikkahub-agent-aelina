@@ -775,18 +775,30 @@ class OwnerApplicationControlHandler(
 
     private suspend fun petConfigure(index: Int, request: OwnerOperationRequest, action: OwnerAction): OwnerAppliedAction {
         val active = settingsStore.settingsFlow.value.petOverlaySelection
-            ?: return failure(index, action, "PET_NOT_SELECTED", "Select a pet package before changing visual settings.")
+        if (action.arguments.isEmpty()) {
+            return success(
+                index,
+                action,
+                "PET_SETTINGS_READ",
+                "Current pet visual settings were read without modification.",
+                ownerPetSelectionData(active),
+            )
+        }
+        active ?: return failure(index, action, "PET_NOT_SELECTED", "Select a pet package before changing visual settings.")
         if (active.ownerAssistantId.toString() != request.assistantId || active.privilegedConversationId.toString() != request.conversationId) {
             return failure(index, action, "PET_OWNER_MISMATCH", "Pet selection is not bound to the active Owner identity.")
         }
-        return settingsMutation(index, action) { current -> current.copy(petOverlaySelection = active.copy(
+        val updated = active.copy(
             enabled = action.arguments.boolean("enabled") ?: active.enabled,
             scale = action.arguments.float("scale") ?: active.scale,
             animationFps = action.arguments.int("fps") ?: active.animationFps,
             normalizedX = action.arguments.float("x") ?: active.normalizedX,
             normalizedY = action.arguments.float("y") ?: active.normalizedY,
             idlePoolEnabled = action.arguments.boolean("idle_pool_enabled") ?: active.idlePoolEnabled,
-        ).normalized()) }
+        ).normalized()
+        return settingsMutation(index, action, ownerPetSelectionData(updated)) { current ->
+            current.copy(petOverlaySelection = updated)
+        }
     }
 
     private suspend fun settingsMutation(
