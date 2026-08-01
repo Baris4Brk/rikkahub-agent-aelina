@@ -237,6 +237,7 @@ private val OWNER_NO_ARGUMENT_ACTIONS = setOf(
     "backup_storage_get",
     "backup_local_export",
     "app_settings_get",
+    "reverse_geocoder_get",
     "runtime_get",
     "safety_get",
     "safety_emergency_stop_activate",

@@ -10,9 +10,11 @@ class OwnerActionRegistryTest {
     @Test
     fun `registry preserves every legacy family and action while exposing playback speed`() {
         assertEquals(OwnerToolFamily.entries.toSet(), OwnerActionRegistry.families.map { it.family }.toSet())
-        assertEquals(158, OwnerActionRegistry.actionCount())
+        assertEquals(164, OwnerActionRegistry.actionCount())
         assertTrue(OwnerActionRegistry.action(OwnerToolFamily.TTS, "tts_get_playback_speed") != null)
         assertTrue(OwnerActionRegistry.action(OwnerToolFamily.TTS, "tts_set_playback_speed") != null)
+        assertTrue(OwnerActionRegistry.action(OwnerToolFamily.APP_SETTINGS, "reverse_geocoder_upsert") != null)
+        assertTrue(OwnerActionRegistry.action(OwnerToolFamily.APP_SETTINGS, "reverse_geocoder_test") != null)
         assertTrue(ownerActionGuideCoverageGaps().isEmpty())
     }
 

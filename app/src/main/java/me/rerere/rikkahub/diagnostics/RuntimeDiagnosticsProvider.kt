@@ -16,6 +16,7 @@ import me.rerere.rikkahub.data.ai.execution.ToolSecurityDescriptorResolver
 import me.rerere.rikkahub.data.ai.tools.local.AccessibilityServiceHandle
 import me.rerere.rikkahub.data.ai.tools.local.NotificationListenerHandle
 import me.rerere.rikkahub.data.ai.tools.local.TermuxIntegration
+import me.rerere.rikkahub.data.ai.tools.local.ReverseGeocodeRuntimeDiagnosticsSource
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.keyboard.KeyboardApiClient
 import me.rerere.rikkahub.data.model.AssistantAffectScope
@@ -46,6 +47,7 @@ class RuntimeDiagnosticsProvider(
     private val clockMillis: () -> Long = System::currentTimeMillis,
     private val executionConsistencyDoctor: ExecutionConsistencyDoctor? = null,
     private val toolCatalogDiagnostics: ToolCatalogDiagnostics? = null,
+    private val reverseGeocodeRuntimeDiagnostics: ReverseGeocodeRuntimeDiagnosticsSource? = null,
 ) {
     private val appContext = context.applicationContext
 
@@ -125,6 +127,8 @@ class RuntimeDiagnosticsProvider(
         val toolCatalog = toolCatalogDiagnostics?.let { diagnostics ->
             runCatching { diagnostics.inspect() }.getOrNull()
         }
+        val reverseSettings = settingsStore.settingsFlow.value.reverseGeocodingSettings.normalized()
+        val reverseDiagnostics = reverseGeocodeRuntimeDiagnostics?.snapshot()
         val extraItems = buildList {
             generation?.let {
                 add(RuntimeDiagnosticItem(
@@ -195,6 +199,28 @@ class RuntimeDiagnosticsProvider(
                         "fastLaneBundle=${breakdown?.toolFastLaneBundleId ?: "NONE"}",
                 ))
             }
+            add(RuntimeDiagnosticItem(
+                id = "reverse_geocoding",
+                title = appContext.getString(R.string.runtime_diagnostic_reverse_geocoding_title),
+                status = if (reverseSettings.enabled &&
+                    (reverseDiagnostics?.androidGeocoderPresent == true || reverseSettings.providers.any { it.enabled })
+                ) RuntimeDiagnosticStatus.READY else RuntimeDiagnosticStatus.NOT_SUPPORTED,
+                detail = appContext.getString(
+                    R.string.runtime_diagnostic_reverse_geocoding_summary,
+                    reverseDiagnostics?.androidGeocoderPresent == true,
+                    reverseDiagnostics?.lastStatus ?: "NONE",
+                    reverseSettings.enabled,
+                    reverseSettings.externalEnabled,
+                    reverseSettings.providers.size,
+                    reverseSettings.providers.filter { it.enabled }.joinToString(",") { it.id }.ifBlank { "NONE" },
+                    reverseSettings.defaultProviderId,
+                    reverseDiagnostics?.cacheEntryCount ?: 0,
+                    reverseDiagnostics?.cacheHitCount ?: 0L,
+                    reverseDiagnostics?.lastErrorCode ?: "NONE",
+                    reverseDiagnostics?.lastProviderId ?: "NONE",
+                    reverseDiagnostics?.lastDurationBucket ?: "NONE",
+                ),
+            ))
         }
         snapshot.copy(items = snapshot.items + extraItems)
     }

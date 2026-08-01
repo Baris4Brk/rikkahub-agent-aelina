@@ -2,6 +2,7 @@ package me.rerere.rikkahub.data.ai.tools.local
 
 import java.util.IllformedLocaleException
 import java.util.Locale
+import kotlinx.serialization.Serializable
 
 internal const val MIN_REVERSE_GEOCODE_TIMEOUT_MS = 1_000L
 internal const val MAX_REVERSE_GEOCODE_TIMEOUT_MS = 15_000L
@@ -47,7 +48,8 @@ internal enum class AddressMatchType(val wireName: String) {
     UNKNOWN("unknown"),
 }
 
-internal enum class CoordinateSystem {
+@Serializable
+enum class CoordinateSystem {
     WGS84,
     GCJ02,
     BD09,

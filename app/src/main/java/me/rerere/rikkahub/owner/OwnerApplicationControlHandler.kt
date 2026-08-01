@@ -1,5 +1,6 @@
 package me.rerere.rikkahub.owner
 
+import java.net.URI
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -9,14 +10,22 @@ import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.decodeFromJsonElement
+import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 import me.rerere.asr.ASRProviderSetting
 import me.rerere.ai.core.MessageRole
 import me.rerere.rikkahub.data.ai.AgentSafetySettings
 import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.datastore.SettingsStore
+import me.rerere.rikkahub.data.datastore.ReverseGeocoderProviderConfig
+import me.rerere.rikkahub.data.datastore.ReverseGeocoderProviderKind
+import me.rerere.rikkahub.data.datastore.ReverseGeocodingSettings
+import me.rerere.rikkahub.data.datastore.isSafeReverseGeocoderEndpoint
+import me.rerere.rikkahub.data.datastore.normalizedOrNull
+import me.rerere.rikkahub.data.ai.tools.local.CoordinateSystem
 import me.rerere.rikkahub.data.model.QuickMessage
 import me.rerere.rikkahub.data.model.Lorebook
 import me.rerere.rikkahub.data.model.PromptInjection
@@ -71,6 +80,7 @@ class OwnerApplicationControlHandler(
         if (action.type == "safety_emergency_stop_activate" && request.actions.size != 1) {
             return invalid("OWNER_EMERGENCY_STOP_MUST_BE_SINGLE", "Emergency Stop activation must be the only action in its call.")
         }
+        validateReverseGeocoderAction(action)?.let { return it }
         return OwnerActionValidation(true, "OWNER_ACTION_VALID", "Action validated by the shared domain facade.")
     }
 
@@ -162,6 +172,12 @@ class OwnerApplicationControlHandler(
             "app_settings_get", "runtime_get" -> appSettingsGet(index, action)
             "app_settings_update", "runtime_update" -> appSettingsUpdate(index, action)
             "app_display_update" -> displayUpdate(index, action)
+            "reverse_geocoder_get" -> reverseGeocoderGet(index, request, action)
+            "reverse_geocoder_upsert" -> reverseGeocoderUpsert(index, request, action)
+            "reverse_geocoder_delete" -> reverseGeocoderDelete(index, request, action)
+            "reverse_geocoder_set_default" -> reverseGeocoderSetDefault(index, action)
+            "reverse_geocoder_set_external_enabled" -> reverseGeocoderSetExternalEnabled(index, action)
+            "reverse_geocoder_test" -> reverseGeocoderTest(index, action)
             "runtime_permissions_open" -> needsUserAction(index, action, "Android permissions can only be granted on the system permission surface.")
             "safety_get" -> safetyGet(index, action)
             "safety_capabilities_update" -> safetyUpdate(index, action)
@@ -204,6 +220,12 @@ class OwnerApplicationControlHandler(
                 if (changed) OwnerActionValidation(true, "ASR_STATE_VERIFIED", "ASR profile and Vault bindings were read back.")
                 else invalid("OWNER_VERIFY_FAILED", "ASR state did not change.")
             }
+            is ControlReceipt.ReverseGeocoderChanged -> {
+                val changed = settingsStore.settingsFlow.value.reverseGeocodingSettings != receipt.before ||
+                    snapshotReverseGeocoderBindings(receipt.providerId, receipt.subjectId) != receipt.beforeBindings
+                if (changed) OwnerActionValidation(true, "REVERSE_GEOCODER_STATE_VERIFIED", "Reverse-geocoding settings and Vault bindings were read back.")
+                else invalid("OWNER_VERIFY_FAILED", "Reverse-geocoding state did not change.")
+            }
             else -> OwnerActionValidation(true, "OWNER_READ_VERIFIED", "The requested state was read from its authoritative source.")
         }
     }
@@ -239,6 +261,11 @@ class OwnerApplicationControlHandler(
                 ) }
                 restoreAsrBindings(receipt.asrId, receipt.subjectId, receipt.beforeBindings)
                 OwnerCompensationResult(true, "ASR_STATE_RESTORED")
+            }
+            is ControlReceipt.ReverseGeocoderChanged -> {
+                settingsStore.update { current -> current.copy(reverseGeocodingSettings = receipt.before) }
+                restoreReverseGeocoderBindings(receipt.providerId, receipt.subjectId, receipt.beforeBindings)
+                OwnerCompensationResult(true, "REVERSE_GEOCODER_STATE_RESTORED")
             }
             else -> OwnerCompensationResult(false, "UNKNOWN_COMPENSATION_RECEIPT")
         }
@@ -609,6 +636,137 @@ class OwnerApplicationControlHandler(
         ))
     }
 
+    private suspend fun reverseGeocoderGet(
+        index: Int,
+        request: OwnerOperationRequest,
+        action: OwnerAction,
+    ): OwnerAppliedAction {
+        val settings = settingsStore.settingsFlow.value.reverseGeocodingSettings.normalized()
+        val boundProviderIds = vault.listMetadata(request.authoritySubjectId)
+            .flatMap { it.bindings }
+            .filter { it.kind == SecretBindingKind.REVERSE_GEOCODER }
+            .mapTo(mutableSetOf(), SecretBinding::targetId)
+        return success(index, action, "REVERSE_GEOCODER_STATE_READ", "Reverse-geocoding configuration read without secrets.", buildJsonObject {
+            put("enabled", settings.enabled)
+            put("external_enabled", settings.externalEnabled)
+            put("default_provider_id", settings.defaultProviderId)
+            put("providers", buildJsonArray {
+                settings.providers.forEach { provider ->
+                    add(buildJsonObject {
+                        put("provider_id", provider.id)
+                        put("provider_type", provider.type.name.lowercase())
+                        put("display_name", provider.displayName)
+                        put("endpoint", redactedEndpoint(provider.endpoint))
+                        put("enabled", provider.enabled)
+                        put("priority", provider.priority)
+                        put("query_coordinate_system", provider.queryCoordinateSystem.name)
+                        put("config_revision", provider.configRevision)
+                        put("terms_accepted", provider.termsAcceptedAtMs != null)
+                        put("secret_binding", if (provider.id in boundProviderIds) "BOUND" else "UNBOUND")
+                    })
+                }
+            })
+        })
+    }
+
+    private suspend fun reverseGeocoderUpsert(
+        index: Int,
+        request: OwnerOperationRequest,
+        action: OwnerAction,
+    ): OwnerAppliedAction {
+        val provider = parseReverseGeocoderProvider(action)
+            ?: return failure(index, action, "REVERSE_GEOCODER_CONFIG_INVALID", "Provider configuration is invalid.")
+        val slotId = action.arguments.string("vault_slot_id")?.trim()?.takeIf(String::isNotEmpty)
+        val slots = vault.listMetadata(request.authoritySubjectId)
+        if (slotId != null && slots.none { it.slotId == slotId }) {
+            return failure(index, action, "SECRET_SLOT_MISSING", "Vault slot does not exist for this authority epoch.")
+        }
+        if (provider.enabled && provider.type == ReverseGeocoderProviderKind.AMAP && slotId == null &&
+            slots.none { slot -> slot.bindings.any { it.kind == SecretBindingKind.REVERSE_GEOCODER && it.targetId == provider.id } }
+        ) {
+            return failure(index, action, "PROVIDER_SECRET_UNAVAILABLE", "An enabled Amap provider requires a bound Vault slot.")
+        }
+        val before = settingsStore.settingsFlow.value
+        val beforeBindings = snapshotReverseGeocoderBindings(provider.id, request.authoritySubjectId)
+        val existing = before.reverseGeocodingSettings.providers.firstOrNull { it.id == provider.id }
+        val revised = provider.copy(configRevision = (existing?.configRevision ?: 0L) + 1L)
+        return try {
+            settingsStore.update { current ->
+                val old = current.reverseGeocodingSettings
+                current.copy(reverseGeocodingSettings = old.copy(
+                    providers = (old.providers.filterNot { it.id == revised.id } + revised),
+                ).normalized())
+            }
+            if (slotId != null) rebindReverseGeocoder(provider.id, request.authoritySubjectId, slotId)
+            success(
+                index, action, "REVERSE_GEOCODER_UPSERTED", "Reverse-geocoding provider configuration updated.",
+                buildJsonObject { put("provider_id", revised.id); put("secret_binding", if (slotId == null) "UNCHANGED" else "BOUND") },
+                ControlReceipt.ReverseGeocoderChanged(before.reverseGeocodingSettings, provider.id, request.authoritySubjectId, beforeBindings),
+            )
+        } catch (_: Throwable) {
+            settingsStore.update { it.copy(reverseGeocodingSettings = before.reverseGeocodingSettings) }
+            runCatching { restoreReverseGeocoderBindings(provider.id, request.authoritySubjectId, beforeBindings) }
+            failure(index, action, "REVERSE_GEOCODER_UPDATE_FAILED", "Provider configuration could not be updated safely.")
+        }
+    }
+
+    private suspend fun reverseGeocoderDelete(
+        index: Int,
+        request: OwnerOperationRequest,
+        action: OwnerAction,
+    ): OwnerAppliedAction {
+        val id = action.arguments.string("provider_id")!!.trim().lowercase()
+        val before = settingsStore.settingsFlow.value
+        val settings = before.reverseGeocodingSettings
+        if (settings.providers.none { it.id == id }) return failure(index, action, "PROVIDER_NOT_CONFIGURED", "Provider is not configured.")
+        val replacement = action.arguments.string("replacement_provider_id")?.trim()?.lowercase()
+        if (settings.defaultProviderId == id && replacement == null) {
+            return failure(index, action, "REPLACEMENT_PROVIDER_REQUIRED", "Deleting the default provider requires a replacement in the same action.")
+        }
+        if (replacement != null && replacement !in setOf("auto", "android") && settings.providers.none { it.id == replacement && it.id != id }) {
+            return failure(index, action, "REPLACEMENT_PROVIDER_INVALID", "Replacement provider is not configured.")
+        }
+        val beforeBindings = snapshotReverseGeocoderBindings(id, request.authoritySubjectId)
+        return try {
+            settingsStore.update { current -> current.copy(reverseGeocodingSettings = current.reverseGeocodingSettings.copy(
+                providers = current.reverseGeocodingSettings.providers.filterNot { it.id == id },
+                defaultProviderId = if (current.reverseGeocodingSettings.defaultProviderId == id) replacement!! else current.reverseGeocodingSettings.defaultProviderId,
+            ).normalized()) }
+            rebindReverseGeocoder(id, request.authoritySubjectId, null)
+            success(index, action, "REVERSE_GEOCODER_DELETED", "Reverse-geocoding provider and its binding were removed.",
+                buildJsonObject { put("provider_id", id) },
+                ControlReceipt.ReverseGeocoderChanged(before.reverseGeocodingSettings, id, request.authoritySubjectId, beforeBindings))
+        } catch (_: Throwable) {
+            settingsStore.update { it.copy(reverseGeocodingSettings = before.reverseGeocodingSettings) }
+            runCatching { restoreReverseGeocoderBindings(id, request.authoritySubjectId, beforeBindings) }
+            failure(index, action, "REVERSE_GEOCODER_DELETE_FAILED", "Provider could not be removed safely.")
+        }
+    }
+
+    private suspend fun reverseGeocoderSetDefault(index: Int, action: OwnerAction): OwnerAppliedAction {
+        val id = action.arguments.string("provider_id")!!.trim().lowercase()
+        val configured = settingsStore.settingsFlow.value.reverseGeocodingSettings.providers.any { it.id == id }
+        if (id !in setOf("auto", "android") && !configured) return failure(index, action, "PROVIDER_NOT_CONFIGURED", "Default provider is not configured.")
+        return settingsMutation(index, action) { current -> current.copy(
+            reverseGeocodingSettings = current.reverseGeocodingSettings.copy(defaultProviderId = id).normalized(),
+        ) }
+    }
+
+    private suspend fun reverseGeocoderSetExternalEnabled(index: Int, action: OwnerAction): OwnerAppliedAction =
+        settingsMutation(index, action) { current -> current.copy(
+            reverseGeocodingSettings = current.reverseGeocodingSettings.copy(
+                externalEnabled = action.arguments.boolean("enabled")!!,
+            ).normalized(),
+        ) }
+
+    private fun reverseGeocoderTest(index: Int, action: OwnerAction): OwnerAppliedAction {
+        val id = action.arguments.string("provider_id")!!.trim().lowercase()
+        val provider = settingsStore.settingsFlow.value.reverseGeocodingSettings.providers.firstOrNull { it.id == id }
+            ?: return failure(index, action, "PROVIDER_NOT_CONFIGURED", "Provider is not configured.")
+        if (!provider.enabled) return failure(index, action, "PROVIDER_DISABLED", "Provider is disabled.")
+        return failure(index, action, "PROVIDER_TEST_NOT_READY", "The configured provider adapter is not available in this build stage.")
+    }
+
     private suspend fun safetyGet(index: Int, action: OwnerAction): OwnerAppliedAction = success(
         index, action, "SAFETY_STATE_READ", "Safety capability state read.", safetySnapshot().toJson(),
     )
@@ -816,6 +974,117 @@ class OwnerApplicationControlHandler(
         return success(index, action, "OWNER_SETTINGS_UPDATED", "Settings updated through the shared domain facade.", data, ControlReceipt.SettingsChanged(before))
     }
 
+    private fun validateReverseGeocoderAction(action: OwnerAction): OwnerActionValidation? {
+        if (!action.type.startsWith("reverse_geocoder_")) return null
+        fun bad(code: String, message: String) = invalid(code, message)
+        return when (action.type) {
+            "reverse_geocoder_get" -> null
+            "reverse_geocoder_upsert" -> {
+                val provider = parseReverseGeocoderProvider(action)
+                    ?: return bad("REVERSE_GEOCODER_CONFIG_INVALID", "Provider ID, type, HTTPS endpoint, coordinate system or limits are invalid.")
+                if (provider.type == ReverseGeocoderProviderKind.NOMINATIM && provider.termsAcceptedAtMs == null) {
+                    bad("NOMINATIM_TERMS_REQUIRED", "Nominatim configuration requires an explicit terms_accepted_at_ms value.")
+                } else null
+            }
+            "reverse_geocoder_delete" -> if (!validReverseProviderId(action.arguments.string("provider_id"))) {
+                bad("PROVIDER_ID_INVALID", "provider_id is invalid.")
+            } else if (action.arguments.string("replacement_provider_id")?.let(::validReverseProviderSelector) == false) {
+                bad("REPLACEMENT_PROVIDER_INVALID", "replacement_provider_id is invalid.")
+            } else null
+            "reverse_geocoder_set_default" -> if (!validReverseProviderSelector(action.arguments.string("provider_id"))) {
+                bad("PROVIDER_ID_INVALID", "provider_id is invalid.")
+            } else null
+            "reverse_geocoder_set_external_enabled" -> if (action.arguments.strictBoolean("enabled") == null) {
+                bad("ENABLED_REQUIRED", "enabled must be a JSON boolean.")
+            } else null
+            "reverse_geocoder_test" -> {
+                val latitude = action.arguments.double("latitude")
+                val longitude = action.arguments.double("longitude")
+                when {
+                    !validReverseProviderId(action.arguments.string("provider_id")) -> bad("PROVIDER_ID_INVALID", "provider_id is invalid.")
+                    (latitude == null) != (longitude == null) -> bad("TEST_COORDINATES_INCOMPLETE", "latitude and longitude must be supplied together.")
+                    latitude != null && (!latitude.isFinite() || latitude !in -90.0..90.0) -> bad("LATITUDE_INVALID", "latitude is invalid.")
+                    longitude != null && (!longitude.isFinite() || longitude !in -180.0..180.0) -> bad("LONGITUDE_INVALID", "longitude is invalid.")
+                    else -> null
+                }
+            }
+            else -> null
+        }
+    }
+
+    private fun parseReverseGeocoderProvider(action: OwnerAction): ReverseGeocoderProviderConfig? {
+        val id = action.arguments.string("provider_id")?.trim()?.lowercase() ?: return null
+        val type = action.arguments.string("provider_type")?.let { raw ->
+            ReverseGeocoderProviderKind.entries.firstOrNull {
+                it.name.equals(raw.replace('-', '_'), ignoreCase = true) ||
+                    (it == ReverseGeocoderProviderKind.BIGDATA_CLOUD && raw.equals("bigdatacloud", ignoreCase = true))
+            }
+        } ?: return null
+        val endpoint = action.arguments.string("endpoint")?.trim() ?: return null
+        val coordinateSystem = action.arguments.string("query_coordinate_system")?.let { raw ->
+            CoordinateSystem.entries.firstOrNull { it.name.equals(raw, ignoreCase = true) }
+        } ?: return null
+        val priority = action.arguments.int("priority") ?: 100
+        if (priority !in 0..10_000 || !isSafeReverseGeocoderEndpoint(endpoint)) return null
+        val acceptedAt = action.arguments.long("terms_accepted_at_ms")
+        if (action.arguments.containsKey("terms_accepted_at_ms") && (acceptedAt == null || acceptedAt <= 0)) return null
+        return ReverseGeocoderProviderConfig(
+            id = id,
+            type = type,
+            displayName = action.arguments.string("display_name") ?: id,
+            endpoint = endpoint,
+            enabled = action.arguments.strictBoolean("enabled") ?: false,
+            priority = priority,
+            queryCoordinateSystem = coordinateSystem,
+            termsAcceptedAtMs = acceptedAt,
+        ).normalizedOrNull()
+    }
+
+    private suspend fun snapshotReverseGeocoderBindings(
+        providerId: String,
+        subjectId: String,
+    ): Map<String, List<SecretBinding>> = vault.listMetadata(subjectId).associate { slot ->
+        slot.slotId to slot.bindings.filter {
+            it.kind == SecretBindingKind.REVERSE_GEOCODER && it.targetId == providerId
+        }
+    }
+
+    private suspend fun rebindReverseGeocoder(providerId: String, subjectId: String, slotId: String?) {
+        val slots = vault.listMetadata(subjectId)
+        slots.forEach { slot ->
+            val retained = slot.bindings.filterNot {
+                it.kind == SecretBindingKind.REVERSE_GEOCODER && it.targetId == providerId
+            }
+            val next = if (slot.slotId == slotId) {
+                retained + SecretBinding(SecretBindingKind.REVERSE_GEOCODER, providerId)
+            } else retained
+            if (next != slot.bindings) check(vault.updateBindings(slot.slotId, subjectId, next)) {
+                "reverse_geocoder_vault_binding_failed"
+            }
+        }
+        if (slotId != null && slots.none { it.slotId == slotId }) error("reverse_geocoder_vault_slot_missing")
+    }
+
+    private suspend fun restoreReverseGeocoderBindings(
+        providerId: String,
+        subjectId: String,
+        snapshot: Map<String, List<SecretBinding>>,
+    ) {
+        vault.listMetadata(subjectId).forEach { slot ->
+            val retained = slot.bindings.filterNot {
+                it.kind == SecretBindingKind.REVERSE_GEOCODER && it.targetId == providerId
+            }
+            check(vault.updateBindings(slot.slotId, subjectId, retained + snapshot[slot.slotId].orEmpty())) {
+                "reverse_geocoder_vault_binding_restore_failed"
+            }
+        }
+    }
+
+    private fun redactedEndpoint(endpoint: String): String = runCatching {
+        val uri = URI(endpoint)
+        URI(uri.scheme, null, uri.host, uri.port, uri.path, null, null).toString()
+    }.getOrDefault("[INVALID_ENDPOINT]")
+
     private fun updateAsr(provider: ASRProviderSetting, args: JsonObject): ASRProviderSetting = when (provider) {
         is ASRProviderSetting.OpenAIRealtime -> provider.copy(
             name = args.string("name")?.take(160) ?: provider.name,
@@ -862,6 +1131,9 @@ class OwnerApplicationControlHandler(
         "search_set_enabled", "search_select" -> current.copy(enableWebSearch = before.enableWebSearch, searchServiceSelected = before.searchServiceSelected)
         "app_settings_update", "runtime_update" -> current.copy(dynamicColor = before.dynamicColor, themeId = before.themeId, developerMode = before.developerMode, parallelReadOnlyToolsEnabled = before.parallelReadOnlyToolsEnabled, maxParallelReadOnlyTools = before.maxParallelReadOnlyTools, managedVirtualDisplayEnabled = before.managedVirtualDisplayEnabled, pluginRuntimeEnabled = before.pluginRuntimeEnabled)
         "app_display_update" -> current.copy(displaySetting = before.displaySetting)
+        "reverse_geocoder_set_default", "reverse_geocoder_set_external_enabled" -> current.copy(
+            reverseGeocodingSettings = before.reverseGeocodingSettings,
+        )
         "pet_select", "pet_configure" -> current.copy(petOverlaySelection = before.petOverlaySelection)
         else -> current
     }
@@ -882,6 +1154,12 @@ class OwnerApplicationControlHandler(
             val beforeProviders: List<ASRProviderSetting>,
             val beforeSelected: Uuid?,
             val asrId: Uuid,
+            val subjectId: String,
+            val beforeBindings: Map<String, List<SecretBinding>>,
+        ) : ControlReceipt
+        data class ReverseGeocoderChanged(
+            val before: ReverseGeocodingSettings,
+            val providerId: String,
             val subjectId: String,
             val beforeBindings: Map<String, List<SecretBinding>>,
         ) : ControlReceipt
@@ -916,6 +1194,12 @@ class OwnerApplicationControlHandler(
             "search_get" to emptySet(), "search_set_enabled" to setOf("enabled"), "search_select" to setOf("index"),
             "backup_storage_get" to emptySet(), "backup_local_export" to emptySet(), "backup_restore_preserving_owner" to setOf("managed_file_id"),
             "app_settings_get" to emptySet(), "app_settings_update" to setOf("dynamic_color", "theme_id", "developer_mode", "parallel_read_only_tools", "max_parallel_read_only_tools", "managed_virtual_display", "plugin_runtime"), "app_display_update" to setOf("show_token_usage", "show_thinking", "auto_scroll", "font_size_ratio", "notification_after_generation"),
+            "reverse_geocoder_get" to emptySet(),
+            "reverse_geocoder_upsert" to setOf("provider_id", "provider_type", "display_name", "endpoint", "enabled", "priority", "query_coordinate_system", "terms_accepted_at_ms", "vault_slot_id"),
+            "reverse_geocoder_delete" to setOf("provider_id", "replacement_provider_id"),
+            "reverse_geocoder_set_default" to setOf("provider_id"),
+            "reverse_geocoder_set_external_enabled" to setOf("enabled"),
+            "reverse_geocoder_test" to setOf("provider_id", "latitude", "longitude"),
             "runtime_get" to emptySet(), "runtime_update" to setOf("parallel_read_only_tools", "max_parallel_read_only_tools", "managed_virtual_display", "plugin_runtime"), "runtime_permissions_open" to setOf("permission"),
             "safety_get" to emptySet(), "safety_capabilities_update" to setOf("high_risk_tools", "remote_tools", "background_automation", "allow_while_locked", "privileged_bridge"), "safety_emergency_stop_activate" to emptySet(),
             "pet_list" to emptySet(), "pet_import_managed" to setOf("managed_file_id", "replace"), "pet_select" to setOf("package_id", "profile_id", "enabled"), "pet_configure" to setOf("enabled", "scale", "fps", "x", "y", "idle_pool_enabled"), "pet_delete" to setOf("package_id", "replacement_package_id"), "pet_dialogue_state" to emptySet(),
@@ -925,11 +1209,26 @@ class OwnerApplicationControlHandler(
 
 private fun JsonObject.string(name: String): String? = this[name]?.jsonPrimitive?.contentOrNull
 private fun JsonObject.boolean(name: String): Boolean? = string(name)?.toBooleanStrictOrNull()
+private fun JsonObject.strictBoolean(name: String): Boolean? = (this[name] as? JsonPrimitive)
+    ?.takeUnless { it.isString }
+    ?.booleanOrNull
 private fun JsonObject.int(name: String): Int? = string(name)?.toIntOrNull()
+private fun JsonObject.long(name: String): Long? = (this[name] as? JsonPrimitive)
+    ?.takeUnless { it.isString }
+    ?.longOrNull
+private fun JsonObject.double(name: String): Double? = (this[name] as? JsonPrimitive)
+    ?.takeUnless { it.isString }
+    ?.doubleOrNull
 private fun JsonObject.float(name: String): Float? = string(name)?.toFloatOrNull()
 private fun JsonObject.uuid(name: String): Uuid? = string(name)?.let { runCatching { Uuid.parse(it) }.getOrNull() }
 private inline fun <reified T : Enum<T>> JsonObject.enum(name: String, fallback: T): T =
     string(name)?.let { raw -> enumValues<T>().firstOrNull { it.name.equals(raw, ignoreCase = true) } } ?: fallback
+private val REVERSE_PROVIDER_ID_PATTERN = Regex("[a-z0-9][a-z0-9_-]{0,63}")
+private fun validReverseProviderId(value: String?): Boolean = value != null &&
+    REVERSE_PROVIDER_ID_PATTERN.matches(value.trim().lowercase()) &&
+    value.trim().lowercase() !in setOf("auto", "android")
+private fun validReverseProviderSelector(value: String?): Boolean = value != null &&
+    (value.trim().lowercase() in setOf("auto", "android") || validReverseProviderId(value))
 private fun validModeInjection(value: PromptInjection.ModeInjection): Boolean =
     value.name.length <= 200 && value.content.length <= 32_000 && value.priority in -10_000..10_000 &&
         value.injectDepth in 0..1_000 && value.role in setOf(MessageRole.USER, MessageRole.ASSISTANT)

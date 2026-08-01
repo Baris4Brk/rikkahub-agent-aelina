@@ -162,6 +162,7 @@ class SettingsStore(
         val SECOND_USER_SECRET_ACCESS_MODE = stringPreferencesKey("second_user_secret_access_mode")
         val QUICK_CAPTURE_SETTINGS = stringPreferencesKey("quick_capture_settings")
         val PET_OVERLAY_SELECTION = stringPreferencesKey("pet_overlay_selection")
+        val REVERSE_GEOCODING_SETTINGS = stringPreferencesKey("reverse_geocoding_settings")
 
         // 搜索
         val SEARCH_SERVICES = stringPreferencesKey("search_services")
@@ -270,6 +271,10 @@ class SettingsStore(
                     runCatching { JsonInstant.decodeFromString<PetOverlaySelection>(value).normalized() }
                         .getOrNull()
                 },
+                reverseGeocodingSettings = preferences[REVERSE_GEOCODING_SETTINGS]?.let { value ->
+                    runCatching { JsonInstant.decodeFromString<ReverseGeocodingSettings>(value).normalized() }
+                        .getOrNull()
+                } ?: ReverseGeocodingSettings(),
                 assistantTags = preferences[ASSISTANT_TAGS]?.let {
                     JsonInstant.decodeFromString(it)
                 } ?: emptyList(),
@@ -558,6 +563,9 @@ class SettingsStore(
             settings.petOverlaySelection?.let { selection ->
                 preferences[PET_OVERLAY_SELECTION] = JsonInstant.encodeToString(selection.normalized())
             } ?: preferences.remove(PET_OVERLAY_SELECTION)
+            preferences[REVERSE_GEOCODING_SETTINGS] = JsonInstant.encodeToString(
+                settings.reverseGeocodingSettings.normalized(),
+            )
             preferences[ASSISTANT_TAGS] = JsonInstant.encodeToString(settings.assistantTags)
 
             preferences[SEARCH_SERVICES] = JsonInstant.encodeToString(settings.searchServices)
@@ -748,6 +756,7 @@ data class Settings(
         me.rerere.rikkahub.security.SecondUserSecretAccessMode.USE_ONLY,
     val quickCaptureSettings: QuickCaptureSettings = QuickCaptureSettings(),
     val petOverlaySelection: PetOverlaySelection? = null,
+    val reverseGeocodingSettings: ReverseGeocodingSettings = ReverseGeocodingSettings(),
     val providers: List<ProviderSetting> = DEFAULT_PROVIDERS,
     /**
      * IDs of built-in providers the user explicitly removed via long-press. The re-seed

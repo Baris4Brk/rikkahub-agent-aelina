@@ -259,6 +259,12 @@ object OwnerActionRegistry {
             action("app_settings_get", OwnerOperationRisk.READ_ONLY),
             action("app_settings_update", OwnerOperationRisk.REVERSIBLE_WRITE, "dynamic_color?, theme_id?, developer_mode?, parallel_read_only_tools?, max_parallel_read_only_tools?, managed_virtual_display?, plugin_runtime?"),
             action("app_display_update", OwnerOperationRisk.REVERSIBLE_WRITE, "show_token_usage?, show_thinking?, auto_scroll?, font_size_ratio?, notification_after_generation?"),
+            action("reverse_geocoder_get", OwnerOperationRisk.READ_ONLY),
+            action("reverse_geocoder_upsert", OwnerOperationRisk.REVERSIBLE_WRITE, "provider_id, provider_type, display_name?, endpoint, enabled?, priority?, query_coordinate_system, terms_accepted_at_ms?, vault_slot_id?"),
+            action("reverse_geocoder_delete", OwnerOperationRisk.IRREVERSIBLE, "provider_id, replacement_provider_id?"),
+            action("reverse_geocoder_set_default", OwnerOperationRisk.REVERSIBLE_WRITE, "provider_id"),
+            action("reverse_geocoder_set_external_enabled", OwnerOperationRisk.REVERSIBLE_WRITE, "enabled"),
+            action("reverse_geocoder_test", OwnerOperationRisk.EXTERNAL_SIDE_EFFECT, "provider_id, latitude?, longitude?"),
         ),
         family(
             OwnerToolFamily.RUNTIME,

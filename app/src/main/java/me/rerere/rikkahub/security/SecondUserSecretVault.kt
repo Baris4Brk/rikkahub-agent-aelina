@@ -16,7 +16,7 @@ import me.rerere.rikkahub.assistant.SecondUserAuthorityRegistry
 import me.rerere.rikkahub.utils.JsonInstant
 
 @Serializable
-enum class SecretBindingKind { PROVIDER, TTS, ASR, MCP, SKILL, CHANNEL }
+enum class SecretBindingKind { PROVIDER, TTS, ASR, MCP, SKILL, CHANNEL, REVERSE_GEOCODER }
 
 @Serializable
 data class SecretBinding(

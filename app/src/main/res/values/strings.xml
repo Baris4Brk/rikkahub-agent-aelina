@@ -2362,4 +2362,6 @@
   <string name="setting_tts_default_playback_speed_desc">Applied to normal reading, saved TTS playback, and cached replays. Provider synthesis speed remains separate.</string>
   <string name="chat_token_usage_latest">Latest input %1$s · Fresh %2$s · Cache %3$s</string>
   <string name="chat_token_usage_turn">Turn input %1$s · %2$d calls · Output %3$s</string>
+  <string name="runtime_diagnostic_reverse_geocoding_title">Reverse geocoding</string>
+  <string name="runtime_diagnostic_reverse_geocoding_summary">platform=%1$s; platformStatus=%2$s; enabled=%3$s; external=%4$s; providers=%5$d; active=%6$s; default=%7$s; cache=%8$d; hits=%9$d; error=%10$s; provider=%11$s; duration=%12$s</string>
 </resources>

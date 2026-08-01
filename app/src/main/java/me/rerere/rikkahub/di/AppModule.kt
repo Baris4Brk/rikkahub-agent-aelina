@@ -439,6 +439,7 @@ val appModule = module {
             toolExecutionPolicyResolver = get(),
             executionConsistencyDoctor = get(),
             toolCatalogDiagnostics = get(),
+            reverseGeocodeRuntimeDiagnostics = get(),
         )
     }
     single {
@@ -449,6 +450,13 @@ val appModule = module {
     }
     single { me.rerere.rikkahub.data.ai.tools.local.ReverseGeocodeCache() }
     single { me.rerere.rikkahub.data.ai.tools.local.ReverseGeocodeDiagnosticsStore() }
+    single {
+        me.rerere.rikkahub.data.ai.tools.local.ReverseGeocodeRuntimeDiagnosticsSource(
+            androidClient = get(),
+            cache = get(),
+            diagnostics = get(),
+        )
+    }
     single<me.rerere.rikkahub.data.ai.tools.local.ReverseGeocodeCoordinator> {
         me.rerere.rikkahub.data.ai.tools.local.ReverseGeocodeCoordinatorImpl(
             androidBackend = me.rerere.rikkahub.data.ai.tools.local.AndroidReverseGeocoder(get()),

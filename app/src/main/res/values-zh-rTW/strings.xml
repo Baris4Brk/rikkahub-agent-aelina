@@ -1973,4 +1973,6 @@
   <string name="setting_tts_default_playback_speed_desc">套用於一般朗讀、已儲存的 TTS 播放及快取重播；Provider 合成語速維持獨立。</string>
   <string name="chat_token_usage_latest">本次輸入 %1$s · 新增 %2$s · 快取 %3$s</string>
   <string name="chat_token_usage_turn">本輪輸入 %1$s · %2$d 次呼叫 · 輸出 %3$s</string>
+  <string name="runtime_diagnostic_reverse_geocoding_title">反向地理編碼</string>
+  <string name="runtime_diagnostic_reverse_geocoding_summary">platform=%1$s; platformStatus=%2$s; enabled=%3$s; external=%4$s; providers=%5$d; active=%6$s; default=%7$s; cache=%8$d; hits=%9$d; error=%10$s; provider=%11$s; duration=%12$s</string>
 </resources>
