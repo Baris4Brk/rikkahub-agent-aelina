@@ -182,7 +182,7 @@ internal object ReverseGeocodeRequestValidator {
                 invalid("latitude must be a finite number between -90 and 90")
             !request.longitude.isFinite() || request.longitude !in -180.0..180.0 ->
                 invalid("longitude must be a finite number between -180 and 180")
-            !PROVIDER_ID_PATTERN.matches(request.providerId) ->
+            !isValidProviderId(request.providerId) ->
                 invalid("provider must be a lowercase configured provider ID")
             normalizeLanguageTag(request.languageTag) == null ->
                 invalid("language must be a valid BCP 47 language tag with 2 to 35 characters")
@@ -221,6 +221,8 @@ internal object ReverseGeocodeRequestValidator {
             null
         }
     }
+
+    internal fun isValidProviderId(raw: String): Boolean = PROVIDER_ID_PATTERN.matches(raw)
 
     private fun invalid(message: String) = ReverseGeocodeError(
         code = "INVALID_ARGUMENT",

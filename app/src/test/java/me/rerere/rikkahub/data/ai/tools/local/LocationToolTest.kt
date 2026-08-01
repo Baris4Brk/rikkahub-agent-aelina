@@ -1,6 +1,8 @@
 package me.rerere.rikkahub.data.ai.tools.local
 
+import kotlinx.coroutines.CancellationException
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -173,4 +175,208 @@ class LocationToolTest {
         assertTrue(result.contains("\"precision_limited_by_permission\":true"))
         assertTrue(result.contains("\"warning_code\":\"PRECISE_LOCATION_NOT_GRANTED\""))
     }
+
+    @Test
+    fun `default location path neither calls address coordinator nor changes legacy JSON`() {
+        var addressCalls = 0
+        val tool = locationTool(
+            NULL_CONTEXT,
+            LocationResolver { locationSuccess() },
+            ReverseGeocodeCoordinator {
+                addressCalls += 1
+                reverseFailure()
+            },
+        )
+
+        val result = execTool(tool, """{"future_legacy_field":"kept-compatible"}""")
+
+        assertTrue(result.contains("\"ok\":true"))
+        assertFalse(result.contains("address_status"))
+        assertEquals(0, addressCalls)
+    }
+
+    @Test
+    fun `optional address uses the same WGS84 fix without overwriting location fields`() {
+        var captured: ReverseGeocodeRequest? = null
+        val tool = locationTool(
+            NULL_CONTEXT,
+            LocationResolver { locationSuccess() },
+            ReverseGeocodeCoordinator { request ->
+                captured = request
+                ReverseGeocodeResolution.Success(
+                    address = StructuredAddress(
+                        formattedAddress = "Zhejiang Hangzhou",
+                        city = "Hangzhou",
+                        road = "Wensan Road",
+                        provider = "android_geocoder",
+                        queryCoordinateSystem = CoordinateSystem.WGS84,
+                        matchType = AddressMatchType.APPROXIMATE,
+                        achievedDetail = AddressDetailLevel.STREET,
+                        isExact = false,
+                        coordinateDisclosure = CoordinateDisclosure.PLATFORM_GEOCODER_UNKNOWN,
+                        explicitExternalProvider = false,
+                    ),
+                    cached = true,
+                    cacheAgeMs = 250L,
+                    attemptedProviders = listOf("android"),
+                )
+            },
+        )
+
+        val result = execTool(
+            tool,
+            """{
+                "include_address":true,
+                "address_detail":"street",
+                "address_language":"en-us",
+                "address_timeout_ms":15000
+            }""".trimIndent(),
+        )
+
+        assertEquals(30.0, captured?.latitude ?: Double.NaN, 0.0)
+        assertEquals(120.0, captured?.longitude ?: Double.NaN, 0.0)
+        assertEquals("en-US", captured?.languageTag)
+        assertTrue(result.contains("\"latitude\":30.0"))
+        assertTrue(result.contains("\"longitude\":120.0"))
+        assertTrue(result.contains("\"coordinate_system\":\"WGS84\""))
+        assertTrue(result.contains("\"address_status\":\"resolved\""))
+        assertTrue(result.contains("\"formatted_address\":\"Zhejiang Hangzhou\""))
+        assertTrue(result.contains("\"address_cached\":true"))
+        assertTrue(result.contains("\"address_cache_age_ms\":250"))
+    }
+
+    @Test
+    fun `location failure never calls reverse geocoding`() {
+        var addressCalls = 0
+        val tool = locationTool(
+            NULL_CONTEXT,
+            LocationResolver { LocationResolution.Failure("LOCATION_SERVICES_DISABLED", "Location is off.") },
+            ReverseGeocodeCoordinator {
+                addressCalls += 1
+                reverseFailure()
+            },
+        )
+
+        val result = execTool(tool, """{"include_address":true}""")
+
+        assertTrue(result.contains("\"code\":\"LOCATION_SERVICES_DISABLED\""))
+        assertEquals(0, addressCalls)
+    }
+
+    @Test
+    fun `best effort address failure keeps successful coordinates`() {
+        val tool = locationTool(
+            NULL_CONTEXT,
+            LocationResolver { locationSuccess() },
+            ReverseGeocodeCoordinator { reverseFailure() },
+        )
+
+        val result = execTool(tool, """{"include_address":true,"address_mode":"best_effort"}""")
+
+        assertTrue(result.contains("\"ok\":true"))
+        assertTrue(result.contains("\"latitude\":30.0"))
+        assertTrue(result.contains("\"address_status\":\"failed\""))
+        assertTrue(result.contains("\"code\":\"NO_GEOCODER_RESULT\""))
+        assertFalse(result.contains("\"partial\":true"))
+    }
+
+    @Test
+    fun `required address failure reports partial while preserving the fix`() {
+        val tool = locationTool(
+            NULL_CONTEXT,
+            LocationResolver { locationSuccess() },
+            ReverseGeocodeCoordinator { reverseFailure() },
+        )
+
+        val result = execTool(tool, """{"include_address":true,"address_mode":"required"}""")
+
+        assertTrue(result.contains("\"ok\":false"))
+        assertTrue(result.contains("\"partial\":true"))
+        assertTrue(result.contains("\"location_ok\":true"))
+        assertTrue(result.contains("\"latitude\":30.0"))
+        assertTrue(result.contains("\"address_status\":\"failed\""))
+    }
+
+    @Test
+    fun `new address arguments fail before device location is read`() {
+        var locationCalls = 0
+        val tool = locationTool(
+            NULL_CONTEXT,
+            LocationResolver {
+                locationCalls += 1
+                locationSuccess()
+            },
+            ReverseGeocodeCoordinator { reverseFailure() },
+        )
+        val invalidInputs = listOf(
+            """{"include_address":"true"}""",
+            """{"address_mode":"strict"}""",
+            """{"address_detail":"building"}""",
+            """{"address_provider":"Amap"}""",
+            """{"address_language":"zh_CN"}""",
+            """{"address_timeout_ms":999}""",
+            """{"include_address":true,"address_provider":"amap","allow_external_address":false}""",
+        )
+
+        invalidInputs.forEach { input ->
+            val result = execTool(tool, input)
+            assertTrue("expected an input failure for $input: $result", result.contains("\"ok\":false"))
+        }
+        assertEquals(0, locationCalls)
+    }
+
+    @Test
+    fun `address coordinator exceptions are redacted without losing the location`() {
+        val tool = locationTool(
+            NULL_CONTEXT,
+            LocationResolver { locationSuccess() },
+            ReverseGeocodeCoordinator { throw IllegalStateException("secret at 30,120") },
+        )
+
+        val result = execTool(tool, """{"include_address":true}""")
+
+        assertTrue(result.contains("\"ok\":true"))
+        assertTrue(result.contains("\"latitude\":30.0"))
+        assertTrue(result.contains("\"code\":\"ANDROID_GEOCODER_FAILED\""))
+        assertFalse(result.contains("secret"))
+    }
+
+    @Test(expected = CancellationException::class)
+    fun `address cancellation propagates instead of becoming a partial response`() {
+        execTool(
+            locationTool(
+                NULL_CONTEXT,
+                LocationResolver { locationSuccess() },
+                ReverseGeocodeCoordinator { throw CancellationException("stop") },
+            ),
+            """{"include_address":true}""",
+        )
+    }
+
+    private fun locationSuccess() = LocationResolution.Success(
+        fix = LocationFix(
+            latitude = 30.0,
+            longitude = 120.0,
+            accuracyM = 8.5f,
+            provider = LocationProviders.GPS,
+            timestampMs = 1_700_000_000_000L,
+            elapsedRealtimeNanos = 55_000_000_000L,
+        ),
+        source = LocationSourceKind.ANDROID_LOCATION_MANAGER,
+        sourceType = LocationSourceType.GNSS,
+        generatedAfterRequest = true,
+        ageMs = 320L,
+        cached = false,
+        fresh = true,
+        permissionPrecision = PermissionPrecision.FINE,
+        requestedAccuracy = RequestedAccuracy.BALANCED,
+    )
+
+    private fun reverseFailure() = ReverseGeocodeResolution.Failure(
+        error = ReverseGeocodeError(
+            code = "NO_GEOCODER_RESULT",
+            message = "No permitted reverse-geocoding backend returned a usable address.",
+        ),
+        attemptedProviders = listOf("android"),
+    )
 }

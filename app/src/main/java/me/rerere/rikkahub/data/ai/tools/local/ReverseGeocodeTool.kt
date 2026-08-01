@@ -20,6 +20,9 @@ class ReverseGeocodeToolProvider internal constructor(
     private val coordinator: ReverseGeocodeCoordinator,
 ) {
     internal fun createTool(): Tool = reverseGeocodeTool(coordinator)
+
+    internal fun createLocationTool(context: android.content.Context): Tool =
+        locationToolWithReverseGeocoding(context, coordinator)
 }
 
 internal fun reverseGeocodeTool(coordinator: ReverseGeocodeCoordinator): Tool = Tool(

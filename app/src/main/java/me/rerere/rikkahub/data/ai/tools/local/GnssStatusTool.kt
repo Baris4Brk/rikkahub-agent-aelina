@@ -21,7 +21,7 @@ internal fun locationToolBundle(
     context: Context,
     reverseGeocodeToolProvider: ReverseGeocodeToolProvider,
 ): List<Tool> = listOf(
-    locationTool(context),
+    reverseGeocodeToolProvider.createLocationTool(context),
     reverseGeocodeToolProvider.createTool(),
     gnssStatusTool(context),
 )
