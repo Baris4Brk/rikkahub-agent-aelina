@@ -17,6 +17,7 @@ import me.rerere.rikkahub.data.sync.webdav.WebDavBackupItem
 import me.rerere.rikkahub.data.sync.webdav.WebDavSync
 import me.rerere.rikkahub.data.sync.S3BackupItem
 import me.rerere.rikkahub.data.sync.S3Sync
+import me.rerere.rikkahub.data.sync.LocalBackupFacade
 import me.rerere.rikkahub.utils.UiState
 import java.io.File
 
@@ -27,6 +28,7 @@ class BackupVM(
     private val webDavSync: WebDavSync,
     private val s3Sync: S3Sync,
     private val conversationRepository: ConversationRepository,
+    private val localBackup: LocalBackupFacade,
 ) : ViewModel() {
     val settings = settingsStore.settingsFlow.stateIn(
         scope = viewModelScope,
@@ -83,13 +85,11 @@ class BackupVM(
     }
 
     suspend fun exportToFile(): File {
-        val file = webDavSync.prepareBackupFile(localBackupConfig(settings.value.webDavConfig))
-        recordBackupTime()
-        return file
+        return localBackup.exportTemporary()
     }
 
     suspend fun restoreFromLocalFile(file: File) {
-        webDavSync.restoreFromLocalFile(file, localBackupConfig(settings.value.webDavConfig))
+        localBackup.restoreFromLocalFile(file)
     }
 
     suspend fun restoreFromChatBox(file: File): ChatboxRestoreResult {
@@ -199,10 +199,6 @@ class BackupVM(
         }
     }
 }
-
-internal fun localBackupConfig(base: WebDavConfig): WebDavConfig = base.copy(
-    items = WebDavConfig.BackupItem.entries.toList(),
-)
 
 data class ChatboxRestoreResult(
     val importedProviders: Int,

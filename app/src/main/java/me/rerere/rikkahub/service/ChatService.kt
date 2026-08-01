@@ -496,6 +496,7 @@ class ChatService(
     private val ownerServiceSpecStore: me.rerere.rikkahub.owner.OwnerServiceSpecStore,
     private val ownerTermuxServiceLauncher: me.rerere.rikkahub.owner.OwnerTermuxServiceLauncher,
     private val ownerOperationFingerprinter: me.rerere.rikkahub.owner.OwnerOperationFingerprinter,
+    private val localBackupFacade: me.rerere.rikkahub.data.sync.LocalBackupFacade,
 ) {
     fun onConversationVisible(conversationId: Uuid) {
         val session = secretPlaintextSessions.state.value as?
@@ -599,6 +600,10 @@ class ChatService(
                         override suspend fun retryLastAssistant(conversationId: Uuid): me.rerere.rikkahub.owner.OwnerRunSubmission =
                             submitOwnerRetryLastAssistant(conversationId).toOwnerRunSubmission()
                     },
+                ),
+                me.rerere.rikkahub.owner.OwnerBackupOperationHandler(
+                    backups = localBackupFacade,
+                    files = filesManager,
                 ),
                 me.rerere.rikkahub.owner.OwnerApplicationControlHandler(
                     settingsStore = settingsStore,

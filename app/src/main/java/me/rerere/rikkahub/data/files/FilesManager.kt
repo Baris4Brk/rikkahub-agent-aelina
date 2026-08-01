@@ -100,6 +100,28 @@ class FilesManager(
         )
     }
 
+    suspend fun saveManagedFromFile(
+        folder: String,
+        source: File,
+        displayName: String = source.name,
+        mimeType: String = "application/octet-stream",
+    ): ManagedFileEntity = withContext(Dispatchers.IO) {
+        require(source.isFile && source.canRead()) { "Managed source file is not readable" }
+        val target = createTargetFile(folder, displayName, mimeType)
+        try {
+            source.inputStream().use { input -> target.outputStream().use(input::copyTo) }
+            createManagedFileEntity(
+                folder = folder,
+                file = target,
+                displayName = displayName,
+                mimeType = mimeType,
+            )
+        } catch (failure: Throwable) {
+            runCatching { target.delete() }
+            throw failure
+        }
+    }
+
     /** Writes a screenshot directly into the managed upload store without retaining a PNG byte array. */
     suspend fun saveUploadPng(
         bitmap: Bitmap,
@@ -503,6 +525,7 @@ object FileFolders {
     const val FONTS = "fonts"
     const val TOOL_OUTPUTS = "tool_outputs"
     const val PET_PACKAGES = "pet_packages"
+    const val BACKUPS = "backups"
 }
 
 suspend fun FilesManager.saveUploadFromUri(

@@ -592,6 +592,8 @@ val dataSourceModule = module {
         )
     }
 
+    single { me.rerere.rikkahub.data.sync.LocalBackupFacade(get(), get(), get()) }
+
     single<HttpClient> {
         HttpClient(OkHttp) {
             engine {
