@@ -18,20 +18,15 @@ import me.rerere.rikkahub.owner.OwnerAction
 import me.rerere.rikkahub.owner.OwnerOperationGateway
 import me.rerere.rikkahub.owner.OwnerOperationRequest
 import me.rerere.rikkahub.owner.OwnerOperationResult
-import me.rerere.rikkahub.owner.OwnerOperationRisk
+import me.rerere.rikkahub.owner.OwnerActionRegistry
+import me.rerere.rikkahub.owner.OwnerFamilySpec
 import me.rerere.rikkahub.owner.OwnerToolFamily
 
-private data class OwnerToolSpec(
-    val family: OwnerToolFamily,
-    val description: String,
-    val operations: Map<String, OwnerOperationRisk>,
-)
-
-/** Eleven stable, compact host-management schemas. Every call performs 1-20 ordered actions. */
+/** Stable, compact host-management schemas. Every call performs 1-20 ordered actions. */
 fun createOwnerManagementTools(
     invocationContext: ToolInvocationContext,
     gateway: OwnerOperationGateway,
-): List<Tool> = OWNER_TOOL_SPECS.map { spec ->
+): List<Tool> = OwnerActionRegistry.families.map { spec ->
     Tool(
         name = spec.family.toolName,
         description = spec.description + " Supply one stable request_id and 1-20 ordered actions; " +
@@ -69,7 +64,7 @@ private sealed interface OwnerRequestParse {
 }
 
 private fun parseOwnerRequest(
-    spec: OwnerToolSpec,
+    spec: OwnerFamilySpec,
     input: JsonObject?,
     invocation: ToolInvocationContext,
 ): OwnerRequestParse {
@@ -134,7 +129,7 @@ private fun parseOwnerRequest(
     )
 }
 
-private fun ownerSchema(spec: OwnerToolSpec): InputSchema = InputSchema.Obj(
+private fun ownerSchema(spec: OwnerFamilySpec): InputSchema = InputSchema.Obj(
     properties = buildJsonObject {
         put("request_id", buildJsonObject {
             put("type", "string")
@@ -156,8 +151,8 @@ private fun ownerSchema(spec: OwnerToolSpec): InputSchema = InputSchema.Obj(
                         put("type", "object")
                         put(
                             "description",
-                            "Typed fields by action: " + spec.operations.keys.joinToString("; ") { type ->
-                                "$type(${OWNER_ACTION_ARGUMENT_GUIDE[type] ?: "no fields"})"
+                            "Typed fields by action: " + spec.actions.joinToString("; ") { action ->
+                                "${action.type}(${action.argumentGuide})"
                             } + ". Fields marked *_id accept a caller-chosen stable UUID when the create action supports it; " +
                                 "reuse that UUID in later actions from the same call. Never place a raw secret here.",
                         )
@@ -172,6 +167,12 @@ private fun ownerSchema(spec: OwnerToolSpec): InputSchema = InputSchema.Obj(
     },
     required = listOf("request_id", "actions"),
 )
+
+internal fun ownerToolSchemaUtf8Bytes(): Map<OwnerToolFamily, Int> =
+    OwnerActionRegistry.families.associate { spec ->
+        val modelFacing = spec.description + ownerSchema(spec).toString()
+        spec.family to modelFacing.toByteArray(Charsets.UTF_8).size
+    }
 
 private fun encodeOwnerResult(result: OwnerOperationResult): List<UIMessagePart> = listOf(
     UIMessagePart.Text(buildJsonObject {
@@ -204,13 +205,27 @@ private fun ownerToolError(code: String, message: String): List<UIMessagePart> =
     }.toString()),
 )
 
-private fun ops(vararg entries: Pair<String, OwnerOperationRisk>) = linkedMapOf(*entries)
-private infix fun String.read(risk: OwnerOperationRisk) = this to risk
+internal fun ownerActionGuideCoverageGaps(): Set<String> = OwnerActionRegistry.families
+    .flatMapTo(linkedSetOf()) { family ->
+        family.actions.filter { it.argumentGuide.isBlank() && it.type !in OWNER_NO_ARGUMENT_ACTIONS }
+            .map { it.type }
+    }
 
-internal fun ownerActionGuideCoverageGaps(): Set<String> = OWNER_TOOL_SPECS
-    .flatMapTo(linkedSetOf()) { it.operations.keys }
-    .minus(OWNER_ACTION_ARGUMENT_GUIDE.keys)
+private val OWNER_NO_ARGUMENT_ACTIONS = setOf(
+    "provider_list",
+    "secret_vault_list",
+    "secret_session_status",
+    "tts_list",
+    "tts_get_playback_speed",
+    "service_list",
+    "mcp_list",
+    "skill_list",
+    "workflow_list",
+    "rikkahub_state_get",
+    "doctor_check",
+)
 
+/* Registry moved to OwnerActionRegistry. Kept in this migration commit for blame continuity.
 private val OWNER_ACTION_ARGUMENT_GUIDE = mapOf(
     "assistant_create" to "assistant_id?, name?, system_prompt?, model_id?",
     "assistant_clone" to "source_assistant_id, assistant_id?, name?",
@@ -448,3 +463,4 @@ private val OWNER_TOOL_SPECS = listOf(
         ),
     ),
 )
+*/
