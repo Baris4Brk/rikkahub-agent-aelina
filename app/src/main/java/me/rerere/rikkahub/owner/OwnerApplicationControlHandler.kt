@@ -13,6 +13,7 @@ import me.rerere.rikkahub.data.ai.AgentSafetySettings
 import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.model.QuickMessage
+import me.rerere.rikkahub.data.repository.MemoryRepository
 import me.rerere.rikkahub.owner.db.HostOperationDao
 import me.rerere.rikkahub.pet.PetOverlaySelection
 import me.rerere.rikkahub.plugin.InstalledPluginRecord
@@ -34,6 +35,7 @@ class OwnerApplicationControlHandler(
     private val plugins: PluginRegistryStore,
     private val safety: AgentSafetySettings,
     private val operations: HostOperationDao,
+    private val memories: MemoryRepository,
 ) : OwnerOperationHandler {
     override fun supports(request: OwnerOperationRequest, action: OwnerAction): Boolean =
         action.type in ACTION_FIELDS && OwnerActionRegistry.action(request.family, action.type) != null
@@ -105,9 +107,9 @@ class OwnerApplicationControlHandler(
             }
             "plugin_bind" -> pluginBind(index, action)
             "plugin_install_managed", "plugin_uninstall" -> needsUserAction(index, action, "The package file must be resolved and verified by the private package installer.")
-            "memory_list" -> memoryList(index, action)
+            "memory_list" -> memoryList(index, request, action)
             "memory_configure_assistant" -> memoryConfigure(index, action)
-            "memory_delete" -> needsUserAction(index, action, "Memory deletion requires a revision-aware Memory repository identifier.")
+            "memory_delete" -> memoryDelete(index, action)
             "prompt_library_list", "lorebook_list" -> promptLibraryList(index, action)
             "quick_message_create" -> quickMessageCreate(index, action)
             "quick_message_update" -> quickMessageUpdate(index, action)
@@ -172,6 +174,9 @@ class OwnerApplicationControlHandler(
             is ControlReceipt.SafetyChanged -> if (safetySnapshot() != receipt.before) {
                 OwnerActionValidation(true, "OWNER_STATE_VERIFIED", "Safety capability settings were read back.")
             } else invalid("OWNER_VERIFY_FAILED", "Safety capability settings did not change.")
+            is ControlReceipt.MemoryArchived -> if (memories.getMemoryEntity(receipt.memoryId)?.lifecycleStatus == "ARCHIVED") {
+                OwnerActionValidation(true, "OWNER_STATE_VERIFIED", "Memory archive state was read back.")
+            } else invalid("OWNER_VERIFY_FAILED", "Memory did not enter the archived state.")
             else -> OwnerActionValidation(true, "OWNER_READ_VERIFIED", "The requested state was read from its authoritative source.")
         }
     }
@@ -195,6 +200,10 @@ class OwnerApplicationControlHandler(
             is ControlReceipt.SafetyChanged -> {
                 restoreSafety(receipt.before)
                 OwnerCompensationResult(true, "SAFETY_CAPABILITIES_RESTORED")
+            }
+            is ControlReceipt.MemoryArchived -> {
+                memories.restoreMemory(receipt.memoryId)
+                OwnerCompensationResult(true, "MEMORY_RESTORED")
             }
             else -> OwnerCompensationResult(false, "UNKNOWN_COMPENSATION_RECEIPT")
         }
@@ -261,16 +270,37 @@ class OwnerApplicationControlHandler(
         }) }
     }
 
-    private fun memoryList(index: Int, action: OwnerAction): OwnerAppliedAction {
+    private suspend fun memoryList(index: Int, request: OwnerOperationRequest, action: OwnerAction): OwnerAppliedAction {
         val settings = settingsStore.settingsFlow.value
         val id = action.arguments.uuid("assistant_id")
-        val assistants = settings.assistants.filter { id == null || it.id == id }
+            ?: runCatching { Uuid.parse(request.assistantId) }.getOrNull()
+            ?: return failure(index, action, "ASSISTANT_ID_INVALID", "Owner assistant ID is invalid.")
+        val assistants = settings.assistants.filter { it.id == id }
+        if (assistants.isEmpty()) return failure(index, action, "ASSISTANT_NOT_FOUND", "Assistant does not exist.")
+        val limit = (action.arguments.int("limit") ?: 20).coerceIn(1, 100)
+        val records = memories.getMemoriesOfAssistant(id.toString()).take(limit)
         return success(index, action, "MEMORY_SETTINGS_LISTED", "Assistant memory settings read.", buildJsonObject {
-            put("items", buildJsonArray { assistants.take((action.arguments.int("limit") ?: 20).coerceIn(1, 100)).forEach { assistant ->
+            put("assistant", buildJsonArray { assistants.forEach { assistant ->
                 add(buildJsonObject { put("assistant_id", assistant.id.toString()); put("enabled", assistant.enableMemory)
                     put("use_global", assistant.useGlobalMemory); put("recent_chats_reference", assistant.enableRecentChatsReference) })
             } })
+            put("items", buildJsonArray { records.forEach { memory -> add(buildJsonObject {
+                put("memory_id", memory.id); put("title", memory.title?.take(240).orEmpty())
+                put("content", memory.content.take(1_200)); put("kind", memory.kind.name)
+            }) } })
         })
+    }
+
+    private suspend fun memoryDelete(index: Int, action: OwnerAction): OwnerAppliedAction {
+        val id = action.arguments.int("memory_id")
+            ?: return failure(index, action, "MEMORY_ID_REQUIRED", "memory_id is required.")
+        val before = memories.getMemoryEntity(id)
+            ?: return failure(index, action, "MEMORY_NOT_FOUND", "Memory record does not exist.")
+        if (before.lifecycleStatus == "ARCHIVED") {
+            return success(index, action, "MEMORY_ALREADY_ARCHIVED", "Memory is already archived.")
+        }
+        memories.deleteMemory(id)
+        return success(index, action, "MEMORY_ARCHIVED", "Memory was revision-safely archived.", receipt = ControlReceipt.MemoryArchived(id))
     }
 
     private suspend fun memoryConfigure(index: Int, action: OwnerAction): OwnerAppliedAction {
@@ -579,6 +609,7 @@ class OwnerApplicationControlHandler(
         data class SettingsChanged(val before: Settings) : ControlReceipt
         data class PluginChanged(val before: InstalledPluginRecord) : ControlReceipt
         data class SafetyChanged(val before: SafetySnapshot) : ControlReceipt
+        data class MemoryArchived(val memoryId: Int) : ControlReceipt
     }
 
     private data class SafetySnapshot(

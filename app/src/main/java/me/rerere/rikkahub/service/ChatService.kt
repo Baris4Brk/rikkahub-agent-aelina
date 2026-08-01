@@ -605,6 +605,7 @@ class ChatService(
                     plugins = pluginRegistryStore,
                     safety = agentSafetySettings,
                     operations = hostOperationDao,
+                    memories = memoryRepository,
                 ),
                 ownerTtsHandler,
                 me.rerere.rikkahub.owner.OwnerEmotionTtsOperationHandler(

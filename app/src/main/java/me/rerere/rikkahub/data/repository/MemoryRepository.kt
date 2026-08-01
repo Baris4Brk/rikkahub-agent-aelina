@@ -147,6 +147,20 @@ class MemoryRepository(
         }
     }
 
+    suspend fun restoreMemory(id: Int) {
+        when (mutationCoordinator.mutate(
+            MemoryMutationCommand.Restore(
+                memoryId = id,
+                approvalSource = MemoryApprovalSource.MEMORY_TOOL,
+            ),
+        )) {
+            is MemoryMutationResult.Applied -> Unit
+            MemoryMutationResult.NotFound -> error("Memory record #$id not found")
+            MemoryMutationResult.Conflict -> error("Memory record #$id changed")
+            is MemoryMutationResult.Rejected -> error("Memory restore rejected")
+        }
+    }
+
     suspend fun getMemoryEntity(id: Int): MemoryEntity? = memoryDAO.getMemoryById(id)
 
     suspend fun queryDetailed(
