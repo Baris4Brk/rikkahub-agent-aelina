@@ -451,6 +451,11 @@ val appModule = module {
     single { me.rerere.rikkahub.data.ai.tools.local.ReverseGeocodeCache() }
     single { me.rerere.rikkahub.data.ai.tools.local.ReverseGeocodeDiagnosticsStore() }
     single {
+        me.rerere.rikkahub.data.ai.tools.local.ReverseGeocodeHttpClient(
+            baseClient = get(),
+        )
+    }
+    single {
         me.rerere.rikkahub.data.ai.tools.local.ReverseGeocodeRuntimeDiagnosticsSource(
             androidClient = get(),
             cache = get(),
@@ -462,7 +467,13 @@ val appModule = module {
             androidBackend = me.rerere.rikkahub.data.ai.tools.local.AndroidReverseGeocoder(get()),
             cache = get(),
             diagnostics = get(),
+            settingsStore = get(),
+            vault = get(),
+            http = get(),
         )
+    }
+    single {
+        me.rerere.rikkahub.data.ai.tools.local.ReverseGeocodeProviderTestGateway(get())
     }
     single {
         me.rerere.rikkahub.data.ai.tools.local.ReverseGeocodeToolProvider(get())
@@ -891,6 +902,7 @@ val appModule = module {
             petDialogueRepository = get(),
             telegramBotPreferences = get(),
             telegramCredentialResolver = get(),
+            reverseGeocodeProviderTestGateway = get(),
         )
     }
     single {

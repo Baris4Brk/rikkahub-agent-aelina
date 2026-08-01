@@ -26,6 +26,7 @@ import me.rerere.rikkahub.data.datastore.ReverseGeocodingSettings
 import me.rerere.rikkahub.data.datastore.isSafeReverseGeocoderEndpoint
 import me.rerere.rikkahub.data.datastore.normalizedOrNull
 import me.rerere.rikkahub.data.ai.tools.local.CoordinateSystem
+import me.rerere.rikkahub.data.ai.tools.local.ReverseGeocodeProviderTestGateway
 import me.rerere.rikkahub.data.model.QuickMessage
 import me.rerere.rikkahub.data.model.Lorebook
 import me.rerere.rikkahub.data.model.PromptInjection
@@ -59,6 +60,7 @@ class OwnerApplicationControlHandler(
     private val memories: MemoryRepository,
     private val vault: SecondUserSecretVault,
     private val petDialogues: PetDialogueRepository,
+    private val reverseGeocodeTester: ReverseGeocodeProviderTestGateway? = null,
 ) : OwnerOperationHandler {
     override fun supports(request: OwnerOperationRequest, action: OwnerAction): Boolean =
         action.type in ACTION_FIELDS && OwnerActionRegistry.action(request.family, action.type) != null
@@ -759,12 +761,25 @@ class OwnerApplicationControlHandler(
             ).normalized(),
         ) }
 
-    private fun reverseGeocoderTest(index: Int, action: OwnerAction): OwnerAppliedAction {
+    private suspend fun reverseGeocoderTest(index: Int, action: OwnerAction): OwnerAppliedAction {
         val id = action.arguments.string("provider_id")!!.trim().lowercase()
         val provider = settingsStore.settingsFlow.value.reverseGeocodingSettings.providers.firstOrNull { it.id == id }
             ?: return failure(index, action, "PROVIDER_NOT_CONFIGURED", "Provider is not configured.")
         if (!provider.enabled) return failure(index, action, "PROVIDER_DISABLED", "Provider is disabled.")
-        return failure(index, action, "PROVIDER_TEST_NOT_READY", "The configured provider adapter is not available in this build stage.")
+        val tester = reverseGeocodeTester
+            ?: return failure(index, action, "PROVIDER_TEST_NOT_READY", "The configured provider tester is unavailable.")
+        val result = tester.test(
+            providerId = id,
+            latitude = action.arguments.double("latitude") ?: 39.9042,
+            longitude = action.arguments.double("longitude") ?: 116.4074,
+        )
+        return if (result.ok) success(
+            index, action, result.code, "Provider test completed successfully without persisting its address result.",
+            buildJsonObject {
+                put("provider_id", result.providerId)
+                result.achievedDetail?.let { put("achieved_detail", it) }
+            },
+        ) else failure(index, action, result.code, "Provider test failed with a stable redacted status.")
     }
 
     private suspend fun safetyGet(index: Int, action: OwnerAction): OwnerAppliedAction = success(

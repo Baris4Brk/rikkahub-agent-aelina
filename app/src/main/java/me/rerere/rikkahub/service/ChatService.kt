@@ -501,6 +501,8 @@ class ChatService(
     private val petDialogueRepository: me.rerere.rikkahub.pet.PetDialogueRepository,
     private val telegramBotPreferences: me.rerere.rikkahub.data.telegram.TelegramBotPreferences,
     private val telegramCredentialResolver: me.rerere.rikkahub.data.telegram.TelegramCredentialResolver,
+    private val reverseGeocodeProviderTestGateway:
+        me.rerere.rikkahub.data.ai.tools.local.ReverseGeocodeProviderTestGateway,
 ) {
     fun onConversationVisible(conversationId: Uuid) {
         val session = secretPlaintextSessions.state.value as?
@@ -626,6 +628,7 @@ class ChatService(
                     memories = memoryRepository,
                     vault = secondUserSecretVault,
                     petDialogues = petDialogueRepository,
+                    reverseGeocodeTester = reverseGeocodeProviderTestGateway,
                 ),
                 ownerTtsHandler,
                 me.rerere.rikkahub.owner.OwnerEmotionTtsOperationHandler(
