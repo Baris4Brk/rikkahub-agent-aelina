@@ -206,7 +206,7 @@ object OwnerActionRegistry {
             "Manage speech-recognition profiles through typed settings and Vault references.",
             action("asr_list", OwnerOperationRisk.READ_ONLY),
             action("asr_create", OwnerOperationRisk.REVERSIBLE_WRITE, "asr_id?, type, name?, websocket_url?, model?, language?, sample_rate?, vault_slot_id?"),
-            action("asr_update", OwnerOperationRisk.REVERSIBLE_WRITE, "asr_id, name?, websocket_url?, model?, language?, sample_rate?"),
+            action("asr_update", OwnerOperationRisk.REVERSIBLE_WRITE, "asr_id, name?, websocket_url?, model?, language?, sample_rate?, vault_slot_id?"),
             action("asr_delete", OwnerOperationRisk.IRREVERSIBLE, "asr_id"),
             action("asr_set_default", OwnerOperationRisk.REVERSIBLE_WRITE, "asr_id"),
         ),

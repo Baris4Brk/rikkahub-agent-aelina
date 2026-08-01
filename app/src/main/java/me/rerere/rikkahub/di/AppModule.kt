@@ -852,6 +852,7 @@ val appModule = module {
             ownerTermuxServiceLauncher = get(),
             ownerOperationFingerprinter = get(),
             localBackupFacade = get(),
+            petDialogueRepository = get(),
         )
     }
     single {

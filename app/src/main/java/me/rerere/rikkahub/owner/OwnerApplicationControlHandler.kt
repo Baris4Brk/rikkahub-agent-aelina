@@ -15,6 +15,7 @@ import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.model.QuickMessage
 import me.rerere.rikkahub.data.repository.MemoryRepository
 import me.rerere.rikkahub.owner.db.HostOperationDao
+import me.rerere.rikkahub.pet.PetDialogueRepository
 import me.rerere.rikkahub.pet.PetOverlaySelection
 import me.rerere.rikkahub.plugin.InstalledPluginRecord
 import me.rerere.rikkahub.plugin.PluginRegistryStore
@@ -24,6 +25,9 @@ import me.rerere.rikkahub.quickcapture.QuickCaptureAreaMode
 import me.rerere.rikkahub.quickcapture.QuickCaptureBackendPreference
 import me.rerere.rikkahub.quickcapture.QuickCaptureBubbleEdge
 import me.rerere.rikkahub.quickcapture.QuickCaptureTargetMode
+import me.rerere.rikkahub.security.SecretBinding
+import me.rerere.rikkahub.security.SecretBindingKind
+import me.rerere.rikkahub.security.SecondUserSecretVault
 import kotlin.uuid.Uuid
 
 /**
@@ -36,6 +40,8 @@ class OwnerApplicationControlHandler(
     private val safety: AgentSafetySettings,
     private val operations: HostOperationDao,
     private val memories: MemoryRepository,
+    private val vault: SecondUserSecretVault,
+    private val petDialogues: PetDialogueRepository,
 ) : OwnerOperationHandler {
     override fun supports(request: OwnerOperationRequest, action: OwnerAction): Boolean =
         action.type in ACTION_FIELDS && OwnerActionRegistry.action(request.family, action.type) != null
@@ -115,9 +121,9 @@ class OwnerApplicationControlHandler(
             "quick_message_update" -> quickMessageUpdate(index, action)
             "quick_message_delete" -> quickMessageDelete(index, action)
             "asr_list" -> asrList(index, action)
-            "asr_create" -> asrCreate(index, action)
-            "asr_update" -> asrUpdate(index, action)
-            "asr_delete" -> asrDelete(index, action)
+            "asr_create" -> asrCreate(index, request, action)
+            "asr_update" -> asrUpdate(index, request, action)
+            "asr_delete" -> asrDelete(index, request, action)
             "asr_set_default" -> asrSetDefault(index, action)
             "channel_get" -> channelGet(index, action)
             "web_channel_update" -> settingsMutation(index, action) { current ->
@@ -148,7 +154,8 @@ class OwnerApplicationControlHandler(
             "safety_get" -> safetyGet(index, action)
             "safety_capabilities_update" -> safetyUpdate(index, action)
             "safety_emergency_stop_activate" -> needsUserAction(index, action, "Use the trusted Emergency Stop surface so every running backend is stopped together.")
-            "pet_list", "pet_dialogue_state" -> petGet(index, action)
+            "pet_list" -> petGet(index, action)
+            "pet_dialogue_state" -> petDialogueState(index, request, action)
             "pet_select" -> petSelect(index, request, action)
             "pet_configure" -> petConfigure(index, request, action)
             "pet_import_managed", "pet_delete" -> needsUserAction(index, action, "The private pet-package repository must validate and atomically switch the package first.")
@@ -177,6 +184,14 @@ class OwnerApplicationControlHandler(
             is ControlReceipt.MemoryArchived -> if (memories.getMemoryEntity(receipt.memoryId)?.lifecycleStatus == "ARCHIVED") {
                 OwnerActionValidation(true, "OWNER_STATE_VERIFIED", "Memory archive state was read back.")
             } else invalid("OWNER_VERIFY_FAILED", "Memory did not enter the archived state.")
+            is ControlReceipt.AsrChanged -> {
+                val settings = settingsStore.settingsFlow.value
+                val changed = settings.asrProviders != receipt.beforeProviders ||
+                    settings.selectedASRProviderId != receipt.beforeSelected ||
+                    snapshotAsrBindings(receipt.asrId, receipt.subjectId) != receipt.beforeBindings
+                if (changed) OwnerActionValidation(true, "ASR_STATE_VERIFIED", "ASR profile and Vault bindings were read back.")
+                else invalid("OWNER_VERIFY_FAILED", "ASR state did not change.")
+            }
             else -> OwnerActionValidation(true, "OWNER_READ_VERIFIED", "The requested state was read from its authoritative source.")
         }
     }
@@ -204,6 +219,14 @@ class OwnerApplicationControlHandler(
             is ControlReceipt.MemoryArchived -> {
                 memories.restoreMemory(receipt.memoryId)
                 OwnerCompensationResult(true, "MEMORY_RESTORED")
+            }
+            is ControlReceipt.AsrChanged -> {
+                settingsStore.update { current -> current.copy(
+                    asrProviders = receipt.beforeProviders,
+                    selectedASRProviderId = receipt.beforeSelected,
+                ) }
+                restoreAsrBindings(receipt.asrId, receipt.subjectId, receipt.beforeBindings)
+                OwnerCompensationResult(true, "ASR_STATE_RESTORED")
             }
             else -> OwnerCompensationResult(false, "UNKNOWN_COMPENSATION_RECEIPT")
         }
@@ -367,7 +390,7 @@ class OwnerApplicationControlHandler(
         })
     }
 
-    private suspend fun asrCreate(index: Int, action: OwnerAction): OwnerAppliedAction {
+    private suspend fun asrCreate(index: Int, request: OwnerOperationRequest, action: OwnerAction): OwnerAppliedAction {
         val id = action.arguments.uuid("asr_id") ?: Uuid.random()
         if (settingsStore.settingsFlow.value.asrProviders.any { it.id == id }) return failure(index, action, "ASR_EXISTS", "asr_id already exists.")
         val name = action.arguments.string("name")?.take(160)
@@ -393,23 +416,23 @@ class OwnerApplicationControlHandler(
             )
             else -> return failure(index, action, "ASR_TYPE_INVALID", "Supported ASR types are OPENAI_REALTIME, DASHSCOPE and VOLCENGINE.")
         }
-        return settingsMutation(index, action, data = buildJsonObject { put("asr_id", id.toString()) }) { current ->
+        return mutateAsr(index, request, action, id, bindRequested = true) { current ->
             current.copy(asrProviders = current.asrProviders + provider, selectedASRProviderId = current.selectedASRProviderId ?: id)
         }
     }
 
-    private suspend fun asrUpdate(index: Int, action: OwnerAction): OwnerAppliedAction {
+    private suspend fun asrUpdate(index: Int, request: OwnerOperationRequest, action: OwnerAction): OwnerAppliedAction {
         val id = action.arguments.uuid("asr_id") ?: return failure(index, action, "ASR_ID_REQUIRED", "asr_id is required.")
         if (settingsStore.settingsFlow.value.asrProviders.none { it.id == id }) return failure(index, action, "ASR_NOT_FOUND", "ASR profile does not exist.")
-        return settingsMutation(index, action) { current -> current.copy(asrProviders = current.asrProviders.map { provider ->
+        return mutateAsr(index, request, action, id, bindRequested = "vault_slot_id" in action.arguments) { current -> current.copy(asrProviders = current.asrProviders.map { provider ->
             if (provider.id != id) provider else updateAsr(provider, action.arguments)
         }) }
     }
 
-    private suspend fun asrDelete(index: Int, action: OwnerAction): OwnerAppliedAction {
+    private suspend fun asrDelete(index: Int, request: OwnerOperationRequest, action: OwnerAction): OwnerAppliedAction {
         val id = action.arguments.uuid("asr_id") ?: return failure(index, action, "ASR_ID_REQUIRED", "asr_id is required.")
         if (settingsStore.settingsFlow.value.asrProviders.none { it.id == id }) return failure(index, action, "ASR_NOT_FOUND", "ASR profile does not exist.")
-        return settingsMutation(index, action) { current ->
+        return mutateAsr(index, request, action, id, removeBinding = true) { current ->
             val remaining = current.asrProviders.filterNot { it.id == id }
             current.copy(asrProviders = remaining, selectedASRProviderId = current.selectedASRProviderId.takeUnless { it == id } ?: remaining.firstOrNull()?.id)
         }
@@ -506,6 +529,132 @@ class OwnerApplicationControlHandler(
                 put("scale", it.scale); put("fps", it.animationFps); put("idle_pool_enabled", it.idlePoolEnabled)
             }
         })
+    }
+
+    private suspend fun petDialogueState(
+        index: Int,
+        request: OwnerOperationRequest,
+        action: OwnerAction,
+    ): OwnerAppliedAction {
+        val active = petDialogues.observeActive(request.assistantId, request.conversationId).first()
+        val pending = petDialogues.observePendingHandoffs(request.assistantId).first()
+            .filter { it.privilegedConversationId == request.conversationId }
+        val archives = petDialogues.observeArchives(request.assistantId, 100).first()
+            .count { it.privilegedConversationId == request.conversationId }
+        return success(index, action, "PET_DIALOGUE_STATE_READ", "Current pet sidecar state read.", buildJsonObject {
+            put("active", active != null)
+            active?.let { dialogue ->
+                put("session_id", dialogue.session.sessionId)
+                put("local_date", dialogue.session.localDate)
+                put("turn_count", dialogue.turns.size)
+                put("remaining_turns", (20 - dialogue.turns.size).coerceAtLeast(0))
+                put("state_version", dialogue.session.stateVersion)
+            }
+            put("archive_count", archives)
+            put("pending_handoff_count", pending.size)
+            put("pending_handoffs", buildJsonArray {
+                pending.take(10).forEach { handoff ->
+                    add(buildJsonObject {
+                        put("request_id", handoff.requestId)
+                        put("title", handoff.title.take(160))
+                        put("mode", handoff.mode)
+                        put("status", handoff.status)
+                        put("state_version", handoff.stateVersion)
+                    })
+                }
+            })
+        })
+    }
+
+    private suspend fun mutateAsr(
+        index: Int,
+        request: OwnerOperationRequest,
+        action: OwnerAction,
+        asrId: Uuid,
+        bindRequested: Boolean = false,
+        removeBinding: Boolean = false,
+        transform: (Settings) -> Settings,
+    ): OwnerAppliedAction {
+        val before = settingsStore.settingsFlow.value
+        val beforeBindings = snapshotAsrBindings(asrId, request.authoritySubjectId)
+        val after = transform(before)
+        val requestedSlot = action.arguments.string("vault_slot_id")?.trim()?.takeIf(String::isNotEmpty)
+        if (bindRequested && requestedSlot != null &&
+            vault.listMetadata(request.authoritySubjectId).none { it.slotId == requestedSlot }
+        ) {
+            return failure(index, action, "SECRET_SLOT_MISSING", "Vault slot does not exist for this authority epoch.")
+        }
+        val bindingAlreadyMatches = when {
+            removeBinding -> beforeBindings.values.all { it.isEmpty() }
+            bindRequested -> beforeBindings.entries.singleOrNull { it.value.isNotEmpty() }?.key == requestedSlot &&
+                beforeBindings.values.sumOf { it.size } == if (requestedSlot == null) 0 else 1
+            else -> true
+        }
+        if (after.asrProviders == before.asrProviders &&
+            after.selectedASRProviderId == before.selectedASRProviderId && bindingAlreadyMatches
+        ) {
+            return success(index, action, "ASR_ALREADY_CONFIGURED", "ASR profile already matches the requested state.", buildJsonObject {
+                put("asr_id", asrId.toString())
+            })
+        }
+        return try {
+            settingsStore.update { current -> current.copy(
+                asrProviders = after.asrProviders,
+                selectedASRProviderId = after.selectedASRProviderId,
+            ) }
+            when {
+                removeBinding -> rebindAsr(asrId, request.authoritySubjectId, null)
+                bindRequested -> rebindAsr(asrId, request.authoritySubjectId, requestedSlot)
+            }
+            success(
+                index, action, "ASR_UPDATED", "ASR profile and credential binding updated.",
+                buildJsonObject { put("asr_id", asrId.toString()) },
+                ControlReceipt.AsrChanged(
+                    beforeProviders = before.asrProviders,
+                    beforeSelected = before.selectedASRProviderId,
+                    asrId = asrId,
+                    subjectId = request.authoritySubjectId,
+                    beforeBindings = beforeBindings,
+                ),
+            )
+        } catch (error: Throwable) {
+            settingsStore.update { current -> current.copy(
+                asrProviders = before.asrProviders,
+                selectedASRProviderId = before.selectedASRProviderId,
+            ) }
+            runCatching { restoreAsrBindings(asrId, request.authoritySubjectId, beforeBindings) }
+            throw error
+        }
+    }
+
+    private suspend fun snapshotAsrBindings(
+        asrId: Uuid,
+        subjectId: String,
+    ): Map<String, List<SecretBinding>> = vault.listMetadata(subjectId).associate { slot ->
+        slot.slotId to slot.bindings.filter { it.kind == SecretBindingKind.ASR && it.targetId == asrId.toString() }
+    }
+
+    private suspend fun rebindAsr(asrId: Uuid, subjectId: String, slotId: String?) {
+        val slots = vault.listMetadata(subjectId)
+        slots.forEach { slot ->
+            val retained = slot.bindings.filterNot { it.kind == SecretBindingKind.ASR && it.targetId == asrId.toString() }
+            val next = if (slot.slotId == slotId) retained + SecretBinding(SecretBindingKind.ASR, asrId.toString()) else retained
+            if (next != slot.bindings) check(vault.updateBindings(slot.slotId, subjectId, next)) { "asr_vault_binding_failed" }
+        }
+        if (slotId != null && slots.none { it.slotId == slotId }) error("asr_vault_slot_missing")
+    }
+
+    private suspend fun restoreAsrBindings(
+        asrId: Uuid,
+        subjectId: String,
+        snapshot: Map<String, List<SecretBinding>>,
+    ) {
+        vault.listMetadata(subjectId).forEach { slot ->
+            val retained = slot.bindings.filterNot { it.kind == SecretBindingKind.ASR && it.targetId == asrId.toString() }
+            check(vault.updateBindings(slot.slotId, subjectId, retained + snapshot[slot.slotId].orEmpty())) {
+                "asr_vault_binding_restore_failed"
+            }
+        }
     }
 
     private suspend fun petSelect(index: Int, request: OwnerOperationRequest, action: OwnerAction): OwnerAppliedAction {
@@ -610,6 +759,13 @@ class OwnerApplicationControlHandler(
         data class PluginChanged(val before: InstalledPluginRecord) : ControlReceipt
         data class SafetyChanged(val before: SafetySnapshot) : ControlReceipt
         data class MemoryArchived(val memoryId: Int) : ControlReceipt
+        data class AsrChanged(
+            val beforeProviders: List<ASRProviderSetting>,
+            val beforeSelected: Uuid?,
+            val asrId: Uuid,
+            val subjectId: String,
+            val beforeBindings: Map<String, List<SecretBinding>>,
+        ) : ControlReceipt
     }
 
     private data class SafetySnapshot(
@@ -630,7 +786,7 @@ class OwnerApplicationControlHandler(
             "plugin_list" to emptySet(), "plugin_runtime_set" to setOf("enabled"), "plugin_install_managed" to setOf("managed_file_id"), "plugin_approve" to setOf("plugin_id"), "plugin_set_enabled" to setOf("plugin_id", "enabled"), "plugin_bind" to setOf("plugin_id", "assistant_id", "enabled"), "plugin_uninstall" to setOf("plugin_id"),
             "memory_list" to setOf("assistant_id", "limit"), "memory_configure_assistant" to setOf("assistant_id", "enabled", "use_global", "recent_chats_reference"), "memory_delete" to setOf("memory_id"),
             "prompt_library_list" to emptySet(), "quick_message_create" to setOf("message_id", "title", "content"), "quick_message_update" to setOf("message_id", "title", "content"), "quick_message_delete" to setOf("message_id"), "lorebook_list" to emptySet(),
-            "asr_list" to emptySet(), "asr_create" to setOf("asr_id", "type", "name", "websocket_url", "model", "language", "sample_rate", "vault_slot_id"), "asr_update" to setOf("asr_id", "name", "websocket_url", "model", "language", "sample_rate"), "asr_delete" to setOf("asr_id"), "asr_set_default" to setOf("asr_id"),
+            "asr_list" to emptySet(), "asr_create" to setOf("asr_id", "type", "name", "websocket_url", "model", "language", "sample_rate", "vault_slot_id"), "asr_update" to setOf("asr_id", "name", "websocket_url", "model", "language", "sample_rate", "vault_slot_id"), "asr_delete" to setOf("asr_id"), "asr_set_default" to setOf("asr_id"),
             "channel_get" to emptySet(), "web_channel_update" to setOf("enabled", "port", "jwt_enabled", "localhost_only"), "telegram_channel_update" to setOf("enabled", "vault_slot_id"),
             "search_get" to emptySet(), "search_set_enabled" to setOf("enabled"), "search_select" to setOf("index"),
             "backup_storage_get" to emptySet(), "backup_local_export" to emptySet(), "backup_restore_preserving_owner" to setOf("managed_file_id"),

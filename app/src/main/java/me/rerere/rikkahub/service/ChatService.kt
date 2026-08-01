@@ -497,6 +497,7 @@ class ChatService(
     private val ownerTermuxServiceLauncher: me.rerere.rikkahub.owner.OwnerTermuxServiceLauncher,
     private val ownerOperationFingerprinter: me.rerere.rikkahub.owner.OwnerOperationFingerprinter,
     private val localBackupFacade: me.rerere.rikkahub.data.sync.LocalBackupFacade,
+    private val petDialogueRepository: me.rerere.rikkahub.pet.PetDialogueRepository,
 ) {
     fun onConversationVisible(conversationId: Uuid) {
         val session = secretPlaintextSessions.state.value as?
@@ -613,6 +614,8 @@ class ChatService(
                     safety = agentSafetySettings,
                     operations = hostOperationDao,
                     memories = memoryRepository,
+                    vault = secondUserSecretVault,
+                    petDialogues = petDialogueRepository,
                 ),
                 ownerTtsHandler,
                 me.rerere.rikkahub.owner.OwnerEmotionTtsOperationHandler(
