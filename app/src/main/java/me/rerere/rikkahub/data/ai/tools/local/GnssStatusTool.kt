@@ -17,8 +17,12 @@ fun gnssStatusTool(context: Context): Tool = createGnssStatusTool {
     AndroidGnssObservationSource(context)
 }
 
-internal fun locationToolBundle(context: Context): List<Tool> = listOf(
+internal fun locationToolBundle(
+    context: Context,
+    reverseGeocodeToolProvider: ReverseGeocodeToolProvider,
+): List<Tool> = listOf(
     locationTool(context),
+    reverseGeocodeToolProvider.createTool(),
     gnssStatusTool(context),
 )
 

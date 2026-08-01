@@ -11,10 +11,18 @@ class GnssStatusToolTest {
     @Test
     fun `Location switch bundle contains location and GNSS status tools`() {
         assertEquals(
-            listOf("get_location", "get_gnss_status"),
-            locationToolBundle(NULL_CONTEXT).map { it.name },
+            listOf("get_location", "reverse_geocode", "get_gnss_status"),
+            locationToolBundle(
+                NULL_CONTEXT,
+                ReverseGeocodeToolProvider { ReverseGeocodeResolution.Failure(testReverseError()) },
+            ).map { it.name },
         )
     }
+
+    private fun testReverseError() = ReverseGeocodeError(
+        code = "NO_GEOCODER_RESULT",
+        message = "No result.",
+    )
 
     @Test
     fun `get_gnss_status rejects invalid duration and unknown fields before observing`() {

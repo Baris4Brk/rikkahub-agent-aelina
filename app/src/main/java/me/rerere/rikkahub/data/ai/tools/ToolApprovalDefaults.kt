@@ -275,6 +275,7 @@ object ToolApprovalDefaults {
         "bluetooth_scan",
         "list_paired_bluetooth_devices",
         "get_gnss_status",
+        "reverse_geocode",
         "setup_apply",
     ) + WORKSPACE_PROCESS_TOOL_NAMES +
         STRUCTURED_PRIVILEGED_TOOL_NAMES +

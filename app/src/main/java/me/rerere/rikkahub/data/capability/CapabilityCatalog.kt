@@ -426,6 +426,7 @@ object CapabilityCatalog {
         "seek_media",
         "get_media_status",
         "get_location",
+        "reverse_geocode",
         "get_step_count",
         "search_contacts",
         "list_contacts",
@@ -813,6 +814,19 @@ object CapabilityCatalog {
             riskLevel = RiskLevel.Medium,
             approvalPolicy = ApprovalPolicy.AlwaysAsk,
             allowedOrigins = InvocationSurfacePolicy.ALL_NON_KEYGUARD,
+        ))
+
+        reg(CapabilityDescriptor(
+            id = CapabilityId.ReverseGeocoding,
+            localToolOption = null,
+            toolNames = setOf("reverse_geocode"),
+            requirements = emptyList(),
+            implementationState = ImplementationState.Implemented,
+            riskLevel = RiskLevel.Medium,
+            approvalPolicy = ApprovalPolicy.AlwaysAsk,
+            allowedOrigins = InvocationSurfacePolicy.CONFIRMED_LOCAL_SECOND_USER,
+            requiresUnlockedDevice = true,
+            requiresForegroundApp = false,
         ))
 
         reg(CapabilityDescriptor(

@@ -444,6 +444,21 @@ val appModule = module {
     single {
         me.rerere.rikkahub.data.ai.tools.local.AndroidGnssObservationSource(get())
     }
+    single<me.rerere.rikkahub.data.ai.tools.local.AndroidGeocoderClient> {
+        me.rerere.rikkahub.data.ai.tools.local.PlatformAndroidGeocoderClient(get())
+    }
+    single { me.rerere.rikkahub.data.ai.tools.local.ReverseGeocodeCache() }
+    single { me.rerere.rikkahub.data.ai.tools.local.ReverseGeocodeDiagnosticsStore() }
+    single<me.rerere.rikkahub.data.ai.tools.local.ReverseGeocodeCoordinator> {
+        me.rerere.rikkahub.data.ai.tools.local.ReverseGeocodeCoordinatorImpl(
+            androidBackend = me.rerere.rikkahub.data.ai.tools.local.AndroidReverseGeocoder(get()),
+            cache = get(),
+            diagnostics = get(),
+        )
+    }
+    single {
+        me.rerere.rikkahub.data.ai.tools.local.ReverseGeocodeToolProvider(get())
+    }
 
     single {
         LocalTools(
@@ -495,6 +510,7 @@ val appModule = module {
             petDiaryToolProvider = get(),
             persistentTtsLibrary = get(),
             ttsLibraryToolProvider = get(),
+            reverseGeocodeToolProvider = get(),
         )
     }
 

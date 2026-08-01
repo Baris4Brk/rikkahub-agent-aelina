@@ -22,6 +22,8 @@ class DefaultToolExecutionPolicyResolver : ToolExecutionPolicyResolver {
         context: ToolExecutionContext,
     ): ToolExecutionPolicy = when {
         toolName == "web_fetch" -> webFetch(args)
+        toolName == "get_location" -> location(args)
+        toolName == "reverse_geocode" -> reverseGeocode(args)
         toolName in FILE_READ_TOOLS -> fileRead(toolName, args)
         toolName in FILE_WRITE_TOOLS -> fileWrite(toolName, args)
         toolName in LOCAL_READ_TOOLS -> readOnly(ToolEffect.LOCAL_READ)
@@ -61,6 +63,40 @@ class DefaultToolExecutionPolicyResolver : ToolExecutionPolicyResolver {
         } else {
             serial(setOf(ToolEffect.NETWORK_WRITE), setOf(key))
         }
+    }
+
+    private fun location(args: JsonObject): ToolExecutionPolicy {
+        val includeAddress = args.boolean("include_address") == true
+        val networkPermitted = includeAddress && (
+            args.boolean("allow_platform_geocoder") != false ||
+                args.boolean("allow_external_address") == true
+            )
+        return serial(
+            effects = buildSet {
+                add(ToolEffect.SENSITIVE_READ)
+                if (networkPermitted) add(ToolEffect.NETWORK_WRITE)
+            },
+            keys = buildSet {
+                add(resourceKey("location", "device"))
+                if (includeAddress) {
+                    add(resourceKey("reverse-geocoder", args.string("address_provider") ?: "auto"))
+                }
+            },
+            concurrency = ToolConcurrency.RESOURCE_SERIAL,
+        )
+    }
+
+    private fun reverseGeocode(args: JsonObject): ToolExecutionPolicy {
+        val networkPermitted = args.boolean("allow_platform_geocoder") != false ||
+            args.boolean("allow_external") == true
+        return serial(
+            effects = buildSet {
+                add(ToolEffect.SENSITIVE_READ)
+                if (networkPermitted) add(ToolEffect.NETWORK_WRITE)
+            },
+            keys = setOf(resourceKey("reverse-geocoder", args.string("provider") ?: "auto")),
+            concurrency = ToolConcurrency.RESOURCE_SERIAL,
+        )
     }
 
     private fun fileRead(toolName: String, args: JsonObject): ToolExecutionPolicy = readOnly(
@@ -233,7 +269,13 @@ class DefaultToolExecutionPolicyResolver : ToolExecutionPolicyResolver {
     private fun normalizePath(path: String): String = path.trim().replace('\\', '/')
 
     private fun JsonObject.string(name: String): String? =
-        get(name)?.jsonPrimitive?.contentOrNull?.trim()?.takeIf(String::isNotEmpty)
+        (get(name) as? kotlinx.serialization.json.JsonPrimitive)
+            ?.contentOrNull
+            ?.trim()
+            ?.takeIf(String::isNotEmpty)
+
+    private fun JsonObject.boolean(name: String): Boolean? =
+        (get(name) as? kotlinx.serialization.json.JsonPrimitive)?.booleanOrNull
 
     companion object {
         private val FILE_ARGUMENT_NAMES = listOf(
@@ -257,7 +299,7 @@ class DefaultToolExecutionPolicyResolver : ToolExecutionPolicyResolver {
             "execution_list", "execution_status",
         )
         private val SENSITIVE_READ_TOOLS = setOf(
-            "get_location", "list_contacts", "search_contacts", "list_call_log",
+            "list_contacts", "search_contacts", "list_call_log",
             "list_sms_inbox", "search_sms", "list_recent_notifications",
             "list_active_notifications", "clipboard_tool",
         )

@@ -405,6 +405,8 @@ class LocalTools(
     private val petDiaryToolProvider: me.rerere.rikkahub.pet.PetDiaryToolProvider,
     private val persistentTtsLibrary: me.rerere.rikkahub.tts.PersistentTtsLibrary,
     private val ttsLibraryToolProvider: me.rerere.rikkahub.tts.TtsLibraryToolProvider,
+    private val reverseGeocodeToolProvider:
+        me.rerere.rikkahub.data.ai.tools.local.ReverseGeocodeToolProvider,
 ) {
     private val displayTargetResolver by lazy {
         me.rerere.rikkahub.data.ai.tools.local.DisplayTargetResolver(displayAutomationRuntime)
@@ -852,7 +854,7 @@ class LocalTools(
             tools.add(writeTextFileTool(context))
         }
         if (options.contains(LocalToolOption.Location)) {
-            tools.addAll(locationToolBundle(context))
+            tools.addAll(locationToolBundle(context, reverseGeocodeToolProvider))
         }
         if (options.contains(LocalToolOption.Contacts)) {
             tools.add(searchContactsTool(context))
