@@ -80,10 +80,13 @@ class PetOverlaySelectionTest {
             normalizedY = -1f,
         ).normalized()
 
-        assertEquals(2f, normalized.scale)
+        assertEquals(3f, normalized.scale)
         assertEquals(12, normalized.animationFps)
         assertEquals(1f, normalized.normalizedX)
         assertEquals(0f, normalized.normalizedY)
         assertFalse(normalized.idlePoolEnabled)
+
+        val minimum = normalized.copy(scale = 0.001f).normalized()
+        assertEquals(0.05f, minimum.scale)
     }
 }
