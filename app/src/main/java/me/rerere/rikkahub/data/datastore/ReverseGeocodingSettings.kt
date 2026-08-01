@@ -1,6 +1,8 @@
 package me.rerere.rikkahub.data.datastore
 
 import java.net.URI
+import java.net.URLDecoder
+import java.nio.charset.StandardCharsets
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import me.rerere.rikkahub.data.ai.tools.local.CoordinateSystem
@@ -68,10 +70,20 @@ internal fun ReverseGeocoderProviderConfig.normalizedOrNull(): ReverseGeocoderPr
 internal fun isSafeReverseGeocoderEndpoint(value: String): Boolean {
     if (value.isBlank() || value.length > 2_048) return false
     val uri = runCatching { URI(value) }.getOrNull() ?: return false
+    val queryNames = uri.rawQuery.orEmpty().split('&').filter(String::isNotBlank).map { field ->
+        runCatching {
+            URLDecoder.decode(field.substringBefore('='), StandardCharsets.UTF_8.name()).lowercase()
+        }.getOrDefault("[invalid]")
+    }
     return uri.scheme.equals("https", ignoreCase = true) &&
         !uri.host.isNullOrBlank() &&
         uri.rawUserInfo == null &&
-        uri.rawFragment == null
+        uri.rawFragment == null &&
+        "[invalid]" !in queryNames &&
+        queryNames.none { it in SENSITIVE_ENDPOINT_QUERY_NAMES }
 }
 
 private val REVERSE_GEOCODER_PROVIDER_ID = Regex("[a-z0-9][a-z0-9_-]{0,63}")
+private val SENSITIVE_ENDPOINT_QUERY_NAMES = setOf(
+    "key", "api_key", "apikey", "token", "access_token", "secret", "password", "sig", "signature",
+)

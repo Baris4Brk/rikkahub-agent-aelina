@@ -38,6 +38,7 @@ class AmapResponseParserTest {
         assertEquals(12.5, result.address.matchedDistanceM!!, 0.001)
         assertFalse(result.address.isExact)
         assertEquals(CoordinateDisclosure.CONFIGURED_EXTERNAL, result.address.coordinateDisclosure)
+        assertEquals("高德地图", result.address.attribution)
     }
 
     @Test

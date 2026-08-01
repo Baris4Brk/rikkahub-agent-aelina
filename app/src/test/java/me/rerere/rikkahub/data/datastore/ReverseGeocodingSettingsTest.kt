@@ -23,6 +23,8 @@ class ReverseGeocodingSettingsTest {
         assertFalse(isSafeReverseGeocoderEndpoint("https://user:pass@example.com/reverse"))
         assertFalse(isSafeReverseGeocoderEndpoint("https://example.com/reverse#fragment"))
         assertTrue(isSafeReverseGeocoderEndpoint("https://example.com/reverse?version=1"))
+        assertFalse(isSafeReverseGeocoderEndpoint("https://example.com/reverse?key=must-not-persist"))
+        assertFalse(isSafeReverseGeocoderEndpoint("https://example.com/reverse?%61pi_key=must-not-persist"))
     }
 
     @Test

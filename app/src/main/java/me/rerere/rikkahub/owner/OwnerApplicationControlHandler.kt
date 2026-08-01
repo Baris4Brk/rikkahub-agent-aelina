@@ -995,6 +995,15 @@ class OwnerApplicationControlHandler(
         return when (action.type) {
             "reverse_geocoder_get" -> null
             "reverse_geocoder_upsert" -> {
+                if (action.arguments.containsKey("enabled") && action.arguments.strictBoolean("enabled") == null) {
+                    return bad("ENABLED_INVALID", "enabled must be a JSON boolean.")
+                }
+                if (action.arguments.containsKey("priority") && action.arguments.strictInt("priority") == null) {
+                    return bad("PRIORITY_INVALID", "priority must be a JSON integer.")
+                }
+                if (action.arguments.containsKey("vault_slot_id") && action.arguments.strictString("vault_slot_id").isNullOrBlank()) {
+                    return bad("VAULT_SLOT_ID_INVALID", "vault_slot_id must be a non-empty string when supplied.")
+                }
                 val provider = parseReverseGeocoderProvider(action)
                     ?: return bad("REVERSE_GEOCODER_CONFIG_INVALID", "Provider ID, type, HTTPS endpoint, coordinate system or limits are invalid.")
                 if (provider.type == ReverseGeocoderProviderKind.NOMINATIM && provider.termsAcceptedAtMs == null) {
@@ -1028,25 +1037,25 @@ class OwnerApplicationControlHandler(
     }
 
     private fun parseReverseGeocoderProvider(action: OwnerAction): ReverseGeocoderProviderConfig? {
-        val id = action.arguments.string("provider_id")?.trim()?.lowercase() ?: return null
-        val type = action.arguments.string("provider_type")?.let { raw ->
+        val id = action.arguments.strictString("provider_id")?.trim()?.lowercase() ?: return null
+        val type = action.arguments.strictString("provider_type")?.let { raw ->
             ReverseGeocoderProviderKind.entries.firstOrNull {
                 it.name.equals(raw.replace('-', '_'), ignoreCase = true) ||
                     (it == ReverseGeocoderProviderKind.BIGDATA_CLOUD && raw.equals("bigdatacloud", ignoreCase = true))
             }
         } ?: return null
-        val endpoint = action.arguments.string("endpoint")?.trim() ?: return null
-        val coordinateSystem = action.arguments.string("query_coordinate_system")?.let { raw ->
+        val endpoint = action.arguments.strictString("endpoint")?.trim() ?: return null
+        val coordinateSystem = action.arguments.strictString("query_coordinate_system")?.let { raw ->
             CoordinateSystem.entries.firstOrNull { it.name.equals(raw, ignoreCase = true) }
         } ?: return null
-        val priority = action.arguments.int("priority") ?: 100
+        val priority = action.arguments.strictInt("priority") ?: 100
         if (priority !in 0..10_000 || !isSafeReverseGeocoderEndpoint(endpoint)) return null
         val acceptedAt = action.arguments.long("terms_accepted_at_ms")
         if (action.arguments.containsKey("terms_accepted_at_ms") && (acceptedAt == null || acceptedAt <= 0)) return null
         return ReverseGeocoderProviderConfig(
             id = id,
             type = type,
-            displayName = action.arguments.string("display_name") ?: id,
+            displayName = action.arguments.strictString("display_name") ?: id,
             endpoint = endpoint,
             enabled = action.arguments.strictBoolean("enabled") ?: false,
             priority = priority,
@@ -1227,6 +1236,12 @@ private fun JsonObject.boolean(name: String): Boolean? = string(name)?.toBoolean
 private fun JsonObject.strictBoolean(name: String): Boolean? = (this[name] as? JsonPrimitive)
     ?.takeUnless { it.isString }
     ?.booleanOrNull
+private fun JsonObject.strictString(name: String): String? = (this[name] as? JsonPrimitive)
+    ?.takeIf { it.isString }
+    ?.contentOrNull
+private fun JsonObject.strictInt(name: String): Int? = (this[name] as? JsonPrimitive)
+    ?.takeUnless { it.isString }
+    ?.intOrNull
 private fun JsonObject.int(name: String): Int? = string(name)?.toIntOrNull()
 private fun JsonObject.long(name: String): Long? = (this[name] as? JsonPrimitive)
     ?.takeUnless { it.isString }
