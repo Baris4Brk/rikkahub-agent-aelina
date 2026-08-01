@@ -2,8 +2,6 @@ package me.rerere.rikkahub.owner
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.addJsonObject
 import kotlinx.serialization.json.buildJsonArray
@@ -25,23 +23,22 @@ class OwnerOperationExecutor(
     private val containsRuntimeSecret: (String) -> Boolean = { false },
     private val fingerprinter: OwnerOperationFingerprinter = Sha256OwnerOperationFingerprinter,
     private val nowMs: () -> Long = System::currentTimeMillis,
+    private val lanes: OwnerOperationLanes = OwnerOperationLanes(),
 ) : OwnerOperationGateway {
-    private val lock = Mutex()
-
     override suspend fun execute(
         request: OwnerOperationRequest,
         context: PrivilegedSessionContext,
-    ): OwnerOperationResult = lock.withLock {
-        validateEnvelope(request, context)?.let { return@withLock it }
+    ): OwnerOperationResult = lanes.withOperation(request) {
+        validateEnvelope(request, context)?.let { return@withOperation it }
         val summary = runCatching { actionSummary(request) }.getOrElse {
-            return@withLock failed(
+            return@withOperation failed(
                 request,
                 "OWNER_FINGERPRINT_UNAVAILABLE",
                 "The secure idempotency fingerprint could not be created.",
             )
         }
         val existing = dao.get(request.requestId)
-        if (existing != null) return@withLock replay(existing, request, summary)
+        if (existing != null) return@withOperation replay(existing, request, summary)
 
         val now = nowMs()
         val initial = HostOperationEntity(
@@ -78,27 +75,27 @@ class OwnerOperationExecutor(
         )
         if (!inserted) {
             val concurrent = dao.get(request.requestId)
-                ?: return@withLock failed(request, "OWNER_REQUEST_RACE", "Operation could not be claimed.")
-            return@withLock replay(concurrent, request, summary)
+                ?: return@withOperation failed(request, "OWNER_REQUEST_RACE", "Operation could not be claimed.")
+            return@withOperation replay(concurrent, request, summary)
         }
 
         transition(request.requestId, OwnerOperationState.APPLYING, reasonCode = "ENVELOPE_VALIDATION_COMPLETE")
-            ?: return@withLock failed(request, "OWNER_LEDGER_CONFLICT", "Operation state changed concurrently.")
+            ?: return@withOperation failed(request, "OWNER_LEDGER_CONFLICT", "Operation state changed concurrently.")
 
         val applied = mutableListOf<Pair<OwnerAction, OwnerAppliedAction>>()
         try {
             for ((index, action) in request.actions.withIndex()) {
                 revalidateAuthority(request, context)?.let { invalid ->
-                    return@withLock compensateAndFinish(request, context, applied, invalid.code, invalid.message)
+                    return@withOperation compensateAndFinish(request, context, applied, invalid.code, invalid.message)
                 }
                 if (isEmergencyStopActive()) {
-                    return@withLock compensateAndFinish(
+                    return@withOperation compensateAndFinish(
                         request, context, applied, "EMERGENCY_STOP_ACTIVE", "Emergency Stop interrupted the operation.",
                     )
                 }
                 val validation = handler.validate(request, action, context)
                 if (!validation.ok) {
-                    return@withLock compensateAndFinish(
+                    return@withOperation compensateAndFinish(
                         request,
                         context,
                         applied,
@@ -108,7 +105,7 @@ class OwnerOperationExecutor(
                 }
                 val result = handler.apply(index, request, action, context)
                 if (!result.result.ok) {
-                    return@withLock compensateAndFinish(
+                    return@withOperation compensateAndFinish(
                         request, context, applied, result.result.code, result.result.message,
                     )
                 }
@@ -119,13 +116,13 @@ class OwnerOperationExecutor(
                     actionIndex = index,
                     actionType = action.type,
                     reasonCode = "ACTION_APPLIED",
-                ) ?: return@withLock compensateAndFinish(
+                ) ?: return@withOperation compensateAndFinish(
                     request, context, applied, "OWNER_LEDGER_CONFLICT", "Operation state changed concurrently.",
                 )
             }
 
             if (isEmergencyStopActive()) {
-                return@withLock compensateAndFinish(
+                return@withOperation compensateAndFinish(
                     request,
                     context,
                     applied,
@@ -134,16 +131,16 @@ class OwnerOperationExecutor(
                 )
             }
             transition(request.requestId, OwnerOperationState.VERIFYING, reasonCode = "APPLY_COMPLETE")
-                ?: return@withLock compensateAndFinish(
+                ?: return@withOperation compensateAndFinish(
                     request, context, applied, "OWNER_LEDGER_CONFLICT", "Operation state changed concurrently.",
                 )
             for ((index, pair) in applied.withIndex()) {
                 val (action, result) = pair
                 revalidateAuthority(request, context)?.let { invalid ->
-                    return@withLock compensateAndFinish(request, context, applied, invalid.code, invalid.message)
+                    return@withOperation compensateAndFinish(request, context, applied, invalid.code, invalid.message)
                 }
                 if (isEmergencyStopActive()) {
-                    return@withLock compensateAndFinish(
+                    return@withOperation compensateAndFinish(
                         request,
                         context,
                         applied,
@@ -153,7 +150,7 @@ class OwnerOperationExecutor(
                 }
                 val check = handler.verify(request, action, result, context)
                 if (!check.ok) {
-                    return@withLock compensateAndFinish(request, context, applied, check.code, check.message)
+                    return@withOperation compensateAndFinish(request, context, applied, check.code, check.message)
                 }
                 transition(
                     request.requestId,
@@ -161,7 +158,7 @@ class OwnerOperationExecutor(
                     actionIndex = index,
                     actionType = action.type,
                     reasonCode = "ACTION_VERIFIED",
-                ) ?: return@withLock compensateAndFinish(
+                ) ?: return@withOperation compensateAndFinish(
                     request, context, applied, "OWNER_LEDGER_CONFLICT", "Operation state changed concurrently.",
                 )
             }
@@ -171,7 +168,7 @@ class OwnerOperationExecutor(
                 reasonCode = "OPERATION_COMMITTED",
                 resultCode = "OWNER_OPERATION_COMMITTED",
                 terminal = true,
-            ) ?: return@withLock compensateAndFinish(
+            ) ?: return@withOperation compensateAndFinish(
                 request, context, applied, "OWNER_LEDGER_CONFLICT", "Operation state changed concurrently.",
             )
             runCatching { dao.trimTerminal() }
@@ -422,15 +419,14 @@ class AgentRunOwnerOperationGateway(
     private val delegate: OwnerOperationGateway,
     private val operations: HostOperationDao,
     private val runs: AgentRunRepository,
+    private val lanes: OwnerOperationLanes = OwnerOperationLanes(),
 ) : OwnerOperationGateway {
-    private val lock = Mutex()
-
     override suspend fun execute(
         request: OwnerOperationRequest,
         context: PrivilegedSessionContext,
-    ): OwnerOperationResult = lock.withLock {
+    ): OwnerOperationResult = lanes.withRequestId(request.requestId) {
         if (operations.get(request.requestId) != null) {
-            return@withLock delegate.execute(request, context)
+            return@withRequestId delegate.execute(request, context)
         }
         val runId = runs.open(
             kind = AgentRunKind.OwnerHost,
