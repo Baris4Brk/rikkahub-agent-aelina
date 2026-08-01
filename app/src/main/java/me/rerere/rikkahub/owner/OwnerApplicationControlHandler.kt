@@ -6,13 +6,17 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import me.rerere.asr.ASRProviderSetting
+import me.rerere.ai.core.MessageRole
 import me.rerere.rikkahub.data.ai.AgentSafetySettings
 import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.model.QuickMessage
+import me.rerere.rikkahub.data.model.Lorebook
+import me.rerere.rikkahub.data.model.PromptInjection
 import me.rerere.rikkahub.data.repository.MemoryRepository
 import me.rerere.rikkahub.owner.db.HostOperationDao
 import me.rerere.rikkahub.pet.PetDialogueRepository
@@ -28,6 +32,7 @@ import me.rerere.rikkahub.quickcapture.QuickCaptureTargetMode
 import me.rerere.rikkahub.security.SecretBinding
 import me.rerere.rikkahub.security.SecretBindingKind
 import me.rerere.rikkahub.security.SecondUserSecretVault
+import me.rerere.rikkahub.utils.JsonInstant
 import kotlin.uuid.Uuid
 
 /**
@@ -117,9 +122,13 @@ class OwnerApplicationControlHandler(
             "memory_configure_assistant" -> memoryConfigure(index, action)
             "memory_delete" -> memoryDelete(index, action)
             "prompt_library_list", "lorebook_list" -> promptLibraryList(index, action)
+            "prompt_injection_upsert" -> promptInjectionUpsert(index, action)
+            "prompt_injection_delete" -> promptInjectionDelete(index, action)
             "quick_message_create" -> quickMessageCreate(index, action)
             "quick_message_update" -> quickMessageUpdate(index, action)
             "quick_message_delete" -> quickMessageDelete(index, action)
+            "lorebook_upsert" -> lorebookUpsert(index, action)
+            "lorebook_delete" -> lorebookDelete(index, action)
             "asr_list" -> asrList(index, action)
             "asr_create" -> asrCreate(index, request, action)
             "asr_update" -> asrUpdate(index, request, action)
@@ -344,10 +353,95 @@ class OwnerApplicationControlHandler(
             put("quick_messages", buildJsonArray { settings.quickMessages.take(100).forEach { item -> add(buildJsonObject {
                 put("message_id", item.id.toString()); put("title", item.title.take(160)); put("content_preview", item.content.take(240))
             }) } })
+            put("mode_injections", buildJsonArray { settings.modeInjections.take(100).forEach { item -> add(buildJsonObject {
+                put("injection_id", item.id.toString()); put("name", item.name.take(160)); put("enabled", item.enabled)
+                put("priority", item.priority); put("position", item.position.name); put("role", item.role.name)
+                put("content_length", item.content.length)
+            }) } })
             put("lorebooks", buildJsonArray { settings.lorebooks.take(100).forEach { item -> add(buildJsonObject {
                 put("lorebook_id", item.id.toString()); put("name", item.name.take(160)); put("enabled", item.enabled)
+                put("entry_count", item.entries.size)
             }) } })
         })
+    }
+
+    private suspend fun promptInjectionUpsert(index: Int, action: OwnerAction): OwnerAppliedAction {
+        val definition = action.arguments["definition"] as? JsonObject
+            ?: return failure(index, action, "PROMPT_DEFINITION_REQUIRED", "definition must be an object.")
+        val unknown = definition.keys - MODE_INJECTION_FIELDS
+        if (unknown.isNotEmpty()) {
+            return failure(index, action, "PROMPT_DEFINITION_FIELD_INVALID", "Unsupported prompt definition fields: ${unknown.sorted().joinToString()}.")
+        }
+        if (definition.string("type")?.equals("mode", ignoreCase = true) == false) {
+            return failure(index, action, "PROMPT_DEFINITION_TYPE_INVALID", "Prompt injection type must be mode.")
+        }
+        val parsed = runCatching {
+            JsonInstant.decodeFromJsonElement<PromptInjection.ModeInjection>(definition)
+        }.getOrNull() ?: return failure(index, action, "PROMPT_DEFINITION_INVALID", "Prompt injection definition is invalid.")
+        if (!validModeInjection(parsed)) {
+            return failure(index, action, "PROMPT_DEFINITION_LIMIT", "Prompt injection exceeds safe field limits.")
+        }
+        val exists = settingsStore.settingsFlow.value.modeInjections.any { it.id == parsed.id }
+        return settingsMutation(index, action, buildJsonObject { put("injection_id", parsed.id.toString()) }) { current ->
+            current.copy(modeInjections = if (exists) {
+                current.modeInjections.map { if (it.id == parsed.id) parsed else it }
+            } else current.modeInjections + parsed)
+        }
+    }
+
+    private suspend fun promptInjectionDelete(index: Int, action: OwnerAction): OwnerAppliedAction {
+        val id = action.arguments.uuid("injection_id")
+            ?: return failure(index, action, "PROMPT_INJECTION_ID_REQUIRED", "injection_id is required.")
+        val settings = settingsStore.settingsFlow.value
+        if (settings.modeInjections.none { it.id == id }) {
+            return failure(index, action, "PROMPT_INJECTION_NOT_FOUND", "Prompt injection does not exist.")
+        }
+        return settingsMutation(index, action) { current -> current.copy(
+            modeInjections = current.modeInjections.filterNot { it.id == id },
+            assistants = current.assistants.map { it.copy(modeInjectionIds = it.modeInjectionIds - id) },
+        ) }
+    }
+
+    private suspend fun lorebookUpsert(index: Int, action: OwnerAction): OwnerAppliedAction {
+        val definition = action.arguments["definition"] as? JsonObject
+            ?: return failure(index, action, "LOREBOOK_DEFINITION_REQUIRED", "definition must be an object.")
+        val unknown = definition.keys - LOREBOOK_FIELDS
+        if (unknown.isNotEmpty()) {
+            return failure(index, action, "LOREBOOK_DEFINITION_FIELD_INVALID", "Unsupported lorebook fields: ${unknown.sorted().joinToString()}.")
+        }
+        val entries = definition["entries"] as? JsonArray
+        if (entries != null && entries.any { entry ->
+                entry !is JsonObject ||
+                    (entry.keys - REGEX_INJECTION_FIELDS).isNotEmpty() ||
+                    entry.string("type")?.equals("regex", ignoreCase = true) == false
+            }
+        ) {
+            return failure(index, action, "LOREBOOK_ENTRY_FIELD_INVALID", "Lorebook entry contains unsupported fields.")
+        }
+        val parsed = runCatching { JsonInstant.decodeFromJsonElement<Lorebook>(definition) }.getOrNull()
+            ?: return failure(index, action, "LOREBOOK_DEFINITION_INVALID", "Lorebook definition is invalid.")
+        if (!validLorebook(parsed)) {
+            return failure(index, action, "LOREBOOK_DEFINITION_LIMIT", "Lorebook exceeds safe field, entry or regex limits.")
+        }
+        val exists = settingsStore.settingsFlow.value.lorebooks.any { it.id == parsed.id }
+        return settingsMutation(index, action, buildJsonObject { put("lorebook_id", parsed.id.toString()) }) { current ->
+            current.copy(lorebooks = if (exists) {
+                current.lorebooks.map { if (it.id == parsed.id) parsed else it }
+            } else current.lorebooks + parsed)
+        }
+    }
+
+    private suspend fun lorebookDelete(index: Int, action: OwnerAction): OwnerAppliedAction {
+        val id = action.arguments.uuid("lorebook_id")
+            ?: return failure(index, action, "LOREBOOK_ID_REQUIRED", "lorebook_id is required.")
+        val settings = settingsStore.settingsFlow.value
+        if (settings.lorebooks.none { it.id == id }) {
+            return failure(index, action, "LOREBOOK_NOT_FOUND", "Lorebook does not exist.")
+        }
+        return settingsMutation(index, action) { current -> current.copy(
+            lorebooks = current.lorebooks.filterNot { it.id == id },
+            assistants = current.assistants.map { it.copy(lorebookIds = it.lorebookIds - id) },
+        ) }
     }
 
     private suspend fun quickMessageCreate(index: Int, action: OwnerAction): OwnerAppliedAction {
@@ -737,7 +831,9 @@ class OwnerApplicationControlHandler(
         "quick_capture_update" -> current.copy(quickCaptureSettings = before.quickCaptureSettings)
         "plugin_runtime_set" -> current.copy(pluginRuntimeEnabled = before.pluginRuntimeEnabled)
         "plugin_bind", "memory_configure_assistant" -> current.copy(assistants = before.assistants)
+        "prompt_injection_upsert", "prompt_injection_delete" -> current.copy(modeInjections = before.modeInjections, assistants = before.assistants)
         "quick_message_create", "quick_message_update", "quick_message_delete" -> current.copy(quickMessages = before.quickMessages, assistants = before.assistants)
+        "lorebook_upsert", "lorebook_delete" -> current.copy(lorebooks = before.lorebooks, assistants = before.assistants)
         "asr_create", "asr_update", "asr_delete", "asr_set_default" -> current.copy(asrProviders = before.asrProviders, selectedASRProviderId = before.selectedASRProviderId)
         "web_channel_update" -> current.copy(webServerEnabled = before.webServerEnabled, webServerPort = before.webServerPort, webServerJwtEnabled = before.webServerJwtEnabled, webServerLocalhostOnly = before.webServerLocalhostOnly)
         "search_set_enabled", "search_select" -> current.copy(enableWebSearch = before.enableWebSearch, searchServiceSelected = before.searchServiceSelected)
@@ -780,12 +876,18 @@ class OwnerApplicationControlHandler(
 
     private companion object {
         val SECRET_FIELDS = setOf("secret", "password", "token", "api_key", "headers", "private_key")
+        val MODE_INJECTION_FIELDS = setOf("type", "id", "name", "enabled", "priority", "position", "content", "injectDepth", "role")
+        val LOREBOOK_FIELDS = setOf("id", "name", "description", "enabled", "entries")
+        val REGEX_INJECTION_FIELDS = setOf(
+            "type", "id", "name", "enabled", "priority", "position", "content", "injectDepth", "role",
+            "keywords", "useRegex", "caseSensitive", "scanDepth", "constantActive",
+        )
         val ACTION_FIELDS: Map<String, Set<String>> = mapOf(
             "run_list" to setOf("limit"), "run_get" to setOf("request_id"), "run_cancel" to setOf("conversation_id", "command_id"), "run_retry" to setOf("conversation_id"),
             "quick_capture_get" to emptySet(), "quick_capture_update" to setOf("enabled", "target_mode", "fixed_assistant_id", "prompt", "auto_send", "backend", "area_mode", "bubble_size_dp", "bubble_opacity", "bubble_edge", "bubble_y_fraction"), "quick_capture_trigger" to emptySet(),
             "plugin_list" to emptySet(), "plugin_runtime_set" to setOf("enabled"), "plugin_install_managed" to setOf("managed_file_id"), "plugin_approve" to setOf("plugin_id"), "plugin_set_enabled" to setOf("plugin_id", "enabled"), "plugin_bind" to setOf("plugin_id", "assistant_id", "enabled"), "plugin_uninstall" to setOf("plugin_id"),
             "memory_list" to setOf("assistant_id", "limit"), "memory_configure_assistant" to setOf("assistant_id", "enabled", "use_global", "recent_chats_reference"), "memory_delete" to setOf("memory_id"),
-            "prompt_library_list" to emptySet(), "quick_message_create" to setOf("message_id", "title", "content"), "quick_message_update" to setOf("message_id", "title", "content"), "quick_message_delete" to setOf("message_id"), "lorebook_list" to emptySet(),
+            "prompt_library_list" to emptySet(), "prompt_injection_upsert" to setOf("definition"), "prompt_injection_delete" to setOf("injection_id"), "quick_message_create" to setOf("message_id", "title", "content"), "quick_message_update" to setOf("message_id", "title", "content"), "quick_message_delete" to setOf("message_id"), "lorebook_list" to emptySet(), "lorebook_upsert" to setOf("definition"), "lorebook_delete" to setOf("lorebook_id"),
             "asr_list" to emptySet(), "asr_create" to setOf("asr_id", "type", "name", "websocket_url", "model", "language", "sample_rate", "vault_slot_id"), "asr_update" to setOf("asr_id", "name", "websocket_url", "model", "language", "sample_rate", "vault_slot_id"), "asr_delete" to setOf("asr_id"), "asr_set_default" to setOf("asr_id"),
             "channel_get" to emptySet(), "web_channel_update" to setOf("enabled", "port", "jwt_enabled", "localhost_only"), "telegram_channel_update" to setOf("enabled", "vault_slot_id", "default_chat_id", "whitelist", "assistant_id", "stream_screenshots"),
             "search_get" to emptySet(), "search_set_enabled" to setOf("enabled"), "search_select" to setOf("index"),
@@ -805,4 +907,14 @@ private fun JsonObject.float(name: String): Float? = string(name)?.toFloatOrNull
 private fun JsonObject.uuid(name: String): Uuid? = string(name)?.let { runCatching { Uuid.parse(it) }.getOrNull() }
 private inline fun <reified T : Enum<T>> JsonObject.enum(name: String, fallback: T): T =
     string(name)?.let { raw -> enumValues<T>().firstOrNull { it.name.equals(raw, ignoreCase = true) } } ?: fallback
+private fun validModeInjection(value: PromptInjection.ModeInjection): Boolean =
+    value.name.length <= 200 && value.content.length <= 32_000 && value.priority in -10_000..10_000 &&
+        value.injectDepth in 0..1_000 && value.role in setOf(MessageRole.USER, MessageRole.ASSISTANT)
+private fun validLorebook(value: Lorebook): Boolean = value.name.length <= 200 &&
+    value.description.length <= 2_000 && value.entries.size <= 200 && value.entries.all { entry ->
+        entry.name.length <= 200 && entry.content.length <= 32_000 && entry.priority in -10_000..10_000 &&
+            entry.injectDepth in 0..1_000 && entry.scanDepth in 1..1_000 && entry.keywords.size <= 32 &&
+            entry.keywords.all { it.length <= 500 } && entry.role in setOf(MessageRole.USER, MessageRole.ASSISTANT) &&
+            (!entry.useRegex || entry.keywords.all { runCatching { Regex(it) }.isSuccess })
+    }
 private fun Throwable.safeCode(): String = message?.takeIf { it.matches(Regex("[a-z0-9_]{3,80}")) }?.uppercase() ?: "OWNER_OPERATION_FAILED"
