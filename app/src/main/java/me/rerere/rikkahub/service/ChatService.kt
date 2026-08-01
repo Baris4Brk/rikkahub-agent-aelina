@@ -489,6 +489,7 @@ class ChatService(
     private val hostLocalServiceDao: me.rerere.rikkahub.owner.db.HostLocalServiceDao,
     private val ownerHttpClient: okhttp3.OkHttpClient,
     private val workflowActionRunner: me.rerere.rikkahub.workflow.execution.WorkflowActionRunner,
+    private val automationControlFacade: me.rerere.rikkahub.automation.AutomationControlFacade,
     private val doctorChecks: me.rerere.rikkahub.ui.pages.setting.doctor.DoctorChecks,
     private val executionConsistencyDoctor: me.rerere.rikkahub.diagnostics.ExecutionConsistencyDoctor,
     private val ownerLocalServiceSupervisor: me.rerere.rikkahub.owner.OwnerLocalServiceSupervisor,
@@ -647,6 +648,9 @@ class ChatService(
                 me.rerere.rikkahub.owner.OwnerWorkflowOperationHandler(
                     repository = workflowRepository,
                     actionRunner = workflowActionRunner,
+                    automation = automationControlFacade,
+                    conversations = conversationRepo,
+                    settings = settingsStore,
                 ),
                 me.rerere.rikkahub.owner.OwnerUiOperationHandler(),
                 me.rerere.rikkahub.owner.OwnerDoctorOperationHandler(

@@ -43,8 +43,7 @@ import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
-import me.rerere.rikkahub.data.alarm.AlarmRepository
-import me.rerere.rikkahub.data.alarm.AlarmScheduler
+import me.rerere.rikkahub.automation.AutomationControlFacade
 import me.rerere.rikkahub.data.db.entity.AlarmEntity
 import me.rerere.rikkahub.ui.components.nav.BackButton
 import org.koin.compose.koinInject
@@ -55,15 +54,14 @@ import java.time.format.DateTimeFormatter
 @Composable
 fun AlarmSettingsPage() {
     val ctx = LocalContext.current
-    val repository: AlarmRepository = koinInject()
-    val scheduler: AlarmScheduler = koinInject()
+    val automation: AutomationControlFacade = koinInject()
     val scope = rememberCoroutineScope()
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
 
     var alarms by remember { mutableStateOf<List<AlarmEntity>>(emptyList()) }
 
     LaunchedEffect(Unit) {
-        alarms = repository.getAllOnce()
+        alarms = automation.listAlarms()
     }
 
     Scaffold(
@@ -82,7 +80,7 @@ fun AlarmSettingsPage() {
                 .fillMaxSize()
                 .padding(16.dp)
         ) {
-            if (!scheduler.canScheduleExactAlarms() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            if (!automation.canScheduleExactAlarms() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 Card(
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
                     modifier = Modifier.fillMaxWidth()
@@ -90,7 +88,7 @@ fun AlarmSettingsPage() {
                     Column(modifier = Modifier.padding(16.dp)) {
                         Text("Exact alarm permission not granted. Alarms may not fire on time.", color = MaterialTheme.colorScheme.onErrorContainer)
                         Spacer(Modifier.height(8.dp))
-                        Button(onClick = { scheduler.openExactAlarmSettings() }) {
+                        Button(onClick = { automation.openExactAlarmSettings() }) {
                             Text("Grant permission")
                         }
                     }
@@ -107,22 +105,14 @@ fun AlarmSettingsPage() {
                             alarm = alarm,
                             onToggleEnabled = { enabled ->
                                 scope.launch {
-                                    if (enabled) {
-                                        val next = scheduler.calculateNextFireAt(alarm)
-                                        repository.markFired(alarm.id, alarm.lastFiredAtMs ?: System.currentTimeMillis(), next)
-                                        scheduler.schedule(alarm.copy(nextFireAtMs = next, enabled = true))
-                                    } else {
-                                        scheduler.cancel(alarm.id)
-                                        repository.setEnabled(alarm.id, false)
-                                    }
-                                    alarms = repository.getAllOnce()
+                                    automation.setAlarmEnabled(alarm.id, enabled)
+                                    alarms = automation.listAlarms()
                                 }
                             },
                             onDelete = {
                                 scope.launch {
-                                    scheduler.cancel(alarm.id)
-                                    repository.deleteById(alarm.id)
-                                    alarms = repository.getAllOnce()
+                                    automation.deleteAlarm(alarm.id)
+                                    alarms = automation.listAlarms()
                                 }
                             }
                         )

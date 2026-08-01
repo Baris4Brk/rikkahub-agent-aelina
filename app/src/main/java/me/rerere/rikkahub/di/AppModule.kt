@@ -60,6 +60,15 @@ val appModule = module {
         )
     }
     single { CronJobScheduler(get(), get()) }
+    single {
+        me.rerere.rikkahub.automation.AutomationControlFacade(
+            scheduledJobs = get(),
+            scheduledJobRuns = get(),
+            cronScheduler = get(),
+            alarms = get(),
+            alarmScheduler = get(),
+        )
+    }
     single { SshHostRepository(get<me.rerere.rikkahub.data.db.AppDatabase>().sshHostDao()) }
     single { TelegramChatRepository(get<me.rerere.rikkahub.data.db.AppDatabase>().telegramChatDao()) }
     single { TelegramBotPreferences(get()) }
@@ -846,6 +855,7 @@ val appModule = module {
             hostLocalServiceDao = get<me.rerere.rikkahub.data.db.AppDatabase>().hostLocalServiceDao(),
             ownerHttpClient = get(),
             workflowActionRunner = get(),
+            automationControlFacade = get(),
             doctorChecks = get(),
             executionConsistencyDoctor = get(),
             ownerLocalServiceSupervisor = get(),

@@ -221,6 +221,8 @@ private val OWNER_NO_ARGUMENT_ACTIONS = setOf(
     "mcp_list",
     "skill_list",
     "workflow_list",
+    "schedule_list",
+    "alarm_list",
     "rikkahub_state_get",
     "doctor_check",
     "quick_capture_get",
