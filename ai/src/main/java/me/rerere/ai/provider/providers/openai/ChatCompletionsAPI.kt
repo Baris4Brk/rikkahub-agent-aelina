@@ -541,7 +541,31 @@ class ChatCompletionsAPI(
 
                     "opencode.ai" -> {
                         if (level != ReasoningLevel.AUTO) {
-                            put("reasoning_effort", level.effort)
+                            // DeepSeek V4 exposes only `high` and `max` on its
+                            // OpenAI-compatible endpoint. The app-level XHIGH
+                            // selector is intentionally translated to the
+                            // provider's native `max` value instead of sending
+                            // the generic OpenAI `xhigh` token. DeepSeek also
+                            // documents low/medium as compatibility aliases for
+                            // high; keep that normalization scoped to V4 so
+                            // unrelated OpenCode models retain their existing
+                            // effort values.
+                            put(
+                                "reasoning_effort",
+                                if (requiresToolReasoningContent(params.model.modelId)) {
+                                    when (level) {
+                                        ReasoningLevel.LOW,
+                                        ReasoningLevel.MEDIUM,
+                                        ReasoningLevel.HIGH -> "high"
+
+                                        ReasoningLevel.XHIGH -> "max"
+                                        ReasoningLevel.OFF -> "none"
+                                        ReasoningLevel.AUTO -> error("AUTO is handled above")
+                                    }
+                                } else {
+                                    level.effort
+                                },
+                            )
                         }
                     }
 

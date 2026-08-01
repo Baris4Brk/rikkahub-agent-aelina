@@ -82,6 +82,35 @@ class ChatCompletionsAPIReasoningTest {
     }
 
     @Test
+    fun `OpenCode DeepSeek V4 maps xhigh to native max effort`() {
+        val request = buildRequest(
+            provider = ProviderSetting.OpenAI(baseUrl = "https://opencode.ai/v1"),
+            params = TextGenerationParams(
+                model = Model(
+                    modelId = "deepseek-v4-flash",
+                    abilities = listOf(ModelAbility.REASONING),
+                ),
+                reasoningLevel = ReasoningLevel.XHIGH,
+            ),
+        )
+
+        assertEquals("max", request["reasoning_effort"]?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun `OpenCode non DeepSeek models retain xhigh effort`() {
+        val request = buildRequest(
+            provider = ProviderSetting.OpenAI(baseUrl = "https://opencode.ai/v1"),
+            params = TextGenerationParams(
+                model = reasoningModel(),
+                reasoningLevel = ReasoningLevel.XHIGH,
+            ),
+        )
+
+        assertEquals("xhigh", request["reasoning_effort"]?.jsonPrimitive?.content)
+    }
+
+    @Test
     fun `memory extraction prevents custom body from restoring disabled reasoning effort`() {
         val request = buildRequest(
             provider = ProviderSetting.OpenAI(baseUrl = "https://opencode.ai/v1"),
