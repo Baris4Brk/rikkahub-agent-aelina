@@ -1976,5 +1976,5 @@
   <string name="chat_token_usage_latest">Текущий ввод: %1$s · Новые: %2$s · Кэш: %3$s</string>
   <string name="chat_token_usage_turn">За ход: %1$s · вызовов: %2$d · вывод: %3$s</string>
   <string name="runtime_diagnostic_reverse_geocoding_title">Обратное геокодирование</string>
-  <string name="runtime_diagnostic_reverse_geocoding_summary">platform=%1$s; platformStatus=%2$s; enabled=%3$s; external=%4$s; providers=%5$d; active=%6$s; default=%7$s; cache=%8$d; hits=%9$d; error=%10$s; provider=%11$s; duration=%12$s</string>
+  <string name="runtime_diagnostic_reverse_geocoding_summary">platform=%1$b; platformStatus=%2$s; enabled=%3$b; external=%4$b; providers=%5$d; active=%6$s; default=%7$s; cache=%8$d; hits=%9$d; error=%10$s; provider=%11$s; duration=%12$s</string>
 </resources>

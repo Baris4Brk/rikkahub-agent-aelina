@@ -35,6 +35,11 @@ internal class ReverseGeocodeCoordinatorImpl(
         } else request.providerId
 
         if (selectedId !in setOf(AUTO_REVERSE_GEOCODER_ID, ANDROID_REVERSE_GEOCODER_ID)) {
+            if (settings == null) return failure(
+                code = "PROVIDER_NOT_CONFIGURED",
+                message = "The selected reverse-geocoding provider is not configured.",
+                recovery = "Configure the provider locally or use auto/android.",
+            )
             if (!request.allowExternal || settings?.externalEnabled != true) return failure(
                 code = "EXTERNAL_GEOCODING_DISABLED",
                 message = "External reverse geocoding is not permitted by both local policy and this call.",

@@ -2227,5 +2227,5 @@ mDNS 地址：使用 .local 主机名，同一网络中的其他设备可通过�
   <string name="chat_token_usage_latest">本次输入 %1$s · 新增 %2$s · 缓存 %3$s</string>
   <string name="chat_token_usage_turn">本轮输入 %1$s · %2$d 次调用 · 输出 %3$s</string>
   <string name="runtime_diagnostic_reverse_geocoding_title">反向地理编码</string>
-  <string name="runtime_diagnostic_reverse_geocoding_summary">platform=%1$s; platformStatus=%2$s; enabled=%3$s; external=%4$s; providers=%5$d; active=%6$s; default=%7$s; cache=%8$d; hits=%9$d; error=%10$s; provider=%11$s; duration=%12$s</string>
+  <string name="runtime_diagnostic_reverse_geocoding_summary">platform=%1$b; platformStatus=%2$s; enabled=%3$b; external=%4$b; providers=%5$d; active=%6$s; default=%7$s; cache=%8$d; hits=%9$d; error=%10$s; provider=%11$s; duration=%12$s</string>
 </resources>
