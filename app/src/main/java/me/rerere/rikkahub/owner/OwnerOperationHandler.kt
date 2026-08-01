@@ -60,6 +60,7 @@ interface OwnerOperationHandler {
  */
 class ExistingHostOwnerOperationHandler(
     private val backend: PrivilegedManagementBackend,
+    private val selfPreservation: OwnerSelfPreservationGuard = OwnerSelfPreservationGuard(),
 ) : OwnerOperationHandler {
     override fun supports(request: OwnerOperationRequest, action: OwnerAction): Boolean =
         action.type in allowedOperations(request.family)
@@ -75,11 +76,9 @@ class ExistingHostOwnerOperationHandler(
         return when (val parsed = parseManagementRequest(action.type, action.arguments)) {
             is ParsedRequest.Error -> rejected(parsed.code, parsed.message)
             is ParsedRequest.Value -> {
-                if (isProtectedIdentityMutation(parsed.request)) {
-                    rejected("OWNER_PERMANENT_PROTECTION", "Owner authority and protected identity cannot be changed by a model tool.")
-                } else {
-                    OwnerActionValidation(true, "OWNER_ACTION_VALID", "Action validated.")
-                }
+                selfPreservation.validate(action)
+                    ?: selfPreservation.validate(parsed.request)
+                    ?: OwnerActionValidation(true, "OWNER_ACTION_VALID", "Action validated.")
             }
         }
     }
@@ -204,5 +203,3 @@ internal fun allowedOperations(family: OwnerToolFamily): Set<String> = when (fam
     OwnerToolFamily.UI,
     -> emptySet()
 }
-
-private fun isProtectedIdentityMutation(request: PrivilegedManagementRequest): Boolean = false

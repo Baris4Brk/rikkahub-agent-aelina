@@ -38,6 +38,7 @@ class OwnerSettingsOperationHandler(
     private val assistantRemoval: AssistantRemovalService,
     private val providerManager: ProviderManager,
     private val vault: SecondUserSecretVault,
+    private val selfPreservation: OwnerSelfPreservationGuard = OwnerSelfPreservationGuard(),
 ) : OwnerOperationHandler {
     override fun supports(request: OwnerOperationRequest, action: OwnerAction): Boolean =
         action.type in ACTION_FIELDS
@@ -47,6 +48,7 @@ class OwnerSettingsOperationHandler(
         action: OwnerAction,
         context: PrivilegedSessionContext,
     ): OwnerActionValidation {
+        selfPreservation.validate(action)?.let { return it }
         val fields = ACTION_FIELDS[action.type]
             ?: return invalid("OWNER_ACTION_UNSUPPORTED", "Unsupported Owner settings action.")
         if ((action.arguments.keys - fields).isNotEmpty()) {
