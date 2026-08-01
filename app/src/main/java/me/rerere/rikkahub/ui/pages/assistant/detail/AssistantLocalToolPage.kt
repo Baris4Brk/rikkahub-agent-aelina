@@ -1127,7 +1127,7 @@ private fun AssistantLocalToolContent(
                             toggleLocalTool(LocalToolOption.TelegramBot, newValue)
                             if (newValue && !telegramDialogShownThisVisit) {
                                 scope.launch {
-                                    if (telegramBotPreferences.current().token.isBlank()) {
+                                    if (!telegramBotPreferences.current().hasCredential) {
                                         telegramDialogShownThisVisit = true
                                         showTelegramNoTokenDialog = true
                                     }

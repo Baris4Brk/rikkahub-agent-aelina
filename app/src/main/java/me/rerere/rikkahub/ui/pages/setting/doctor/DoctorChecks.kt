@@ -872,10 +872,13 @@ class DoctorChecks(
                     // Don't render any portion of the token — Telegram bot tokens are
                     // formatted "<bot_id>:<secret>" and even the first 6 chars reveal the
                     // bot id, which an attacker could use to enumerate bot endpoints.
-                    detail = if (tg.token.isNotBlank()) "Token configured (${tg.token.length} chars, hidden)."
+                    detail = if (tg.hasCredential) {
+                        if (!tg.vaultSlotId.isNullOrBlank()) "Vault credential configured (hidden)."
+                        else "Token configured (${tg.token.length} chars, hidden)."
+                    }
                     else "Telegram bot is enabled but no token is set — the service will fail at startup.",
-                    severity = if (tg.token.isNotBlank()) Severity.OK else Severity.FAIL,
-                    fix = if (tg.token.isBlank())
+                    severity = if (tg.hasCredential) Severity.OK else Severity.FAIL,
+                    fix = if (!tg.hasCredential)
                         FixAction.OpenAppRoute("Open Telegram settings", AppRouteKey.SettingTelegram)
                     else null,
                 )
@@ -889,7 +892,7 @@ class DoctorChecks(
                     else "Service is stopped. Telegram messages won't reach the assistant. The watchdog will retry on the next 30-min health pass.",
                     severity = when {
                         TelegramBotService.isRunning -> Severity.OK
-                        tg.token.isBlank() -> Severity.INFO  // token issue covers this
+                        !tg.hasCredential -> Severity.INFO  // credential issue covers this
                         else -> Severity.FAIL
                     },
                 )

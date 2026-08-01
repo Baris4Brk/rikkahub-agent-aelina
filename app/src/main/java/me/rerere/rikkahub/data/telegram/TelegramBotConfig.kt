@@ -3,6 +3,8 @@ package me.rerere.rikkahub.data.telegram
 /** Persisted bot configuration. Lives in TelegramBotPreferences (DataStore). */
 data class TelegramBotConfig(
     val token: String = "",
+    /** Vault-backed token selected by the local Owner. The token itself is never in DataStore. */
+    val vaultSlotId: String? = null,
     val enabled: Boolean = false,
     /** Outbound default — used by telegram_send_message when chat_id is omitted. */
     val defaultChatId: Long? = null,
@@ -30,5 +32,6 @@ data class TelegramBotConfig(
      */
     val streamScreenshots: Boolean = true,
 ) {
-    val isUsable: Boolean get() = token.isNotBlank() && enabled
+    val hasCredential: Boolean get() = token.isNotBlank() || !vaultSlotId.isNullOrBlank()
+    val isUsable: Boolean get() = hasCredential && enabled
 }

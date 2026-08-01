@@ -215,7 +215,7 @@ object OwnerActionRegistry {
             "Inspect and configure local Web and Telegram channels without exposing channel secrets.",
             action("channel_get", OwnerOperationRisk.READ_ONLY),
             action("web_channel_update", OwnerOperationRisk.EXTERNAL_SIDE_EFFECT, "enabled?, port?, jwt_enabled?, localhost_only?"),
-            action("telegram_channel_update", OwnerOperationRisk.EXTERNAL_SIDE_EFFECT, "enabled?, vault_slot_id?"),
+            action("telegram_channel_update", OwnerOperationRisk.EXTERNAL_SIDE_EFFECT, "enabled?, vault_slot_id?, default_chat_id?, whitelist?, assistant_id?, stream_screenshots?"),
         ),
         family(
             OwnerToolFamily.SEARCH,

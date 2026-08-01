@@ -108,7 +108,7 @@ fun SettingTelegramPage() {
         floatingActionButton = {
             ExtendedFloatingActionButton(
                 onClick = {
-                    if (cfg.token.isBlank()) {
+                    if (!cfg.hasCredential) {
                         toaster.show(noTokenToast)
                         return@ExtendedFloatingActionButton
                     }
@@ -156,7 +156,7 @@ fun SettingTelegramPage() {
                                 onValueChange = { value ->
                                     tokenText = value.trim()
                                     scope.launch {
-                                        prefs.update { it.copy(token = tokenText) }
+                                        prefs.update { it.copy(token = tokenText, vaultSlotId = null) }
                                     }
                                 },
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),

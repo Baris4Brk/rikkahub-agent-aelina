@@ -19,6 +19,7 @@ import me.rerere.rikkahub.data.repository.TelegramChatRepository
 import me.rerere.rikkahub.data.notifications.NotificationListenerPreferences
 import me.rerere.rikkahub.data.telegram.TelegramBotClient
 import me.rerere.rikkahub.data.telegram.TelegramBotPreferences
+import me.rerere.rikkahub.data.telegram.TelegramCredentialResolver
 import me.rerere.rikkahub.service.ChatService
 import me.rerere.rikkahub.service.CronJobScheduler
 import me.rerere.rikkahub.utils.EmojiData
@@ -93,7 +94,8 @@ val appModule = module {
         me.rerere.rikkahub.data.telegram.TelegramInteractiveToolStreamer(get(), get(), get(), get())
     }
     single { me.rerere.rikkahub.data.preferences.ToolApprovalPreferences(get()) }
-    single { TelegramBotClient { runCatching { kotlinx.coroutines.runBlocking { get<TelegramBotPreferences>().current().token } }.getOrDefault("") } }
+    single { TelegramCredentialResolver(get(), get()) }
+    single { TelegramBotClient { runCatching { kotlinx.coroutines.runBlocking { get<TelegramCredentialResolver>().currentToken() } }.getOrDefault("") } }
     // Phase 24 — Telegram long-poll stall tracker. Shared singleton: TelegramBotService's
     // poll loop calls markUpdate() on every getUpdates; the in-service stall checker and
     // DoctorChecks read it. No cross-dependencies, so no DI-cycle risk.
@@ -853,6 +855,8 @@ val appModule = module {
             ownerOperationFingerprinter = get(),
             localBackupFacade = get(),
             petDialogueRepository = get(),
+            telegramBotPreferences = get(),
+            telegramCredentialResolver = get(),
         )
     }
     single {

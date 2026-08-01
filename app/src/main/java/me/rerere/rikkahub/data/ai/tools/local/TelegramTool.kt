@@ -90,8 +90,9 @@ fun telegramSetTokenTool(prefs: TelegramBotPreferences, client: TelegramBotClien
     execute = { input ->
         val token = input.jsonObject["token"]?.jsonPrimitive?.contentOrNull
             ?: error("token is required")
-        // Provisionally persist; the client uses tokenProvider() lazily so getMe will use it.
-        prefs.update { it.copy(token = token) }
+        // Provisionally persist; a manually supplied token intentionally replaces a Vault slot.
+        val previous = prefs.current()
+        prefs.update { it.copy(token = token, vaultSlotId = null) }
         // Verify the token. A 401 from Telegram means the token is permanently invalid
         // (don't retry); a network/timeout/non-401 failure is transient (retry OK). The
         // classifier produces distinct {error, detail, recovery} envelopes so the model
@@ -107,7 +108,7 @@ fun telegramSetTokenTool(prefs: TelegramBotPreferences, client: TelegramBotClien
         }
         // If verification failed, roll back the token so we don't leave a bad value behind.
         if (payload["error"] != null) {
-            prefs.update { it.copy(token = "") }
+            prefs.update { previous }
         }
         textPart(payload)
     }
@@ -124,7 +125,7 @@ fun telegramStatusTool(
     parameters = { InputSchema.Obj(properties = buildJsonObject {}) },
     execute = {
         val cfg = prefs.current()
-        val botInfo = if (cfg.token.isNotBlank()) {
+        val botInfo = if (cfg.hasCredential) {
             try { client.getMe() } catch (e: Throwable) {
                 buildJsonObject { put("error", "getMe failed: ${e.message ?: "unknown"}") }
             }
@@ -134,7 +135,8 @@ fun telegramStatusTool(
         // process-local), so this naturally reflects "service alive in *this* process".
         val serviceRunning = me.rerere.rikkahub.service.TelegramBotService.isRunning
         textPart(buildJsonObject {
-            put("token_set", cfg.token.isNotBlank())
+            put("token_set", cfg.hasCredential)
+            put("credential_source", if (!cfg.vaultSlotId.isNullOrBlank()) "VAULT" else if (cfg.token.isNotBlank()) "LEGACY_LOCAL" else "NONE")
             put("enabled", cfg.enabled)
             put("service_running", serviceRunning)
             if (cfg.enabled && !serviceRunning) {
@@ -155,7 +157,7 @@ fun telegramEnableTool(context: Context, prefs: TelegramBotPreferences): Tool = 
     parameters = { InputSchema.Obj(properties = buildJsonObject {}) },
     execute = {
         val cfg = prefs.current()
-        if (cfg.token.isBlank()) {
+        if (!cfg.hasCredential) {
             return@Tool textPart(buildJsonObject { put("error", "no token set — call telegram_set_token first") })
         }
         prefs.update { it.copy(enabled = true) }

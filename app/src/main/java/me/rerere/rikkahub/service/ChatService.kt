@@ -498,6 +498,8 @@ class ChatService(
     private val ownerOperationFingerprinter: me.rerere.rikkahub.owner.OwnerOperationFingerprinter,
     private val localBackupFacade: me.rerere.rikkahub.data.sync.LocalBackupFacade,
     private val petDialogueRepository: me.rerere.rikkahub.pet.PetDialogueRepository,
+    private val telegramBotPreferences: me.rerere.rikkahub.data.telegram.TelegramBotPreferences,
+    private val telegramCredentialResolver: me.rerere.rikkahub.data.telegram.TelegramCredentialResolver,
 ) {
     fun onConversationVisible(conversationId: Uuid) {
         val session = secretPlaintextSessions.state.value as?
@@ -608,6 +610,13 @@ class ChatService(
                 ),
                 me.rerere.rikkahub.owner.OwnerQuickCaptureOperationHandler(context),
                 me.rerere.rikkahub.owner.OwnerAndroidControlHandler(context, agentSafetySettings),
+                me.rerere.rikkahub.owner.OwnerChannelOperationHandler(
+                    context = context,
+                    settingsStore = settingsStore,
+                    preferences = telegramBotPreferences,
+                    credentials = telegramCredentialResolver,
+                    vault = secondUserSecretVault,
+                ),
                 me.rerere.rikkahub.owner.OwnerApplicationControlHandler(
                     settingsStore = settingsStore,
                     plugins = pluginRegistryStore,

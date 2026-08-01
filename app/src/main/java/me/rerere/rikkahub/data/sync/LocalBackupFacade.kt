@@ -38,8 +38,8 @@ class LocalBackupFacade(
 
     suspend fun restoreFromLocalFile(file: File) = webDavSync.restoreFromLocalFile(file, localConfig())
 
-    private fun localConfig(): WebDavConfig = settingsStore.settingsFlow.value.webDavConfig.copy(
-        items = WebDavConfig.BackupItem.entries.toList(),
+    private fun localConfig(): WebDavConfig = completeLocalBackupConfig(
+        settingsStore.settingsFlow.value.webDavConfig,
     )
 
     private suspend fun recordBackupTime() {
@@ -48,3 +48,7 @@ class LocalBackupFacade(
         ) }
     }
 }
+
+internal fun completeLocalBackupConfig(base: WebDavConfig): WebDavConfig = base.copy(
+    items = WebDavConfig.BackupItem.entries.toList(),
+)

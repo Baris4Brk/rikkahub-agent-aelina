@@ -15,6 +15,7 @@ class TelegramBotPreferences(private val context: Context) {
     private val store = context.telegramDataStore
 
     private val K_TOKEN = stringPreferencesKey("token")
+    private val K_VAULT_SLOT_ID = stringPreferencesKey("vault_slot_id")
     private val K_ENABLED = booleanPreferencesKey("enabled")
     private val K_DEFAULT_CHAT_ID = longPreferencesKey("default_chat_id")
     private val K_WHITELIST = stringPreferencesKey("whitelist")
@@ -37,6 +38,8 @@ class TelegramBotPreferences(private val context: Context) {
             val cur = readConfig(p)
             val next = fn(cur)
             p[K_TOKEN] = next.token
+            if (next.vaultSlotId != null) p[K_VAULT_SLOT_ID] = next.vaultSlotId
+            else p.remove(K_VAULT_SLOT_ID)
             p[K_ENABLED] = next.enabled
             if (next.defaultChatId != null) p[K_DEFAULT_CHAT_ID] = next.defaultChatId
             else p.remove(K_DEFAULT_CHAT_ID)
@@ -53,6 +56,7 @@ class TelegramBotPreferences(private val context: Context) {
     private fun readConfig(p: androidx.datastore.preferences.core.Preferences): TelegramBotConfig =
         TelegramBotConfig(
             token = p[K_TOKEN].orEmpty(),
+            vaultSlotId = p[K_VAULT_SLOT_ID],
             enabled = p[K_ENABLED] == true,
             defaultChatId = p[K_DEFAULT_CHAT_ID],
             whitelist = parseWhitelist(p[K_WHITELIST].orEmpty()),
