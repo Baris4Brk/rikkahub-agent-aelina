@@ -47,12 +47,12 @@ object ImportedDatabaseReconciler {
 
     /**
      * Room's schema version and identity hash for [AppDatabase]. Both are copied verbatim
-     * from app/schemas/me.rerere.rikkahub.data.db.AppDatabase/41.json. When the schema
+     * from app/schemas/me.rerere.rikkahub.data.db.AppDatabase/42.json. When the schema
      * version is bumped, update BOTH constants (and the table DDL below if the fork-only
      * tables changed) or this reconciliation will silently stop matching.
      */
-    internal const val EXPECTED_VERSION = 41
-    internal const val EXPECTED_IDENTITY_HASH = "0fc584fa99bb47672eb041a415f4b8c7"
+    internal const val EXPECTED_VERSION = 42
+    internal const val EXPECTED_IDENTITY_HASH = "1cee9962080483881bef799c83219b40"
     internal const val PRE_STORAGE_MODE_V35_IDENTITY_HASH = "2a74d694211f0df9f9094c7571ec71dd"
 
     internal enum class ReconcilePlan {
@@ -477,6 +477,24 @@ object ImportedDatabaseReconciler {
         ).forEach(db::execSQL)
     }
 
+    /** Same-version upstream or pre-Owner v42 backups need the recoverable host-operation ledger. */
+    private fun ensureOwnerHostV42Schema(db: SQLiteDatabase) {
+        listOf(
+            "CREATE TABLE IF NOT EXISTS `host_operations` (`request_id` TEXT NOT NULL, `authority_subject_id` TEXT NOT NULL, `authority_epoch` INTEGER NOT NULL, `assistant_id` TEXT NOT NULL, `conversation_id` TEXT NOT NULL, `model_id` TEXT, `provider_id` TEXT, `tool_family` TEXT NOT NULL, `action_summary_json` TEXT NOT NULL, `state` TEXT NOT NULL, `state_version` INTEGER NOT NULL, `recovery_code` TEXT, `result_code` TEXT, `created_at_ms` INTEGER NOT NULL, `updated_at_ms` INTEGER NOT NULL, `completed_at_ms` INTEGER, PRIMARY KEY(`request_id`))",
+            "CREATE INDEX IF NOT EXISTS `idx_host_operations_authority_state` ON `host_operations` (`authority_subject_id`, `state`)",
+            "CREATE INDEX IF NOT EXISTS `idx_host_operations_conversation_updated` ON `host_operations` (`conversation_id`, `updated_at_ms`)",
+            "CREATE INDEX IF NOT EXISTS `idx_host_operations_state_updated` ON `host_operations` (`state`, `updated_at_ms`)",
+            "CREATE TABLE IF NOT EXISTS `host_operation_events` (`event_id` TEXT NOT NULL, `request_id` TEXT NOT NULL, `sequence` INTEGER NOT NULL, `previous_state` TEXT, `next_state` TEXT NOT NULL, `action_index` INTEGER, `action_type` TEXT, `reason_code` TEXT, `created_at_ms` INTEGER NOT NULL, PRIMARY KEY(`event_id`), FOREIGN KEY(`request_id`) REFERENCES `host_operations`(`request_id`) ON UPDATE NO ACTION ON DELETE CASCADE)",
+            "CREATE INDEX IF NOT EXISTS `idx_host_operation_events_request` ON `host_operation_events` (`request_id`)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS `idx_host_operation_events_request_sequence` ON `host_operation_events` (`request_id`, `sequence`)",
+            "CREATE INDEX IF NOT EXISTS `idx_host_operation_events_created` ON `host_operation_events` (`created_at_ms`)",
+            "CREATE TABLE IF NOT EXISTS `host_local_services` (`service_id` TEXT NOT NULL, `authority_subject_id` TEXT NOT NULL, `authority_epoch` INTEGER NOT NULL, `manifest_json` TEXT NOT NULL, `manifest_hash` TEXT NOT NULL, `execution_id` TEXT, `health_state` TEXT NOT NULL, `restart_policy` TEXT NOT NULL, `restart_count` INTEGER NOT NULL, `next_probe_at_ms` INTEGER, `last_probe_at_ms` INTEGER, `last_reason_code` TEXT, `enabled` INTEGER NOT NULL, `state_version` INTEGER NOT NULL, `created_at_ms` INTEGER NOT NULL, `updated_at_ms` INTEGER NOT NULL, PRIMARY KEY(`service_id`))",
+            "CREATE INDEX IF NOT EXISTS `idx_host_local_services_authority_enabled` ON `host_local_services` (`authority_subject_id`, `enabled`)",
+            "CREATE INDEX IF NOT EXISTS `idx_host_local_services_execution` ON `host_local_services` (`execution_id`)",
+            "CREATE INDEX IF NOT EXISTS `idx_host_local_services_health` ON `host_local_services` (`health_state`, `next_probe_at_ms`)",
+        ).forEach(db::execSQL)
+    }
+
     private fun ensureCapabilityGrantsV35Schema(db: SQLiteDatabase) {
         listOf(
             "CREATE TABLE IF NOT EXISTS `capability_grants` (`id` TEXT NOT NULL, `subject_id` TEXT NOT NULL, `subject_type` TEXT NOT NULL, `capability_key` TEXT NOT NULL, `resource_kind` TEXT NOT NULL, `resource_identifier` TEXT NOT NULL, `allowed_origins` TEXT NOT NULL, `scope` TEXT NOT NULL, `expires_at_ms` INTEGER, `revoked` INTEGER NOT NULL, `created_at_ms` INTEGER NOT NULL, `updated_at_ms` INTEGER NOT NULL, PRIMARY KEY(`id`))",
@@ -621,6 +639,7 @@ object ImportedDatabaseReconciler {
                     if (version >= 39) ensurePendingCommandAuthorityV39Schema(db)
                     if (version >= 40) ensureToolExperienceV40Schema(db)
                     if (version >= 41) ensureToolShortcutV41Schema(db)
+                    if (version >= 42) ensureOwnerHostV42Schema(db)
 
                     // Older backups must keep their original user_version so Room can run
                     // every real migration (including 28→29). Precreating fork-only tables
