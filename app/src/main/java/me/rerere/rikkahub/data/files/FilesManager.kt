@@ -502,6 +502,7 @@ object FileFolders {
     const val SKILLS = "skills"
     const val FONTS = "fonts"
     const val TOOL_OUTPUTS = "tool_outputs"
+    const val PET_PACKAGES = "pet_packages"
 }
 
 suspend fun FilesManager.saveUploadFromUri(

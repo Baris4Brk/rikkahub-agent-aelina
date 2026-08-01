@@ -102,6 +102,24 @@ class PluginPackageInstallerTest {
         assertEquals(PluginReviewStatus.NEEDS_REVIEW, restored.reviewStatus)
     }
 
+    @Test
+    fun `uninstall removes package and registry record`() {
+        val root = temporaryFolder.newFolder("plugins-uninstall")
+        val marker = temporaryFolder.newFolder("no-backup-uninstall")
+        val registry = FilePluginRegistryStore(root, marker)
+        val installer = PluginPackageInstaller(root, registry)
+        installer.install(zip(
+            "plugin.json" to manifest(networkHosts = emptyList()),
+            "index.html" to "installed",
+        )).getOrThrow()
+
+        val removed = installer.uninstall("sample-plugin").getOrThrow()
+
+        assertEquals("sample-plugin", removed.id)
+        assertTrue(registry.snapshot().isEmpty())
+        assertFalse(File(root, "packages/sample-plugin").exists())
+    }
+
     private fun manifest(
         networkHosts: List<String>,
         version: String = "1",

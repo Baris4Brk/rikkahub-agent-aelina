@@ -52,6 +52,8 @@ interface PluginRegistryStore {
     fun get(pluginId: String): InstalledPluginRecord?
     fun update(pluginId: String, transform: (InstalledPluginRecord) -> InstalledPluginRecord)
     fun upsert(record: InstalledPluginRecord)
+    fun remove(pluginId: String): InstalledPluginRecord? =
+        throw UnsupportedOperationException("plugin_registry_remove_unsupported")
 }
 
 class FilePluginRegistryStore(
@@ -104,6 +106,18 @@ class FilePluginRegistryStore(
     override fun upsert(record: InstalledPluginRecord) {
         records[record.id] = record
         writeLocked()
+    }
+
+    @Synchronized
+    override fun remove(pluginId: String): InstalledPluginRecord? {
+        val removed = records.remove(pluginId) ?: return null
+        return try {
+            writeLocked()
+            removed
+        } catch (failure: Throwable) {
+            records[pluginId] = removed
+            throw failure
+        }
     }
 
     private fun readDocument(): PluginRegistryDocument? = runCatching {
@@ -202,6 +216,31 @@ class PluginPackageInstaller(
         }
     }
 
+    /** Removes one installed package with a rollback directory until its registry row is gone. */
+    fun uninstall(pluginId: String): Result<InstalledPluginRecord> = runCatching {
+        require(SAFE_PLUGIN_ID.matches(pluginId)) { "plugin_id_invalid" }
+        val record = registry.get(pluginId) ?: error("plugin_not_found")
+        val target = File(packagesDir, pluginId).canonicalFile
+        val packagesRoot = packagesDir.canonicalFile
+        require(target.parentFile == packagesRoot) { "plugin_path_invalid" }
+        rollbackDir.mkdirs()
+        val rollback = File(rollbackDir, "$pluginId-${UUID.randomUUID()}")
+        val moved = target.exists() && target.renameTo(rollback)
+        require(!target.exists() || moved) { "plugin_uninstall_prepare_failed" }
+        try {
+            registry.remove(pluginId) ?: error("plugin_not_found")
+            if (rollback.exists() && !rollback.deleteRecursively()) {
+                // Registry state is already authoritative; leave a non-executable rollback orphan
+                // for Doctor cleanup instead of resurrecting an installed plugin.
+            }
+            record
+        } catch (failure: Throwable) {
+            registry.upsert(record)
+            if (moved && !target.exists()) rollback.renameTo(target)
+            throw failure
+        }
+    }
+
     private fun extract(archive: File, stage: File) {
         val rootPath = stage.canonicalFile.toPath()
         var entryCount = 0
@@ -294,5 +333,6 @@ class PluginPackageInstaller(
         const val MAX_MANIFEST_BYTES = 64L * 1024
         const val MAX_ENTRIES = 256
         val JSON = Json { ignoreUnknownKeys = false; explicitNulls = false }
+        val SAFE_PLUGIN_ID = Regex("[a-z0-9][a-z0-9._-]{1,63}")
     }
 }

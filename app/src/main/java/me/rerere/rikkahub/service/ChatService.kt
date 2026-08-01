@@ -465,6 +465,7 @@ class ChatService(
     private val pluginToolCatalog: me.rerere.rikkahub.plugin.PluginToolCatalog,
     private val pluginHookBridge: me.rerere.rikkahub.plugin.PluginHookBridge,
     private val pluginRegistryStore: me.rerere.rikkahub.plugin.PluginRegistryStore,
+    private val pluginPackageInstaller: me.rerere.rikkahub.plugin.PluginPackageInstaller,
     private val agentSafetySettings: me.rerere.rikkahub.data.ai.AgentSafetySettings,
     private val shizukuBridgeManager: me.rerere.rikkahub.privilege.ShizukuBridgeManager,
     private val workspaceProcessManager: me.rerere.workspace.WorkspaceProcessManager,
@@ -562,6 +563,13 @@ class ChatService(
                     assistantRemoval = assistantRemovalService,
                     providerManager = providerManager,
                     vault = secondUserSecretVault,
+                ),
+                me.rerere.rikkahub.owner.OwnerPackageControlHandler(
+                    context = context,
+                    settingsStore = settingsStore,
+                    files = filesManager,
+                    pluginInstaller = pluginPackageInstaller,
+                    plugins = pluginRegistryStore,
                 ),
                 me.rerere.rikkahub.owner.OwnerApplicationControlHandler(
                     settingsStore = settingsStore,

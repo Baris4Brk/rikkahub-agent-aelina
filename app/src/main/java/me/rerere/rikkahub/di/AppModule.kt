@@ -823,6 +823,7 @@ val appModule = module {
             pluginToolCatalog = get(),
             pluginHookBridge = get(),
             pluginRegistryStore = get(),
+            pluginPackageInstaller = get(),
             agentSafetySettings = get(),
             shizukuBridgeManager = get(),
             workspaceProcessManager = get(),
