@@ -217,6 +217,7 @@ private val OWNER_NO_ARGUMENT_ACTIONS = setOf(
     "secret_session_status",
     "tts_list",
     "tts_get_playback_speed",
+    "tts_stop",
     "service_list",
     "mcp_list",
     "skill_list",

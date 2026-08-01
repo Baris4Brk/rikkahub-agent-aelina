@@ -77,4 +77,25 @@ class TtsArtifactStoreTest {
         assertTrue(failure is IllegalStateException)
         assertNull(store.get("../../outside"))
     }
+
+    @Test
+    fun `delete removes only the selected private artifact`() = runBlocking {
+        val root = temporaryFolder.newFolder("tts_library")
+        val store = TtsArtifactStore(root)
+        store.save(
+            text = "first",
+            responses = listOf(TTSResponse(byteArrayOf(1), AudioFormat.MP3)),
+            artifactId = "artifact_first",
+        )
+        store.save(
+            text = "second",
+            responses = listOf(TTSResponse(byteArrayOf(2), AudioFormat.MP3)),
+            artifactId = "artifact_second",
+        )
+
+        assertTrue(store.delete("artifact_first"))
+        assertNull(store.get("artifact_first"))
+        assertEquals("artifact_second", store.get("artifact_second")?.artifactId)
+        assertTrue(!store.delete("../../outside"))
+    }
 }

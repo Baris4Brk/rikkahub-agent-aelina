@@ -177,6 +177,15 @@ class TtsArtifactStore(
             .toList()
     }
 
+    suspend fun delete(artifactId: String): Boolean = mutationMutex.withLock {
+        if (!SAFE_ID.matches(artifactId)) return@withLock false
+        withContext(Dispatchers.IO) {
+            val directory = File(root, artifactId)
+            if (!directory.isDirectory) return@withContext false
+            directory.deleteRecursively() && !directory.exists()
+        }
+    }
+
     private fun readEntry(artifactId: String): TtsLibraryEntry? {
         if (!SAFE_ID.matches(artifactId)) return null
         val manifest = File(File(root, artifactId), MANIFEST_FILE)
@@ -330,6 +339,12 @@ class PersistentTtsLibrary(
 
     suspend fun list(limit: Int = 50, offset: Int = 0): List<TtsLibraryEntry> =
         store.list(limit = limit, offset = offset)
+
+    suspend fun delete(artifactId: String): Boolean {
+        val speaking = playbackState.value as? TtsPlaybackState.Speaking
+        if (speaking?.artifactId == artifactId) stopPlayback()
+        return store.delete(artifactId)
+    }
 
     private fun AppScope.launchPlayback(block: suspend () -> Unit): Job =
         launch(context = Dispatchers.Main.immediate) { block() }

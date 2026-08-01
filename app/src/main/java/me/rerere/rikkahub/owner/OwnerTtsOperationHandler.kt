@@ -80,6 +80,9 @@ class OwnerTtsOperationHandler(
             "tts_delete" -> delete(index, request, action)
             "tts_test" -> test(index, request, action)
             "tts_play" -> play(index, request, action)
+            "tts_library_list" -> libraryList(index, action)
+            "tts_library_delete" -> libraryDelete(index, action)
+            "tts_stop" -> stop(index, action)
             "tts_set_default" -> setDefault(index, action)
             "tts_get_playback_speed" -> getPlaybackSpeed(index)
             "tts_set_playback_speed" -> setPlaybackSpeed(index, action)
@@ -273,6 +276,38 @@ class OwnerTtsOperationHandler(
         })
     }
 
+    private suspend fun libraryList(index: Int, action: OwnerAction): OwnerAppliedAction {
+        val limit = action.arguments.int("limit")?.coerceIn(1, 100) ?: 50
+        val offset = action.arguments.int("offset")?.coerceAtLeast(0) ?: 0
+        val entries = library.list(limit, offset)
+        return success(index, action.type, "TTS_LIBRARY_LISTED", "TTS cache metadata returned without transcript text.", buildJsonObject {
+            put("limit", limit); put("offset", offset)
+            put("artifacts", buildJsonArray {
+                entries.forEach { entry -> add(buildJsonObject {
+                    put("artifact_id", entry.artifactId)
+                    put("created_at_ms", entry.createdAtMs)
+                    put("text_length", entry.text.length)
+                    put("chunk_count", entry.chunks.size)
+                    put("total_bytes", entry.totalBytes)
+                    put("owner_scoped", entry.ownerKey != null)
+                }) }
+            })
+        })
+    }
+
+    private suspend fun libraryDelete(index: Int, action: OwnerAction): OwnerAppliedAction {
+        val id = action.arguments.string("artifact_id")?.trim()
+            ?: return failure(index, action.type, "TTS_ARTIFACT_ID_REQUIRED", "artifact_id is required.")
+        return if (library.delete(id)) {
+            success(index, action.type, "TTS_ARTIFACT_DELETED", "TTS cache artifact deleted.", buildJsonObject { put("artifact_id", id) })
+        } else failure(index, action.type, "TTS_ARTIFACT_NOT_FOUND", "TTS cache artifact does not exist.")
+    }
+
+    private fun stop(index: Int, action: OwnerAction): OwnerAppliedAction {
+        library.stopPlayback()
+        return success(index, action.type, "TTS_PLAYBACK_STOPPED", "TTS playback stopped.")
+    }
+
     private suspend fun setDefault(index: Int, action: OwnerAction): OwnerAppliedAction {
         val id = action.arguments.uuid("tts_provider_id")
             ?: return failure(index, action.type, "TTS_ID_REQUIRED", "tts_provider_id is required.")
@@ -431,6 +466,9 @@ class OwnerTtsOperationHandler(
             "tts_delete" to setOf("tts_provider_id"),
             "tts_test" to setOf("tts_provider_id", "text"),
             "tts_play" to setOf("artifact_id", "text"),
+            "tts_library_list" to setOf("limit", "offset"),
+            "tts_library_delete" to setOf("artifact_id"),
+            "tts_stop" to emptySet(),
             "tts_set_default" to setOf("tts_provider_id"),
             "tts_get_playback_speed" to emptySet(),
             "tts_set_playback_speed" to setOf("speed"),
