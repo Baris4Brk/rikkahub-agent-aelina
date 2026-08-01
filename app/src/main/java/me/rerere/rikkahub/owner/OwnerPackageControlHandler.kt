@@ -151,6 +151,7 @@ class OwnerPackageControlHandler(
     private fun petList(index: Int, action: OwnerAction): OwnerAppliedAction {
         val selection = settingsStore.settingsFlow.value.petOverlaySelection
         return success(index, action, "PET_PACKAGES_LISTED", "Private pet package library rebuilt from installed manifests.", buildJsonObject {
+            put("selection", ownerPetSelectionData(selection))
             put("items", buildJsonArray { installedPets().forEach { manifest -> add(buildJsonObject {
                 put("package_id", manifest.id); put("name", manifest.displayName.take(160))
                 put("version", manifest.resolvedVersion.name); put("selected", selection?.packageId == manifest.id)
@@ -288,6 +289,20 @@ class OwnerPackageControlHandler(
             "pet_select" to setOf("package_id", "profile_id", "enabled"),
             "pet_delete" to setOf("package_id", "replacement_package_id"),
         )
+    }
+}
+
+internal fun ownerPetSelectionData(selection: PetOverlaySelection?): JsonObject = buildJsonObject {
+    put("configured", selection != null)
+    selection?.normalized()?.let { current ->
+        put("enabled", current.enabled)
+        put("package_id", current.packageId.orEmpty())
+        put("profile_id", current.profileId.orEmpty())
+        put("scale", current.scale)
+        put("fps", current.animationFps)
+        current.normalizedX?.let { put("x", it) }
+        current.normalizedY?.let { put("y", it) }
+        put("idle_pool_enabled", current.idlePoolEnabled)
     }
 }
 

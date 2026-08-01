@@ -12,6 +12,7 @@ import me.rerere.rikkahub.data.ai.mcp.McpCommonOptions
 import me.rerere.rikkahub.data.ai.mcp.McpManager
 import me.rerere.rikkahub.data.ai.mcp.McpServerConfig
 import me.rerere.rikkahub.data.ai.mcp.McpStatus
+import me.rerere.rikkahub.data.ai.mcp.control.classifyMcpError
 import me.rerere.rikkahub.data.ai.mcp.McpTool
 import me.rerere.rikkahub.data.ai.mcp.McpVaultSecretReference
 import me.rerere.rikkahub.data.ai.mcp.control.McpControlValidation
@@ -204,7 +205,7 @@ class OwnerMcpOperationHandler(
                         put("name", server.commonOptions.name.take(60))
                         put("transport", transport(server))
                         put("enabled", server.commonOptions.enable)
-                        put("status", statusCode(statuses[server.id]))
+                        ownerMcpStatusData(statuses[server.id]).forEach { (key, value) -> put(key, value) }
                         put("tool_count", server.commonOptions.tools.size)
                     })
                 }
@@ -341,7 +342,11 @@ class OwnerMcpOperationHandler(
         return if (status == McpStatus.Connected) success(index, action.type, "MCP_TEST_OK", "MCP connection and tool sync verified.", buildJsonObject {
             put("mcp_id", id.toString())
             put("tool_count", settingsStore.settingsFlow.value.mcpServers.firstOrNull { it.id == id }?.commonOptions?.tools?.size ?: 0)
-        }) else failure(index, action.type, "MCP_TEST_FAILED", "MCP connection could not be confirmed.")
+        }) else {
+            val detail = ownerMcpStatusData(status)
+            val hint = detail["hint"]?.jsonPrimitive?.contentOrNull ?: "Check the URL, transport and server process, then retry."
+            failure(index, action.type, "MCP_TEST_FAILED", "MCP connection could not be confirmed. $hint")
+        }
     }
 
     private suspend fun awaitTerminal(id: Uuid, seconds: Int) {
@@ -473,6 +478,25 @@ class OwnerMcpOperationHandler(
             "mcp_test" to setOf("mcp_id", "wait_seconds"),
         )
         val ID_ACTIONS = setOf("mcp_update", "mcp_delete", "mcp_bind", "mcp_unbind", "mcp_test")
+    }
+}
+
+internal fun ownerMcpStatusData(status: McpStatus?): JsonObject = buildJsonObject {
+    when (status) {
+        McpStatus.Connected -> put("status", "CONNECTED")
+        is McpStatus.Error -> {
+            val (kind, hint) = classifyMcpError(status.message)
+            put("status", "ERROR")
+            put("error_kind", kind)
+            put("hint", hint.take(300))
+        }
+        is McpStatus.Reconnecting -> {
+            put("status", "RECONNECTING")
+            put("reconnect_attempt", status.attempt)
+            put("reconnect_max_attempts", status.maxAttempts)
+        }
+        McpStatus.Connecting -> put("status", "CONNECTING")
+        else -> put("status", "IDLE")
     }
 }
 

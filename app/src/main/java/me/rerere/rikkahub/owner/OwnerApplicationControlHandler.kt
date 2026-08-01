@@ -3,11 +3,14 @@ package me.rerere.rikkahub.owner
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.put
 import me.rerere.asr.ASRProviderSetting
 import me.rerere.ai.core.MessageRole
@@ -375,9 +378,17 @@ class OwnerApplicationControlHandler(
         if (definition.string("type")?.equals("mode", ignoreCase = true) == false) {
             return failure(index, action, "PROMPT_DEFINITION_TYPE_INVALID", "Prompt injection type must be mode.")
         }
+        validateModeInjectionWire(definition)?.let { issue ->
+            return failure(index, action, issue.code, issue.message)
+        }
         val parsed = runCatching {
             JsonInstant.decodeFromJsonElement<PromptInjection.ModeInjection>(definition)
-        }.getOrNull() ?: return failure(index, action, "PROMPT_DEFINITION_INVALID", "Prompt injection definition is invalid.")
+        }.getOrNull() ?: return failure(
+            index,
+            action,
+            "PROMPT_DEFINITION_INVALID",
+            "Prompt injection could not be decoded. Use camelCase injectDepth, serialized position values, and role=user or assistant.",
+        )
         if (!validModeInjection(parsed)) {
             return failure(index, action, "PROMPT_DEFINITION_LIMIT", "Prompt injection exceeds safe field limits.")
         }
@@ -917,4 +928,49 @@ private fun validLorebook(value: Lorebook): Boolean = value.name.length <= 200 &
             entry.keywords.all { it.length <= 500 } && entry.role in setOf(MessageRole.USER, MessageRole.ASSISTANT) &&
             (!entry.useRegex || entry.keywords.all { runCatching { Regex(it) }.isSuccess })
     }
+
+internal data class OwnerPromptDefinitionIssue(val code: String, val message: String)
+
+internal fun validateModeInjectionWire(definition: JsonObject): OwnerPromptDefinitionIssue? {
+    fun primitive(name: String) = definition[name] as? JsonPrimitive
+    fun wrongType(name: String, expected: String) =
+        OwnerPromptDefinitionIssue("PROMPT_${name.uppercase()}_INVALID", "$name must be $expected.")
+
+    definition["id"]?.let { value ->
+        val raw = (value as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull
+        if (raw == null || runCatching { Uuid.parse(raw) }.isFailure) return wrongType("id", "a UUID string")
+    }
+    definition["name"]?.let { if (primitive("name")?.isString != true) return wrongType("name", "a string") }
+    definition["enabled"]?.let {
+        val value = primitive("enabled")
+        if (value == null || value.isString || value.booleanOrNull == null) return wrongType("enabled", "a JSON boolean")
+    }
+    definition["priority"]?.let {
+        val value = primitive("priority")
+        if (value == null || value.isString || value.intOrNull == null) return wrongType("priority", "a JSON integer")
+    }
+    definition["content"]?.let { if (primitive("content")?.isString != true) return wrongType("content", "a string") }
+    definition["injectDepth"]?.let {
+        val value = primitive("injectDepth")
+        if (value == null || value.isString || value.intOrNull == null) return wrongType("injectDepth", "a JSON integer")
+    }
+    definition["position"]?.let {
+        val value = primitive("position")?.takeIf { item -> item.isString }?.contentOrNull
+        if (value !in OWNER_PROMPT_POSITIONS) return wrongType("position", OWNER_PROMPT_POSITIONS.joinToString("|"))
+    }
+    definition["role"]?.let {
+        val value = primitive("role")?.takeIf { item -> item.isString }?.contentOrNull
+        if (value !in OWNER_PROMPT_ROLES) return wrongType("role", "user|assistant")
+    }
+    return null
+}
+
+private val OWNER_PROMPT_POSITIONS = setOf(
+    "before_system_prompt",
+    "after_system_prompt",
+    "top_of_chat",
+    "bottom_of_chat",
+    "at_depth",
+)
+private val OWNER_PROMPT_ROLES = setOf("user", "assistant")
 private fun Throwable.safeCode(): String = message?.takeIf { it.matches(Regex("[a-z0-9_]{3,80}")) }?.uppercase() ?: "OWNER_OPERATION_FAILED"

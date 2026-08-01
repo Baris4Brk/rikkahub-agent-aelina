@@ -8,6 +8,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import me.rerere.rikkahub.assistant.SecondUserAuthorityRegistry
+import me.rerere.rikkahub.data.ai.tools.ownerToolSchemaUtf8Bytes
 import me.rerere.rikkahub.diagnostics.ExecutionConsistencyDoctor
 import me.rerere.rikkahub.owner.db.HostLocalServiceDao
 import me.rerere.rikkahub.owner.db.HostOperationDao
@@ -86,12 +87,16 @@ class OwnerDoctorOperationHandler(
         val authority = SecondUserAuthorityRegistry.current()
         val recoverable = operationDao.getRecoverable()
         val services = serviceDao.getEnabled()
+        val schemaBytes = ownerToolSchemaUtf8Bytes()
         return success(index, type, "DOCTOR_REPORT", "Redacted Owner runtime diagnostics completed.", buildJsonObject {
             put("authority_active", authority != null)
             put("authority_epoch", authority?.authorityEpoch ?: -1)
             put("plaintext_session_open", plaintextSessions.state.value is SecretPlaintextSessionState.Open)
             put("recoverable_operation_count", recoverable.size)
             put("enabled_service_count", services.size)
+            put("owner_tool_family_count", OwnerToolFamily.entries.size)
+            put("owner_action_count", OwnerActionRegistry.actionCount())
+            put("owner_schema_bytes", schemaBytes.values.sum())
             put("execution_tracking_healthy", execution.healthy)
             put("execution_active_count", execution.activeExecutionCount)
             put("execution_stale_count", execution.staleProbeCount)
