@@ -10,7 +10,7 @@ class OwnerActionRegistryTest {
     @Test
     fun `registry preserves every legacy family and action while exposing playback speed`() {
         assertEquals(OwnerToolFamily.entries.toSet(), OwnerActionRegistry.families.map { it.family }.toSet())
-        assertEquals(154, OwnerActionRegistry.actionCount())
+        assertEquals(158, OwnerActionRegistry.actionCount())
         assertTrue(OwnerActionRegistry.action(OwnerToolFamily.TTS, "tts_get_playback_speed") != null)
         assertTrue(OwnerActionRegistry.action(OwnerToolFamily.TTS, "tts_set_playback_speed") != null)
         assertTrue(ownerActionGuideCoverageGaps().isEmpty())

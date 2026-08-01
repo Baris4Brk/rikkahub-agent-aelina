@@ -4,6 +4,7 @@ import android.content.Context
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.add
@@ -12,9 +13,12 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import me.rerere.ai.provider.Model
 import me.rerere.ai.provider.ModelAbility
+import me.rerere.ai.provider.ModelType
+import me.rerere.ai.provider.Modality
 import me.rerere.ai.provider.ProviderManager
 import me.rerere.ai.provider.ProviderSetting
 import me.rerere.rikkahub.data.datastore.SettingsStore
+import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.datastore.findModelById
 import me.rerere.rikkahub.data.ai.tools.local.ConversationExportResult
 import me.rerere.rikkahub.data.ai.tools.local.exportConversationToDownloads
@@ -64,7 +68,7 @@ class OwnerSettingsOperationHandler(
         }
         if (forbidden) return invalid("OWNER_SECRET_ARGUMENT_FORBIDDEN", "Provider secrets must be referenced by Vault slot ID.")
         if (action.type.startsWith("provider_") &&
-            action.type !in setOf("provider_list", "provider_create", "provider_set_default")
+            action.type !in setOf("provider_list", "provider_create", "provider_set_default", "provider_route_set")
         ) {
             val id = action.arguments.uuid("provider_id")
                 ?: return invalid("PROVIDER_ID_REQUIRED", "provider_id is required.")
@@ -107,6 +111,10 @@ class OwnerSettingsOperationHandler(
             "provider_refresh_models" -> providerRefresh(index, request, action, persist = true)
             "provider_test" -> providerRefresh(index, request, action, persist = false)
             "provider_set_default" -> providerSetDefault(index, action)
+            "provider_model_list" -> providerModelList(index, action)
+            "provider_model_upsert" -> providerModelUpsert(index, action)
+            "provider_model_delete" -> providerModelDelete(index, action)
+            "provider_route_set" -> providerRouteSet(index, action)
             else -> failure(index, action.type, "OWNER_ACTION_UNSUPPORTED", "Unsupported action.")
         }
     }.getOrElse {
@@ -168,6 +176,15 @@ class OwnerSettingsOperationHandler(
                             if (assistant.id == receipt.assistantId) assistant.copy(chatModelId = receipt.modelId) else assistant
                         })
                     }
+                }
+                is SettingsReceipt.PreviousSettings -> settingsStore.update { receipt.value }
+                is SettingsReceipt.DeletedProvider -> {
+                    settingsStore.update { receipt.settings }
+                    restoreProviderBindings(
+                        providerId = receipt.providerId,
+                        authoritySubjectId = request.authoritySubjectId,
+                        snapshot = receipt.bindings,
+                    )
                 }
             }
             OwnerCompensationResult(true, "SETTINGS_STATE_RESTORED")
@@ -462,17 +479,60 @@ class OwnerSettingsOperationHandler(
         val id = requireNotNull(action.arguments.uuid("provider_id"))
         val settings = settingsStore.settingsFlow.value
         val provider = settings.providers.first { it.id == id }
-        if (provider.builtIn) return failure(index, action.type, "PROVIDER_BUILT_IN", "Built-in Providers cannot be deleted.")
         val modelIds = provider.models.mapTo(hashSetOf()) { it.id }
-        if (settings.chatModelId in modelIds || settings.assistants.any { it.chatModelId in modelIds }) {
-            return failure(index, action.type, "PROVIDER_IN_USE", "Switch every model binding before deleting this Provider.")
+        val replacementId = action.arguments.uuid("replacement_model_id")
+        if (action.arguments.string("replacement_model_id") != null && replacementId == null) {
+            return failure(index, action.type, "PROVIDER_REPLACEMENT_INVALID", "replacement_model_id must be a UUID.")
         }
-        settingsStore.update { it.copy(providers = it.providers.filterNot { candidate -> candidate.id == id }) }
-        vault.listMetadata(request.authoritySubjectId).forEach { slot ->
-            val filtered = slot.bindings.filterNot { it.kind == SecretBindingKind.PROVIDER && it.targetId == id.toString() }
-            if (filtered.size != slot.bindings.size) vault.updateBindings(slot.slotId, request.authoritySubjectId, filtered)
+        val referencesDeletedModel = settings.referencesAnyModel(modelIds)
+        val requiredReplacementTypes = settings.ownerReferencedModelTypes(modelIds)
+        if (requiredReplacementTypes.size > 1) {
+            return failure(
+                index,
+                action.type,
+                "PROVIDER_REPLACEMENT_TYPE_AMBIGUOUS",
+                "This Provider supplies both active chat and image routes. Switch one route in the same Owner request before deleting it.",
+            )
         }
-        return success(index, action.type, "PROVIDER_DELETED", "Unreferenced Provider deleted.")
+        if (referencesDeletedModel && replacementId == null) {
+            return failure(index, action.type, "PROVIDER_REPLACEMENT_REQUIRED", "replacement_model_id is required because this Provider is currently in use.")
+        }
+        if (replacementId != null) {
+            val replacement = settings.findModelById(replacementId)
+            if (replacementId in modelIds || replacement == null) {
+                return failure(index, action.type, "PROVIDER_REPLACEMENT_INVALID", "Replacement model must exist outside the Provider being deleted.")
+            }
+            val requiredType = requiredReplacementTypes.singleOrNull()
+            if (requiredType != null && replacement.type != requiredType) {
+                return failure(index, action.type, "PROVIDER_REPLACEMENT_TYPE_INVALID", "Replacement model type must be ${requiredType.name.lowercase()}.")
+            }
+        }
+        val bindingSnapshot = snapshotProviderBindings(id, request.authoritySubjectId)
+        val switched = if (referencesDeletedModel) {
+            settings.ownerReplaceModelReferences(modelIds, requireNotNull(replacementId))
+        } else settings
+        settingsStore.update { current -> switched.copy(
+            providers = switched.providers.filterNot { candidate -> candidate.id == id },
+            deletedBuiltInProviderIds = if (provider.builtIn) switched.deletedBuiltInProviderIds + id
+            else switched.deletedBuiltInProviderIds,
+        ) }
+        try {
+            removeProviderBindings(id, request.authoritySubjectId)
+        } catch (error: Throwable) {
+            settingsStore.update { settings }
+            runCatching { restoreProviderBindings(id, request.authoritySubjectId, bindingSnapshot) }
+            throw error
+        }
+        val verified = settingsStore.settingsFlow.value
+        if (verified.providers.any { it.id == id } || verified.referencesAnyModel(modelIds)) {
+            settingsStore.update { settings }
+            restoreProviderBindings(id, request.authoritySubjectId, bindingSnapshot)
+            return failure(index, action.type, "PROVIDER_DELETE_VERIFY_FAILED", "Provider replacement or deletion could not be confirmed.")
+        }
+        return success(
+            index, action.type, "PROVIDER_DELETED", "Provider references were switched and the old Provider was deleted.",
+            receipt = SettingsReceipt.DeletedProvider(settings, id, bindingSnapshot),
+        )
     }
 
     private suspend fun providerRefresh(
@@ -528,6 +588,163 @@ class OwnerSettingsOperationHandler(
         )
     }
 
+    private fun providerModelList(index: Int, action: OwnerAction): OwnerAppliedAction {
+        val providerId = action.arguments.uuid("provider_id")
+            ?: return failure(index, action.type, "PROVIDER_ID_REQUIRED", "provider_id is required.")
+        val provider = settingsStore.settingsFlow.value.providers.firstOrNull { it.id == providerId }
+            ?: return failure(index, action.type, "PROVIDER_NOT_FOUND", "Provider does not exist.")
+        return success(index, action.type, "PROVIDER_MODELS_LISTED", "Provider model metadata returned.", buildJsonObject {
+            put("provider_id", providerId.toString())
+            put("models", buildJsonArray {
+                provider.models.take(200).forEach { model ->
+                    add(buildJsonObject {
+                        put("model_id", model.id.toString())
+                        put("api_model_id", model.modelId.take(300))
+                        put("display_name", model.displayName.take(300))
+                        put("type", model.type.name)
+                        put("abilities", buildJsonArray { model.abilities.forEach { add(it.name) } })
+                        put("input_modalities", buildJsonArray { model.inputModalities.forEach { add(it.name) } })
+                        put("output_modalities", buildJsonArray { model.outputModalities.forEach { add(it.name) } })
+                        model.contextLength?.let { put("context_length", it) }
+                        put("user_context_window_tokens", model.userContextWindowTokens)
+                        put("supported_parameters", buildJsonArray {
+                            model.supportedParameters.take(64).forEach { add(it.take(100)) }
+                        })
+                    })
+                }
+            })
+        })
+    }
+
+    private suspend fun providerModelUpsert(index: Int, action: OwnerAction): OwnerAppliedAction {
+        val providerId = action.arguments.uuid("provider_id")
+            ?: return failure(index, action.type, "PROVIDER_ID_REQUIRED", "provider_id is required.")
+        val definition = action.arguments["definition"] as? JsonObject
+            ?: return failure(index, action.type, "MODEL_DEFINITION_REQUIRED", "definition must be an object.")
+        val unknown = definition.keys - MODEL_DEFINITION_FIELDS
+        if (unknown.isNotEmpty()) return failure(index, action.type, "MODEL_DEFINITION_FIELD_INVALID", "Unsupported model fields: ${unknown.sorted().joinToString()}.")
+        val settings = settingsStore.settingsFlow.value
+        val provider = settings.providers.firstOrNull { it.id == providerId }
+            ?: return failure(index, action.type, "PROVIDER_NOT_FOUND", "Provider does not exist.")
+        val requestedId = definition.uuid("model_id")
+        if (definition.string("model_id") != null && requestedId == null) return failure(index, action.type, "MODEL_ID_INVALID", "model_id must be a UUID.")
+        val apiModelId = definition.string("api_model_id")?.trim()?.takeIf { it.isNotEmpty() }
+        val existing = requestedId?.let { id -> provider.models.firstOrNull { it.id == id } }
+            ?: apiModelId?.let { name -> provider.models.firstOrNull { it.modelId == name } }
+        if (existing == null && apiModelId == null) return failure(index, action.type, "API_MODEL_ID_REQUIRED", "api_model_id is required for a new model.")
+        if (existing == null && requestedId != null && settings.providers.any { candidate ->
+                candidate.id != providerId && candidate.models.any { it.id == requestedId }
+            }
+        ) {
+            return failure(index, action.type, "MODEL_ID_EXISTS", "model_id already belongs to another Provider.")
+        }
+        val type = definition.enumValue<ModelType>("type") ?: existing?.type ?: ModelType.CHAT
+        val abilities = definition.enumList<ModelAbility>("abilities")
+            ?: if ("abilities" in definition) return failure(index, action.type, "MODEL_ABILITIES_INVALID", "abilities contains an unsupported value.") else existing?.abilities.orEmpty()
+        val input = definition.enumList<Modality>("input_modalities")
+            ?: if ("input_modalities" in definition) return failure(index, action.type, "MODEL_MODALITIES_INVALID", "input_modalities contains an unsupported value.") else existing?.inputModalities ?: listOf(Modality.TEXT)
+        val output = definition.enumList<Modality>("output_modalities")
+            ?: if ("output_modalities" in definition) return failure(index, action.type, "MODEL_MODALITIES_INVALID", "output_modalities contains an unsupported value.") else existing?.outputModalities ?: listOf(Modality.TEXT)
+        val supported = definition.stringList("supported_parameters")
+            ?: if ("supported_parameters" in definition) return failure(index, action.type, "MODEL_PARAMETERS_INVALID", "supported_parameters must be a string array.") else existing?.supportedParameters.orEmpty()
+        if (abilities.size > 8 || input.size > 8 || output.size > 8 || supported.size > 64 || supported.any { it.length > 100 }) {
+            return failure(index, action.type, "MODEL_DEFINITION_LIMIT", "Model capability metadata exceeds safe limits.")
+        }
+        val contextLength = definition.int("context_length") ?: existing?.contextLength
+        val userWindow = definition.int("user_context_window_tokens") ?: existing?.userContextWindowTokens ?: 1_000_000
+        if (contextLength != null && contextLength !in 1..10_000_000 || userWindow !in 1..10_000_000) {
+            return failure(index, action.type, "MODEL_CONTEXT_INVALID", "Context windows must be between 1 and 10000000 tokens.")
+        }
+        val model = Model(
+            id = existing?.id ?: requestedId ?: Uuid.random(),
+            modelId = apiModelId?.take(300) ?: existing!!.modelId,
+            displayName = definition.string("display_name")?.take(300) ?: existing?.displayName.orEmpty(),
+            type = type,
+            inputModalities = input.distinct(),
+            outputModalities = output.distinct(),
+            abilities = abilities.distinct(),
+            contextLength = contextLength,
+            userContextWindowTokens = userWindow,
+            supportedParameters = supported.distinct(),
+            customHeaders = existing?.customHeaders.orEmpty(),
+            customBodies = existing?.customBodies.orEmpty(),
+            tools = existing?.tools.orEmpty(),
+            providerOverwrite = existing?.providerOverwrite,
+            pricePromptPerToken = existing?.pricePromptPerToken,
+            priceCompletionPerToken = existing?.priceCompletionPerToken,
+        )
+        val updatedProvider = if (existing == null) provider.addModel(model) else provider.editModel(model)
+        if (updatedProvider.models.none { it.id == model.id && it == model }) {
+            return failure(index, action.type, "PROVIDER_MODEL_IMMUTABLE", "This Provider does not permit model catalog mutation.")
+        }
+        settingsStore.update { current -> current.copy(providers = current.providers.map { if (it.id == providerId) updatedProvider else it }) }
+        return success(index, action.type, if (existing == null) "PROVIDER_MODEL_CREATED" else "PROVIDER_MODEL_UPDATED", "Provider model metadata updated.", buildJsonObject {
+            put("provider_id", providerId.toString()); put("model_id", model.id.toString())
+        }, SettingsReceipt.PreviousProvider(provider))
+    }
+
+    private suspend fun providerModelDelete(index: Int, action: OwnerAction): OwnerAppliedAction {
+        val providerId = action.arguments.uuid("provider_id")
+            ?: return failure(index, action.type, "PROVIDER_ID_REQUIRED", "provider_id is required.")
+        val modelId = action.arguments.uuid("model_id")
+            ?: return failure(index, action.type, "MODEL_ID_REQUIRED", "model_id is required.")
+        val before = settingsStore.settingsFlow.value
+        val provider = before.providers.firstOrNull { it.id == providerId }
+            ?: return failure(index, action.type, "PROVIDER_NOT_FOUND", "Provider does not exist.")
+        val model = provider.models.firstOrNull { it.id == modelId }
+            ?: return failure(index, action.type, "MODEL_NOT_FOUND", "Model does not exist in this Provider.")
+        val referenced = before.referencesAnyModel(setOf(modelId))
+        val requiredReplacementType = before.ownerReferencedModelTypes(setOf(modelId)).singleOrNull()
+        val replacementId = action.arguments.uuid("replacement_model_id")
+        if (action.arguments.string("replacement_model_id") != null && replacementId == null) {
+            return failure(index, action.type, "MODEL_REPLACEMENT_INVALID", "replacement_model_id must be a UUID.")
+        }
+        if (referenced && replacementId == null) return failure(index, action.type, "MODEL_REPLACEMENT_REQUIRED", "replacement_model_id is required because the model is in use.")
+        val replacement = replacementId?.let(before::findModelById)
+        if (replacementId != null && (replacementId == modelId || replacement == null)) {
+            return failure(index, action.type, "MODEL_REPLACEMENT_INVALID", "Replacement model does not exist or equals the deleted model.")
+        }
+        if (requiredReplacementType != null && replacement != null && replacement.type != requiredReplacementType) {
+            return failure(index, action.type, "MODEL_REPLACEMENT_TYPE_INVALID", "Replacement model type must be ${requiredReplacementType.name.lowercase()}.")
+        }
+        val changedProvider = provider.delModel(model)
+        if (changedProvider.models.any { it.id == modelId }) return failure(index, action.type, "PROVIDER_MODEL_IMMUTABLE", "This Provider does not permit model deletion.")
+        val switched = if (referenced) before.ownerReplaceModelReferences(setOf(modelId), requireNotNull(replacementId)) else before
+        settingsStore.update { switched.copy(providers = switched.providers.map { if (it.id == providerId) changedProvider else it }) }
+        return success(index, action.type, "PROVIDER_MODEL_DELETED", "Model references were switched and the model was deleted.", receipt = SettingsReceipt.PreviousSettings(before))
+    }
+
+    private suspend fun providerRouteSet(index: Int, action: OwnerAction): OwnerAppliedAction {
+        val route = action.arguments.string("route")?.lowercase()
+            ?: return failure(index, action.type, "MODEL_ROUTE_REQUIRED", "route is required.")
+        if (route !in MODEL_ROUTES) return failure(index, action.type, "MODEL_ROUTE_INVALID", "Unsupported model route.")
+        val rawId = action.arguments.string("model_id")?.trim()?.takeIf { it.isNotEmpty() }
+        val modelId = rawId?.let { runCatching { Uuid.parse(it) }.getOrNull() }
+        if (rawId != null && modelId == null) return failure(index, action.type, "MODEL_ID_INVALID", "model_id must be a UUID.")
+        if (modelId == null && route !in NULLABLE_MODEL_ROUTES) return failure(index, action.type, "MODEL_ID_REQUIRED", "model_id is required for this route.")
+        val before = settingsStore.settingsFlow.value
+        val model = modelId?.let { before.findModelById(it) }
+        if (modelId != null && model == null) return failure(index, action.type, "MODEL_NOT_FOUND", "Model does not exist.")
+        if (route == "image_generation" && model?.type != ModelType.IMAGE) return failure(index, action.type, "MODEL_TYPE_INVALID", "image_generation requires an image model.")
+        if (route != "image_generation" && model != null && model.type != ModelType.CHAT) return failure(index, action.type, "MODEL_TYPE_INVALID", "This route requires a chat model.")
+        val after = when (route) {
+            "chat" -> before.copy(chatModelId = requireNotNull(modelId))
+            "fast" -> before.copy(fastModelId = requireNotNull(modelId))
+            "memory" -> before.copy(memoryExtractionModelId = modelId)
+            "title" -> before.copy(titleModelId = modelId)
+            "image_generation" -> before.copy(imageGenerationModelId = requireNotNull(modelId))
+            "suggestion" -> before.copy(suggestionModelId = modelId)
+            "ocr" -> before.copy(ocrModelId = requireNotNull(modelId))
+            "compress" -> before.copy(compressModelId = requireNotNull(modelId))
+            "translate" -> before.copy(translateModeId = requireNotNull(modelId))
+            else -> before
+        }
+        settingsStore.update { after }
+        return success(index, action.type, "PROVIDER_ROUTE_UPDATED", "Model route updated.", buildJsonObject {
+            put("route", route); put("model_id", modelId?.toString() ?: "")
+        }, SettingsReceipt.PreviousSettings(before))
+    }
+
     private suspend fun bindProviderSlot(slotId: String, subjectId: String, providerId: Uuid) {
         val slot = vault.listMetadata(subjectId).first { it.slotId == slotId }
         val binding = SecretBinding(SecretBindingKind.PROVIDER, providerId.toString())
@@ -542,6 +759,30 @@ class OwnerSettingsOperationHandler(
                 it.kind == SecretBindingKind.PROVIDER && it.targetId == providerId.toString()
             }
             if (retained != slot.bindings) vault.updateBindings(slot.slotId, subjectId, retained)
+        }
+    }
+
+    private suspend fun snapshotProviderBindings(
+        providerId: Uuid,
+        authoritySubjectId: String,
+    ): Map<String, List<SecretBinding>> = vault.listMetadata(authoritySubjectId).associate { slot ->
+        slot.slotId to slot.bindings.filter {
+            it.kind == SecretBindingKind.PROVIDER && it.targetId == providerId.toString()
+        }
+    }
+
+    private suspend fun restoreProviderBindings(
+        providerId: Uuid,
+        authoritySubjectId: String,
+        snapshot: Map<String, List<SecretBinding>>,
+    ) {
+        vault.listMetadata(authoritySubjectId).forEach { slot ->
+            val retained = slot.bindings.filterNot {
+                it.kind == SecretBindingKind.PROVIDER && it.targetId == providerId.toString()
+            }
+            check(vault.updateBindings(slot.slotId, authoritySubjectId, retained + snapshot[slot.slotId].orEmpty())) {
+                "provider_vault_binding_restore_failed"
+            }
         }
     }
 
@@ -572,12 +813,26 @@ class OwnerSettingsOperationHandler(
     private fun invalid(code: String, message: String) = OwnerActionValidation(false, code, message)
     private fun idData(key: String, id: Any) = buildJsonObject { put(key, id.toString()) }
 
-    private fun JsonObject.string(key: String) = this[key]?.jsonPrimitive?.contentOrNull
+    private fun JsonObject.string(key: String) = (this[key] as? JsonPrimitive)?.contentOrNull
     private fun JsonObject.uuid(key: String): Uuid? = string(key)?.trim()?.takeIf { it.isNotEmpty() }?.let {
         runCatching { Uuid.parse(it) }.getOrNull()
     }
     private fun JsonObject.boolean(key: String): Boolean? = string(key)?.toBooleanStrictOrNull()
     private fun JsonObject.int(key: String): Int? = string(key)?.toIntOrNull()
+    private inline fun <reified T : Enum<T>> JsonObject.enumValue(key: String): T? =
+        string(key)?.uppercase()?.let { value -> enumValues<T>().firstOrNull { it.name == value } }
+    private inline fun <reified T : Enum<T>> JsonObject.enumList(key: String): List<T>? {
+        val values = this[key] as? JsonArray ?: return null
+        val parsed = values.mapNotNull { element ->
+            (element as? JsonPrimitive)?.contentOrNull?.uppercase()?.let { name -> enumValues<T>().firstOrNull { it.name == name } }
+        }
+        return parsed.takeIf { it.size == values.size }
+    }
+    private fun JsonObject.stringList(key: String): List<String>? {
+        val values = this[key] as? JsonArray ?: return null
+        val parsed = values.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
+        return parsed.takeIf { it.size == values.size }
+    }
 
     private sealed interface SettingsReceipt {
         data class CreatedAssistant(val id: Uuid) : SettingsReceipt
@@ -589,6 +844,12 @@ class OwnerSettingsOperationHandler(
         data class CreatedProvider(val id: Uuid) : SettingsReceipt
         data class PreviousProvider(val value: ProviderSetting) : SettingsReceipt
         data class PreviousDefaultModel(val assistantId: Uuid?, val modelId: Uuid?) : SettingsReceipt
+        data class PreviousSettings(val value: Settings) : SettingsReceipt
+        data class DeletedProvider(
+            val settings: Settings,
+            val providerId: Uuid,
+            val bindings: Map<String, List<SecretBinding>>,
+        ) : SettingsReceipt
     }
 
     private companion object {
@@ -610,10 +871,14 @@ class OwnerSettingsOperationHandler(
             "provider_list" to emptySet(),
             "provider_create" to setOf("provider_id", "provider_type", "name", "base_url", "vault_slot_id"),
             "provider_update" to setOf("provider_id", "name", "base_url", "enabled"),
-            "provider_delete" to setOf("provider_id"),
+            "provider_delete" to setOf("provider_id", "replacement_model_id"),
             "provider_refresh_models" to setOf("provider_id"),
             "provider_test" to setOf("provider_id"),
             "provider_set_default" to setOf("model_id", "assistant_id"),
+            "provider_model_list" to setOf("provider_id"),
+            "provider_model_upsert" to setOf("provider_id", "definition"),
+            "provider_model_delete" to setOf("provider_id", "model_id", "replacement_model_id"),
+            "provider_route_set" to setOf("route", "model_id"),
         )
         val OPTIONAL_UUID_FIELDS = mapOf(
             "assistant_create" to setOf("assistant_id"),
@@ -622,8 +887,55 @@ class OwnerSettingsOperationHandler(
             "conversation_branch" to setOf("new_conversation_id"),
             "provider_create" to setOf("provider_id"),
         )
+        val MODEL_DEFINITION_FIELDS = setOf(
+            "model_id", "api_model_id", "display_name", "type", "abilities", "input_modalities",
+            "output_modalities", "context_length", "user_context_window_tokens", "supported_parameters",
+        )
+        val MODEL_ROUTES = setOf("chat", "fast", "memory", "title", "image_generation", "suggestion", "ocr", "compress", "translate")
+        val NULLABLE_MODEL_ROUTES = setOf("memory", "title", "suggestion")
     }
 }
+
+private fun Settings.referencesAnyModel(ids: Set<Uuid>): Boolean =
+    chatModelId in ids || fastModelId in ids || ids.containsNullable(memoryExtractionModelId) || ids.containsNullable(titleModelId) ||
+        imageGenerationModelId in ids || ids.containsNullable(suggestionModelId) || ocrModelId in ids || compressModelId in ids ||
+        translateModeId in ids || assistants.any { assistant ->
+            ids.containsNullable(assistant.chatModelId) || ids.containsNullable(assistant.subAgentModelId)
+        }
+
+internal fun Settings.ownerReferencedModelTypes(ids: Set<Uuid>): Set<ModelType> = buildSet {
+    if (imageGenerationModelId in ids) add(ModelType.IMAGE)
+    if (
+        chatModelId in ids || fastModelId in ids || ids.containsNullable(memoryExtractionModelId) ||
+        ids.containsNullable(titleModelId) || ids.containsNullable(suggestionModelId) || ocrModelId in ids ||
+        compressModelId in ids || translateModeId in ids || assistants.any { assistant ->
+            ids.containsNullable(assistant.chatModelId) || ids.containsNullable(assistant.subAgentModelId)
+        }
+    ) {
+        add(ModelType.CHAT)
+    }
+}
+
+internal fun Settings.ownerReplaceModelReferences(ids: Set<Uuid>, replacement: Uuid): Settings = copy(
+    chatModelId = chatModelId.takeUnless(ids::contains) ?: replacement,
+    fastModelId = fastModelId.takeUnless(ids::contains) ?: replacement,
+    memoryExtractionModelId = memoryExtractionModelId.replaceIfIn(ids, replacement),
+    titleModelId = titleModelId.replaceIfIn(ids, replacement),
+    imageGenerationModelId = imageGenerationModelId.takeUnless(ids::contains) ?: replacement,
+    suggestionModelId = suggestionModelId.replaceIfIn(ids, replacement),
+    ocrModelId = ocrModelId.takeUnless(ids::contains) ?: replacement,
+    compressModelId = compressModelId.takeUnless(ids::contains) ?: replacement,
+    translateModeId = translateModeId.takeUnless(ids::contains) ?: replacement,
+    favoriteModels = favoriteModels.filterNot(ids::contains),
+    assistants = assistants.map { assistant -> assistant.copy(
+        chatModelId = assistant.chatModelId.replaceIfIn(ids, replacement),
+        subAgentModelId = assistant.subAgentModelId.replaceIfIn(ids, replacement),
+    ) },
+)
+
+private fun Set<Uuid>.containsNullable(value: Uuid?): Boolean = value != null && value in this
+private fun Uuid?.replaceIfIn(ids: Set<Uuid>, replacement: Uuid): Uuid? =
+    if (this != null && this in ids) replacement else this
 
 sealed interface OwnerNavigationTarget {
     data class Conversation(val conversationId: String) : OwnerNavigationTarget
