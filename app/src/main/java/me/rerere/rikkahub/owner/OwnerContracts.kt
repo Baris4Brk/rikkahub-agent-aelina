@@ -37,6 +37,19 @@ enum class OwnerToolFamily(val toolName: String) {
     WORKFLOW("owner_workflow_manage"),
     UI("owner_ui"),
     DOCTOR("owner_doctor"),
+    RUN("owner_run_manage"),
+    QUICK_CAPTURE("owner_quick_capture_manage"),
+    PLUGIN("owner_plugin_manage"),
+    MEMORY("owner_memory_manage"),
+    PROMPT_LIBRARY("owner_prompt_library_manage"),
+    ASR("owner_asr_manage"),
+    CHANNEL("owner_channel_manage"),
+    SEARCH("owner_search_manage"),
+    BACKUP_STORAGE("owner_backup_storage_manage"),
+    APP_SETTINGS("owner_app_settings_manage"),
+    RUNTIME("owner_runtime_manage"),
+    SAFETY("owner_safety_manage"),
+    PET("owner_pet_manage"),
 }
 
 /**

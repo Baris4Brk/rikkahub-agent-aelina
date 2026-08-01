@@ -201,5 +201,18 @@ internal fun allowedOperations(family: OwnerToolFamily): Set<String> = when (fam
     OwnerToolFamily.SKILL,
     OwnerToolFamily.WORKFLOW,
     OwnerToolFamily.UI,
+    OwnerToolFamily.RUN,
+    OwnerToolFamily.QUICK_CAPTURE,
+    OwnerToolFamily.PLUGIN,
+    OwnerToolFamily.MEMORY,
+    OwnerToolFamily.PROMPT_LIBRARY,
+    OwnerToolFamily.ASR,
+    OwnerToolFamily.CHANNEL,
+    OwnerToolFamily.SEARCH,
+    OwnerToolFamily.BACKUP_STORAGE,
+    OwnerToolFamily.APP_SETTINGS,
+    OwnerToolFamily.RUNTIME,
+    OwnerToolFamily.SAFETY,
+    OwnerToolFamily.PET,
     -> emptySet()
 }

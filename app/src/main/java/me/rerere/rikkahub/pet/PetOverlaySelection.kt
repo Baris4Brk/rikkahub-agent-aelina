@@ -38,7 +38,7 @@ data class PetOverlaySelection(
 
     companion object {
         const val MIN_SCALE = 0.05f
-        const val MAX_SCALE = 2.0f
+        const val MAX_SCALE = 3.0f
         const val MIN_FPS = 4
         const val MAX_FPS = 12
         private val SAFE_PACKAGE_ID = Regex("[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}")

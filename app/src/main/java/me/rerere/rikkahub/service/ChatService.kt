@@ -464,6 +464,7 @@ class ChatService(
     private val toolRuntime: me.rerere.rikkahub.data.ai.execution.ToolRuntime,
     private val pluginToolCatalog: me.rerere.rikkahub.plugin.PluginToolCatalog,
     private val pluginHookBridge: me.rerere.rikkahub.plugin.PluginHookBridge,
+    private val pluginRegistryStore: me.rerere.rikkahub.plugin.PluginRegistryStore,
     private val agentSafetySettings: me.rerere.rikkahub.data.ai.AgentSafetySettings,
     private val shizukuBridgeManager: me.rerere.rikkahub.privilege.ShizukuBridgeManager,
     private val workspaceProcessManager: me.rerere.workspace.WorkspaceProcessManager,
@@ -561,6 +562,12 @@ class ChatService(
                     assistantRemoval = assistantRemovalService,
                     providerManager = providerManager,
                     vault = secondUserSecretVault,
+                ),
+                me.rerere.rikkahub.owner.OwnerApplicationControlHandler(
+                    settingsStore = settingsStore,
+                    plugins = pluginRegistryStore,
+                    safety = agentSafetySettings,
+                    operations = hostOperationDao,
                 ),
                 ownerTtsHandler,
                 me.rerere.rikkahub.owner.OwnerEmotionTtsOperationHandler(

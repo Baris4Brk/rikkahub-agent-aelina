@@ -223,6 +223,22 @@ private val OWNER_NO_ARGUMENT_ACTIONS = setOf(
     "workflow_list",
     "rikkahub_state_get",
     "doctor_check",
+    "quick_capture_get",
+    "quick_capture_trigger",
+    "plugin_list",
+    "prompt_library_list",
+    "lorebook_list",
+    "asr_list",
+    "channel_get",
+    "search_get",
+    "backup_storage_get",
+    "backup_local_export",
+    "app_settings_get",
+    "runtime_get",
+    "safety_get",
+    "safety_emergency_stop_activate",
+    "pet_list",
+    "pet_dialogue_state",
 )
 
 /* Registry moved to OwnerActionRegistry. Kept in this migration commit for blame continuity.
