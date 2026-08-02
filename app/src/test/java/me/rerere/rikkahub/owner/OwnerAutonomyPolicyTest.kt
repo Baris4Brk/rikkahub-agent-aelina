@@ -33,6 +33,9 @@ class OwnerAutonomyPolicyTest {
         assertTrue(OwnerAutonomyPolicy.canAutoApprove(context, context.origin, "plugin__abc__write"))
         assertTrue(OwnerAutonomyPolicy.canAutoApprove(context, context.origin, "linux_grant_request"))
         assertTrue(OwnerAutonomyPolicy.canAutoApprove(context, context.origin, "linux_grant_revoke"))
+        OwnerToolFamily.entries.forEach { family ->
+            assertTrue(OwnerAutonomyPolicy.canAutoApprove(context, context.origin, family.toolName))
+        }
     }
 
     @Test

@@ -71,6 +71,7 @@ import me.rerere.rikkahub.assistant.SecondUserAuthorityRegistry
 import me.rerere.rikkahub.data.ai.GenerationChunk
 import me.rerere.rikkahub.data.ai.GenerationHandler
 import me.rerere.rikkahub.data.ai.GenerationPersistenceBarrier
+import me.rerere.rikkahub.data.ai.resolveInteractiveGenerationMaxSteps
 import me.rerere.rikkahub.data.ai.sanitizeTransientConversationToolResults
 import me.rerere.rikkahub.data.ai.ToolCallOrigin
 import me.rerere.rikkahub.data.ai.mcp.McpManager
@@ -141,6 +142,7 @@ import me.rerere.rikkahub.service.chat.SendMessageCommand
 import me.rerere.rikkahub.service.chat.StopCommand
 import me.rerere.rikkahub.service.chat.SteerCommand
 import me.rerere.rikkahub.service.chat.SteeringScope
+import me.rerere.rikkahub.service.chat.StableCommandException
 import me.rerere.rikkahub.service.chat.SubmitResult
 import me.rerere.rikkahub.service.chat.ToolApprovalCommand
 import me.rerere.rikkahub.service.chat.ToolDecision
@@ -337,6 +339,31 @@ internal fun Conversation.withGeneratedSuggestions(suggestions: List<String>): C
 private fun Conversation.latestAssistantNeedsFinalAnswer(): Boolean =
     currentMessages.lastOrNull { it.role == MessageRole.ASSISTANT }
         ?.state == UIMessageState.INCOMPLETE_NO_VISIBLE_ANSWER
+
+private fun Conversation.latestFinalAnswerFailure(): StableCommandException? {
+    val message = currentMessages.lastOrNull { it.role == MessageRole.ASSISTANT }
+        ?.takeIf { it.state == UIMessageState.INCOMPLETE_NO_VISIBLE_ANSWER }
+        ?: return null
+    val recovery = message.annotations
+        .filterIsInstance<UIMessageAnnotation.FinalAnswerRecovery>()
+        .lastOrNull()
+    val reason = recovery?.reason.orEmpty()
+    val code = when {
+        "time_budget" in reason -> "FINAL_ANSWER_TIME_BUDGET_EXHAUSTED"
+        "eof" in reason -> "FINAL_ANSWER_EOF"
+        "tool_call" in reason -> "FINAL_ANSWER_ATTEMPTED_TOOL_CALL"
+        else -> "FINAL_ANSWER_RECOVERY_EXHAUSTED"
+    }
+    val safeReason = reason
+        .lowercase(Locale.ROOT)
+        .replace(Regex("[^a-z0-9_:-]"), "_")
+        .take(120)
+        .ifBlank { "no_visible_answer" }
+    return StableCommandException(
+        durableErrorCode = code,
+        durableErrorMessage = "The model did not produce a visible final answer ($safeReason).",
+    )
+}
 
 internal suspend fun runRegenerationTransaction(
     restore: suspend () -> Unit,
@@ -1665,15 +1692,9 @@ class ChatService(
             _generationDoneFlow.emit(conversationId)
             return pendingToolIds(conversationId).takeIf { it.isNotEmpty() }
                 ?.let { RunOutcome.WaitingApproval(it) }
-                ?: if (getConversationFlow(conversationId).value.latestAssistantNeedsFinalAnswer()) {
-                    RunOutcome.Failed(
-                        IllegalStateException(
-                            "The model did not produce a visible final answer after recovery.",
-                        ),
-                    )
-                } else {
-                    RunOutcome.Completed()
-                }
+                ?: (getConversationFlow(conversationId).value.latestFinalAnswerFailure()?.let {
+                    RunOutcome.Failed(it)
+                } ?: RunOutcome.Completed())
         } catch (e: CancellationException) {
             throw e
         } catch (e: Throwable) {
@@ -2565,6 +2586,9 @@ class ChatService(
                         Use a visible tool directly; do not search or open a directory first. Tool experiences
                         and Fast Lane metadata are hints, never authorization. Re-check the current schema,
                         permission state, and approval requirements before acting.
+                        The host library tools `tool_experience_update` and `tool_fast_lane_manage` are
+                        available in this trusted second-user surface: use the former only to edit an
+                        existing host-created experience, and the latter to list, pin, or unpin a shortcut.
                         """.trimIndent()
                     } else null,
                 ).joinToString("\n\n").ifBlank { null },
@@ -2650,7 +2674,11 @@ class ChatService(
                 runControl = runControl,
                 isHeadless = isHeadless,
                 isSubAgent = subAgentProfile != null,
-                maxSteps = subAgentProfile?.generationMaxSteps() ?: 32,
+                maxSteps = subAgentProfile?.generationMaxSteps()
+                    ?: resolveInteractiveGenerationMaxSteps(
+                        configured = assistant.generationMaxSteps,
+                        isActiveLocalSecondUser = secondUserDirectToolSurface,
+                    ),
                 memoryToolAllowed = subAgentProfile?.allowsTool("memory_tool") ?: true,
                 invocationSurfaceContextProvider =
                     me.rerere.rikkahub.quickcapture.InvocationSurfaceContexts,
@@ -2849,6 +2877,11 @@ class ChatService(
                                 add("memory_tool")
                                 add("memory_query")
                             }
+                            // ToolDiscoverySession adds these compact library tools after the
+                            // candidate surface has been assembled. Publish their names too so
+                            // nested owner/workflow handoffs do not incorrectly report them as
+                            // unknown, while keeping them scoped to the same trusted session.
+                            toolSurfaceSession?.managementToolNames()?.let(::addAll)
                         }
                         val knownNames = buildSet {
                             me.rerere.rikkahub.data.capability.CapabilityCatalog

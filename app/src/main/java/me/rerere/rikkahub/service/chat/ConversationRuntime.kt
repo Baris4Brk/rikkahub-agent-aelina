@@ -1321,7 +1321,11 @@ class ConversationRuntime(
             is CommandOutcome.Superseded -> DurableCommandState.CANCELLED
             is CommandOutcome.NotApplied -> DurableCommandState.COMPLETED
         }
-        queue.complete(envelope.id.toString(), state)
+        queue.complete(
+            id = envelope.id.toString(),
+            state = state,
+            error = (outcome as? CommandOutcome.Failed)?.error,
+        )
     }
 
     private fun startRun(envelope: CommandEnvelope<out ChatCommand>) {

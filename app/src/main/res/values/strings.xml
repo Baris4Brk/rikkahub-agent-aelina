@@ -2364,4 +2364,9 @@
   <string name="chat_token_usage_turn">Turn input %1$s · %2$d calls · Output %3$s</string>
   <string name="runtime_diagnostic_reverse_geocoding_title">Reverse geocoding</string>
   <string name="runtime_diagnostic_reverse_geocoding_summary">platform=%1$b; platformStatus=%2$s; enabled=%3$b; external=%4$b; providers=%5$d; active=%6$s; default=%7$s; cache=%8$d; hits=%9$d; error=%10$s; provider=%11$s; duration=%12$s</string>
+  <string name="assistant_page_generation_max_steps">Maximum agent steps</string>
+  <string name="assistant_page_generation_max_steps_desc">Maximum model/tool-loop steps for one turn. Leave blank for the role-aware default; range 1–256.</string>
+  <string name="assistant_page_generation_max_steps_auto">Automatic</string>
+  <string name="assistant_page_generation_max_steps_effective_auto">Automatic: %1$d steps</string>
+  <string name="assistant_page_generation_max_steps_effective">Current limit: %1$d steps</string>
 </resources>

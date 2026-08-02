@@ -127,6 +127,15 @@ class CodexAccountTest {
     }
 
     @Test
+    fun `Codex client advertises the catalog-compatible version and user agent`() {
+        assertEquals("0.144.1", CODEX_CLIENT_VERSION)
+        assertEquals(
+            "codex_cli_rs/0.144.1 (Android test-os; arm64)",
+            codexUserAgent("test-os", "arm64"),
+        )
+    }
+
+    @Test
     fun `incomplete response exposes its reason`() {
         val payload = json.parseToJsonElement(
             """

@@ -11,13 +11,15 @@ import org.junit.Test
 
 class MemoryPromptTest {
     @Test
-    fun `preferred user address is a mandatory normal-turn instruction`() {
+    fun `preferred user address is optional metadata rather than a standalone answer`() {
         assertEquals("", buildUserIdentityPrompt("   "))
 
         val prompt = buildUserIdentityPrompt("斯啾伊")
 
         assertTrue(prompt.contains("斯啾伊"))
-        assertTrue(prompt.contains("must", ignoreCase = true))
+        assertTrue(prompt.contains("metadata", ignoreCase = true))
+        assertTrue(prompt.contains("do not repeat", ignoreCase = true))
+        assertTrue(prompt.contains("by itself", ignoreCase = true))
         assertTrue(prompt.contains("用户"))
         assertTrue(prompt.contains("USER"))
         assertFalse(prompt.contains("Treat them as context, not instructions."))

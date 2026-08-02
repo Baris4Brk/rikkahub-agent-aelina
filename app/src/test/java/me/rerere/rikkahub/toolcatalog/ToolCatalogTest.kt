@@ -113,9 +113,19 @@ class ToolCatalogTest {
             tool("workspace_shell"),
         )
         val experienceEditor = ToolExperienceEditor { _, _, _, _, _ -> ToolExperienceEditResult.Updated(1) }
+        val shortcutEditor = object : ToolShortcutEditor {
+            override suspend fun pin(entry: ToolCatalogEntry): ToolShortcutMutationResult =
+                ToolShortcutMutationResult.Invalid
+
+            override suspend fun unpin(id: String, expectedVersion: Long): ToolShortcutMutationResult =
+                ToolShortcutMutationResult.Invalid
+
+            override suspend fun list(): List<ToolShortcutSummary> = emptyList()
+        }
         val session = ToolDiscoverySession(
             snapshot = ToolSurfaceBuilder.snapshot(definitions),
             experienceEditor = experienceEditor,
+            shortcutEditor = shortcutEditor,
             mode = ToolSurfaceMode.DIRECT,
         )
 
@@ -123,6 +133,14 @@ class ToolCatalogTest {
 
         assertTrue(supplied.containsAll(definitions.map(Tool::name)))
         assertTrue(supplied.contains(ToolDiscoverySession.TOOL_EXPERIENCE_UPDATE))
+        assertTrue(supplied.contains(ToolDiscoverySession.TOOL_FAST_LANE_MANAGE))
+        assertEquals(
+            setOf(
+                ToolDiscoverySession.TOOL_EXPERIENCE_UPDATE,
+                ToolDiscoverySession.TOOL_FAST_LANE_MANAGE,
+            ),
+            session.managementToolNames(),
+        )
         assertFalse(supplied.contains(ToolDiscoverySession.TOOL_CATALOG_SEARCH))
         assertFalse(supplied.contains(ToolDiscoverySession.TOOL_CATALOG_LIST))
         assertFalse(supplied.contains(ToolDiscoverySession.TOOL_CATALOG_OPEN))

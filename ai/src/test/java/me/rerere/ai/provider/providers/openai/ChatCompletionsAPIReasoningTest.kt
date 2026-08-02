@@ -98,6 +98,22 @@ class ChatCompletionsAPIReasoningTest {
     }
 
     @Test
+    fun `OpenCode DeepSeek V4 maps off recovery effort to native high`() {
+        val request = buildRequest(
+            provider = ProviderSetting.OpenAI(baseUrl = "https://opencode.ai/v1"),
+            params = TextGenerationParams(
+                model = Model(
+                    modelId = "deepseek-v4-flash",
+                    abilities = listOf(ModelAbility.REASONING),
+                ),
+                reasoningLevel = ReasoningLevel.OFF,
+            ),
+        )
+
+        assertEquals("high", request["reasoning_effort"]?.jsonPrimitive?.content)
+    }
+
+    @Test
     fun `OpenCode non DeepSeek models retain xhigh effort`() {
         val request = buildRequest(
             provider = ProviderSetting.OpenAI(baseUrl = "https://opencode.ai/v1"),

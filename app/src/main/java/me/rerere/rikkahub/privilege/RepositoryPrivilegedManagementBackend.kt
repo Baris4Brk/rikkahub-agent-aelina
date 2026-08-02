@@ -418,6 +418,11 @@ class RepositoryPrivilegedManagementBackend(
                     streamOutput = request.streamOutput ?: assistant.streamOutput,
                     fastPathRouterEnabled = request.fastPathRouterEnabled ?: assistant.fastPathRouterEnabled,
                     enableWebSearch = request.enableWebSearch ?: assistant.enableWebSearch,
+                    generationMaxSteps = when {
+                        request.clearGenerationMaxSteps -> null
+                        request.generationMaxSteps != null -> request.generationMaxSteps
+                        else -> assistant.generationMaxSteps
+                    },
                 )
             })
         }

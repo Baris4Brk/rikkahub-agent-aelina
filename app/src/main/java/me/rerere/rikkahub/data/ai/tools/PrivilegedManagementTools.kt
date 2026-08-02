@@ -181,6 +181,7 @@ private fun managementToolSpecs(): List<ManagementToolSpec> = listOf(
             "stream_output" to booleanProperty("Stream output"),
             "fast_path_router_enabled" to booleanProperty("Enable the conservative fast-path router"),
             "enable_web_search" to booleanProperty("Enable built-in web search for this assistant"),
+            "generation_max_steps" to integerProperty("Maximum agent steps from 1 to 256; 0 restores the role-aware default"),
         ),
         listOf("assistant_id"),
     ),
@@ -346,6 +347,10 @@ internal fun parseManagementRequest(name: String, obj: JsonObject): ParsedReques
             "assistant_update" -> {
                 val chatRaw = obj.string("chat_model_id")
                 val workspaceRaw = obj.string("workspace_id")
+                val generationMaxStepsRaw = obj.int("generation_max_steps")
+                require(generationMaxStepsRaw == null || generationMaxStepsRaw in 0..256) {
+                    "generation_max_steps must be between 0 and 256."
+                }
                 PrivilegedManagementRequest.AssistantUpdate(
                     assistantId = requiredUuid("assistant_id"),
                     name = obj.string("name")?.trim()?.take(200),
@@ -360,6 +365,8 @@ internal fun parseManagementRequest(name: String, obj: JsonObject): ParsedReques
                     streamOutput = obj.boolean("stream_output"),
                     fastPathRouterEnabled = obj.boolean("fast_path_router_enabled"),
                     enableWebSearch = obj.boolean("enable_web_search"),
+                    generationMaxSteps = generationMaxStepsRaw?.takeIf { it > 0 },
+                    clearGenerationMaxSteps = generationMaxStepsRaw == 0,
                 )
             }
             "assistant_toggle_tool" -> PrivilegedManagementRequest.AssistantToggleTool(

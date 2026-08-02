@@ -123,7 +123,12 @@ internal fun shouldSpillToolOutputToFile(
 ): Boolean = toolName !in TRANSIENT_CONVERSATION_READER_TOOL_NAMES &&
     totalChars > MAX_TOOL_OUTPUT_CHARS && hasShellAccess
 private const val FINAL_ANSWER_MAX_TOKENS = 4096
-private const val FINAL_ANSWER_MAX_ATTEMPTS = 10
+private const val FINAL_ANSWER_MAX_ATTEMPTS = 3
+private const val FINAL_ANSWER_CONTEXT_TOOL_OUTPUT_BUDGET = 24 * 1024
+private const val FINAL_ANSWER_CONTEXT_TOOL_OUTPUT_MAX = 2 * 1024
+private const val FINAL_ANSWER_CONTEXT_TOOL_OUTPUT_MIN = 256
+private const val FINAL_ANSWER_CONTEXT_TOOL_INPUT_MAX = 512
+private const val FINAL_ANSWER_CONTEXT_ASSISTANT_TEXT_MAX = 4 * 1024
 private const val FINAL_ANSWER_RESERVE_MS = 45_000L
 private val FINAL_ANSWER_RESERVED_CUSTOM_BODY_KEYS = setOf(
     "tools",
@@ -182,12 +187,81 @@ internal fun generationFinalizationStep(
 private fun List<UIMessage>.replaceLastMessage(message: UIMessage): List<UIMessage> =
     if (isEmpty()) this else dropLast(1) + message
 
-private fun List<UIMessage>.currentTurnForFinalAnswer(): List<UIMessage> {
+internal fun List<UIMessage>.compactCurrentTurnForFinalAnswer(): List<UIMessage> {
     val turnStart = indexOfLast { message ->
         message.role == MessageRole.USER &&
             message.annotations.none { it is UIMessageAnnotation.Steering }
     }
-    return if (turnStart >= 0) subList(turnStart, size) else takeLast(1)
+    val currentTurn = if (turnStart >= 0) subList(turnStart, size) else takeLast(1)
+    val toolCount = currentTurn.sumOf { message ->
+        message.parts.count { it is UIMessagePart.Tool }
+    }
+    val perToolOutputLimit = if (toolCount == 0) {
+        FINAL_ANSWER_CONTEXT_TOOL_OUTPUT_MAX
+    } else {
+        (FINAL_ANSWER_CONTEXT_TOOL_OUTPUT_BUDGET / toolCount).coerceIn(
+            FINAL_ANSWER_CONTEXT_TOOL_OUTPUT_MIN,
+            FINAL_ANSWER_CONTEXT_TOOL_OUTPUT_MAX,
+        )
+    }
+    return currentTurn.map { message ->
+        if (message.role == MessageRole.USER) {
+            message
+        } else {
+            message.copy(
+                parts = message.parts.mapNotNull { part ->
+                    when (part) {
+                        is UIMessagePart.Reasoning -> null
+                        is UIMessagePart.Text -> part.copy(
+                            text = part.text.compactFinalAnswerText(
+                                FINAL_ANSWER_CONTEXT_ASSISTANT_TEXT_MAX,
+                            ),
+                        )
+                        is UIMessagePart.Tool -> part.copy(
+                            input = part.input.compactFinalAnswerToolInput(),
+                            output = part.output.compactFinalAnswerToolOutput(
+                                perToolOutputLimit,
+                            ),
+                        )
+                        else -> part
+                    }
+                },
+            )
+        }
+    }
+}
+
+private fun String.compactFinalAnswerToolInput(): String = if (
+    length <= FINAL_ANSWER_CONTEXT_TOOL_INPUT_MAX
+) {
+    this
+} else {
+    """{"_truncated_for_final_answer":true,"original_characters":$length}"""
+}
+
+private fun List<UIMessagePart>.compactFinalAnswerToolOutput(limit: Int): List<UIMessagePart> {
+    if (isEmpty()) return this
+    val text = joinToString("\n") { part ->
+        when (part) {
+            is UIMessagePart.Text -> part.text
+            is UIMessagePart.Reasoning -> ""
+            is UIMessagePart.Image -> "[image output omitted]"
+            is UIMessagePart.Video -> "[video output omitted]"
+            is UIMessagePart.Audio -> "[audio output omitted]"
+            is UIMessagePart.Document -> "[document output omitted]"
+            is UIMessagePart.Tool -> "[nested tool output omitted]"
+            else -> "[structured output omitted]"
+        }
+    }.trim().ifBlank { "[tool output omitted]" }
+    return listOf(UIMessagePart.Text(text.compactFinalAnswerText(limit)))
+}
+
+private fun String.compactFinalAnswerText(limit: Int): String {
+    if (length <= limit) return this
+    val marker = "\n...[truncated for final answer; original characters=$length]...\n"
+    val available = (limit - marker.length).coerceAtLeast(2)
+    val head = available / 2
+    return take(head) + marker + takeLast(available - head)
 }
 
 private fun List<UIMessage>.redactedInputCharacterCount(): Int = sumOf { message ->
@@ -806,7 +880,7 @@ class GenerationHandler(
                         workspaceCwd = workspaceCwd,
                         runControl = runControl,
                         contextMessages = if (forceFinalization) {
-                            messages.currentTurnForFinalAnswer()
+                            messages.compactCurrentTurnForFinalAnswer()
                         } else if (messages.lastOrNull()?.getTools()?.isNotEmpty() == true) {
                             messages.selectToolLoopContinuationContext()
                         } else {
@@ -1013,7 +1087,7 @@ class GenerationHandler(
                                             conversationLorebookIds = conversationLorebookIds,
                                             workspaceCwd = workspaceCwd,
                                             runControl = runControl,
-                                            contextMessages = recoveryBase.currentTurnForFinalAnswer(),
+                                            contextMessages = recoveryBase.compactCurrentTurnForFinalAnswer(),
                                             requestPurpose = GenerationRequestPurpose.FINAL_ANSWER_RECOVERY,
                                             diagnosticHandle = generationDiagnostics,
                                             providerTailMessages = recoveryTailMessages,
@@ -1184,7 +1258,7 @@ class GenerationHandler(
                             messages = messages.replaceLastMessage(
                                 messages.last().withFinalAnswerRecovery(
                                     commandId = recoveryCommandKey,
-                                    reason = "recovery_attempts_exhausted",
+                                    reason = "recovery_attempts_exhausted:$recoveryReason",
                                     status = FinalAnswerRecoveryStatus.FAILED,
                                     attempt = finalAnswerRecoveryAttempts,
                                     state = UIMessageState.INCOMPLETE_NO_VISIBLE_ANSWER,

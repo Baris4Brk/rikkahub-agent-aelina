@@ -130,12 +130,13 @@ class DurableCommandQueue(
         state: DurableCommandState,
         error: Throwable? = null,
     ): Boolean {
+        val stableFailure = error as? DurableCommandFailure
         val changed = dao.finish(
             id = id,
             state = state.name,
             finishedAt = nowMillis(),
-            errorCode = error?.javaClass?.simpleName,
-            errorMessage = error?.message,
+            errorCode = stableFailure?.durableErrorCode ?: error?.javaClass?.simpleName,
+            errorMessage = stableFailure?.durableErrorMessage ?: error?.message,
         ) == 1
         if (changed) wakeUpListener(WakeUp)
         return changed || dao.findById(id)?.state == state.name

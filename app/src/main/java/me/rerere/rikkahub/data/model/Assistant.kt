@@ -61,6 +61,11 @@ data class Assistant(
     val regexes: List<AssistantRegex> = emptyList(),
     val reasoningLevel: ReasoningLevel = ReasoningLevel.AUTO,
     val maxTokens: Int? = null,
+    /**
+     * Maximum model/tool-loop steps for one interactive turn. Null keeps the role-aware default:
+     * 64 for the active local second user and 32 for ordinary assistants.
+     */
+    val generationMaxSteps: Int? = null,
     val customHeaders: List<CustomHeader> = emptyList(),
     val customBodies: List<CustomBody> = emptyList(),
     val mcpServers: Set<Uuid> = emptySet(),

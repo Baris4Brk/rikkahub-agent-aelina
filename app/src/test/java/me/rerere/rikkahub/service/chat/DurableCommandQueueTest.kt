@@ -72,6 +72,33 @@ class DurableCommandQueueTest {
         assertEquals(RecoveryAction.MANUAL_CONFIRMATION, decision.action)
     }
 
+    @Test
+    fun `stable command failures persist actionable code and message`() = runBlocking {
+        val dao = FakePendingChatCommandDao()
+        val queue = DurableCommandQueue(dao, nowMillis = { 2_000L })
+        val id = "00000000-0000-0000-0000-000000000099"
+        queue.submitDurable(entity(id = id, idempotencyKey = "idem-99"))
+        assertTrue(queue.claim(id))
+
+        assertTrue(
+            queue.complete(
+                id = id,
+                state = DurableCommandState.FAILED,
+                error = StableCommandException(
+                    durableErrorCode = "FINAL_ANSWER_EOF",
+                    durableErrorMessage = "The provider ended before returning a visible final answer.",
+                ),
+            ),
+        )
+
+        val stored = dao.findById(id)
+        assertEquals("FINAL_ANSWER_EOF", stored?.lastErrorCode)
+        assertEquals(
+            "The provider ended before returning a visible final answer.",
+            stored?.lastErrorMessage,
+        )
+    }
+
     private fun entity(
         id: String,
         idempotencyKey: String,

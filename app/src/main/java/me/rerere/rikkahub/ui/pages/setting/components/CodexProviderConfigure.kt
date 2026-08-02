@@ -65,14 +65,36 @@ fun CodexProviderConfigure(
     val context = LocalContext.current
     val canEnable = accounts.any { it.enabled && it.tokenStatus != CodexTokenStatus.INVALID }
 
+    suspend fun refreshModels(showError: Boolean) {
+        runCatching {
+            providerManager.getProviderByType(provider).listModels(provider)
+        }.onSuccess { models ->
+            // The Codex endpoint is the source of truth. Merge by slug so a refreshed
+            // catalog adds every newly entitled model while preserving user-owned model
+            // settings (custom headers/body, tools and stable UUIDs).
+            if (models.isNotEmpty()) {
+                onEdit(provider.copy(models = mergeCodexModels(provider.models, models)))
+            }
+        }.onFailure {
+            if (showError) {
+                toaster.show(
+                    it.message ?: context.getString(R.string.codex_refresh_failed),
+                    type = ToastType.Error,
+                )
+            }
+        }
+    }
+
+    // Refresh on entry and when an account is added or its token status changes. This
+    // avoids requiring a logout/login cycle after Codex publishes a new model family.
+    LaunchedEffect(provider.id, accounts.map { it.id to it.tokenStatus }) {
+        if (accounts.isNotEmpty()) refreshModels(showError = false)
+    }
+
     LaunchedEffect(oauthStatus) {
         when (val status = oauthStatus) {
             is CodexOAuthStatus.Success -> {
-                runCatching {
-                    providerManager.getProviderByType(provider).listModels(provider)
-                }.onSuccess { models ->
-                    onEdit(provider.copy(models = mergeCodexModels(provider.models, models)))
-                }
+                refreshModels(showError = false)
                 toaster.show(
                     context.getString(R.string.codex_oauth_success),
                     type = ToastType.Success,
@@ -153,6 +175,7 @@ fun CodexProviderConfigure(
                 onClick = {
                     scope.launch {
                         repository.refreshAll()
+                        refreshModels(showError = true)
                     }
                 },
                 enabled = accounts.isNotEmpty(),

@@ -35,7 +35,7 @@ object OwnerActionRegistry {
             "Create, clone, update, delete or select ordinary assistants and update this Owner's model/TTS bindings. Authority fields are permanently excluded.",
             action("assistant_create", OwnerOperationRisk.REVERSIBLE_WRITE, "assistant_id?, name?, system_prompt?, model_id?"),
             action("assistant_clone", OwnerOperationRisk.REVERSIBLE_WRITE, "source_assistant_id, assistant_id?, name?"),
-            action("assistant_update", OwnerOperationRisk.REVERSIBLE_WRITE, "assistant_id, name?, system_prompt?, chat_model_id?, workspace_id?, enable_memory?, use_global_memory?, enable_recent_chats_reference?, stream_output?, fast_path_router_enabled?, enable_web_search?"),
+            action("assistant_update", OwnerOperationRisk.REVERSIBLE_WRITE, "assistant_id, name?, system_prompt?, chat_model_id?, workspace_id?, enable_memory?, use_global_memory?, enable_recent_chats_reference?, stream_output?, fast_path_router_enabled?, enable_web_search?, generation_max_steps? (0=auto, 1..256)"),
             action("assistant_delete", OwnerOperationRisk.IRREVERSIBLE, "assistant_id"),
             action("assistant_set_default", OwnerOperationRisk.REVERSIBLE_WRITE, "assistant_id"),
             action("assistant_toggle_tool", OwnerOperationRisk.REVERSIBLE_WRITE, "assistant_id, tool_type, enabled"),

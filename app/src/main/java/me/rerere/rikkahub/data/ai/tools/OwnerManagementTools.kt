@@ -249,7 +249,7 @@ private val OWNER_NO_ARGUMENT_ACTIONS = setOf(
 private val OWNER_ACTION_ARGUMENT_GUIDE = mapOf(
     "assistant_create" to "assistant_id?, name?, system_prompt?, model_id?",
     "assistant_clone" to "source_assistant_id, assistant_id?, name?",
-    "assistant_update" to "assistant_id, name?, system_prompt?, chat_model_id?, workspace_id?, enable_memory?, use_global_memory?, enable_recent_chats_reference?, stream_output?, fast_path_router_enabled?, enable_web_search?",
+    "assistant_update" to "assistant_id, name?, system_prompt?, chat_model_id?, workspace_id?, enable_memory?, use_global_memory?, enable_recent_chats_reference?, stream_output?, fast_path_router_enabled?, enable_web_search?, generation_max_steps? (0=auto, 1..256)",
     "assistant_delete" to "assistant_id",
     "assistant_set_default" to "assistant_id",
     "assistant_toggle_tool" to "assistant_id, tool_type, enabled",

@@ -1,6 +1,7 @@
 package me.rerere.rikkahub.data.codex
 
 import android.content.Context
+import android.os.Build
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
@@ -46,6 +47,12 @@ import okhttp3.sse.EventSource
 import okhttp3.sse.EventSourceListener
 import okhttp3.sse.EventSources
 
+/** Version understood by the Codex model catalog and Responses gateway. */
+internal const val CODEX_CLIENT_VERSION = "0.144.1"
+
+internal fun codexUserAgent(osVersion: String, abi: String): String =
+    "codex_cli_rs/$CODEX_CLIENT_VERSION (Android $osVersion; $abi)"
+
 class CodexProvider(
     private val context: Context,
     private val client: OkHttpClient,
@@ -79,7 +86,7 @@ class CodexProvider(
         withContext(Dispatchers.IO) {
             val account = repository.acquireAccount()
             val request = Request.Builder()
-                .url("$CODEX_API_BASE/models?client_version=$CLIENT_VERSION")
+                .url("$CODEX_API_BASE/models?client_version=$CODEX_CLIENT_VERSION")
                 .codexHeaders(account)
                 .get()
                 .build()
@@ -295,6 +302,7 @@ class CodexProvider(
             .header("ChatGPT-Account-Id", account.chatgptAccountId)
             .header("OpenAI-Beta", "responses=experimental")
             .header("originator", "codex_cli_rs")
+            .header("User-Agent", CODEX_USER_AGENT)
     }
 
     private fun parseTokenUsage(payload: JsonObject): TokenUsage? {
@@ -325,7 +333,12 @@ class CodexProvider(
 
     private companion object {
         const val CODEX_API_BASE = "${CodexAccountRepository.CODEX_BASE_URL}/codex"
-        const val CLIENT_VERSION = "0.139.0"
+        // The Codex model catalog gates newer slugs (including the GPT-5.6 family) on
+        // the client version advertised by both the query parameter and User-Agent.
+        val CODEX_USER_AGENT = codexUserAgent(
+            osVersion = Build.VERSION.RELEASE,
+            abi = Build.SUPPORTED_ABIS.firstOrNull() ?: "arm64",
+        )
         const val DEFAULT_INSTRUCTIONS = "You are a helpful assistant."
         val FINAL_RESPONSE_EVENTS = setOf(
             "response.completed",

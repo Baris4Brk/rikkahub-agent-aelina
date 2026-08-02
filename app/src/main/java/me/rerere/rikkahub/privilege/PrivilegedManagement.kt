@@ -30,6 +30,8 @@ sealed interface PrivilegedManagementRequest {
         val streamOutput: Boolean?,
         val fastPathRouterEnabled: Boolean?,
         val enableWebSearch: Boolean? = null,
+        val generationMaxSteps: Int? = null,
+        val clearGenerationMaxSteps: Boolean = false,
     ) : PrivilegedManagementRequest
     data class AssistantToggleTool(
         val assistantId: Uuid,

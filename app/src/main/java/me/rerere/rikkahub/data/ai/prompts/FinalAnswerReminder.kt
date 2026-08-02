@@ -22,8 +22,9 @@ const val DEFAULT_FINAL_ANSWER_REMINDER_PROMPT = """
 “完成了”。只输出应当展示给用户的最终回答，并确保整轮最后一个语义块是非空正文，正文
 之后不得继续追加思考。如果任务未能完全完成，请明确说明已经完成什么、还剩什么以及原因。
 
-必须沿用当前用户正在使用的语言以及本对话已有的称呼。不得把内部角色标签 USER、user、
-ASSISTANT、assistant 或它们的残缺形式（例如 urse）当作用户姓名或称呼。
+必须沿用当前用户正在使用的语言。只有在自然直接称呼用户时才使用本对话已有的称呼；
+称呼不得单独作为回答、不得重复，也不得代替对用户请求的实际回答。不得把内部角色标签
+USER、user、ASSISTANT、assistant 或它们的残缺形式（例如 urse）当作用户姓名或称呼。
 """
 
 fun resolveFinalAnswerReminderPrompt(stored: String?): String {
@@ -31,6 +32,12 @@ fun resolveFinalAnswerReminderPrompt(stored: String?): String {
     return when {
         candidate.isBlank() -> DEFAULT_FINAL_ANSWER_REMINDER_PROMPT
         candidate == LEGACY_ENGLISH_FINAL_ANSWER_REMINDER_PROMPT.trim() ->
+            DEFAULT_FINAL_ANSWER_REMINDER_PROMPT
+        // Upgrade the previous built-in Chinese default for existing DataStore values too.
+        // Otherwise only fresh installs receive the safer name-handling instruction.
+        candidate.contains("必须沿用当前用户正在使用的语言以及本对话已有的称呼。") &&
+            candidate.contains("不得把内部角色标签") &&
+            candidate.contains("ASSISTANT、assistant") ->
             DEFAULT_FINAL_ANSWER_REMINDER_PROMPT
         else -> stored.orEmpty()
     }

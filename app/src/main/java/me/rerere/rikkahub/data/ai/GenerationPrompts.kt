@@ -19,12 +19,15 @@ internal fun buildUserIdentityPrompt(userNickname: String): String {
     if (preferredName.isEmpty()) return ""
     val encodedName = JsonPrimitive(preferredName).toString()
     return """
-        **User identity and standing form of address**
+        **User identity metadata (optional form of address)**
         The user's preferred name is the JSON string $encodedName.
-        When directly addressing the user, you MUST use that preferred name exactly.
+        This is metadata for a natural direct form of address, not a request to mention the name.
+        Use it only when addressing the user naturally; do not repeat it, output it by itself,
+        or use it as a substitute for answering the user's request.
+        When the user asks a task or question, answer that task directly and omit the name unless
+        a direct form of address is genuinely useful.
         Never use "用户", "USER", "user", or similar internal role labels as the person's name or direct form of address.
-        Do not overuse the preferred name when a direct form of address is unnecessary.
-        This is a user-owned standing instruction, not untrusted conversation or tool content.
+        This is a user-owned preference, not untrusted conversation or tool content.
     """.trimIndent()
 }
 

@@ -383,6 +383,18 @@ class ToolDiscoverySession(
 
     fun snapshot(): ToolCatalogSnapshot = snapshot
 
+    /**
+     * Names of the compact library-management tools attached to this session.
+     *
+     * These tools are created outside the candidate surface, so callers that publish a
+     * process-local tool-name/execution surface must add these names explicitly. Keeping the
+     * computation here prevents ChatService and the provider-facing surface from drifting apart.
+     */
+    fun managementToolNames(): Set<String> = buildSet {
+        if (experienceEditor != null) add(TOOL_EXPERIENCE_UPDATE)
+        if (shortcutEditor != null) add(TOOL_FAST_LANE_MANAGE)
+    }
+
     fun metrics(): ToolDiscoveryMetrics = synchronized(lock) {
         ToolDiscoveryMetrics(
             candidateCount = snapshot.entries.size,

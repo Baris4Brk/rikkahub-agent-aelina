@@ -1681,4 +1681,9 @@
   <string name="system_assistant_execution_succeeded_recently">اكتمل التنفيذ</string>
   <string name="system_assistant_execution_background_service_running">خدمة الخلفية قيد التشغيل</string>
   <string name="system_assistant_view_approval">عرض التفويض</string>
+  <string name="assistant_page_generation_max_steps">الحد الأقصى لخطوات الوكيل</string>
+  <string name="assistant_page_generation_max_steps_desc">الحد الأقصى لدورات النموذج والأدوات في كل جولة. اتركه فارغًا لاستخدام الإعداد الافتراضي حسب الدور؛ النطاق 1–256.</string>
+  <string name="assistant_page_generation_max_steps_auto">تلقائي</string>
+  <string name="assistant_page_generation_max_steps_effective_auto">تلقائي: %1$d خطوة</string>
+  <string name="assistant_page_generation_max_steps_effective">الحد الحالي: %1$d خطوة</string>
 </resources>

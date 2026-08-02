@@ -52,4 +52,18 @@ class CodexProviderConfigureTest {
         assertEquals(missing, merged[1])
         assertEquals(added, merged[2])
     }
+
+    @Test
+    fun `model refresh keeps every server slug including future families`() {
+        val refreshed = listOf(
+            Model(modelId = "gpt-5.6-sol"),
+            Model(modelId = "gpt-5.6-terra"),
+            Model(modelId = "gpt-5.6-luna"),
+            Model(modelId = "future-codex-family-preview"),
+        )
+
+        val merged = mergeCodexModels(existing = emptyList(), refreshed = refreshed)
+
+        assertEquals(refreshed.map { it.modelId }, merged.map { it.modelId })
+    }
 }

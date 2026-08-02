@@ -25,7 +25,7 @@ class OwnerManagementToolsTest {
     fun clear() = SecondUserAuthorityRegistry.install(null)
 
     @Test
-    fun `direct owner surface exposes exactly eleven compact tools`() {
+    fun `direct owner surface exposes every compact family without a discovery gate`() {
         SecondUserAuthorityRegistry.install(snapshot)
         val tools = createOwnerManagementTools(context()) { request, _ ->
             OwnerOperationResult(
@@ -37,9 +37,15 @@ class OwnerManagementToolsTest {
             )
         }
 
-        assertEquals(11, tools.size)
+        assertEquals(OwnerToolFamily.entries.size, tools.size)
         assertEquals(OwnerToolFamily.entries.map { it.toolName }.toSet(), tools.map { it.name }.toSet())
-        assertFalse(tools.any { it.name.startsWith("setup_") || it.name == "rikkahub_state_get" })
+        assertFalse(
+            tools.any {
+                it.name.startsWith("setup_") ||
+                    it.name.startsWith("tool_catalog_") ||
+                    it.name == "rikkahub_state_get"
+            },
+        )
     }
 
     @Test

@@ -16,6 +16,21 @@ sealed interface CommandOutcome {
     data class SkippedDependencyFailed(val dependencyId: Uuid) : CommandOutcome
 }
 
+/**
+ * A failure whose durable representation is deliberately stable and safe to show in Doctor/UI.
+ * Implementations must never place prompt text, tool arguments, provider bodies, or credentials
+ * in either field.
+ */
+interface DurableCommandFailure {
+    val durableErrorCode: String
+    val durableErrorMessage: String
+}
+
+class StableCommandException(
+    override val durableErrorCode: String,
+    override val durableErrorMessage: String,
+) : IllegalStateException(durableErrorMessage), DurableCommandFailure
+
 sealed interface SubmitResult {
     data class Accepted(val commandId: Uuid) : SubmitResult
     data class QueueFull(val limit: Int) : SubmitResult

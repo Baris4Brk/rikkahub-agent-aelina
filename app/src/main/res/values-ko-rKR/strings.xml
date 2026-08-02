@@ -1977,4 +1977,9 @@ mDNS 주소: .local 호스트네임을 사용하며, IP를 몰라도 같은 네�
   <string name="chat_token_usage_turn">턴 입력 %1$s · %2$d회 호출 · 출력 %3$s</string>
   <string name="runtime_diagnostic_reverse_geocoding_title">역지오코딩</string>
   <string name="runtime_diagnostic_reverse_geocoding_summary">platform=%1$b; platformStatus=%2$s; enabled=%3$b; external=%4$b; providers=%5$d; active=%6$s; default=%7$s; cache=%8$d; hits=%9$d; error=%10$s; provider=%11$s; duration=%12$s</string>
+  <string name="assistant_page_generation_max_steps">에이전트 최대 단계 수</string>
+  <string name="assistant_page_generation_max_steps_desc">한 턴의 모델/도구 반복 최대 단계 수입니다. 비워 두면 역할별 기본값을 사용합니다. 범위는 1~256입니다.</string>
+  <string name="assistant_page_generation_max_steps_auto">자동</string>
+  <string name="assistant_page_generation_max_steps_effective_auto">자동: %1$d단계</string>
+  <string name="assistant_page_generation_max_steps_effective">현재 한도: %1$d단계</string>
 </resources>

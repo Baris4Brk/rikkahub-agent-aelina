@@ -559,7 +559,10 @@ class ChatCompletionsAPI(
                                         ReasoningLevel.HIGH -> "high"
 
                                         ReasoningLevel.XHIGH -> "max"
-                                        ReasoningLevel.OFF -> "none"
+                                        // DeepSeek V4's OpenCode endpoint accepts only high/max.
+                                        // Recovery disables extended reasoning at the app level,
+                                        // but still needs the provider's lowest valid value.
+                                        ReasoningLevel.OFF -> "high"
                                         ReasoningLevel.AUTO -> error("AUTO is handled above")
                                     }
                                 } else {
