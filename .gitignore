@@ -44,3 +44,11 @@ app/google-services.json
 
 # Temporary screenshots captured while diagnosing local builds.
 /tmp-rikkahub-*.png
+
+# Only the Kotlin implementation used by the material3 module is vendored. Other language
+# trees from a local Material Color Utilities checkout are not part of this Android build.
+material3/material-color-utilities/*
+!material3/material-color-utilities/kotlin/
+!material3/material-color-utilities/kotlin/**
+!material3/material-color-utilities/LICENSE
+!material3/material-color-utilities/README.md

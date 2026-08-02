@@ -47,7 +47,10 @@ internal object HljsFixtures {
             val expectedFile = File(directory, "${source.nameWithoutExtension}.tokens")
             assertTrue("missing golden tokens for ${source.name}", expectedFile.isFile)
 
-            val code = source.readText()
+            // Git may check text fixtures out as CRLF on Windows. The highlighter and the
+            // highlight.js golden generator both define their fixture protocol over LF, so
+            // normalize at the test boundary rather than making parity depend on Git config.
+            val code = source.readText().normalizeFixtureLines()
             val actual = engine.highlight(code, language)
                 ?: error("language '$language' is not registered with the engine")
 
@@ -58,11 +61,14 @@ internal object HljsFixtures {
             )
             assertEquals(
                 "highlight.js parity for $language/${source.name}",
-                expectedFile.readText().trimEnd('\n'),
+                expectedFile.readText().normalizeFixtureLines().trimEnd('\n'),
                 actual.joinToString(separator = "\n") { it.encode() },
             )
         }
     }
+
+    private fun String.normalizeFixtureLines(): String =
+        replace("\r\n", "\n").replace('\r', '\n')
 
     private fun HighlightToken.encode(): String {
         val scope = when (this) {

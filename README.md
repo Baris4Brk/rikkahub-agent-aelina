@@ -244,12 +244,16 @@ runs `bun install` and `bun run build` in `web-ui/` to produce the in-app web
 UI bundle before packaging the APK.
 
 ```bash
-git clone --branch feature/second-user-linux-runtime https://github.com/AAAelina/rikkahub-agent.git
+git clone https://github.com/AAAelina/rikkahub-agent.git
 
 cd rikkahub-agent
 
-./gradlew :app:installDebug   # build + install on a connected device
+./gradlew test
+./gradlew :app:assembleDebug
 ```
+
+The default branch is `master`. Material Color Utilities sources required by the
+`material3` module are vendored with their upstream license, so no submodule setup is required.
 
 ---
 

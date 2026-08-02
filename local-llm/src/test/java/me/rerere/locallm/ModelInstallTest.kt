@@ -56,10 +56,9 @@ class ModelInstallTest {
     @Test fun `targetFile builds a path under the runtime-specific subdir`() {
         val baseDir = File("/data/data/com.test/files/local-models")
         val out = ModelInstall.targetFile(baseDir, LocalRuntime.LiteRT, "model.task")
-        assertEquals(
-            "/data/data/com.test/files/local-models/litert/model.task",
-            out.absolutePath,
-        )
+        assertEquals("model.task", out.name)
+        assertEquals("litert", out.parentFile?.name)
+        assertEquals(baseDir.absoluteFile, out.parentFile?.parentFile?.absoluteFile)
     }
 
     // normalizeHuggingFaceUrl ---------------------------------------------------
