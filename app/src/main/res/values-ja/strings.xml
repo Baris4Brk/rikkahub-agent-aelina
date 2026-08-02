@@ -1983,4 +1983,9 @@ mDNSアドレス: .localホスト名を使用し、IPを知らなくても同じ
   <string name="assistant_page_generation_max_steps_auto">自動</string>
   <string name="assistant_page_generation_max_steps_effective_auto">自動：%1$d ステップ</string>
   <string name="assistant_page_generation_max_steps_effective">現在の上限：%1$d ステップ</string>
+  <string name="assistant_page_generation_turn_budget">ターン時間予算</string>
+  <string name="assistant_page_generation_turn_budget_desc">1回のモデル／ツール実行の最大時間です。空欄では役割別の既定値を使用します。範囲は1～60分です。</string>
+  <string name="assistant_page_generation_turn_budget_effective">現在の上限：%1$d 分</string>
+  <string name="assistant_page_generation_turn_budget_effective_auto">自動：%1$d 分</string>
+  <string name="assistant_page_generation_turn_budget_global">自動：グローバル実行時間上限</string>
 </resources>

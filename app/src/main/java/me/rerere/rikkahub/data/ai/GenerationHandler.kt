@@ -534,6 +534,8 @@ class GenerationHandler(
         memoryToolAllowed: Boolean = true,
         startableTools: Map<String, me.rerere.rikkahub.data.ai.tools.StartableTool> = emptyMap(),
         maxSteps: Int = 32,
+        /** Frozen per-turn wall-clock budget; callers may grant the local second user more time. */
+        turnBudgetMs: Long = ToolRuntimeLimits.turnBudgetMs,
         processingStatus: MutableStateFlow<String?> = MutableStateFlow(null),
         // Returns true when the user has pre-approved [toolName] for this turn (e.g.
         // "Allow for this chat" or "Always Allow" granted earlier). When true, the loop
@@ -686,7 +688,7 @@ class GenerationHandler(
             // run for hours.
             val elapsedMs = android.os.SystemClock.elapsedRealtime() - turnStartMs
             val finalizationThresholdMs =
-                (ToolRuntimeLimits.turnBudgetMs - FINAL_ANSWER_RESERVE_MS).coerceAtLeast(0L)
+                (turnBudgetMs - FINAL_ANSWER_RESERVE_MS).coerceAtLeast(0L)
             val wallClockNeedsFinalization = elapsedMs >= finalizationThresholdMs
             // Repeated loop-guard trips mean the model is flailing: it bumps into the
             // guard, picks a different tool, that one also gets guarded, and so on. After
@@ -702,6 +704,9 @@ class GenerationHandler(
             )
             val forceFinalization = finalizationStep.forceFinalization
             if (forceFinalization) {
+                if (wallClockNeedsFinalization) {
+                    processingStatus.value = "Time budget reached; generating final answer"
+                }
                 Log.w(
                     TAG,
                     "generateText: entering tool-free finalization at step #$stepIndex " +
@@ -883,6 +888,7 @@ class GenerationHandler(
                             messages.compactCurrentTurnForFinalAnswer()
                         } else if (messages.lastOrNull()?.getTools()?.isNotEmpty() == true) {
                             messages.selectToolLoopContinuationContext()
+                                .compactCompletedToolHistoryForContinuation()
                         } else {
                             null
                         },
@@ -1059,7 +1065,7 @@ class GenerationHandler(
                             var recoveredMessages = recoveryBase
                             var recoveryTimedOut = false
                             val recoveryResult = try {
-                                val remainingRecoveryMs = ToolRuntimeLimits.turnBudgetMs -
+                                val remainingRecoveryMs = turnBudgetMs -
                                     (android.os.SystemClock.elapsedRealtime() - turnStartMs)
                                 val recoveryTerminal = if (remainingRecoveryMs > 0L) {
                                     withTimeoutOrNull(remainingRecoveryMs) {
@@ -1616,10 +1622,10 @@ class GenerationHandler(
                             // Hard-cap individual tool execution at the remaining wall-clock
                             // budget so a single tool with its OWN long timeout (camera 5min,
                             // ssh_exec timeout_seconds=300) can't carry the turn past the
-                            // global ${ToolRuntimeLimits.turnBudgetMs}ms cap. If the budget is
+                            // frozen ${turnBudgetMs}ms turn cap. If the budget is
                             // already blown when we start the tool, return a structured
                             // wall-clock envelope instead of even attempting.
-                            val remainingMs = ToolRuntimeLimits.turnBudgetMs -
+                            val remainingMs = turnBudgetMs -
                                 (android.os.SystemClock.elapsedRealtime() - turnStartMs)
                             val executionContext = if (conversationId != null && runControl != null) {
                                 ToolExecutionContext(
@@ -1913,7 +1919,7 @@ class GenerationHandler(
                         onBatchStarted = { batch ->
                             batchDeadlineMs = android.os.SystemClock.elapsedRealtime() +
                                 (
-                                    ToolRuntimeLimits.turnBudgetMs -
+                                    turnBudgetMs -
                                         (android.os.SystemClock.elapsedRealtime() - turnStartMs)
                                     ).coerceAtLeast(0L)
                             val startedAt = System.currentTimeMillis()

@@ -1686,4 +1686,9 @@
   <string name="assistant_page_generation_max_steps_auto">تلقائي</string>
   <string name="assistant_page_generation_max_steps_effective_auto">تلقائي: %1$d خطوة</string>
   <string name="assistant_page_generation_max_steps_effective">الحد الحالي: %1$d خطوة</string>
+  <string name="assistant_page_generation_turn_budget">ميزانية وقت الجولة</string>
+  <string name="assistant_page_generation_turn_budget_desc">الحد الأقصى لمدة جولة واحدة للنموذج والأدوات. اتركه فارغًا لاستخدام الإعداد الافتراضي حسب الدور؛ النطاق 1–60 دقيقة.</string>
+  <string name="assistant_page_generation_turn_budget_effective">الحد الحالي: %1$d دقيقة</string>
+  <string name="assistant_page_generation_turn_budget_effective_auto">تلقائي: %1$d دقيقة</string>
+  <string name="assistant_page_generation_turn_budget_global">تلقائي: حد وقت التشغيل العام</string>
 </resources>

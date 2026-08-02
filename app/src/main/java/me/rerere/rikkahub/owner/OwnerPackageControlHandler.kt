@@ -13,10 +13,12 @@ import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.files.FileFolders
 import me.rerere.rikkahub.data.files.FilesManager
 import me.rerere.rikkahub.pet.PetOverlaySelection
+import me.rerere.rikkahub.pet.resolvePetProfileForPackage
 import me.rerere.rikkahub.pet.assets.AndroidPetImageProbe
 import me.rerere.rikkahub.pet.assets.CodexPetManifest
 import me.rerere.rikkahub.pet.assets.CodexPetPackageImporter
 import me.rerere.rikkahub.pet.assets.PetPackageException
+import me.rerere.rikkahub.pet.overlay.DesktopPetService
 import me.rerere.rikkahub.plugin.PluginPackageInstaller
 import me.rerere.rikkahub.plugin.PluginRegistryStore
 import me.rerere.rikkahub.privilege.PrivilegedSessionContext
@@ -30,6 +32,7 @@ class OwnerPackageControlHandler(
     private val pluginInstaller: PluginPackageInstaller,
     private val plugins: PluginRegistryStore,
 ) : OwnerOperationHandler {
+    private val appContext = context.applicationContext
     private val petsRoot = File(context.filesDir, "pets")
     private val petImporter = CodexPetPackageImporter(petsRoot, AndroidPetImageProbe)
 
@@ -203,14 +206,45 @@ class OwnerPackageControlHandler(
         val conversationId = runCatching { Uuid.parse(request.conversationId) }.getOrNull()
             ?: return failure(index, action, "CONVERSATION_ID_INVALID", "Owner conversation ID is invalid.")
         val previous = settingsStore.settingsFlow.value.petOverlaySelection
+        val requestedProfileId = action.arguments.string("profile_id")
         val next = (previous ?: PetOverlaySelection(assistantId, conversationId)).copy(
             ownerAssistantId = assistantId,
             privilegedConversationId = conversationId,
             enabled = action.arguments.boolean("enabled") ?: true,
             packageId = id,
-            profileId = action.arguments.string("profile_id") ?: previous?.profileId,
+            profileId = resolvePetProfileForPackage(
+                previousPackageId = previous?.packageId,
+                previousProfileId = previous?.profileId,
+                nextPackageId = id,
+                requestedProfileId = requestedProfileId,
+            ),
         ).normalized()
-        settingsStore.update { it.copy(petOverlaySelection = next) }
+        settingsStore.update { current ->
+            current.copy(
+                petOverlaySelection = next,
+                // Keep the legacy Assistant fields as a compatibility mirror. The global
+                // selection remains authoritative, but older settings surfaces still read these
+                // fields and must not write a stale package back over an Owner selection.
+                assistants = current.assistants.map { assistant ->
+                    when {
+                        assistant.id == assistantId -> assistant.copy(
+                            petEnabled = next.enabled,
+                            petPackageId = next.packageId,
+                            petScale = next.scale,
+                            petAnimationFps = next.animationFps,
+                            petHeadBoundary = next.headBoundary,
+                            petBodyBoundary = next.bodyBoundary,
+                            petIdlePoolEnabled = next.idlePoolEnabled,
+                        )
+                        next.enabled && assistant.petEnabled -> assistant.copy(petEnabled = false)
+                        else -> assistant
+                    }
+                },
+            )
+        }
+        // Also covers a replaced ZIP with the same package id: the persisted selection is
+        // intentionally identical, so the Settings flow alone cannot invalidate the renderer.
+        DesktopPetService.reload(appContext)
         return success(index, action, "PET_SELECTED", "Pet package selected for the active Owner.", receipt = Receipt.PetSelectionChanged(previous))
     }
 
@@ -233,7 +267,14 @@ class OwnerPackageControlHandler(
         if (!target.renameTo(tombstone)) return failure(index, action, "PET_DELETE_PREPARE_FAILED", "Pet package could not be staged for deletion.")
         try {
             if (isSelected) settingsStore.update { current -> current.copy(
-                petOverlaySelection = requireNotNull(before).copy(packageId = replacementId).normalized(),
+                petOverlaySelection = requireNotNull(before).copy(
+                    packageId = replacementId,
+                    profileId = resolvePetProfileForPackage(
+                        previousPackageId = before.packageId,
+                        previousProfileId = before.profileId,
+                        nextPackageId = replacementId,
+                    ),
+                ).normalized(),
             ) }
             if (!tombstone.deleteRecursively()) error("pet_delete_failed")
         } catch (failure: Throwable) {

@@ -39,8 +39,10 @@ import me.rerere.rikkahub.R
 import me.rerere.rikkahub.Screen
 import me.rerere.rikkahub.data.db.entity.WorkspaceEntity
 import me.rerere.rikkahub.data.ai.MAX_CONFIGURABLE_GENERATION_STEPS
+import me.rerere.rikkahub.data.ai.MAX_CONFIGURABLE_GENERATION_TURN_BUDGET_MINUTES
 import me.rerere.rikkahub.data.ai.ORDINARY_GENERATION_MAX_STEPS
 import me.rerere.rikkahub.data.ai.SECOND_USER_GENERATION_MAX_STEPS
+import me.rerere.rikkahub.data.ai.SECOND_USER_GENERATION_TURN_BUDGET_MINUTES
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.data.model.Conversation
 import me.rerere.rikkahub.ui.components.ai.ModelSelector
@@ -644,6 +646,63 @@ internal fun AssistantBasicContent(
                                 stringResource(
                                     R.string.assistant_page_generation_max_steps_effective,
                                     assistant.generationMaxSteps,
+                                )
+                            },
+                        )
+                    },
+                )
+            }
+            HorizontalDivider()
+            FormItem(
+                modifier = Modifier.padding(8.dp),
+                label = {
+                    Text(stringResource(R.string.assistant_page_generation_turn_budget))
+                },
+                description = {
+                    Text(stringResource(R.string.assistant_page_generation_turn_budget_desc))
+                },
+            ) {
+                val automaticMinutes = if (
+                    assistant.privilegedConversationId != null && assistant.secondUserPolicyConfirmed
+                ) {
+                    SECOND_USER_GENERATION_TURN_BUDGET_MINUTES
+                } else {
+                    null
+                }
+                OutlinedTextField(
+                    value = assistant.generationTurnBudgetMinutes?.toString().orEmpty(),
+                    onValueChange = { text ->
+                        when {
+                            text.isBlank() -> onUpdate(
+                                assistant.copy(generationTurnBudgetMinutes = null),
+                            )
+                            else -> text.toIntOrNull()
+                                ?.takeIf {
+                                    it in 1..MAX_CONFIGURABLE_GENERATION_TURN_BUDGET_MINUTES
+                                }
+                                ?.let {
+                                    onUpdate(assistant.copy(generationTurnBudgetMinutes = it))
+                                }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    placeholder = {
+                        Text(stringResource(R.string.assistant_page_generation_max_steps_auto))
+                    },
+                    supportingText = {
+                        Text(
+                            when {
+                                assistant.generationTurnBudgetMinutes != null -> stringResource(
+                                    R.string.assistant_page_generation_turn_budget_effective,
+                                    assistant.generationTurnBudgetMinutes,
+                                )
+                                automaticMinutes != null -> stringResource(
+                                    R.string.assistant_page_generation_turn_budget_effective_auto,
+                                    automaticMinutes,
+                                )
+                                else -> stringResource(
+                                    R.string.assistant_page_generation_turn_budget_global,
                                 )
                             },
                         )

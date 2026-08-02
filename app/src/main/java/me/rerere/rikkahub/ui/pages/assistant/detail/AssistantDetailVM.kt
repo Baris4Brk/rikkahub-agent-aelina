@@ -25,6 +25,7 @@ import me.rerere.rikkahub.data.model.AssistantMemory
 import me.rerere.rikkahub.data.model.Avatar
 import me.rerere.rikkahub.data.model.Tag
 import me.rerere.rikkahub.pet.PetOverlaySelection
+import me.rerere.rikkahub.pet.resolvePetProfileForPackage
 import me.rerere.rikkahub.assistant.SecondUserAuthorityState
 import me.rerere.rikkahub.data.repository.MemoryRepository
 import me.rerere.rikkahub.data.repository.ConversationRepository
@@ -269,6 +270,11 @@ class AssistantDetailVM(
                         (existing ?: checkNotNull(PetOverlaySelection.fromLegacy(next))).copy(
                             enabled = true,
                             packageId = next.petPackageId,
+                            profileId = resolvePetProfileForPackage(
+                                previousPackageId = existing?.packageId,
+                                previousProfileId = existing?.profileId,
+                                nextPackageId = next.petPackageId,
+                            ),
                             scale = next.petScale,
                             animationFps = next.petAnimationFps,
                             headBoundary = next.petHeadBoundary,

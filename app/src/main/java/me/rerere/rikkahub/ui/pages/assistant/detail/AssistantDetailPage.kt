@@ -56,6 +56,7 @@ fun AssistantDetailPage(id: String) {
         }
     )
     val assistant by vm.assistant.collectAsStateWithLifecycle()
+    val settings by vm.settings.collectAsStateWithLifecycle()
     val pendingReviewCount by vm.pendingReviewCount.collectAsStateWithLifecycle()
     val navController = LocalNavController.current
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
@@ -183,8 +184,23 @@ fun AssistantDetailPage(id: String) {
         }
     }
     if (showPetSettings) {
+        val authoritativePet = settings.petOverlaySelection?.takeIf { selection ->
+            selection.ownerAssistantId == assistant.id &&
+                selection.privilegedConversationId == assistant.privilegedConversationId
+        }
+        val petDraft = authoritativePet?.let { selection ->
+            assistant.copy(
+                petEnabled = selection.enabled,
+                petPackageId = selection.packageId,
+                petScale = selection.scale,
+                petAnimationFps = selection.animationFps,
+                petHeadBoundary = selection.headBoundary,
+                petBodyBoundary = selection.bodyBoundary,
+                petIdlePoolEnabled = selection.idlePoolEnabled,
+            )
+        } ?: assistant
         PetSettingsDialog(
-            assistant = assistant,
+            assistant = petDraft,
             onDismiss = { showPetSettings = false },
             onUpdate = { next, afterUpdate ->
                 vm.updatePetSettingsAfter(

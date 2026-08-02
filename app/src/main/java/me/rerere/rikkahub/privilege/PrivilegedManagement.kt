@@ -32,6 +32,8 @@ sealed interface PrivilegedManagementRequest {
         val enableWebSearch: Boolean? = null,
         val generationMaxSteps: Int? = null,
         val clearGenerationMaxSteps: Boolean = false,
+        val generationTurnBudgetMinutes: Int? = null,
+        val clearGenerationTurnBudgetMinutes: Boolean = false,
     ) : PrivilegedManagementRequest
     data class AssistantToggleTool(
         val assistantId: Uuid,

@@ -3,6 +3,7 @@ package me.rerere.rikkahub.data.ai
 import kotlinx.datetime.LocalDateTime
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessageAnnotation
+import me.rerere.ai.ui.UIMessagePart
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
@@ -87,5 +88,49 @@ class ManualCompressionContextPolicyTest {
         assertEquals(1, selected.count { it.id == summary.id })
         assertTrue(selected.any { it.id == currentUser.id })
         assertEquals(7, selected.size)
+    }
+
+    @Test
+    fun `long tool turn archives only old completed payloads`() {
+        val user = UIMessage.user("long task")
+        val tools = (0 until 40).map { index ->
+            UIMessage.assistant("").copy(parts = buildList {
+                if (index == 0) add(UIMessagePart.Reasoning("old reasoning"))
+                add(UIMessagePart.Tool(
+                    toolCallId = "call-$index",
+                    toolName = "tool_$index",
+                    input = "{\"secret_like_argument\":\"value-$index\"}",
+                    output = listOf(UIMessagePart.Text("large output $index")),
+                ))
+            })
+        }
+
+        val compacted = (listOf(user) + tools).compactCompletedToolHistoryForContinuation()
+        val compactedTools = compacted.flatMap { it.parts }.filterIsInstance<UIMessagePart.Tool>()
+
+        assertEquals("{\"_archived_tool_input\":true}", compactedTools.first().input)
+        assertTrue(compacted[1].parts.none { it is UIMessagePart.Reasoning })
+        assertTrue((compactedTools.first().output.single() as UIMessagePart.Text).text.contains("archived"))
+        assertEquals("{\"secret_like_argument\":\"value-8\"}", compactedTools[8].input)
+        assertEquals("large output 39", (compactedTools.last().output.single() as UIMessagePart.Text).text)
+    }
+
+    @Test
+    fun `pending old tool and its reasoning are never compacted`() {
+        val pending = UIMessagePart.Tool(
+            toolCallId = "pending",
+            toolName = "dangerous",
+            input = "{\"keep\":true}",
+            approvalState = me.rerere.ai.ui.ToolApprovalState.Pending,
+        )
+        val message = UIMessage.assistant("").copy(parts = listOf(
+            UIMessagePart.Reasoning("private old reasoning"),
+            pending,
+        ))
+
+        val compacted = listOf(message).compactCompletedToolHistoryForContinuation(recentToolCount = 0)
+
+        assertTrue(compacted.single().parts.first() is UIMessagePart.Reasoning)
+        assertEquals(pending, compacted.single().parts.last())
     }
 }

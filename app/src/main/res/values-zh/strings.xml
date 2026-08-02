@@ -2233,4 +2233,9 @@ mDNS 地址：使用 .local 主机名，同一网络中的其他设备可通过�
   <string name="assistant_page_generation_max_steps_auto">自动</string>
   <string name="assistant_page_generation_max_steps_effective_auto">自动：%1$d 步</string>
   <string name="assistant_page_generation_max_steps_effective">当前上限：%1$d 步</string>
+  <string name="assistant_page_generation_turn_budget">单轮时间预算</string>
+  <string name="assistant_page_generation_turn_budget_desc">单轮模型/工具运行的最长时间。留空则使用对应角色的默认值；范围 1–60 分钟。</string>
+  <string name="assistant_page_generation_turn_budget_effective">当前上限：%1$d 分钟</string>
+  <string name="assistant_page_generation_turn_budget_effective_auto">自动：%1$d 分钟</string>
+  <string name="assistant_page_generation_turn_budget_global">自动：全局运行时上限</string>
 </resources>

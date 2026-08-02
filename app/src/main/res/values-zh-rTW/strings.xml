@@ -1980,4 +1980,9 @@
   <string name="assistant_page_generation_max_steps_auto">自動</string>
   <string name="assistant_page_generation_max_steps_effective_auto">自動：%1$d 步</string>
   <string name="assistant_page_generation_max_steps_effective">目前上限：%1$d 步</string>
+  <string name="assistant_page_generation_turn_budget">單輪時間預算</string>
+  <string name="assistant_page_generation_turn_budget_desc">單輪模型／工具運行的最長時間。留空則使用對應角色的預設值；範圍 1–60 分鐘。</string>
+  <string name="assistant_page_generation_turn_budget_effective">目前上限：%1$d 分鐘</string>
+  <string name="assistant_page_generation_turn_budget_effective_auto">自動：%1$d 分鐘</string>
+  <string name="assistant_page_generation_turn_budget_global">自動：全域執行時間上限</string>
 </resources>

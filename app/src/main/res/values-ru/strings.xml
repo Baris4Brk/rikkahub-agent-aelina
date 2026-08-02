@@ -1982,4 +1982,9 @@
   <string name="assistant_page_generation_max_steps_auto">Автоматически</string>
   <string name="assistant_page_generation_max_steps_effective_auto">Автоматически: %1$d шаг.</string>
   <string name="assistant_page_generation_max_steps_effective">Текущий предел: %1$d шаг.</string>
+  <string name="assistant_page_generation_turn_budget">Лимит времени хода</string>
+  <string name="assistant_page_generation_turn_budget_desc">Максимальное время одного цикла модели и инструментов. Оставьте пустым для значения по роли; диапазон 1–60 минут.</string>
+  <string name="assistant_page_generation_turn_budget_effective">Текущий лимит: %1$d мин.</string>
+  <string name="assistant_page_generation_turn_budget_effective_auto">Автоматически: %1$d мин.</string>
+  <string name="assistant_page_generation_turn_budget_global">Автоматически: глобальный лимит выполнения</string>
 </resources>

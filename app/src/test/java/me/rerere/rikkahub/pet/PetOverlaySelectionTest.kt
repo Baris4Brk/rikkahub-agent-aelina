@@ -13,6 +13,34 @@ import org.junit.Test
 
 class PetOverlaySelectionTest {
     @Test
+    fun `changing package clears an inherited visual profile`() {
+        assertNull(
+            resolvePetProfileForPackage(
+                previousPackageId = "pet.nahida",
+                previousProfileId = "profile.nahida",
+                nextPackageId = "pet.klee",
+            ),
+        )
+    }
+
+    @Test
+    fun `same package keeps profile while explicit replacement profile wins`() {
+        assertEquals(
+            "profile.nahida",
+            resolvePetProfileForPackage("pet.nahida", "profile.nahida", "pet.nahida"),
+        )
+        assertEquals(
+            "profile.klee.alt",
+            resolvePetProfileForPackage(
+                previousPackageId = "pet.nahida",
+                previousProfileId = "profile.nahida",
+                nextPackageId = "pet.klee",
+                requestedProfileId = "profile.klee.alt",
+            ),
+        )
+    }
+
+    @Test
     fun `one legacy enabled pet migrates conservatively`() {
         val conversation = Uuid.random()
         val assistant = Assistant(

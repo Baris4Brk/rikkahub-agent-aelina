@@ -67,6 +67,20 @@ data class ResolvedPetOverlaySelection(
     val migratedFromLegacy: Boolean,
 )
 
+/**
+ * A visual profile belongs to one package. Reusing a profile id after changing packages makes
+ * [me.rerere.rikkahub.pet.profile.PetProfileRepository] reject the new package and the atomic
+ * renderer correctly keeps showing the old character. Preserve the profile only when the package
+ * itself did not change; an explicitly requested profile always wins.
+ */
+internal fun resolvePetProfileForPackage(
+    previousPackageId: String?,
+    previousProfileId: String?,
+    nextPackageId: String?,
+    requestedProfileId: String? = null,
+): String? = requestedProfileId
+    ?: previousProfileId.takeIf { previousPackageId == nextPackageId }
+
 /** Fail closed for a malformed saved choice; never silently choose a different assistant. */
 fun Settings.resolvePetOverlaySelection(): ResolvedPetOverlaySelection? {
     val authority = secondUserAuthority.normalized()

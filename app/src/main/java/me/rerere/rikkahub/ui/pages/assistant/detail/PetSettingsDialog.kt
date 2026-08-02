@@ -10,6 +10,8 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
@@ -19,6 +21,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -29,13 +32,19 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.Json
+import java.io.File
 import kotlin.math.roundToInt
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.pet.PetHandoffMode
 import me.rerere.rikkahub.pet.assets.AndroidPetImageProbe
 import me.rerere.rikkahub.pet.assets.CodexPetPackageImporter
+import me.rerere.rikkahub.pet.assets.CodexPetManifest
 import me.rerere.rikkahub.pet.assets.PetPackageException
 import me.rerere.rikkahub.pet.overlay.DesktopPetService
+import me.rerere.rikkahub.ui.components.ui.Select
 
 @Composable
 fun PetSettingsDialog(
@@ -49,6 +58,18 @@ fun PetSettingsDialog(
     var status by remember { mutableStateOf<String?>(null) }
     var replacementUri by remember { mutableStateOf<Uri?>(null) }
     var showProfileEditor by remember { mutableStateOf(false) }
+    var forceRendererReload by remember { mutableStateOf(false) }
+    var installedPets by remember { mutableStateOf<List<CodexPetManifest>>(emptyList()) }
+
+    suspend fun refreshInstalledPets() {
+        installedPets = withContext(Dispatchers.IO) {
+            listInstalledPetManifests(context.filesDir.resolve("pets"))
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        refreshInstalledPets()
+    }
 
     fun importPackage(uri: Uri, replace: Boolean) {
         scope.launch {
@@ -64,6 +85,8 @@ fun PetSettingsDialog(
             }
             result.onSuccess { installed ->
                 draft = draft.copy(petPackageId = installed.manifest.id)
+                forceRendererReload = forceRendererReload || replace
+                refreshInstalledPets()
                 status = "已导入 ${installed.manifest.displayName}"
                 replacementUri = null
             }.onFailure { error ->
@@ -85,7 +108,10 @@ fun PetSettingsDialog(
         onDismissRequest = onDismiss,
         title = { Text("第二用户桌宠") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
                 if (draft.privilegedConversationId == null) {
                     Text("必须先为这个助手配置固定的第二用户会话。", color = MaterialTheme.colorScheme.error)
                 }
@@ -104,10 +130,41 @@ fun PetSettingsDialog(
                         onCheckedChange = { draft = draft.copy(petEnabled = it) },
                     )
                 }
-                Button(onClick = { picker.launch(arrayOf("application/zip", "application/octet-stream")) }) {
-                    Text(if (draft.petPackageId == null) "导入 .codex-pet.zip" else "更换桌宠资源")
+                Text("桌宠角色", style = MaterialTheme.typography.labelLarge)
+                if (installedPets.isNotEmpty()) {
+                    val selectedManifest = installedPets.firstOrNull { manifest ->
+                        manifest.id == draft.petPackageId
+                    } ?: CodexPetManifest(
+                        id = draft.petPackageId.orEmpty(),
+                        displayName = draft.petPackageId ?: "请选择桌宠",
+                    )
+                    Select(
+                        options = installedPets,
+                        selectedOption = selectedManifest,
+                        onOptionSelected = { manifest ->
+                            if (draft.petPackageId != manifest.id) {
+                                draft = draft.copy(petPackageId = manifest.id)
+                                forceRendererReload = true
+                                status = "已选择 ${manifest.displayName}，保存后立即切换"
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        optionToString = { manifest -> manifest.displayName },
+                    )
+                    Text(
+                        "点击当前角色可查看其余 ${installedPets.size} 个已安装桌宠",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                } else {
+                    Text("尚未安装桌宠资源", style = MaterialTheme.typography.bodySmall)
                 }
-                Text("当前：${draft.petPackageId ?: "静态应用占位图"}")
+                Button(
+                    onClick = {
+                        picker.launch(arrayOf("application/zip", "application/octet-stream"))
+                    },
+                ) {
+                    Text("导入新的 .codex-pet.zip")
+                }
                 if (draft.petPackageId != null) {
                     TextButton(onClick = { showProfileEditor = true }) {
                         Text("编辑安全视觉动作")
@@ -213,7 +270,11 @@ fun PetSettingsDialog(
                 val appContext = context.applicationContext
                 onUpdate(saved) {
                     if (saved.petEnabled) {
-                        DesktopPetService.start(appContext)
+                        if (forceRendererReload) {
+                            DesktopPetService.reload(appContext)
+                        } else {
+                            DesktopPetService.start(appContext)
+                        }
                     } else {
                         DesktopPetService.stop(appContext)
                     }
@@ -229,4 +290,20 @@ fun PetSettingsDialog(
             onDismiss = { showProfileEditor = false },
         )
     }
+}
+
+internal fun listInstalledPetManifests(petsRoot: File): List<CodexPetManifest> {
+    val json = Json { ignoreUnknownKeys = true }
+    return petsRoot.listFiles().orEmpty()
+        .asSequence()
+        .filter { directory -> directory.isDirectory && !directory.name.startsWith(".") }
+        .mapNotNull { directory ->
+            runCatching {
+                json.decodeFromString<CodexPetManifest>(
+                    File(directory, "pet.json").readText(Charsets.UTF_8),
+                )
+            }.getOrNull()
+        }
+        .sortedBy { manifest -> manifest.displayName.lowercase() }
+        .toList()
 }

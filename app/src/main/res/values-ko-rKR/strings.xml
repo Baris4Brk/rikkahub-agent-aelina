@@ -1982,4 +1982,9 @@ mDNS 주소: .local 호스트네임을 사용하며, IP를 몰라도 같은 네�
   <string name="assistant_page_generation_max_steps_auto">자동</string>
   <string name="assistant_page_generation_max_steps_effective_auto">자동: %1$d단계</string>
   <string name="assistant_page_generation_max_steps_effective">현재 한도: %1$d단계</string>
+  <string name="assistant_page_generation_turn_budget">턴 시간 예산</string>
+  <string name="assistant_page_generation_turn_budget_desc">한 번의 모델/도구 실행에 허용되는 최대 시간입니다. 비워 두면 역할별 기본값을 사용합니다. 범위는 1~60분입니다.</string>
+  <string name="assistant_page_generation_turn_budget_effective">현재 한도: %1$d분</string>
+  <string name="assistant_page_generation_turn_budget_effective_auto">자동: %1$d분</string>
+  <string name="assistant_page_generation_turn_budget_global">자동: 전역 런타임 한도</string>
 </resources>

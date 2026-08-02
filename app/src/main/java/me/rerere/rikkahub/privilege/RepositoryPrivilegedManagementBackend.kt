@@ -423,6 +423,11 @@ class RepositoryPrivilegedManagementBackend(
                         request.generationMaxSteps != null -> request.generationMaxSteps
                         else -> assistant.generationMaxSteps
                     },
+                    generationTurnBudgetMinutes = when {
+                        request.clearGenerationTurnBudgetMinutes -> null
+                        request.generationTurnBudgetMinutes != null -> request.generationTurnBudgetMinutes
+                        else -> assistant.generationTurnBudgetMinutes
+                    },
                 )
             })
         }

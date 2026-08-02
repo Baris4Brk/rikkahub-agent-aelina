@@ -72,6 +72,7 @@ import me.rerere.rikkahub.data.ai.GenerationChunk
 import me.rerere.rikkahub.data.ai.GenerationHandler
 import me.rerere.rikkahub.data.ai.GenerationPersistenceBarrier
 import me.rerere.rikkahub.data.ai.resolveInteractiveGenerationMaxSteps
+import me.rerere.rikkahub.data.ai.resolveInteractiveGenerationTurnBudgetMs
 import me.rerere.rikkahub.data.ai.sanitizeTransientConversationToolResults
 import me.rerere.rikkahub.data.ai.ToolCallOrigin
 import me.rerere.rikkahub.data.ai.mcp.McpManager
@@ -2567,6 +2568,15 @@ class ChatService(
             } else {
                 emptyList()
             }
+            val interactiveTurnBudgetMs = if (subAgentProfile != null) {
+                me.rerere.rikkahub.data.ai.limits.ToolRuntimeLimits.turnBudgetMs
+            } else {
+                resolveInteractiveGenerationTurnBudgetMs(
+                    configuredMinutes = assistant.generationTurnBudgetMinutes,
+                    isActiveLocalSecondUser = secondUserDirectToolSurface,
+                    globalTurnBudgetMs = me.rerere.rikkahub.data.ai.limits.ToolRuntimeLimits.turnBudgetMs,
+                )
+            }
             generationHandler.generateText(
                 settings = settings,
                 model = model,
@@ -2679,6 +2689,7 @@ class ChatService(
                         configured = assistant.generationMaxSteps,
                         isActiveLocalSecondUser = secondUserDirectToolSurface,
                     ),
+                turnBudgetMs = interactiveTurnBudgetMs,
                 memoryToolAllowed = subAgentProfile?.allowsTool("memory_tool") ?: true,
                 invocationSurfaceContextProvider =
                     me.rerere.rikkahub.quickcapture.InvocationSurfaceContexts,

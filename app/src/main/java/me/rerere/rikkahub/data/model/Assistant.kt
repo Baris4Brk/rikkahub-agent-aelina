@@ -66,6 +66,12 @@ data class Assistant(
      * 64 for the active local second user and 32 for ordinary assistants.
      */
     val generationMaxSteps: Int? = null,
+    /**
+     * Optional wall-clock budget for one interactive model/tool turn. Null keeps the
+     * role-aware policy: the active local second user gets a 60 minute budget while ordinary
+     * assistants continue using the global runtime budget.
+     */
+    val generationTurnBudgetMinutes: Int? = null,
     val customHeaders: List<CustomHeader> = emptyList(),
     val customBodies: List<CustomBody> = emptyList(),
     val mcpServers: Set<Uuid> = emptySet(),

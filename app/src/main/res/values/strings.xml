@@ -2369,4 +2369,9 @@
   <string name="assistant_page_generation_max_steps_auto">Automatic</string>
   <string name="assistant_page_generation_max_steps_effective_auto">Automatic: %1$d steps</string>
   <string name="assistant_page_generation_max_steps_effective">Current limit: %1$d steps</string>
+  <string name="assistant_page_generation_turn_budget">Turn time budget</string>
+  <string name="assistant_page_generation_turn_budget_desc">Maximum wall-clock time for one model/tool turn. Leave blank for the role-aware default; range 1-60 minutes.</string>
+  <string name="assistant_page_generation_turn_budget_effective">Current limit: %1$d minutes</string>
+  <string name="assistant_page_generation_turn_budget_effective_auto">Automatic: %1$d minutes</string>
+  <string name="assistant_page_generation_turn_budget_global">Automatic: global runtime limit</string>
 </resources>

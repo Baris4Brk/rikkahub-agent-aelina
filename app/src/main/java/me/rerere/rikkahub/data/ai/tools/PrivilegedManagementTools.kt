@@ -182,6 +182,7 @@ private fun managementToolSpecs(): List<ManagementToolSpec> = listOf(
             "fast_path_router_enabled" to booleanProperty("Enable the conservative fast-path router"),
             "enable_web_search" to booleanProperty("Enable built-in web search for this assistant"),
             "generation_max_steps" to integerProperty("Maximum agent steps from 1 to 256; 0 restores the role-aware default"),
+            "generation_turn_budget_minutes" to integerProperty("Wall-clock budget from 1 to 60 minutes; 0 restores the role-aware default"),
         ),
         listOf("assistant_id"),
     ),
@@ -348,8 +349,12 @@ internal fun parseManagementRequest(name: String, obj: JsonObject): ParsedReques
                 val chatRaw = obj.string("chat_model_id")
                 val workspaceRaw = obj.string("workspace_id")
                 val generationMaxStepsRaw = obj.int("generation_max_steps")
+                val generationTurnBudgetMinutesRaw = obj.int("generation_turn_budget_minutes")
                 require(generationMaxStepsRaw == null || generationMaxStepsRaw in 0..256) {
                     "generation_max_steps must be between 0 and 256."
+                }
+                require(generationTurnBudgetMinutesRaw == null || generationTurnBudgetMinutesRaw in 0..60) {
+                    "generation_turn_budget_minutes must be between 0 and 60."
                 }
                 PrivilegedManagementRequest.AssistantUpdate(
                     assistantId = requiredUuid("assistant_id"),
@@ -367,6 +372,8 @@ internal fun parseManagementRequest(name: String, obj: JsonObject): ParsedReques
                     enableWebSearch = obj.boolean("enable_web_search"),
                     generationMaxSteps = generationMaxStepsRaw?.takeIf { it > 0 },
                     clearGenerationMaxSteps = generationMaxStepsRaw == 0,
+                    generationTurnBudgetMinutes = generationTurnBudgetMinutesRaw?.takeIf { it > 0 },
+                    clearGenerationTurnBudgetMinutes = generationTurnBudgetMinutesRaw == 0,
                 )
             }
             "assistant_toggle_tool" -> PrivilegedManagementRequest.AssistantToggleTool(
