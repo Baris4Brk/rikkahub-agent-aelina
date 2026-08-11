@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.os.Build
 import android.os.PerformanceHintManager
 import android.os.Process
+import android.system.Os
 import com.google.ai.edge.litertlm.Backend
 import com.google.ai.edge.litertlm.Capabilities
 import com.google.ai.edge.litertlm.Content
@@ -29,7 +30,12 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import me.rerere.locallm.AcceleratorProbe
+import me.rerere.locallm.LocalRuntimePreferences
+import me.rerere.ai.provider.ProviderCacheIdentity
 import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.FileInputStream
+import java.security.MessageDigest
 import java.util.concurrent.CancellationException
 import java.util.concurrent.TimeUnit
 
@@ -38,13 +44,55 @@ import java.util.concurrent.TimeUnit
 const val ROLE_USER = "user"
 const val ROLE_ASSISTANT = "assistant"
 
+internal const val LITERT_PROMPT_RENDERER_ABI = "rikkahub-litert-render-v2"
+internal const val LITERT_NATIVE_TOOL_ABI = "rikkahub-run-tool-v1"
+private const val TURN_FINGERPRINT_DOMAIN = "rikkahub-litert-turn-v2"
+private const val MODEL_FINGERPRINT_BUFFER_BYTES = 1024 * 1024
+
 /**
- * Stable, content-derived signature for one conversation turn. Used to decide whether the
- * warm [Conversation]'s KV cache can be reused (see [planTurns]). Length + hashCode keeps
- * the collision rate negligible; a collision would only cause a (correct) cold reload, never
- * wrong output.
+ * Strong, content-derived signature for one conversation turn. Fields are length-prefixed before
+ * SHA-256 hashing, so neither delimiter ambiguity nor Java String.hashCode collisions can select
+ * a wrong warm KV prefix.
  */
-fun turnSignature(role: String, text: String): String = "$role|${text.length}|${text.hashCode()}"
+fun turnSignature(role: String, text: String): String = strongFingerprint(
+    domain = TURN_FINGERPRINT_DOMAIN,
+    fields = listOf(role.toByteArray(Charsets.UTF_8), text.toByteArray(Charsets.UTF_8)),
+)
+
+internal fun strongFingerprint(domain: String, fields: List<ByteArray>): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+    digest.updateLengthPrefixed(domain.toByteArray(Charsets.UTF_8))
+    fields.forEach { field -> digest.updateLengthPrefixed(field) }
+    return digest.digest().joinToString("") { byte ->
+        (byte.toInt() and 0xff).toString(16).padStart(2, '0')
+    }
+}
+
+private fun MessageDigest.updateLengthPrefixed(bytes: ByteArray) {
+    val size = bytes.size
+    update((size ushr 24).toByte())
+    update((size ushr 16).toByte())
+    update((size ushr 8).toByte())
+    update(size.toByte())
+    update(bytes)
+}
+
+/** Strong artifact identity. Callers cache this result; it must not be recomputed per token/turn. */
+internal fun computeModelArtifactSha256(file: File): String {
+    require(file.isFile) { "Model artifact does not exist: ${file.absolutePath}" }
+    val digest = MessageDigest.getInstance("SHA-256")
+    val buffer = ByteArray(MODEL_FINGERPRINT_BUFFER_BYTES)
+    FileInputStream(file).use { input ->
+        while (true) {
+            val read = input.read(buffer)
+            if (read < 0) break
+            if (read > 0) digest.update(buffer, 0, read)
+        }
+    }
+    return digest.digest().joinToString("") { byte ->
+        (byte.toInt() and 0xff).toString(16).padStart(2, '0')
+    }
+}
 
 /**
  * One rendered conversation turn handed from [LiteRtProvider] to [LiteRtRuntime].
@@ -54,7 +102,12 @@ fun turnSignature(role: String, text: String): String = "$role|${text.length}|${
  * chat template applies the role wrapping (the same path Gallery uses). The marker-prefixed
  * cold blob is built separately by the provider for the rebuild-from-scratch path.
  */
-data class Turn(val role: String, val rawText: String) {
+data class Turn(
+    val role: String,
+    val rawText: String,
+    /** Warm reuse stays disabled when any retained turn contains media. */
+    val containsMedia: Boolean = false,
+) {
     val signature: String get() = turnSignature(role, rawText)
 }
 
@@ -148,7 +201,24 @@ class LiteRtVisionUnavailableException(
 class LiteRtRuntime(private val context: Context) {
 
     private val mutex = Mutex()
+    private val artifactFingerprintMutex = Mutex()
     private var loaded: LoadedModel? = null
+    private val artifactFingerprints = mutableMapOf<String, CachedArtifactFingerprint>()
+
+    private data class ModelArtifactStat(
+        val device: Long,
+        val inode: Long,
+        val sizeBytes: Long,
+        val modifiedSeconds: Long,
+        val modifiedNanos: Long,
+        val changedSeconds: Long,
+        val changedNanos: Long,
+    )
+
+    private data class CachedArtifactFingerprint(
+        val stat: ModelArtifactStat,
+        val sha256: String,
+    )
 
     /**
      * In-session fallback accelerator. If the preferred/probed accelerator failed and we
@@ -247,6 +317,9 @@ class LiteRtRuntime(private val context: Context) {
      */
     private data class EngineKey(
         val modelPath: String,
+        /** Strong content identity; replacing a model at the same path invalidates the Engine. */
+        val modelArtifactSha256: String,
+        val sdkAbi: String,
         val accelerator: String,
         val maxNumTokens: Int,
         val supportImage: Boolean,
@@ -264,7 +337,11 @@ class LiteRtRuntime(private val context: Context) {
      * kept across [ensureLoaded] calls.
      */
     private data class ConversationKey(
-        val systemInstructionText: String?,
+        val systemInstructionFingerprint: String,
+        val providerCacheIdentity: ProviderCacheIdentity?,
+        val toolAuthorizationFingerprint: String,
+        val promptRendererAbi: String,
+        val nativeToolAbi: String,
         val constrainedDecoding: Boolean,
         val topK: Int,
         val topP: Double,
@@ -342,6 +419,47 @@ class LiteRtRuntime(private val context: Context) {
         else -> Backend.CPU()
     }
 
+    private suspend fun resolveModelArtifactSha256(modelPath: String): String =
+        artifactFingerprintMutex.withLock {
+            val file = File(modelPath)
+            val canonicalPath = withContext(Dispatchers.IO) { file.canonicalPath }
+            val before = withContext(Dispatchers.IO) { readModelArtifactStat(canonicalPath) }
+            artifactFingerprints[canonicalPath]?.let { cached ->
+                if (cached.stat == before) {
+                    return@withLock cached.sha256
+                }
+            }
+            val sha256 = withContext(Dispatchers.IO) { computeModelArtifactSha256(file) }
+            val after = withContext(Dispatchers.IO) { readModelArtifactStat(canonicalPath) }
+            require(after == before) {
+                "Model artifact changed while its cache identity was being computed"
+            }
+            artifactFingerprints[canonicalPath] = CachedArtifactFingerprint(
+                stat = after,
+                sha256 = sha256,
+            )
+            sha256
+        }
+
+    /**
+     * Linux inode and ctime make replacement detection independent of a path's coarse mtime.
+     * Atomic replacement changes the inode; in-place writes change ctime even when a caller
+     * deliberately restores the old size and mtime. The expensive full SHA-256 is recomputed
+     * only when this stamp changes.
+     */
+    private fun readModelArtifactStat(canonicalPath: String): ModelArtifactStat {
+        val stat = Os.stat(canonicalPath)
+        return ModelArtifactStat(
+            device = stat.st_dev,
+            inode = stat.st_ino,
+            sizeBytes = stat.st_size,
+            modifiedSeconds = stat.st_mtim.tv_sec,
+            modifiedNanos = stat.st_mtim.tv_nsec,
+            changedSeconds = stat.st_ctim.tv_sec,
+            changedNanos = stat.st_ctim.tv_nsec,
+        )
+    }
+
     /**
      * Configure the engine + conversation for the next [streamTurns] call.
      *
@@ -374,7 +492,11 @@ class LiteRtRuntime(private val context: Context) {
         topK: Int = 64,
         topP: Double = 0.95,
         temperature: Double = 1.0,
+        providerCacheIdentity: ProviderCacheIdentity? = null,
+        toolAuthorizationFingerprint: String = "",
+        promptRendererAbi: String = LITERT_PROMPT_RENDERER_ABI,
     ): LoadOutcome = mutex.withLock {
+        val modelArtifactSha256 = resolveModelArtifactSha256(modelPath)
         // Use in-session fallback if a prior GPU→CPU retry already succeeded this session.
         // forceCpu wins over a non-null preferredAccel.
         val accel = if (forceCpu) "CPU"
@@ -392,6 +514,8 @@ class LiteRtRuntime(private val context: Context) {
 
         val desiredEngineKey = EngineKey(
             modelPath = modelPath,
+            modelArtifactSha256 = modelArtifactSha256,
+            sdkAbi = LocalRuntimePreferences.LITERTLM_SDK_VERSION,
             accelerator = accel,
             maxNumTokens = maxNumTokens,
             supportImage = supportImage,
@@ -401,8 +525,16 @@ class LiteRtRuntime(private val context: Context) {
         )
         val systemInstruction: Contents? =
             if (!systemInstructionText.isNullOrBlank()) Contents.of(systemInstructionText) else null
+        val systemInstructionFingerprint = strongFingerprint(
+            domain = "rikkahub-litert-system-v1",
+            fields = listOf(systemInstructionText.orEmpty().toByteArray(Charsets.UTF_8)),
+        )
         val desiredConversationKey = ConversationKey(
-            systemInstructionText = systemInstructionText?.takeIf { it.isNotBlank() },
+            systemInstructionFingerprint = systemInstructionFingerprint,
+            providerCacheIdentity = providerCacheIdentity,
+            toolAuthorizationFingerprint = toolAuthorizationFingerprint,
+            promptRendererAbi = promptRendererAbi,
+            nativeToolAbi = LITERT_NATIVE_TOOL_ABI,
             constrainedDecoding = constrainedDecoding,
             topK = topK,
             topP = topP,
@@ -419,7 +551,7 @@ class LiteRtRuntime(private val context: Context) {
 
         val current = loaded
         if (current != null && current.engineKey == desiredEngineKey) {
-            if (current.conversationKey == desiredConversationKey) {
+            if (providerCacheIdentity != null && current.conversationKey == desiredConversationKey) {
                 // Full reuse — Engine AND Conversation kept. The KV cache (and therefore
                 // [processed]) is left intact so the next streamTurns can warm-continue.
                 return@withLock LoadOutcome(
@@ -800,7 +932,8 @@ class LiteRtRuntime(private val context: Context) {
             val instance = loaded
                 ?: throw IllegalStateException("Call ensureLoaded(...) before streamTurns()")
 
-            val hasMedia = images.isNotEmpty() || audioClips.isNotEmpty()
+            val hasMedia = images.isNotEmpty() || audioClips.isNotEmpty() ||
+                history.any(Turn::containsMedia)
             val historySignatures = history.map { it.signature }
             val plan = planTurns(instance.processed, historySignatures, hasMedia)
 
@@ -851,9 +984,13 @@ class LiteRtRuntime(private val context: Context) {
                         // turn just generated. Record that so the NEXT call can warm-continue
                         // if it is a clean single-turn append. Mutating [processed] here is
                         // safe: the mutex is held for this whole streamTurns invocation.
+                        val nextProcessed = processedPrefixAfterCompletion(
+                            historySignatures = historySignatures,
+                            assistantSignature = turnSignature(ROLE_ASSISTANT, lastCumulative),
+                            consumedMedia = hasMedia,
+                        )
                         instance.processed.clear()
-                        instance.processed.addAll(historySignatures)
-                        instance.processed.add(turnSignature(ROLE_ASSISTANT, lastCumulative))
+                        instance.processed.addAll(nextProcessed)
                         // Stamp telemetry for the provider to read + persist.
                         val endNs = System.nanoTime()
                         val prefillMs = if (firstMessageNs > 0L)
@@ -945,6 +1082,21 @@ class LiteRtRuntime(private val context: Context) {
             if (historySignatures.subList(0, processed.size) != processed) return TurnPlan.Cold
             if (historySignatures.size - processed.size != 1) return TurnPlan.Cold
             return TurnPlan.Warm(sendFromIndex = processed.size)
+        }
+
+        /**
+         * Media bytes are deliberately absent from [Turn.signature]. Never retain a reusable
+         * text-only prefix for a Conversation that consumed media: otherwise editing the media
+         * out while keeping the same text could incorrectly select the old multimodal KV state.
+         */
+        internal fun processedPrefixAfterCompletion(
+            historySignatures: List<String>,
+            assistantSignature: String,
+            consumedMedia: Boolean,
+        ): List<String> = if (consumedMedia) {
+            emptyList()
+        } else {
+            historySignatures + assistantSignature
         }
 
         /**

@@ -319,7 +319,15 @@ class AssistantDetailVM(
     fun updateMemory(memory: AssistantMemory) {
         viewModelScope.launch {
             runCatching {
-                memoryRepository.updateContent(id = memory.id, content = memory.content)
+                val memoryScopeId = requireNotNull(memory.scopeId) {
+                    "Memory scope is unavailable; refresh before editing"
+                }
+                memoryRepository.updateContent(
+                    scopeId = memoryScopeId,
+                    id = memory.id,
+                    content = memory.content,
+                    expectedRevision = memory.revision,
+                )
             }.onFailure {
                 // The record may have been deleted (e.g. by the memory tool) between opening
                 // the editor and saving; don't crash the VM scope, the update is moot.
@@ -330,7 +338,12 @@ class AssistantDetailVM(
 
     fun deleteMemory(memory: AssistantMemory) {
         viewModelScope.launch {
-            memoryRepository.deleteMemory(id = memory.id)
+            val memoryScopeId = memory.scopeId ?: return@launch
+            memoryRepository.deleteMemory(
+                scopeId = memoryScopeId,
+                id = memory.id,
+                expectedRevision = memory.revision,
+            )
         }
     }
 

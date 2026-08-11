@@ -4,6 +4,11 @@ import android.util.Log
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+import me.rerere.ai.core.InputSchema
+import me.rerere.ai.core.Tool
 import me.rerere.ai.core.MessageRole
 import me.rerere.ai.provider.ImageGenerationParams
 import me.rerere.ai.provider.Model
@@ -24,6 +29,27 @@ import com.google.ai.edge.litertlm.tool as litertTool
 import com.google.ai.edge.litertlm.ToolProvider
 
 private const val TAG = "LiteRtProvider"
+private val liteRtProviderInferenceMutex = Mutex()
+private val liteRtCacheIdentityJson = Json {
+    encodeDefaults = true
+    explicitNulls = false
+}
+
+internal fun computeLiteRtToolAuthorizationFingerprint(tools: List<Tool>): String {
+    val fields = buildList<ByteArray> {
+        tools.forEach { tool ->
+            add(tool.name.toByteArray(Charsets.UTF_8))
+            add(tool.description.toByteArray(Charsets.UTF_8))
+            val schema = runCatching {
+                tool.parameters()?.let {
+                    liteRtCacheIdentityJson.encodeToString(InputSchema.serializer(), it)
+                }.orEmpty()
+            }.getOrElse { "<schema-unavailable>" }
+            add(schema.toByteArray(Charsets.UTF_8))
+        }
+    }
+    return strongFingerprint("rikkahub-litert-tool-authorization-v1", fields)
+}
 
 /**
  * Outcome of [decideImageForwarding]: whether to hand image bytes to the runtime this turn,
@@ -85,6 +111,17 @@ class LiteRtProvider(
     private val toolBridge = LiteRtToolBridge()
     private val toolProvider: ToolProvider = litertTool(toolBridge)
 
+    override suspend fun resolveTrustedContextWindowTokens(
+        providerSetting: ProviderSetting.LiteRtLocal,
+        model: Model,
+    ): Int? {
+        val runtimeOverride = prefs.maxNumTokensOverride(LocalRuntime.LiteRT)?.takeIf { it > 0 }
+        if (runtimeOverride != null) return runtimeOverride
+        model.trustedContextWindowTokens?.takeIf { it > 0 }?.let { return it }
+        val defaults = LiteRtModelDefaults.forModelFile(model.modelId)
+        return (defaults.maxContextLength ?: defaults.maxTokens).takeIf { it > 0 }
+    }
+
     /**
      * Self-heal a permanently corrupt model: delete the file from disk, remove it from
      * [LocalRuntimePreferences], and remove it from the provider's models list in settings.
@@ -134,10 +171,15 @@ class LiteRtProvider(
 
     override suspend fun listModels(providerSetting: ProviderSetting.LiteRtLocal): List<Model> {
         val installed = prefs.installedModels(LocalRuntime.LiteRT)
+        val engineContextOverride = prefs.maxNumTokensOverride(LocalRuntime.LiteRT)
         return installed.map { (fileName, _) ->
+            val defaults = LiteRtModelDefaults.forModelFile(fileName)
             Model(
                 modelId = fileName,
                 displayName = fileName,
+                trustedContextWindowTokens = engineContextOverride
+                    ?: defaults.maxContextLength
+                    ?: defaults.maxTokens,
             )
         }
     }
@@ -179,6 +221,8 @@ class LiteRtProvider(
         messages: List<UIMessage>,
         params: TextGenerationParams,
     ): Flow<MessageChunk> = flow {
+        liteRtProviderInferenceMutex.lock()
+        try {
         val installed = prefs.installedModels(LocalRuntime.LiteRT)
         val modelPath = installed[params.model.modelId]
             ?: throw IllegalStateException("Model ${params.model.modelId} not installed")
@@ -219,25 +263,16 @@ class LiteRtProvider(
         // than Gallery's curated default; the underlying KV cache size still caps it
         // (Qwen `ekv4096` cannot exceed 4096 regardless of this setting).
         val maxNumTokensOverride = prefs.maxNumTokensOverride(LocalRuntime.LiteRT)
-        val effectiveMaxNumTokens = maxNumTokensOverride ?: config.maxTokens
+        // EngineConfig.maxNumTokens is input + output (the KV-cache size), not an output cap.
+        val effectiveEngineContextTokens = (maxNumTokensOverride
+            ?: config.maxContextLength
+            ?: config.maxTokens).coerceAtLeast(1)
+        // LiteRT-LM 0.11.0 exposes EngineConfig.maxNumTokens (total KV/context capacity),
+        // but no independent Conversation output-token parameter. Never substitute
+        // params.maxTokens here: the app gate reserves that requested output separately, while
+        // this value must remain the trusted engine window.
 
-        // ---- System instruction (RADICALLY TRIMMED for small-context local models) ----
-        //
-        // Cloud providers happily accept full system prompts: agent-core skill body
-        // (~3-5k tokens of persona + tool docs) + every tool's JSON schema (~5-10k more)
-        // fits comfortably inside a 32k–200k context window. LiteRT models max out at
-        // 1-32k TOTAL, often 4k. A fresh "hi" against the default Qwen 4k model SDK-aborts
-        // with "Input token ids are too long: 18031 >= 4096" because we forwarded the same
-        // bulky system instruction the cloud path uses.
-        //
-        // For LiteRT we therefore:
-        //  - Use [buildCompactPrefix] (one-line `- name: desc` per tool, NO schemas).
-        //  - Drop bulky auto-loaded skill bodies — keep at most the first
-        //    [SYSTEM_MESSAGE_CHAR_BUDGET] chars of system text (room for the user's
-        //    custom system prompt + a short identity line, not for skill prose).
-        //
-        // A 1.5B model can't usefully consume agent-core's persona docs anyway — the
-        // model lacks the capacity to follow that level of instruction.
+        // ---- Exact protected system instruction ----
         val systemTextsRaw = messages
             .filter { it.role == MessageRole.SYSTEM }
             .map { msg ->
@@ -245,11 +280,10 @@ class LiteRtProvider(
             }
             .filter { it.isNotBlank() }
             .joinToString("\n\n")
-        val trimmedSystemTexts = if (systemTextsRaw.length > SYSTEM_MESSAGE_CHAR_BUDGET) {
-            systemTextsRaw.take(SYSTEM_MESSAGE_CHAR_BUDGET) + "\n…(truncated for local model context)"
-        } else {
-            systemTextsRaw
-        }
+        // The app-level hard gate has already bounded the request against the trusted local
+        // window. Preserve protected instructions exactly; a second character truncation here
+        // could cut a negation, Unicode surrogate, or prompt boundary.
+        val exactSystemTexts = systemTextsRaw
 
         // Compact tool prefix only — full-schema dump would re-blow the context budget
         // (every tool's schema is ~200-500 chars, ×50 tools = ~15k chars on its own).
@@ -270,6 +304,7 @@ class LiteRtProvider(
         // Populate the snapshot before handing the engine the call, clear it in the
         // finally below so concurrent requests cannot see each other's tools.
         LiteRtToolBridgeRegistry.setForRequest(params.tools)
+        val toolAuthorizationFingerprint = computeLiteRtToolAuthorizationFingerprint(params.tools)
         val nativeTools = if (params.tools.isNotEmpty()) listOf(toolProvider) else emptyList()
         Log.i(
             TAG,
@@ -305,13 +340,13 @@ class LiteRtProvider(
                 append(toolPrefix.trimEnd())
                 append("\n\n")
             }
-            if (trimmedSystemTexts.isNotEmpty()) append(trimmedSystemTexts)
+            if (exactSystemTexts.isNotEmpty()) append(exactSystemTexts)
         }.trim()
 
         // ---- Conversation history → turn list + cold-path blob ----
         //
         // We hand the runtime BOTH:
-        //   - `turns`: the full (trimmed) turn list, each carrying a content signature. The
+        //   - `turns`: the full app-gated turn list, each carrying a content signature. The
         //     runtime uses these to decide whether its warm Conversation's KV cache already
         //     holds a prefix of this history — if so it sends ONLY the new turn and reuses
         //     the cache (Gallery's behaviour), instead of re-prefilling the whole history.
@@ -322,19 +357,13 @@ class LiteRtProvider(
         // TOOL-role messages are dropped here: their content is already represented inline
         // in the immediately-preceding ASSISTANT message's Tool part output.
         //
-        // Trimming: drop the oldest turns one at a time until the cold render fits under
-        // HISTORY_CHAR_BUDGET. A trimmed list is no longer a forward-only extension of what
-        // the Conversation already processed, so the runtime correctly falls back to a cold
-        // rebuild for that turn — exactly the behaviour we want when history is reshaped.
-        var trimmed = messages.filter {
+        // The app-level gate already drops old history as complete user-led turns. Keep that
+        // atomic projection instead of applying a second, character-based truncation.
+        val preparedTurns = messages.filter {
             it.role != MessageRole.SYSTEM && it.role != MessageRole.TOOL
         }
-        var coldBlob = renderColdBlob(trimmed)
-        while (coldBlob.length > HISTORY_CHAR_BUDGET && trimmed.size > 1) {
-            trimmed = trimmed.drop(1)
-            coldBlob = renderColdBlob(trimmed)
-        }
-        val turns = trimmed.map { it.toTurn() }
+        val coldBlob = renderColdBlob(preparedTurns)
+        val turns = preparedTurns.map { it.toTurn() }
 
         // Check the persisted vision-unavailable flag. If a prior load fell back to
         // text-only on this device, skip the GPU vision attempt entirely — saves ~1 s of
@@ -357,7 +386,7 @@ class LiteRtProvider(
                 modelPath = modelPath,
                 preferredAccel = cachedAccel,
                 forceCpu = forceCpu,
-                maxNumTokens = effectiveMaxNumTokens,
+                maxNumTokens = effectiveEngineContextTokens,
                 supportImage = effectiveSupportImage,
                 supportAudio = config.supportsAudio,
                 // Match Google AI Edge Gallery: speculative decoding is an explicit user
@@ -379,11 +408,13 @@ class LiteRtProvider(
                 topK = config.topK,
                 topP = config.topP,
                 temperature = config.temperature,
+                providerCacheIdentity = params.providerCacheIdentity,
+                toolAuthorizationFingerprint = toolAuthorizationFingerprint,
             )
         } catch (corrupt: LiteRtModelCorruptException) {
             handleCorruptModel(corrupt)
         } catch (t: Throwable) {
-            throw translateSdkError(t, effectiveMaxNumTokens)
+            throw translateSdkError(t, effectiveEngineContextTokens)
         }
         val resolvedAccel = outcome.accelerator
         // Persist whatever the runtime actually used. Without this, the in-runtime
@@ -541,7 +572,7 @@ class LiteRtProvider(
                 // ids are too long. Exceeding the maximum number of tokens allowed: N >= M"
                 // — looks scary but means "your conversation is bigger than this model can
                 // hold". Surface that with a recovery hint.
-                throw translateSdkError(t, effectiveMaxNumTokens)
+                throw translateSdkError(t, effectiveEngineContextTokens)
             }
         } finally {
             LiteRtToolBridgeRegistry.clear()
@@ -604,6 +635,12 @@ class LiteRtProvider(
                 ),
             )
         )
+        } finally {
+            // Clear while the provider-wide lock is still held. An older request can therefore
+            // never clear a newer request's tool authorization snapshot.
+            LiteRtToolBridgeRegistry.clear()
+            liteRtProviderInferenceMutex.unlock()
+        }
     }
 
     /**
@@ -655,7 +692,14 @@ class LiteRtProvider(
             MessageRole.ASSISTANT -> ROLE_ASSISTANT
             else -> "other"
         }
-        return Turn(turnRole, renderTurnRawText(this))
+        return Turn(
+            role = turnRole,
+            rawText = renderTurnRawText(this),
+            containsMedia = parts.any { part ->
+                part is UIMessagePart.Image || part is UIMessagePart.Video ||
+                    part is UIMessagePart.Audio || part is UIMessagePart.Document
+            },
+        )
     }
 
     /**
@@ -771,15 +815,6 @@ class LiteRtProvider(
         private const val VISION_DROPPED_NOTE =
             "[Note: this model's vision encoder is unavailable on this device, so attached " +
                 "images were not analysed. Replying from text only.]\n\n"
-
-        /** Hard char-cap for the joined SYSTEM-message text. Tight on purpose: we
-         *  want the user's actual system prompt ("You are X") to land, but NOT
-         *  agent-core's auto-loaded skill body (~3-5k tokens of persona + tool
-         *  docs that small models can't usefully consume). 500 chars ≈ 125 tokens. */
-        private const val SYSTEM_MESSAGE_CHAR_BUDGET = 500
-
-        /** Hard char-cap for the rendered ChatML history. ~3000 chars ≈ 750 tokens. */
-        private const val HISTORY_CHAR_BUDGET = 3000
 
         // MAX_TOOLS_IN_PREFIX / TOOL_PREFIX_CHAR_BUDGET were static caps that starved
         // large-context models (Gemma 4 = 32k) of 30+ enabled tools. Replaced by

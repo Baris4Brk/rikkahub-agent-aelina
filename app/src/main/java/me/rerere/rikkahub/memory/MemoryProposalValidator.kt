@@ -72,9 +72,12 @@ class MemoryProposalValidator {
             if (code == null) accepted += proposal else rejected += RejectedMemoryProposal(proposal, code)
         }
         val acceptedKeys = accepted.mapNotNullTo(hashSetOf(), MemoryProposal::proposalKey)
-        val acceptedRelations = envelope.relations.filter { relation ->
-            validRelation(relation, acceptedKeys, context)
+        val structurallyAcceptedRelations = envelope.relations.mapIndexedNotNull { index, relation ->
+            relation.takeIf {
+                index < MAX_MEMORY_RELATIONS && validRelation(it, acceptedKeys, context)
+            }
         }
+        val acceptedRelations = rejectDerivedCycles(structurallyAcceptedRelations)
         return MemoryProposalValidationResult(
             accepted,
             rejected,
@@ -90,6 +93,7 @@ private const val MIN_MEMORY_CONTENT_CHARS = 8
 private const val MAX_MEMORY_CONTENT_CHARS = 4_000
 private const val MAX_MEMORY_TAGS = 8
 private const val MAX_MEMORY_TAG_CHARS = 32
+private const val MAX_MEMORY_RELATIONS = 12
 
 private fun validTags(tags: List<String>): Boolean =
     tags.size <= MAX_MEMORY_TAGS && tags.all { tag ->
@@ -105,12 +109,16 @@ private fun validTargets(proposal: MemoryProposal, visible: Map<Int, Int>): Bool
 
     MemoryCandidateAction.UPDATE ->
         proposal.targetIds.size == 1 && proposal.expectedRevisions.size == 1 &&
-            proposal.targetIds.all(visible::containsKey)
+            proposal.targetIds.zip(proposal.expectedRevisions).all { (id, revision) ->
+                visible[id] == revision
+            }
 
     MemoryCandidateAction.MERGE ->
         proposal.targetIds.size >= 2 &&
             proposal.targetIds.size == proposal.expectedRevisions.size &&
-            proposal.targetIds.all(visible::containsKey)
+            proposal.targetIds.zip(proposal.expectedRevisions).all { (id, revision) ->
+                visible[id] == revision
+            }
 }
 
 private val EVENT_KINDS = setOf(MemoryKind.EPISODE, MemoryKind.DECISION)
@@ -134,11 +142,58 @@ private fun validRelation(
 ): Boolean {
     val sourceCount = listOfNotNull(relation.sourceProposalKey, relation.sourceMemoryId).size
     val targetCount = listOfNotNull(relation.targetProposalKey, relation.targetMemoryId).size
+    val selfRelation =
+        relation.sourceProposalKey != null && relation.sourceProposalKey == relation.targetProposalKey ||
+            relation.sourceMemoryId != null && relation.sourceMemoryId == relation.targetMemoryId
     return sourceCount == 1 && targetCount == 1 && relation.weight in 0f..1f &&
-        relation.description.length <= 500 &&
+        !selfRelation && relation.description.length <= 500 &&
+        relation.description.none(Char::isISOControl) &&
+        relation.evidenceMessageIds.isNotEmpty() &&
         context.allowedEvidenceMessageIds.containsAll(relation.evidenceMessageIds) &&
         relation.sourceProposalKey?.let(acceptedProposalKeys::contains) != false &&
         relation.targetProposalKey?.let(acceptedProposalKeys::contains) != false &&
         relation.sourceMemoryId?.let(context.visibleExistingMemories::containsKey) != false &&
         relation.targetMemoryId?.let(context.visibleExistingMemories::containsKey) != false
+}
+
+/**
+ * Relation candidates are review-only, but rejecting an obvious DERIVED_FROM cycle before it is
+ * persisted keeps later review deterministic. Existing-link cycles are rechecked at activation.
+ */
+private fun rejectDerivedCycles(
+    relations: List<MemoryRelationProposal>,
+): List<MemoryRelationProposal> {
+    val accepted = arrayListOf<MemoryRelationProposal>()
+    val graph = hashMapOf<String, MutableSet<String>>()
+    relations.forEach { relation ->
+        if (relation.type != MemoryRelationType.DERIVED_FROM) {
+            accepted += relation
+            return@forEach
+        }
+        val source = relation.sourceEndpointToken()
+        val target = relation.targetEndpointToken()
+        if (source == null || target == null || graph.reachable(target, source)) return@forEach
+        graph.getOrPut(source) { linkedSetOf() }.add(target)
+        accepted += relation
+    }
+    return accepted
+}
+
+private fun MemoryRelationProposal.sourceEndpointToken(): String? =
+    sourceProposalKey?.let { "p:$it" } ?: sourceMemoryId?.let { "m:$it" }
+
+private fun MemoryRelationProposal.targetEndpointToken(): String? =
+    targetProposalKey?.let { "p:$it" } ?: targetMemoryId?.let { "m:$it" }
+
+private fun Map<String, MutableSet<String>>.reachable(start: String, target: String): Boolean {
+    val pending = ArrayDeque<String>()
+    val visited = hashSetOf<String>()
+    pending.add(start)
+    while (pending.isNotEmpty()) {
+        val current = pending.removeFirst()
+        if (!visited.add(current)) continue
+        if (current == target) return true
+        get(current).orEmpty().forEach(pending::addLast)
+    }
+    return false
 }

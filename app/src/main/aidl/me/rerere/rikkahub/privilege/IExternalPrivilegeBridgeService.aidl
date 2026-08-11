@@ -12,6 +12,7 @@ interface IExternalPrivilegeBridgeService {
     String listPackages(int userId);
     String forceStopApp(String packageName, int userId, in String[] protectedPackages);
     String clearAppCache(String packageName, int userId, in String[] protectedPackages);
+    String ensureAccessibilityServiceEnabled(int userId, boolean forceRebind);
     String runCommand(String requestJson);
     String cancelCommand(String commandId);
     String cancelAllCommands();

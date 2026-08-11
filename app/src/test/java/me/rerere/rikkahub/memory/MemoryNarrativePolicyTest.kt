@@ -6,8 +6,8 @@ import org.junit.Test
 
 class MemoryNarrativePolicyTest {
     private val identity = MemoryNarrativeIdentity(
-        selfName = "啥子七",
-        companionName = "斯啾伊",
+        selfName = "角色甲",
+        companionName = "角色乙",
     )
 
     @Test
@@ -27,12 +27,12 @@ class MemoryNarrativePolicyTest {
 
         val normalized = MemoryNarrativePolicy().normalize(proposal, identity)
 
-        assertEquals("啥子七与斯啾伊的决定", normalized.title)
-        assertEquals("啥子七和斯啾伊一起完成了修复。", normalized.content)
-        assertEquals("啥子七 confirmed the result", normalized.outcome)
-        assertEquals("斯啾伊 observed a durable change", normalized.reason)
+        assertEquals("角色甲与角色乙的决定", normalized.title)
+        assertEquals("角色甲和角色乙一起完成了修复。", normalized.content)
+        assertEquals("角色甲 confirmed the result", normalized.outcome)
+        assertEquals("角色乙 observed a durable change", normalized.reason)
         assertEquals(listOf("USER", "ASSISTANT"), normalized.participants)
-        assertEquals(listOf("啥子七偏好", "斯啾伊-view"), normalized.tags)
+        assertEquals(listOf("角色甲偏好", "角色乙-view"), normalized.tags)
         listOf(normalized.title, normalized.content, normalized.outcome.orEmpty(), normalized.reason)
             .forEach { text ->
                 assertFalse(text.contains("用户"))
@@ -77,6 +77,6 @@ class MemoryNarrativePolicyTest {
             identity,
         )
 
-        assertEquals("啥子七和斯啾伊一起确认了结果。", readable)
+        assertEquals("角色甲和角色乙一起确认了结果。", readable)
     }
 }

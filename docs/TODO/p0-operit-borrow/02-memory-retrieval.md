@@ -3,7 +3,7 @@
 Goal: preserve the existing `__global__` versus Assistant-exclusive scope while replacing full
 prompt injection with bounded FTS retrieval.
 
-Status: IMPLEMENTED; DEVICE MIGRATION VERIFIED
+Status: IMPLEMENTED; OFFLINE MIGRATION VERIFIED
 
 Delivered:
 
@@ -23,8 +23,8 @@ Verification:
 
 - `MemoryRetrieverTest` and `MemoryPromptTest` passed in the final 1,574-test JVM regression.
 - Room schema `30.json` is checked in.
-- The backed-up HONOR AAK-AN00 user-0 database migrated to `user_version=30`; the resulting
+- A sanitized offline migration fixture migrated to `user_version=30`; the resulting
   `MemoryEntity` columns, FTS5 table, `simple` tokenizer, three synchronization triggers, and Room
   identity were inspected from the post-install snapshot.
-- Final v170 instrumentation ran only `Migration_29_30_Test` on the device and reported
-  `OK (1 test)`, proving v29 data preservation, metadata defaults, and FTS projection backfill.
+- Isolated migration verification ran only `Migration_29_30_Test` and passed, proving v29 data
+  preservation, metadata defaults, and FTS projection backfill.

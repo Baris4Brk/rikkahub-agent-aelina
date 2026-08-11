@@ -4,8 +4,10 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import me.rerere.rikkahub.data.db.AppDatabase
+import me.rerere.rikkahub.data.repository.MemoryIndexSearchRequest
 import me.rerere.rikkahub.data.repository.MemorySearchCandidate
 import me.rerere.rikkahub.data.repository.MemorySearchIndex
+import me.rerere.rikkahub.data.repository.MAX_MEMORY_INDEX_CANDIDATES
 
 const val MEMORY_FTS_SIMPLE_CREATE_SQL = """
     CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
@@ -106,7 +108,8 @@ val MEMORY_FTS_TRIGGER_SQL: List<String> = listOf(
     END
     """.trimIndent(),
     """
-    CREATE TRIGGER IF NOT EXISTS memory_fts_au AFTER UPDATE ON MemoryEntity BEGIN
+    CREATE TRIGGER IF NOT EXISTS memory_fts_au
+    AFTER UPDATE OF title, content, outcome, tags_search ON MemoryEntity BEGIN
         DELETE FROM memory_fts WHERE rowid = old.id;
         INSERT INTO memory_fts(
             rowid, title, content, outcome, tags_search, memory_id, assistant_id, updated_at_ms,
@@ -144,26 +147,154 @@ val MEMORY_FTS_V31_BACKFILL_SQL = MEMORY_FTS_BACKFILL_SQL
     .replace("content, outcome, tags_search", "content, tags_search")
     .replace("content, outcome, tags_search", "content, tags_search")
 
+internal val MEMORY_FTS_SEARCH_SQL = """
+    SELECT m.id, m.title, m.content, m.updated_at_ms, m.importance,
+           bm25(memory_fts, 5.0, 1.0, 1.5, 2.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+               AS fts_rank
+    FROM memory_fts
+    INNER JOIN MemoryEntity AS m ON m.id = memory_fts.rowid
+    WHERE memory_fts MATCH jieba_query(?)
+      AND m.assistant_id = ?
+      AND m.lifecycle_status = 'ACTIVE'
+      AND m.truth_status = 'CONFIRMED'
+      AND (m.expires_at_ms IS NULL OR m.expires_at_ms > ?)
+    ORDER BY fts_rank ASC, m.updated_at_ms DESC, m.id ASC
+    LIMIT ?
+""".trimIndent()
+
+private val MEMORY_FTS_EXPECTED_COLUMNS = setOf(
+    "title",
+    "content",
+    "outcome",
+    "tags_search",
+    "memory_id",
+    "assistant_id",
+    "updated_at_ms",
+    "importance",
+    "lifecycle_status",
+    "expires_at_ms",
+)
+
 /**
  * Makes the memory projection deterministic after migration, import or an interrupted rebuild.
- * The bundled `simple` tokenizer is loaded before this callback runs; rebuilding every open is
- * cheap for preference-sized memory collections and repairs any missed trigger update.
+ * A healthy projection is verified but never rewritten on open. This matters because a DELETE +
+ * backfill retokenizes every memory, adds startup latency and needlessly consumes battery.
  */
 fun ensureMemoryFtsSchema(db: SupportSQLiteDatabase) {
-    val schemaSql = db.query(
-        "SELECT sql FROM sqlite_master WHERE type='table' AND name='memory_fts'",
-    ).use { cursor -> if (cursor.moveToFirst()) cursor.getString(0).orEmpty() else "" }
-    val usesSimple = schemaSql.contains("tokenize = 'simple'", ignoreCase = true) ||
-        schemaSql.contains("tokenize='simple'", ignoreCase = true)
-    if (!usesSimple) {
-        dropMemoryFtsProjection(db)
-    }
     try {
+        val schemaSql = db.query(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='memory_fts'",
+        ).use { cursor -> if (cursor.moveToFirst()) cursor.getString(0).orEmpty() else "" }
+        val columns = readMemoryFtsColumns(db)
+        if (!isCompatibleMemoryFtsSchema(schemaSql, columns)) {
+            rebuildMemoryFtsProjection(db)
+            return
+        }
+
+        ensureCurrentMemoryFtsTriggers(db)
+        if (memoryFtsProjectionHasDrift(db)) {
+            rebuildMemoryFtsRows(db)
+        }
+    } catch (_: Throwable) {
+        // A malformed/corrupt virtual table can make even PRAGMA or the drift query fail. The
+        // recovery path is intentionally deterministic and runs before Room exposes the DB.
+        rebuildMemoryFtsProjection(db)
+    }
+}
+
+internal fun isCompatibleMemoryFtsSchema(
+    schemaSql: String,
+    columns: Set<String>,
+): Boolean {
+    val usesSimple = Regex(
+        pattern = "tokenize\\s*=\\s*['\"]simple['\"]",
+        option = RegexOption.IGNORE_CASE,
+    ).containsMatchIn(schemaSql)
+    return usesSimple && columns == MEMORY_FTS_EXPECTED_COLUMNS
+}
+
+internal fun memoryFtsTriggerDefinitionsAreCompatible(
+    definitions: Map<String, String>,
+): Boolean {
+    val expected = MEMORY_FTS_TRIGGER_SQL.associateBy(
+        keySelector = { sql ->
+            Regex("CREATE\\s+TRIGGER(?:\\s+IF\\s+NOT\\s+EXISTS)?\\s+(\\w+)", RegexOption.IGNORE_CASE)
+                .find(sql)
+                ?.groupValues
+                ?.get(1)
+                .orEmpty()
+        },
+        valueTransform = ::normalizeMemoryFtsSql,
+    )
+    val actual = definitions.mapValues { (_, sql) -> normalizeMemoryFtsSql(sql) }
+    return actual == expected
+}
+
+private fun readMemoryFtsColumns(db: SupportSQLiteDatabase): Set<String> =
+    db.query("PRAGMA table_info(memory_fts)").use { cursor ->
+        val nameIndex = cursor.getColumnIndex("name")
+        buildSet {
+            if (nameIndex >= 0) {
+                while (cursor.moveToNext()) add(cursor.getString(nameIndex))
+            }
+        }
+    }
+
+private fun ensureCurrentMemoryFtsTriggers(db: SupportSQLiteDatabase) {
+    val definitions = db.query(
+        "SELECT name, sql FROM sqlite_master " +
+            "WHERE type='trigger' AND name IN ('memory_fts_ai','memory_fts_au','memory_fts_ad')",
+    ).use { cursor ->
+        buildMap {
+            while (cursor.moveToNext()) {
+                put(cursor.getString(0), cursor.getString(1).orEmpty())
+            }
+        }
+    }
+    if (memoryFtsTriggerDefinitionsAreCompatible(definitions)) return
+    memoryFtsTransaction(db) {
+        dropMemoryFtsTriggers(db)
+        MEMORY_FTS_TRIGGER_SQL.forEach(db::execSQL)
+    }
+}
+
+private fun memoryFtsProjectionHasDrift(db: SupportSQLiteDatabase): Boolean =
+    db.query(
+        """
+        SELECT 1
+        FROM MemoryEntity AS m
+        LEFT JOIN memory_fts AS f ON f.rowid = m.id
+        WHERE f.rowid IS NULL
+           OR CAST(f.memory_id AS INTEGER) IS NOT m.id
+           OR f.title IS NOT m.title
+           OR f.content IS NOT m.content
+           OR f.outcome IS NOT m.outcome
+           OR f.tags_search IS NOT m.tags_search
+           OR f.assistant_id IS NOT m.assistant_id
+           OR CAST(f.updated_at_ms AS INTEGER) IS NOT m.updated_at_ms
+           OR CAST(f.importance AS REAL) IS NOT m.importance
+           OR f.lifecycle_status IS NOT m.lifecycle_status
+           OR CAST(f.expires_at_ms AS INTEGER) IS NOT m.expires_at_ms
+        UNION ALL
+        SELECT 1
+        FROM memory_fts AS f
+        LEFT JOIN MemoryEntity AS m ON m.id = f.rowid
+        WHERE m.id IS NULL
+        LIMIT 1
+        """.trimIndent(),
+    ).use { cursor -> cursor.moveToFirst() }
+
+private fun rebuildMemoryFtsRows(db: SupportSQLiteDatabase) {
+    memoryFtsTransaction(db) {
         db.execSQL(MEMORY_FTS_SIMPLE_CREATE_SQL.trimIndent())
         db.execSQL("DELETE FROM memory_fts")
         db.execSQL(MEMORY_FTS_BACKFILL_SQL.trimIndent())
         MEMORY_FTS_TRIGGER_SQL.forEach(db::execSQL)
-    } catch (_: Throwable) {
+    }
+}
+
+private fun rebuildMemoryFtsProjection(db: SupportSQLiteDatabase) {
+    memoryFtsTransaction(db) {
         dropMemoryFtsProjection(db)
         db.execSQL(MEMORY_FTS_SIMPLE_CREATE_SQL.trimIndent())
         db.execSQL(MEMORY_FTS_BACKFILL_SQL.trimIndent())
@@ -172,34 +303,61 @@ fun ensureMemoryFtsSchema(db: SupportSQLiteDatabase) {
 }
 
 private fun dropMemoryFtsProjection(db: SupportSQLiteDatabase) {
+    dropMemoryFtsTriggers(db)
+    db.execSQL("DROP TABLE IF EXISTS memory_fts")
+}
+
+private fun dropMemoryFtsTriggers(db: SupportSQLiteDatabase) {
     db.execSQL("DROP TRIGGER IF EXISTS memory_fts_ai")
     db.execSQL("DROP TRIGGER IF EXISTS memory_fts_au")
     db.execSQL("DROP TRIGGER IF EXISTS memory_fts_ad")
-    db.execSQL("DROP TABLE IF EXISTS memory_fts")
 }
+
+private inline fun memoryFtsTransaction(db: SupportSQLiteDatabase, block: () -> Unit) {
+    val ownsTransaction = !db.inTransaction()
+    if (ownsTransaction) db.beginTransaction()
+    try {
+        block()
+        if (ownsTransaction) db.setTransactionSuccessful()
+    } finally {
+        if (ownsTransaction) db.endTransaction()
+    }
+}
+
+private fun normalizeMemoryFtsSql(sql: String): String = sql
+    .lowercase()
+    .replace(Regex("if\\s+not\\s+exists"), "")
+    .replace(Regex("[`\"\\[\\]\\s;]+"), "")
 
 class MemoryFtsManager(
     private val database: AppDatabase,
 ) : MemorySearchIndex {
+    /** Compatibility entry point for callers that have not adopted a frozen request clock. */
     override suspend fun search(
         scopeId: String,
         query: String,
         limit: Int,
+    ): List<MemorySearchCandidate> = search(
+        MemoryIndexSearchRequest(
+            scopeId = scopeId,
+            query = query,
+            limit = limit,
+            frozenNowMs = System.currentTimeMillis(),
+        ),
+    )
+
+    override suspend fun search(
+        request: MemoryIndexSearchRequest,
     ): List<MemorySearchCandidate> = withContext(Dispatchers.IO) {
         val results = arrayListOf<MemorySearchCandidate>()
         database.openHelper.readableDatabase.query(
-            """
-            SELECT memory_id, title, content, updated_at_ms, importance,
-                   bm25(memory_fts, 5.0, 1.0, 1.5, 2.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-                       AS fts_rank
-            FROM memory_fts
-            WHERE memory_fts MATCH jieba_query(?) AND assistant_id = ?
-              AND lifecycle_status = 'ACTIVE'
-              AND (expires_at_ms IS NULL OR CAST(expires_at_ms AS INTEGER) > ?)
-            ORDER BY fts_rank ASC, updated_at_ms DESC, memory_id ASC
-            LIMIT ?
-            """.trimIndent(),
-            arrayOf<Any?>(query, scopeId, System.currentTimeMillis(), limit.coerceIn(1, 64)),
+            MEMORY_FTS_SEARCH_SQL,
+            arrayOf<Any?>(
+                request.query,
+                request.scopeId,
+                request.frozenNowMs,
+                request.limit.coerceIn(1, MAX_MEMORY_INDEX_CANDIDATES),
+            ),
         ).use { cursor ->
             while (cursor.moveToNext()) {
                 results += MemorySearchCandidate(

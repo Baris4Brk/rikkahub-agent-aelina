@@ -2,7 +2,6 @@ package me.rerere.rikkahub.data.ai.tools
 
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.add
-import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
@@ -121,7 +120,6 @@ fun buildMemoryTools(
                         put("items", buildJsonObject { put("type", "string") })
                     })
                     put("kind", memoryKindSchema())
-                    put("includeArchived", buildJsonObject { put("type", "boolean") })
                 },
                 required = listOf("query"),
             )
@@ -136,7 +134,10 @@ fun buildMemoryTools(
                     it.jsonPrimitive.contentOrNull?.trim()?.takeIf(String::isNotEmpty)
                 }?.toSet().orEmpty(),
                 kind = params["kind"]?.jsonPrimitive?.contentOrNull?.toMemoryKindOrNull(),
-                includeArchived = params["includeArchived"]?.jsonPrimitive?.booleanOrNull ?: false,
+                // Inactive/disputed/superseded records are available only in Memory Center,
+                // where lifecycle and truth are visible. A model tool must never receive them
+                // as unlabeled facts, including when replaying an older persisted argument.
+                includeArchived = false,
             )
             val payload = buildJsonArray {
                 onQuery(request).forEach { record ->

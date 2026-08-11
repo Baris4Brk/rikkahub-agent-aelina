@@ -1691,4 +1691,15 @@
   <string name="assistant_page_generation_turn_budget_effective">الحد الحالي: %1$d دقيقة</string>
   <string name="assistant_page_generation_turn_budget_effective_auto">تلقائي: %1$d دقيقة</string>
   <string name="assistant_page_generation_turn_budget_global">تلقائي: حد وقت التشغيل العام</string>
+  <string name="notification_channel_accessibility_keep_alive">حماية إمكانية الوصول</string>
+  <string name="accessibility_keep_alive_title">حماية إمكانية الوصول</string>
+  <string name="accessibility_keep_alive_starting">جارٍ بدء حماية إمكانية الوصول طويلة الأمد…</string>
+  <string name="accessibility_keep_alive_active">خدمة إمكانية الوصول نشطة ومحمية.</string>
+  <string name="accessibility_keep_alive_recovering">جارٍ استعادة خدمة إمكانية الوصول في RikkaHub…</string>
+  <string name="accessibility_keep_alive_waiting_for_bind">مفعّلة؛ بانتظار Android لإعادة توصيل الخدمة.</string>
+  <string name="accessibility_keep_alive_privilege_required">تتطلب الاستعادة إذن WRITE_SECURE_SETTINGS أو خدمة Shizuku مصرّحًا بها.</string>
+  <string name="accessibility_keep_alive_open_settings">إعدادات إمكانية الوصول</string>
+  <string name="accessibility_keep_alive_stop">إيقاف التشغيل الدائم</string>
+  <string name="setting_page_accessibility_keep_alive">إبقاء إمكانية الوصول مفعّلة</string>
+  <string name="setting_page_accessibility_keep_alive_desc">تشغيل مراقب في المقدمة واستعادة RikkaHub فقط إذا فصل Android خدمة إمكانية الوصول الخاصة به أو عطّلها.</string>
 </resources>

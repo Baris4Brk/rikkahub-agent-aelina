@@ -28,9 +28,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonElement
-import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -39,7 +37,6 @@ import me.rerere.highlight.HighlightText
 import me.rerere.hugeicons.HugeIcons
 import me.rerere.hugeicons.stroke.Clipboard
 import me.rerere.hugeicons.stroke.Clock02
-import me.rerere.hugeicons.stroke.Delete01
 import me.rerere.hugeicons.stroke.Eraser
 import me.rerere.hugeicons.stroke.GlobalSearch
 import me.rerere.hugeicons.stroke.MagicWand01
@@ -55,14 +52,12 @@ import me.rerere.hugeicons.stroke.VolumeHigh
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.data.event.AppEvent
 import me.rerere.rikkahub.data.event.AppEventBus
-import me.rerere.rikkahub.data.repository.MemoryRepository
 import me.rerere.rikkahub.tts.PersistentTtsLibrary
 import me.rerere.rikkahub.ui.components.richtext.MarkdownBlock
 import me.rerere.rikkahub.ui.components.ui.Favicon
 import me.rerere.rikkahub.ui.components.ui.FaviconRow
 import me.rerere.rikkahub.ui.modifier.shimmer
 import me.rerere.rikkahub.utils.JsonInstantPretty
-import me.rerere.rikkahub.utils.jsonPrimitiveOrNull
 import me.rerere.rikkahub.utils.openUrl
 import org.koin.compose.koinInject
 
@@ -112,30 +107,13 @@ object MemoryToolUI : ToolUIRenderer {
 
     @Composable
     override fun Preview(context: ToolUIContext, onDismissRequest: () -> Unit) {
-        val memoryRepo: MemoryRepository = koinInject()
-        val scope = rememberCoroutineScope()
-        val memoryId = (context.content as? JsonObject)?.get("id")?.jsonPrimitiveOrNull?.intOrNull
         DefaultToolPreview(
             context = context,
-            headerActions = if (action(context) in listOf(ACTION_CREATE, ACTION_EDIT) && memoryId != null) {
-                {
-                    IconButton(
-                        onClick = {
-                            scope.launch {
-                                memoryRepo.deleteMemory(memoryId)
-                                onDismissRequest()
-                            }
-                        }
-                    ) {
-                        Icon(
-                            imageVector = HugeIcons.Delete01,
-                            contentDescription = stringResource(R.string.tool_ui_delete_memory)
-                        )
-                    }
-                }
-            } else {
-                null
-            },
+            // A persisted tool result contains only an untrusted numeric memory id. Until the
+            // preview carries a host-bound assistant/global scope, exposing a delete shortcut
+            // here would reintroduce a cross-assistant confused-deputy path. Scoped deletion
+            // remains available from Memory Center and Assistant settings.
+            headerActions = null,
         )
     }
 }

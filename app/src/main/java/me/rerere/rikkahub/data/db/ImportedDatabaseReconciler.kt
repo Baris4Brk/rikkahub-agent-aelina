@@ -47,12 +47,13 @@ object ImportedDatabaseReconciler {
 
     /**
      * Room's schema version and identity hash for [AppDatabase]. Both are copied verbatim
-     * from app/schemas/me.rerere.rikkahub.data.db.AppDatabase/42.json. When the schema
+     * from app/schemas/me.rerere.rikkahub.data.db.AppDatabase/43.json. When the schema
      * version is bumped, update BOTH constants (and the table DDL below if the fork-only
      * tables changed) or this reconciliation will silently stop matching.
      */
-    internal const val EXPECTED_VERSION = 42
-    internal const val EXPECTED_IDENTITY_HASH = "1cee9962080483881bef799c83219b40"
+    internal const val EXPECTED_VERSION = 43
+    // Copied verbatim from app/schemas/.../43.json after the serial Room schema export.
+    internal const val EXPECTED_IDENTITY_HASH = "993e84f6266c165ffd196d30acb1969d"
     internal const val PRE_STORAGE_MODE_V35_IDENTITY_HASH = "2a74d694211f0df9f9094c7571ec71dd"
 
     internal enum class ReconcilePlan {
@@ -327,6 +328,112 @@ object ImportedDatabaseReconciler {
             "memory_captures",
             listOf("context_turn_limit" to "INTEGER NOT NULL DEFAULT 12"),
         )
+    }
+
+    /** Same-version imports need the scope/revision-aware Memory V2 relation schema. */
+    private fun ensureMemoryV43Schema(db: SQLiteDatabase) {
+        ensureColumns(
+            db,
+            "memory_captures",
+            listOf("payload_purged_at_ms" to "INTEGER"),
+        )
+        ensureColumns(
+            db,
+            "memory_candidates",
+            listOf("batch_id" to "TEXT"),
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS `index_memory_candidates_batch_id` " +
+                "ON `memory_candidates` (`batch_id`)",
+        )
+        ensureColumns(
+            db,
+            "memory_evidence",
+            listOf(
+                "relation_candidate_id" to "TEXT",
+                "link_id" to "TEXT",
+            ),
+        )
+        db.execSQL("CREATE INDEX IF NOT EXISTS `index_memory_evidence_relation_candidate_id` ON `memory_evidence` (`relation_candidate_id`)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS `index_memory_evidence_link_id` ON `memory_evidence` (`link_id`)")
+
+        ensureColumns(
+            db,
+            "memory_relation_candidates",
+            listOf(
+                "scope_id" to "TEXT NOT NULL DEFAULT ''",
+                "created_by_assistant_id" to "TEXT NOT NULL DEFAULT ''",
+                "source_candidate_id" to "TEXT",
+                "target_candidate_id" to "TEXT",
+                "source_expected_revision" to "INTEGER",
+                "target_expected_revision" to "INTEGER",
+                "resolved_link_id" to "TEXT",
+                "resolution_error" to "TEXT",
+                "updated_at_ms" to "INTEGER NOT NULL DEFAULT 0",
+            ),
+        )
+        db.execSQL(
+            "UPDATE `memory_relation_candidates` SET `status` = 'INVALIDATED', " +
+                "`resolution_error` = COALESCE(`resolution_error`, 'MIGRATION_UNVERIFIED'), " +
+                "`updated_at_ms` = CASE WHEN `updated_at_ms` = 0 THEN `created_at_ms` ELSE `updated_at_ms` END " +
+                "WHERE `scope_id` = ''",
+        )
+        db.execSQL("DROP INDEX IF EXISTS `index_memory_relation_candidates_status`")
+        db.execSQL("CREATE INDEX IF NOT EXISTS `index_memory_relation_candidates_scope_id_status_created_at_ms` ON `memory_relation_candidates` (`scope_id`, `status`, `created_at_ms`)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS `index_memory_relation_candidates_source_candidate_id` ON `memory_relation_candidates` (`source_candidate_id`)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS `index_memory_relation_candidates_target_candidate_id` ON `memory_relation_candidates` (`target_candidate_id`)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS `index_memory_relation_candidates_resolved_link_id` ON `memory_relation_candidates` (`resolved_link_id`)")
+
+        ensureColumns(
+            db,
+            "memory_links",
+            listOf(
+                "scope_id" to "TEXT NOT NULL DEFAULT ''",
+                "lifecycle_status" to "TEXT NOT NULL DEFAULT 'ACTIVE'",
+                "source_revision" to "INTEGER NOT NULL DEFAULT 1",
+                "target_revision" to "INTEGER NOT NULL DEFAULT 1",
+                "source_semantic_hash" to "TEXT NOT NULL DEFAULT ''",
+                "target_semantic_hash" to "TEXT NOT NULL DEFAULT ''",
+                "relation_candidate_id" to "TEXT",
+                "updated_at_ms" to "INTEGER NOT NULL DEFAULT 0",
+                "invalidated_at_ms" to "INTEGER",
+                "invalidation_reason" to "TEXT",
+            ),
+        )
+        db.execSQL(
+            "UPDATE `memory_links` SET `scope_id` = COALESCE((" +
+                "SELECT s.`assistant_id` FROM `MemoryEntity` s " +
+                "INNER JOIN `MemoryEntity` t ON t.`id` = `memory_links`.`target_memory_id` " +
+                "WHERE s.`id` = `memory_links`.`source_memory_id` " +
+                "AND s.`assistant_id` = t.`assistant_id`), ''), " +
+                "`lifecycle_status` = 'INVALIDATED', " +
+                "`updated_at_ms` = CASE WHEN `updated_at_ms` = 0 THEN `created_at_ms` ELSE `updated_at_ms` END, " +
+                "`invalidated_at_ms` = COALESCE(`invalidated_at_ms`, `created_at_ms`), " +
+                "`invalidation_reason` = COALESCE(`invalidation_reason`, 'MIGRATION_UNVERIFIED') " +
+                "WHERE `source_semantic_hash` = '' OR `target_semantic_hash` = ''",
+        )
+        db.execSQL("DROP INDEX IF EXISTS `index_memory_links_source_memory_id_target_memory_id_relation_type`")
+        db.execSQL("DROP INDEX IF EXISTS `index_memory_links_target_memory_id`")
+        db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_memory_links_scope_id_source_memory_id_target_memory_id_relation_type` ON `memory_links` (`scope_id`, `source_memory_id`, `target_memory_id`, `relation_type`)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS `index_memory_links_scope_id_source_memory_id_lifecycle_status` ON `memory_links` (`scope_id`, `source_memory_id`, `lifecycle_status`)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS `index_memory_links_scope_id_target_memory_id_lifecycle_status` ON `memory_links` (`scope_id`, `target_memory_id`, `lifecycle_status`)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS `index_memory_links_relation_candidate_id` ON `memory_links` (`relation_candidate_id`)")
+
+        ensureColumns(
+            db,
+            "memory_revisions",
+            listOf(
+                "reason_code" to "TEXT",
+                "cause_memory_id" to "INTEGER",
+                "cause_link_id" to "TEXT",
+            ),
+        )
+        listOf(
+            "CREATE TABLE IF NOT EXISTS `memory_link_revisions` (`id` TEXT NOT NULL, `link_id` TEXT NOT NULL, `revision` INTEGER NOT NULL, `operation` TEXT NOT NULL, `before_snapshot_json` TEXT, `after_snapshot_json` TEXT, `actor` TEXT NOT NULL, `relation_candidate_id` TEXT, `reason_code` TEXT, `created_at_ms` INTEGER NOT NULL, PRIMARY KEY(`id`))",
+            "CREATE UNIQUE INDEX IF NOT EXISTS `index_memory_link_revisions_link_id_revision` ON `memory_link_revisions` (`link_id`, `revision`)",
+            "CREATE INDEX IF NOT EXISTS `index_memory_link_revisions_link_id_created_at_ms` ON `memory_link_revisions` (`link_id`, `created_at_ms`)",
+            "CREATE INDEX IF NOT EXISTS `index_memory_link_revisions_relation_candidate_id` ON `memory_link_revisions` (`relation_candidate_id`)",
+        ).forEach(db::execSQL)
     }
 
     private fun ensureBrowserV34Schema(db: SQLiteDatabase) {
@@ -640,6 +747,7 @@ object ImportedDatabaseReconciler {
                     if (version >= 40) ensureToolExperienceV40Schema(db)
                     if (version >= 41) ensureToolShortcutV41Schema(db)
                     if (version >= 42) ensureOwnerHostV42Schema(db)
+                    if (version >= 43) ensureMemoryV43Schema(db)
 
                     // Older backups must keep their original user_version so Room can run
                     // every real migration (including 28→29). Precreating fork-only tables

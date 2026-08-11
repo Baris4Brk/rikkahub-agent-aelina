@@ -37,6 +37,7 @@ class ConversationRepository(
     private val filesManager: FilesManager,
     private val messageFtsManager: MessageFtsManager,
     private val deletionPolicy: ConversationDeletionPolicy,
+    private val memoryRepository: MemoryRepository,
 ) {
     companion object {
         private const val PAGE_SIZE = 20
@@ -331,6 +332,17 @@ class ConversationRepository(
         }
         messageFtsManager.deleteConversation(fullConversation.id.toString())
         database.withTransaction {
+            val conversationId = fullConversation.id.toString()
+            // Captures may belong to the assistant scope or to the shared global scope. Resolve
+            // exact provenance in both domains before the authoritative source messages vanish.
+            memoryRepository.invalidateSourceConversation(
+                scopeId = fullConversation.assistantId.toString(),
+                conversationId = conversationId,
+            )
+            memoryRepository.invalidateSourceConversation(
+                scopeId = MemoryRepository.GLOBAL_MEMORY_ID,
+                conversationId = conversationId,
+            )
             // message_node 会通过 CASCADE 自动删除
             conversationDAO.delete(
                 conversationToConversationEntity(fullConversation)

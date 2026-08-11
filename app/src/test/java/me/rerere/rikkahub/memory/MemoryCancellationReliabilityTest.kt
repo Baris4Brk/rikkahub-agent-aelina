@@ -63,6 +63,7 @@ class MemoryCancellationReliabilityTest {
             scopeId: String,
             query: String,
             limit: Int,
+            frozenNowMs: Long,
         ): List<ExistingMemoryRecord> = emptyList()
 
         override suspend fun commit(commit: MemoryProcessCommit): MemoryCommitResult {
@@ -72,6 +73,8 @@ class MemoryCancellationReliabilityTest {
 
         override suspend fun markFailed(
             captureIds: List<String>,
+            scopeId: String,
+            workerId: String,
             code: String,
             message: String?,
             retryPolicy: MemoryFailureRetryPolicy,
@@ -82,7 +85,12 @@ class MemoryCancellationReliabilityTest {
 
         override suspend fun pauseScope(scopeId: String, reason: String, nowMs: Long) = Unit
 
-        override suspend fun releaseClaimed(captureIds: List<String>, nowMs: Long) {
+        override suspend fun releaseClaimed(
+            captureIds: List<String>,
+            scopeId: String,
+            workerId: String,
+            nowMs: Long,
+        ) {
             releasedCaptureIds = captureIds
         }
 

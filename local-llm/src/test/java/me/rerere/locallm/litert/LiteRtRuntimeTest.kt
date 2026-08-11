@@ -1,7 +1,10 @@
 package me.rerere.locallm.litert
 
+import java.io.File
+import me.rerere.ai.core.Tool
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -49,6 +52,37 @@ class LiteRtRuntimeTest {
             hasMedia = true,
         )
         assertEquals(TurnPlan.Cold, plan)
+    }
+
+    @Test
+    fun `completed media call cannot warm reuse after media is removed from matching text`() {
+        val processed = LiteRtRuntime.processedPrefixAfterCompletion(
+            historySignatures = listOf(u1),
+            assistantSignature = a1,
+            consumedMedia = true,
+        )
+
+        assertTrue(processed.isEmpty())
+        assertEquals(
+            TurnPlan.Cold,
+            LiteRtRuntime.planTurns(
+                processed = processed,
+                historySignatures = listOf(u1, a1, u2),
+                hasMedia = false,
+            ),
+        )
+    }
+
+    @Test
+    fun `completed text call retains its strong warm prefix`() {
+        assertEquals(
+            listOf(u1, a1),
+            LiteRtRuntime.processedPrefixAfterCompletion(
+                historySignatures = listOf(u1),
+                assistantSignature = a1,
+                consumedMedia = false,
+            ),
+        )
     }
 
     @Test
@@ -127,6 +161,69 @@ class LiteRtRuntimeTest {
     @Test
     fun `turnSignature differs when content differs`() {
         assertFalse(turnSignature(ROLE_USER, "a") == turnSignature(ROLE_USER, "b"))
+    }
+
+    @Test
+    fun `turnSignature rejects the classic same-length Java hash collision`() {
+        assertEquals("Aa".hashCode(), "BB".hashCode())
+        assertEquals("Aa".length, "BB".length)
+
+        assertNotEquals(
+            turnSignature(ROLE_USER, "Aa"),
+            turnSignature(ROLE_USER, "BB"),
+        )
+    }
+
+    @Test
+    fun `turnSignature hashes exact unicode without normalization`() {
+        val composed = "\u00e9"
+        val decomposed = "e\u0301"
+
+        assertNotEquals(
+            turnSignature(ROLE_USER, composed),
+            turnSignature(ROLE_USER, decomposed),
+        )
+    }
+
+    @Test
+    fun `length-prefixed fingerprint has no field-boundary ambiguity`() {
+        val first = strongFingerprint(
+            domain = "test",
+            fields = listOf("a".toByteArray(), "bc".toByteArray()),
+        )
+        val second = strongFingerprint(
+            domain = "test",
+            fields = listOf("ab".toByteArray(), "c".toByteArray()),
+        )
+
+        assertNotEquals(first, second)
+        assertEquals(64, first.length)
+    }
+
+    @Test
+    fun `same path model replacement changes strong artifact identity`() {
+        val model = File.createTempFile("litert-model-identity", ".litertlm")
+        try {
+            model.writeText("Aa")
+            val first = computeModelArtifactSha256(model)
+            model.writeText("BB")
+            val replaced = computeModelArtifactSha256(model)
+
+            assertNotEquals(first, replaced)
+        } finally {
+            model.delete()
+        }
+    }
+
+    @Test
+    fun `tool authorization identity includes the full allowed tool definition`() {
+        val first = Tool(name = "read", description = "version one", execute = { emptyList() })
+        val revised = Tool(name = "read", description = "version two", execute = { emptyList() })
+
+        assertNotEquals(
+            computeLiteRtToolAuthorizationFingerprint(listOf(first)),
+            computeLiteRtToolAuthorizationFingerprint(listOf(revised)),
+        )
     }
 
     // ---- isVisionExecutorError -----------------------------------------------------

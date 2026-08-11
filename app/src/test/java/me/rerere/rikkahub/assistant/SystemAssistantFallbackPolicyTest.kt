@@ -24,7 +24,7 @@ class SystemAssistantFallbackPolicyTest {
         val conversationId = Uuid.random()
         val target = SecondUserTargetResolution.Resolved(
             assistantId = assistantId,
-            assistantName = "啥子七",
+            assistantName = "角色甲",
             conversationId = conversationId,
             displayName = "七姐",
         )
@@ -45,7 +45,7 @@ class SystemAssistantFallbackPolicyTest {
             assistantId = Uuid.random(),
             conversationId = Uuid.random(),
             displayName = "七姐",
-            assistantName = "啥子七",
+            assistantName = "角色甲",
         )
 
         assertEquals(

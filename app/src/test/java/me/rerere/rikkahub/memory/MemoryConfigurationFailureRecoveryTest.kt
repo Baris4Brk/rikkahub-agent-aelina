@@ -88,6 +88,7 @@ class MemoryConfigurationFailureRecoveryTest {
             scopeId: String,
             query: String,
             limit: Int,
+            frozenNowMs: Long,
         ): List<ExistingMemoryRecord> = emptyList()
 
         override suspend fun commit(commit: MemoryProcessCommit): MemoryCommitResult =
@@ -95,6 +96,8 @@ class MemoryConfigurationFailureRecoveryTest {
 
         override suspend fun markFailed(
             captureIds: List<String>,
+            scopeId: String,
+            workerId: String,
             code: String,
             message: String?,
             retryPolicy: MemoryFailureRetryPolicy,

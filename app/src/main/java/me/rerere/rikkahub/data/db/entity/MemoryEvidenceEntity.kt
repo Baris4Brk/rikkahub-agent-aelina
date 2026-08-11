@@ -5,7 +5,16 @@ import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
 
-@Entity(tableName = "memory_evidence", indices = [Index("memory_id"), Index("candidate_id"), Index("message_id")])
+@Entity(
+    tableName = "memory_evidence",
+    indices = [
+        Index("memory_id"),
+        Index("candidate_id"),
+        Index("relation_candidate_id"),
+        Index("link_id"),
+        Index("message_id"),
+    ],
+)
 data class MemoryEvidenceEntity(
     @PrimaryKey val id: String,
     @ColumnInfo("memory_id") val memoryId: Int? = null,
@@ -17,4 +26,6 @@ data class MemoryEvidenceEntity(
     @ColumnInfo("content_hash") val contentHash: String,
     @ColumnInfo("captured_at_ms") val capturedAtMs: Long,
     @ColumnInfo(defaultValue = "'ORIGINAL_MESSAGE'") val quality: String = "ORIGINAL_MESSAGE",
+    @ColumnInfo("relation_candidate_id") val relationCandidateId: String? = null,
+    @ColumnInfo("link_id") val linkId: String? = null,
 )

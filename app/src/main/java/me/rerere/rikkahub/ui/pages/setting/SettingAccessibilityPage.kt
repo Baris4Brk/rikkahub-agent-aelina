@@ -12,6 +12,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.LargeFlexibleTopAppBar
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -38,6 +39,8 @@ import me.rerere.rikkahub.R
 import me.rerere.rikkahub.data.ai.tools.local.AccessibilityServiceHandle
 import me.rerere.rikkahub.data.ai.tools.local.PermissionHelper
 import me.rerere.rikkahub.service.ActionLogEntry
+import me.rerere.rikkahub.service.AccessibilityKeepAliveService
+import me.rerere.rikkahub.service.AccessibilityKeepAliveState
 import me.rerere.rikkahub.service.RikkaAccessibilityService
 import me.rerere.rikkahub.ui.components.nav.BackButton
 import me.rerere.rikkahub.ui.components.ui.CardGroup
@@ -80,11 +83,15 @@ fun SettingAccessibilityPage() {
     // Re-check overlay permission on resume so the row updates immediately after the user
     // returns from the system settings deep-link.
     var overlayGranted by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
+    var keepAliveEnabled by remember {
+        mutableStateOf(AccessibilityKeepAliveState.isEnabled(context))
+    }
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 overlayGranted = Settings.canDrawOverlays(context)
+                keepAliveEnabled = AccessibilityKeepAliveState.isEnabled(context)
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -118,6 +125,23 @@ fun SettingAccessibilityPage() {
                 modifier = Modifier.padding(start = 16.dp)
             )
             CardGroup {
+                item(
+                    headlineContent = {
+                        Text(stringResource(R.string.setting_page_accessibility_keep_alive))
+                    },
+                    supportingContent = {
+                        Text(stringResource(R.string.setting_page_accessibility_keep_alive_desc))
+                    },
+                    trailingContent = {
+                        Switch(
+                            checked = keepAliveEnabled,
+                            onCheckedChange = { enabled ->
+                                keepAliveEnabled = enabled
+                                AccessibilityKeepAliveService.setEnabled(context, enabled)
+                            },
+                        )
+                    },
+                )
                 if (running) {
                     item(
                         headlineContent = {

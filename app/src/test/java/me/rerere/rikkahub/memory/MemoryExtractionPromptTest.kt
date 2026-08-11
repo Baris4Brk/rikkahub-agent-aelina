@@ -58,15 +58,15 @@ class MemoryExtractionPromptTest {
                 evidenceRefToMessageId = mapOf("T1" to "private-user-message-id"),
                 isConversationContextCompacted = true,
                 narrativeIdentity = MemoryNarrativeIdentity(
-                    selfName = "啥子七",
-                    companionName = "斯啾伊",
+                    selfName = "角色甲",
+                    companionName = "角色乙",
                 ),
             ),
         )
 
         assertTrue(payload.contains("\"evidenceRef\":\"T1\""))
         assertTrue(payload.contains("\"conversationContextCompacted\":true"))
-        assertTrue(payload.contains("\"displayNames\":{\"self\":\"啥子七\",\"companion\":\"斯啾伊\"}"))
+        assertTrue(payload.contains("\"displayNames\":{\"self\":\"角色甲\",\"companion\":\"角色乙\"}"))
         assertTrue(payload.contains("\"selfText\":\"Short chronological excerpt\""))
         assertTrue(payload.contains("\"companionText\":\"Short answer excerpt\""))
         assertFalse(payload.contains("\"userText\""))

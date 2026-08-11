@@ -16,6 +16,17 @@ import me.rerere.ai.ui.UIMessage
 interface Provider<T : ProviderSetting> {
     suspend fun listModels(providerSetting: T): List<Model>
 
+    /**
+     * Returns a provider-owned hard capability only when it is locally/versionedly trusted.
+     * Remote catalog metadata must remain in [Model.contextLength] and must not be promoted by
+     * the default implementation. Providers whose capability depends on local runtime settings
+     * may resolve it at request time.
+     */
+    suspend fun resolveTrustedContextWindowTokens(
+        providerSetting: T,
+        model: Model,
+    ): Int? = model.trustedContextWindowTokens?.takeIf { it > 0 }
+
     suspend fun getBalance(providerSetting: T): String {
         return "TODO"
     }
@@ -52,6 +63,51 @@ interface Provider<T : ProviderSetting> {
     }
 }
 
+/**
+ * Opaque, privacy-safe namespace for provider/local prefix caches.
+ *
+ * The app must hash conversation, assistant, memory-scope, and final injected-memory identities
+ * before crossing this API. Raw UUIDs and memory IDs are deliberately rejected here and must never
+ * appear in cache traces. [compilerRevision] invalidates a prefix when prompt rendering changes.
+ */
+class ProviderCacheIdentity private constructor(
+    private val opaqueDigest: String,
+    private val compilerRevision: String,
+) {
+    fun redactedPrefix(): String = opaqueDigest.take(12)
+
+    override fun equals(other: Any?): Boolean =
+        other is ProviderCacheIdentity &&
+            opaqueDigest == other.opaqueDigest &&
+            compilerRevision == other.compilerRevision
+
+    override fun hashCode(): Int = 31 * opaqueDigest.hashCode() + compilerRevision.hashCode()
+
+    override fun toString(): String =
+        "ProviderCacheIdentity(${redactedPrefix()}..., revision=$compilerRevision)"
+
+    companion object {
+        private val SHA256_HEX = Regex("^[0-9a-fA-F]{64}$")
+        private val REVISION = Regex("^[A-Za-z0-9._-]{1,64}$")
+
+        fun fromOpaqueDigest(
+            opaqueSha256: String,
+            compilerRevision: String,
+        ): ProviderCacheIdentity {
+            require(SHA256_HEX.matches(opaqueSha256)) {
+                "Provider cache identity must be an opaque SHA-256 hex digest, never a raw ID"
+            }
+            require(REVISION.matches(compilerRevision)) {
+                "compilerRevision must be a non-empty, privacy-safe revision label"
+            }
+            return ProviderCacheIdentity(
+                opaqueDigest = opaqueSha256.lowercase(),
+                compilerRevision = compilerRevision,
+            )
+        }
+    }
+}
+
 @Serializable
 data class TextGenerationParams(
     val model: Model,
@@ -74,6 +130,9 @@ data class TextGenerationParams(
      */
     @Transient
     val freshConnection: Boolean = false,
+    /** Local/provider cache namespace only. It is never serialized into an API request. */
+    @Transient
+    val providerCacheIdentity: ProviderCacheIdentity? = null,
     val customHeaders: List<CustomHeader> = emptyList(),
     val customBody: List<CustomBody> = emptyList(),
 )

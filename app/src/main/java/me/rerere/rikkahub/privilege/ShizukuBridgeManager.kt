@@ -180,6 +180,33 @@ class ShizukuBridgeManager(context: Context) : ExternalPrivilegeBridge, ManagedD
             service.clearAppCache(packageName, currentUserId(), protected)
         }
 
+    /** Fixed internal recovery path; unlike [startCommand], it cannot execute arbitrary input. */
+    suspend fun ensureOwnAccessibilityServiceEnabled(
+        forceRebind: Boolean,
+    ): ExternalPrivilegeActionResult {
+        val service = connectService().getOrElse { error ->
+            return ExternalPrivilegeActionResult(
+                false,
+                "SHIZUKU_UNAVAILABLE",
+                error.message ?: "Shizuku UserService is unavailable.",
+            )
+        }
+        return runCatching {
+            parseServiceResponse(
+                service.ensureAccessibilityServiceEnabled(currentUserId(), forceRebind),
+            ).toMutationActionResult()
+        }.getOrElse { error ->
+            if (!service.asBinder().isBinderAlive) {
+                clearUserService(notifyDisplayListeners = true)
+            }
+            ExternalPrivilegeActionResult(
+                false,
+                "BINDER_CALL_FAILED",
+                error.message ?: "Accessibility recovery Binder call failed.",
+            )
+        }
+    }
+
     override suspend fun startCommand(input: PrivilegedCommandInput): ToolExecutionHandle {
         val commandId = Uuid.random().toString()
         val normalized = input.normalized()
@@ -529,8 +556,8 @@ class ShizukuBridgeManager(context: Context) : ExternalPrivilegeBridge, ManagedD
         private const val SHIZUKU_PACKAGE = "moe.shizuku.privileged.api"
         private const val SUI_PACKAGE = "rikka.sui"
         private const val PERMISSION_REQUEST_CODE = 74_201
-        private const val USER_SERVICE_VERSION = 2
-        private const val USER_SERVICE_TAG = "rikkahub.external_privilege.v2"
+        private const val USER_SERVICE_VERSION = 3
+        private const val USER_SERVICE_TAG = "rikkahub.external_privilege.v3"
         private const val BIND_TIMEOUT_MS = 10_000L
         private const val MAX_PACKAGES = 2_000
         private const val PER_USER_RANGE = 100_000

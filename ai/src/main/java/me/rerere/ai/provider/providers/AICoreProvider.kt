@@ -42,6 +42,7 @@ import me.rerere.ai.ui.UIMessageChoice
 import me.rerere.ai.ui.UIMessagePart
 
 private const val TAG = "AICoreProvider"
+private const val AICORE_CONSERVATIVE_TOTAL_TOKEN_LIMIT = 4_000
 
 /**
  * On-device LLM provider backed by Google's AICore (Gemini Nano) via the ML Kit GenAI prompt
@@ -57,6 +58,16 @@ class AICoreProvider(private val context: Context) : Provider<ProviderSetting.AI
 
     override suspend fun listModels(providerSetting: ProviderSetting.AICore): List<Model> =
         AICORE_DEFAULT_MODELS
+
+    /**
+     * ML Kit documents a hard input limit below 4,000 tokens. Keep the shared app gate at a
+     * conservative 4,000-token total envelope so it cannot accidentally exceed that input limit
+     * when a device/model reports a larger combined input+output capacity.
+     */
+    override suspend fun resolveTrustedContextWindowTokens(
+        providerSetting: ProviderSetting.AICore,
+        model: Model,
+    ): Int = AICORE_CONSERVATIVE_TOTAL_TOKEN_LIMIT
 
     override suspend fun getBalance(providerSetting: ProviderSetting.AICore): String =
         "On-device — no API balance"
@@ -98,7 +109,10 @@ class AICoreProvider(private val context: Context) : Provider<ProviderSetting.AI
             // descriptions, no skill prose, no examples. Cloud providers continue to use the
             // full agent-core via the assistant's enabledSkills.
             val systemPrefix = buildAiCoreMiniSystemPrefix(params.tools)
-            val prompt = formatPromptFromMessages(truncateForAiCore(messages))
+            // The shared request gate has already pruned only complete historical turns. Never
+            // perform a second hidden takeLast here: it used to discard every SYSTEM message and
+            // could silently remove safety and memory trust boundaries.
+            val prompt = formatPromptFromMessages(messages)
             val temperature = (params.temperature ?: 0.7f).coerceIn(0f, 1f)
             val request = generateContentRequest(TextPart(prompt)) {
                 this.temperature = temperature
@@ -405,17 +419,6 @@ private fun buildAiCoreMiniSystemPrefix(tools: List<Tool>): String = buildString
         }
     }
 }.trim()
-
-/**
- * Trims the conversation history so the prompt stays under Nano's context window. Keeps
- * the latest [keepTail] messages and drops the rest. SYSTEM messages are dropped entirely
- * because the AICore mini prefix replaces them. Tool exchanges within the kept tail are
- * preserved so the model can continue an in-progress task.
- */
-private fun truncateForAiCore(messages: List<UIMessage>, keepTail: Int = 6): List<UIMessage> {
-    val nonSystem = messages.filter { it.role != MessageRole.SYSTEM }
-    return if (nonSystem.size <= keepTail) nonSystem else nonSystem.takeLast(keepTail)
-}
 
 /**
  * Streaming parser that walks the AICore output token-by-token, splitting it into plain

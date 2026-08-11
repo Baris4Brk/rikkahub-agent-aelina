@@ -18,6 +18,7 @@ import me.rerere.ai.provider.LITERT_PROVIDER_ID
 import me.rerere.locallm.AcceleratorProbe
 import me.rerere.locallm.LocalRuntime
 import me.rerere.locallm.LocalRuntimePreferences
+import me.rerere.locallm.litert.LiteRtModelDefaults
 import me.rerere.locallm.litert.LiteRtModelMetadata
 import me.rerere.locallm.MemoryGuard
 import me.rerere.locallm.ModelInstall
@@ -145,6 +146,7 @@ class SettingLocalLlmViewModel(
             .firstOrNull { it.id == targetId } ?: return
         if (provider.models.isEmpty()) return
         val originals = provider.models.toList()
+        val engineContextOverride = prefs.maxNumTokensOverride(runtime)
         var anyChange = false
         val patched = originals.map { model ->
             val current = LiteRtModelMetadata.Capabilities(
@@ -153,8 +155,13 @@ class SettingLocalLlmViewModel(
             )
             val target = LiteRtModelMetadata.deriveCapabilities(model.modelId)
             val merged = LiteRtModelMetadata.mergeAdditive(current, target)
+            val defaults = LiteRtModelDefaults.forModelFile(model.modelId)
+            val trustedContextTokens = engineContextOverride
+                ?: defaults.maxContextLength
+                ?: defaults.maxTokens
             if (merged.inputModalities == model.inputModalities &&
-                merged.abilities == model.abilities
+                merged.abilities == model.abilities &&
+                model.trustedContextWindowTokens == trustedContextTokens
             ) {
                 model
             } else {
@@ -162,6 +169,7 @@ class SettingLocalLlmViewModel(
                 model.copy(
                     inputModalities = merged.inputModalities,
                     abilities = merged.abilities,
+                    trustedContextWindowTokens = trustedContextTokens,
                 )
             }
         }
@@ -234,11 +242,15 @@ class SettingLocalLlmViewModel(
             val missing = finalInstalled.keys.filter { it !in knownModelIds }
             for (fileName in missing) {
                 val caps = LiteRtModelMetadata.deriveCapabilities(fileName)
+                val defaults = LiteRtModelDefaults.forModelFile(fileName)
                 val model = Model(
                     modelId = fileName,
                     displayName = fileName,
                     inputModalities = caps.inputModalities,
                     abilities = caps.abilities,
+                    trustedContextWindowTokens = prefs.maxNumTokensOverride(runtime)
+                        ?: defaults.maxContextLength
+                        ?: defaults.maxTokens,
                 )
                 updateMyProvider { provider -> provider.addModel(model) }
             }
@@ -278,7 +290,10 @@ class SettingLocalLlmViewModel(
 
     /** Set the max-context override. Pass null to clear and revert to the curated default. */
     fun setMaxNumTokensOverride(value: Int?) {
-        viewModelScope.launch { prefs.setMaxNumTokensOverride(runtime, value) }
+        viewModelScope.launch {
+            prefs.setMaxNumTokensOverride(runtime, value)
+            migrateExistingModelMetadata()
+        }
     }
 
     /** Clear the "vision unavailable" flag for [fileName] so the next inference attempts the
@@ -384,11 +399,15 @@ class SettingLocalLlmViewModel(
                     _downloadProgress.value = null
                     prefs.addInstalledModel(runtime, fileName, p.file.absolutePath)
                     val caps = LiteRtModelMetadata.deriveCapabilities(fileName)
+                    val defaults = LiteRtModelDefaults.forModelFile(fileName)
                     val model = Model(
                         modelId = fileName,
                         displayName = fileName,
                         inputModalities = caps.inputModalities,
                         abilities = caps.abilities,
+                        trustedContextWindowTokens = prefs.maxNumTokensOverride(runtime)
+                            ?: defaults.maxContextLength
+                            ?: defaults.maxTokens,
                     )
                     updateMyProvider { provider -> provider.addModel(model) }
                     // Enable the provider automatically after the first successful download.

@@ -34,6 +34,7 @@ interface MemoryProcessingStore {
         scopeId: String,
         query: String,
         limit: Int,
+        frozenNowMs: Long,
     ): List<ExistingMemoryRecord>
 
     /** Atomically resolves captures, candidate rows, formal memories and revisions. */
@@ -41,6 +42,8 @@ interface MemoryProcessingStore {
 
     suspend fun markFailed(
         captureIds: List<String>,
+        scopeId: String,
+        workerId: String,
         code: String,
         message: String?,
         retryPolicy: MemoryFailureRetryPolicy,
@@ -50,9 +53,36 @@ interface MemoryProcessingStore {
     suspend fun pauseScope(scopeId: String, reason: String, nowMs: Long)
 
     /** Returns interrupted leases without consuming an automatic retry. */
-    suspend fun releaseClaimed(captureIds: List<String>, nowMs: Long) = Unit
+    suspend fun releaseClaimed(
+        captureIds: List<String>,
+        scopeId: String,
+        workerId: String,
+        nowMs: Long,
+    ) = Unit
 
     suspend fun review(command: MemoryReviewCommand, nowMs: Long): MemoryReviewResult
+
+    suspend fun reviewRelation(
+        command: MemoryRelationReviewCommand,
+        nowMs: Long,
+    ): MemoryRelationReviewResult = MemoryRelationReviewResult.Failed("memory_relation_review_unavailable")
+
+    suspend fun invalidateSourceConversation(
+        scopeId: String,
+        conversationId: String,
+        nowMs: Long,
+    ): Int = 0
+
+    suspend fun invalidateSourceMessages(
+        scopeId: String,
+        conversationId: String,
+        messageIds: Set<String>,
+        nowMs: Long,
+    ): Int = 0
+
+    suspend fun runRetention(nowMs: Long): Int = 0
+
+    suspend fun purgeScope(scopeId: String, nowMs: Long): Int = 0
 
     suspend fun mutate(
         command: MemoryMutationCommand,
@@ -169,7 +199,14 @@ class DefaultMemoryV2Coordinator(
         // from the same conversation when constructing an extraction request.
         try {
             captures.groupBy { it.conversationId to it.captureSource }.values.forEach { group ->
-                val outcome = processGroup(store, memoryExtractor, request.scopeId, group, now)
+                val outcome = processGroup(
+                    store = store,
+                    memoryExtractor = memoryExtractor,
+                    scopeId = request.scopeId,
+                    workerId = request.workerId,
+                    captures = group,
+                    now = now,
+                )
                 processedCaptures += outcome.processedCaptures
                 autoApplied += outcome.autoApplied
                 pendingReview += outcome.pendingReview
@@ -180,7 +217,12 @@ class DefaultMemoryV2Coordinator(
             }
         } catch (cancelled: CancellationException) {
             withContext(NonCancellable) {
-                store.releaseClaimed(captures.map(MemoryCaptureRecord::id), nowMs())
+                store.releaseClaimed(
+                    captureIds = captures.map(MemoryCaptureRecord::id),
+                    scopeId = request.scopeId,
+                    workerId = request.workerId,
+                    nowMs = nowMs(),
+                )
             }
             throw cancelled
         }
@@ -204,6 +246,7 @@ class DefaultMemoryV2Coordinator(
         store: MemoryProcessingStore,
         memoryExtractor: MemoryExtractor,
         scopeId: String,
+        workerId: String,
         captures: List<MemoryCaptureRecord>,
         now: Long,
     ): ProcessGroupOutcome {
@@ -215,6 +258,8 @@ class DefaultMemoryV2Coordinator(
         if (turns.isEmpty()) {
             store.markFailed(
                 captureIds,
+                scopeId,
+                workerId,
                 "memory_extraction_empty",
                 null,
                 retryPolicy = MemoryFailureRetryPolicy.NONE,
@@ -225,7 +270,7 @@ class DefaultMemoryV2Coordinator(
 
         val query = turns.joinToString("\n") { it.userText }.take(MEMORY_EXISTING_QUERY_CHARS)
         val existing = try {
-            store.findExisting(scopeId, query, MAX_EXISTING_MEMORIES)
+            store.findExisting(scopeId, query, MAX_EXISTING_MEMORIES, now)
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Throwable) {
@@ -267,6 +312,8 @@ class DefaultMemoryV2Coordinator(
         if (extraction is MemoryExtractorResult.Failure) {
             store.markFailed(
                 captureIds,
+                scopeId,
+                workerId,
                 extraction.code,
                 extraction.message,
                 extraction.retryPolicy,
@@ -283,6 +330,8 @@ class DefaultMemoryV2Coordinator(
         if (parsed is MemoryExtractionParseResult.Failure) {
             store.markFailed(
                 captureIds,
+                scopeId,
+                workerId,
                 parsed.message,
                 null,
                 retryPolicy = MemoryFailureRetryPolicy.AUTOMATIC,
@@ -342,14 +391,26 @@ class DefaultMemoryV2Coordinator(
                     risks = candidatePolicy.reviewFlagsFor(proposal, duplicate),
                 )
             }
+        val visibleRevisions = existingForExtraction.associate { it.id to it.revision }
+        val relationDecisions = validation.acceptedRelations.map { relation ->
+            MemoryRelationDecision(
+                id = idGenerator(),
+                proposal = relation,
+                sourceExpectedRevision = relation.sourceMemoryId?.let(visibleRevisions::get),
+                targetExpectedRevision = relation.targetMemoryId?.let(visibleRevisions::get),
+            )
+        }
         val commitResult = try {
             store.commit(
                 MemoryProcessCommit(
+                    batchId = idGenerator(),
                     scopeId = scopeId,
                     assistantId = bounded.first().assistantId,
+                    workerId = workerId,
                     conversationId = bounded.first().conversationId,
                     captures = bounded,
                     candidates = decisions,
+                    relations = relationDecisions,
                     nowMs = now,
                 ),
             )
@@ -358,6 +419,8 @@ class DefaultMemoryV2Coordinator(
         } catch (error: Throwable) {
             store.markFailed(
                 captureIds,
+                scopeId,
+                workerId,
                 "memory_commit_failed",
                 error.message,
                 retryPolicy = MemoryFailureRetryPolicy.AUTOMATIC,

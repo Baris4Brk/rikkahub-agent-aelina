@@ -1985,4 +1985,15 @@
   <string name="assistant_page_generation_turn_budget_effective">目前上限：%1$d 分鐘</string>
   <string name="assistant_page_generation_turn_budget_effective_auto">自動：%1$d 分鐘</string>
   <string name="assistant_page_generation_turn_budget_global">自動：全域執行時間上限</string>
+  <string name="notification_channel_accessibility_keep_alive">無障礙保護</string>
+  <string name="accessibility_keep_alive_title">無障礙保護</string>
+  <string name="accessibility_keep_alive_starting">正在啟動無障礙長期保護…</string>
+  <string name="accessibility_keep_alive_active">無障礙服務已啟用並受到保護。</string>
+  <string name="accessibility_keep_alive_recovering">正在復原 RikkaHub 無障礙服務…</string>
+  <string name="accessibility_keep_alive_waiting_for_bind">已啟用；正在等待 Android 重新連接服務。</string>
+  <string name="accessibility_keep_alive_privilege_required">自動復原需要 WRITE_SECURE_SETTINGS 或已授權的 Shizuku 服務。</string>
+  <string name="accessibility_keep_alive_open_settings">無障礙設定</string>
+  <string name="accessibility_keep_alive_stop">停止常駐</string>
+  <string name="setting_page_accessibility_keep_alive">保持無障礙啟用</string>
+  <string name="setting_page_accessibility_keep_alive_desc">執行前景監控；若 Android 中斷或停用 RikkaHub 無障礙服務，則只復原 RikkaHub。</string>
 </resources>

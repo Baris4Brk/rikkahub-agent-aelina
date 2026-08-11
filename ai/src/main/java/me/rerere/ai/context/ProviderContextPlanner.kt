@@ -37,9 +37,12 @@ fun validateProviderContextPayload(
     estimator: ContextTokenEstimator = ApproximateContextTokenEstimator,
 ): ProviderContextPayloadValidation {
     require(contextWindowTokens > 0)
+    // Reserve the value the caller actually intends to send. Silently capping only this
+    // validation-side reserve (while leaving the provider's max output unchanged) can approve a
+    // payload that the provider must reject. Callers that intentionally reduce output must use
+    // ProviderRequestContextGate and forward its effectiveMaxOutputTokens to the provider.
     val outputReserve = (requestedOutputTokens ?: 4_096)
-        .coerceAtLeast(1_024)
-        .coerceAtMost(max(1_024, contextWindowTokens / 4))
+        .coerceAtLeast(1)
         .coerceAtMost((contextWindowTokens - 1).coerceAtLeast(1))
     return ProviderContextPayloadValidation(
         estimatedInputTokens = messages.sumOf { estimator.estimate(it).coerceAtLeast(0) },

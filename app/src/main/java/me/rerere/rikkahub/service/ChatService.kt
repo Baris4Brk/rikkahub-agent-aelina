@@ -109,6 +109,8 @@ import me.rerere.rikkahub.data.model.replaceRegexes
 import me.rerere.rikkahub.data.model.toMessageNode
 import me.rerere.rikkahub.data.repository.ConversationRepository
 import me.rerere.rikkahub.data.repository.MemoryRepository
+import me.rerere.rikkahub.data.repository.MemoryRetrievalDiagnosticsStore
+import me.rerere.rikkahub.data.repository.MemoryRetrievalQuerySource
 import me.rerere.rikkahub.data.repository.WorkspaceRepository
 import me.rerere.rikkahub.workflow.repository.WorkflowRepository
 import me.rerere.rikkahub.web.BadRequestException
@@ -469,6 +471,7 @@ class ChatService(
     private val settingsStore: SettingsStore,
     private val conversationRepo: ConversationRepository,
     private val memoryRepository: MemoryRepository,
+    private val memoryRetrievalDiagnostics: MemoryRetrievalDiagnosticsStore,
     private val memoryV2Coordinator: me.rerere.rikkahub.memory.MemoryV2Coordinator,
     private val generationHandler: GenerationHandler,
     private val templateTransformer: TemplateTransformer,
@@ -2577,6 +2580,45 @@ class ChatService(
                     globalTurnBudgetMs = me.rerere.rikkahub.data.ai.limits.ToolRuntimeLimits.turnBudgetMs,
                 )
             }
+            // Freeze one time boundary for standing, expiry, FTS and eventual lastAccess. A long
+            // tool loop must not see internally inconsistent memory validity decisions.
+            val memoryFrozenNowMs = System.currentTimeMillis()
+            val generationInputMessages = conversation.currentMessages.let { allMessages ->
+                if (messageRange != null) {
+                    allMessages.subList(messageRange.start, messageRange.endInclusive + 1)
+                } else {
+                    allMessages
+                }
+            }
+            var memoryRetrievalTraceId: String? = null
+            val generationMemories = if (!assistant.enableMemory) {
+                emptyList()
+            } else {
+                val standingPreferences = memoryRepository.getUserApprovedStandingMemories(
+                    assistantId = assistant.id,
+                    includeGlobal = assistant.useGlobalMemory,
+                    frozenNowMs = memoryFrozenNowMs,
+                )
+                val query = generationInputMessages
+                    .lastOrNull { it.role == MessageRole.USER }
+                    ?.parts
+                    ?.filterIsInstance<UIMessagePart.Text>()
+                    ?.joinToString("\n") { it.text }
+                    .orEmpty()
+                val retrieval = memoryRepository.retrieveRelevant(
+                    assistantId = assistant.id,
+                    query = query,
+                    includeGlobal = assistant.useGlobalMemory,
+                    excludeMemoryIds = standingPreferences.mapTo(hashSetOf()) { it.id },
+                    frozenNowMs = memoryFrozenNowMs,
+                    querySource = MemoryRetrievalQuerySource.LATEST_USER_TEXT,
+                )
+                memoryRetrievalTraceId = memoryRetrievalDiagnostics.record(
+                    trace = retrieval.trace,
+                    recordedAtMs = memoryFrozenNowMs,
+                )
+                (standingPreferences + retrieval.matches.map { it.memory }).distinctBy { it.id }
+            }
             generationHandler.generateText(
                 settings = settings,
                 model = model,
@@ -2662,13 +2704,7 @@ class ChatService(
                     }
                 },
                 runtimeOnlyTools = legacyOwnerRuntimeTools,
-                messages = conversation.currentMessages.let {
-                    if (messageRange != null) {
-                        it.subList(messageRange.start, messageRange.endInclusive + 1)
-                    } else {
-                        it
-                    }
-                },
+                messages = generationInputMessages,
                 assistant = assistant,
                 unrestrictedOverride = privilegeContext.unrestrictedOverride,
                 capabilitySubject = capabilitySubject,
@@ -2681,6 +2717,8 @@ class ChatService(
                 commandOrigin = origin,
                 conversationId = conversationId,
                 commandId = effectiveCommandId,
+                memoryFrozenNowMs = memoryFrozenNowMs,
+                memoryRetrievalTraceId = memoryRetrievalTraceId,
                 runControl = runControl,
                 isHeadless = isHeadless,
                 isSubAgent = subAgentProfile != null,
@@ -2712,27 +2750,7 @@ class ChatService(
                         put(registration.definition.name, registration.startable)
                     }
                 },
-                memories = if (!assistant.enableMemory) {
-                    emptyList()
-                } else {
-                    val standingPreferences = memoryRepository.getUserApprovedStandingMemories(
-                        assistantId = assistant.id,
-                        includeGlobal = assistant.useGlobalMemory,
-                    )
-                    val query = conversation.currentMessages
-                        .lastOrNull { it.role == MessageRole.USER }
-                        ?.parts
-                        ?.filterIsInstance<UIMessagePart.Text>()
-                        ?.joinToString("\n") { it.text }
-                        .orEmpty()
-                    val relevantMemories = memoryRepository.queryRelevant(
-                        assistantId = assistant.id,
-                        query = query,
-                        includeGlobal = assistant.useGlobalMemory,
-                        excludeMemoryIds = standingPreferences.mapTo(hashSetOf()) { it.id },
-                    ).map { it.memory }
-                    (standingPreferences + relevantMemories).distinctBy { it.id }
-                },
+                memories = generationMemories,
                 inputTransformers = buildList {
                     addAll(inputTransformers)
                     add(templateTransformer)
@@ -3913,6 +3931,17 @@ class ChatService(
             return
         }
 
+        val sourceMessageIds = setOf(messageId.toString())
+        memoryRepository.invalidateSourceMessages(
+            scopeId = currentConversation.assistantId.toString(),
+            conversationId = conversationId.toString(),
+            messageIds = sourceMessageIds,
+        )
+        memoryRepository.invalidateSourceMessages(
+            scopeId = MemoryRepository.GLOBAL_MEMORY_ID,
+            conversationId = conversationId.toString(),
+            messageIds = sourceMessageIds,
+        )
         saveConversation(conversationId, updatedConversation)
     }
 

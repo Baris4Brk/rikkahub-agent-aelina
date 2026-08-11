@@ -7,7 +7,7 @@
 - Room 版本保持 v42；未修改 `Conversation`、`ConversationEntity`、`AppDatabase` 或 `ToolExecutionGate` 的核心职责。
 - 第二用户 authority、epoch、固定会话、DIRECT 工具面、Owner 自动执行、Secret Vault、审批策略与全部既有桥接能力保持不变。
 - 现有助手提示词没有迁移。`{{cur_time}}` 与 `{{cur_datetime}}` 继续解析；只有以后补入的新默认助手模板使用 `{{cur_date}}`。
-- 所有验证均为本地 JVM、编译或 APK 构建；未连接 Honor AAK-AN00，也未运行 connected、instrumentation 或 UIAutomator 测试。
+- 所有验证均为本地 JVM、编译或 APK 构建；未连接主力设备，也未运行 connected、instrumentation 或 UIAutomator 测试。
 
 ## 功能审计结果
 
@@ -68,7 +68,7 @@
 - 高亮 grammar 来自上游 2.4.5 对 highlight.js 11.11.1 的纯 Kotlin 移植；QuickJS/Prism 已从 highlight 模块删除。
 - 应用仍显式依赖 QuickJS 以保留第二用户的 `eval_javascript` 工具能力。
 - `HighlighterLimitsAndPerformanceTest` 在本机 JVM 中完成 100、1,000、5,000 行联合测试用时 0.493 秒；5,000 次请求序号测试用时 0.004 秒。该数据是回归预算，不冒充 Android UI 帧率。
-- 直接 QuickJS Android 对照需要模拟器 instrumentation；本轮遵守主力机禁测规则，没有在 Honor 手机上获取该数据。
+- 直接 QuickJS Android 对照需要模拟器 instrumentation；本轮遵守主力设备禁测规则，没有在主力设备上获取该数据。
 
 ## 验证矩阵
 

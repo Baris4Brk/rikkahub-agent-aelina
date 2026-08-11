@@ -12,19 +12,22 @@ import me.rerere.rikkahub.data.db.entity.MemoryEntity
 interface MemoryDAO {
     @Query(
         "SELECT * FROM memoryentity WHERE assistant_id = :assistantId " +
-            "AND lifecycle_status = 'ACTIVE' AND (expires_at_ms IS NULL OR expires_at_ms > :nowMs)",
+            "AND lifecycle_status = 'ACTIVE' AND truth_status = 'CONFIRMED' " +
+            "AND (expires_at_ms IS NULL OR expires_at_ms > :nowMs)",
     )
     fun getMemoriesOfAssistantFlow(assistantId: String, nowMs: Long): Flow<List<MemoryEntity>>
 
     @Query(
         "SELECT * FROM memoryentity WHERE assistant_id = :assistantId " +
-            "AND lifecycle_status = 'ACTIVE' AND (expires_at_ms IS NULL OR expires_at_ms > :nowMs)",
+            "AND lifecycle_status = 'ACTIVE' AND truth_status = 'CONFIRMED' " +
+            "AND (expires_at_ms IS NULL OR expires_at_ms > :nowMs)",
     )
     suspend fun getMemoriesOfAssistant(assistantId: String, nowMs: Long): List<MemoryEntity>
 
     @Query(
         "SELECT * FROM memoryentity WHERE assistant_id = :scopeId " +
             "AND lifecycle_status = 'ACTIVE' AND (expires_at_ms IS NULL OR expires_at_ms > :nowMs) " +
+            "AND truth_status = 'CONFIRMED' " +
             "AND memory_kind IN ('USER_PROFILE', 'PREFERENCE', 'WORKING_CONSTRAINT') " +
             "AND approval_source IN ('MANUAL_UI', 'USER_REVIEWED') " +
             "ORDER BY importance DESC, updated_at_ms DESC, id ASC LIMIT :limit",
@@ -41,11 +44,22 @@ interface MemoryDAO {
     @Query("SELECT * FROM memoryentity")
     suspend fun getAllMemories(): List<MemoryEntity>
 
-    @Query("SELECT * FROM memoryentity WHERE id = :id")
-    suspend fun getMemoryById(id: Int): MemoryEntity?
+    @Query("SELECT * FROM memoryentity WHERE id = :id AND assistant_id = :scopeId LIMIT 1")
+    suspend fun getMemoryById(id: Int, scopeId: String): MemoryEntity?
 
-    @Query("SELECT * FROM memoryentity WHERE id IN (:ids)")
-    suspend fun getMemoriesByIds(ids: List<Int>): List<MemoryEntity>
+    @Query(
+        "SELECT * FROM memoryentity WHERE id = :id AND assistant_id = :scopeId " +
+            "AND lifecycle_status = 'ACTIVE' AND truth_status = 'CONFIRMED' " +
+            "AND (expires_at_ms IS NULL OR expires_at_ms > :nowMs) LIMIT 1",
+    )
+    suspend fun getActiveConfirmedMemoryById(
+        id: Int,
+        scopeId: String,
+        nowMs: Long,
+    ): MemoryEntity?
+
+    @Query("SELECT * FROM memoryentity WHERE id IN (:ids) AND assistant_id = :scopeId")
+    suspend fun getMemoriesByIds(ids: List<Int>, scopeId: String): List<MemoryEntity>
 
     @Query(
         "SELECT * FROM memoryentity WHERE assistant_id = :scopeId AND content_hash = :contentHash " +
@@ -125,11 +139,66 @@ interface MemoryDAO {
     suspend fun insertMemory(memory: MemoryEntity): Long
 
     @Update
-    suspend fun updateMemory(memory: MemoryEntity)
+    suspend fun updateMemory(memory: MemoryEntity): Int
 
-    @Query("DELETE FROM memoryentity WHERE id = :id")
-    suspend fun deleteMemory(id: Int)
+    @Query("DELETE FROM memoryentity WHERE id = :id AND assistant_id = :scopeId")
+    suspend fun deleteMemory(id: Int, scopeId: String): Int
+
+    @Query(
+        "UPDATE memoryentity SET last_accessed_at_ms = " +
+            "CASE WHEN last_accessed_at_ms IS NULL OR last_accessed_at_ms < :accessedAtMs " +
+            "THEN :accessedAtMs ELSE last_accessed_at_ms END " +
+            "WHERE id IN (:ids) AND assistant_id = :scopeId AND lifecycle_status = 'ACTIVE' " +
+            "AND truth_status = 'CONFIRMED' " +
+            "AND (last_accessed_at_ms IS NULL OR last_accessed_at_ms < :accessedAtMs) " +
+            "AND (expires_at_ms IS NULL OR expires_at_ms > :frozenNowMs)",
+    )
+    suspend fun markLastAccessed(
+        ids: List<Int>,
+        scopeId: String,
+        accessedAtMs: Long,
+        frozenNowMs: Long,
+    ): Int
+
+    @Query(
+        "SELECT * FROM memoryentity WHERE assistant_id = :scopeId " +
+            "AND source_conversation_id = :conversationId ORDER BY id ASC",
+    )
+    suspend fun getMemoriesBySourceConversation(
+        scopeId: String,
+        conversationId: String,
+    ): List<MemoryEntity>
+
+    @Query(
+        "SELECT * FROM memoryentity WHERE assistant_id = :scopeId " +
+            "AND lifecycle_status = 'ACTIVE' AND expires_at_ms IS NOT NULL " +
+            "AND expires_at_ms <= :nowMs ORDER BY expires_at_ms ASC, id ASC LIMIT :limit",
+    )
+    suspend fun getDueForExpiryMaterialization(
+        scopeId: String,
+        nowMs: Long,
+        limit: Int,
+    ): List<MemoryEntity>
+
+    @Query(
+        "SELECT * FROM memoryentity WHERE lifecycle_status = 'ACTIVE' " +
+            "AND expires_at_ms IS NOT NULL AND expires_at_ms <= :nowMs " +
+            "ORDER BY expires_at_ms ASC, id ASC LIMIT :limit",
+    )
+    suspend fun getAllDueForExpiryMaterialization(
+        nowMs: Long,
+        limit: Int,
+    ): List<MemoryEntity>
+
+    @Query(
+        "SELECT * FROM memoryentity WHERE assistant_id = :globalScopeId " +
+            "AND origin_assistant_id = :originAssistantId ORDER BY id ASC",
+    )
+    suspend fun getGlobalMemoriesByOriginAssistant(
+        globalScopeId: String,
+        originAssistantId: String,
+    ): List<MemoryEntity>
 
     @Query("DELETE FROM memoryentity WHERE assistant_id = :assistantId")
-    suspend fun deleteMemoriesOfAssistant(assistantId: String)
+    suspend fun deleteMemoriesOfAssistant(assistantId: String): Int
 }

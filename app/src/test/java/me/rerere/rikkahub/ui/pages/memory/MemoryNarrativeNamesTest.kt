@@ -13,21 +13,21 @@ class MemoryNarrativeNamesTest {
     @Test
     fun `memory attribution and participants use configured names rather than internal roles`() {
         val names = Assistant(
-            name = "斯啾伊",
-            memoryNarrativeUserName = "啥子七",
+            name = "角色乙",
+            memoryNarrativeUserName = "角色甲",
         ).memoryNarrativeNames(
             defaultSelfName = "你",
             defaultCompanionName = "对话对象",
             sharedNameFormat = "%1\$s 与 %2\$s",
         )
 
-        assertEquals("啥子七", names.attributionName(MemoryAttribution.USER.name))
-        assertEquals("斯啾伊", names.attributionName(MemoryAttribution.ASSISTANT.name))
-        assertEquals("啥子七 与 斯啾伊", names.attributionName(MemoryAttribution.SHARED.name))
+        assertEquals("角色甲", names.attributionName(MemoryAttribution.USER.name))
+        assertEquals("角色乙", names.attributionName(MemoryAttribution.ASSISTANT.name))
+        assertEquals("角色甲 与 角色乙", names.attributionName(MemoryAttribution.SHARED.name))
         val participants = names.participantsName(
             JsonInstant.encodeToString(listOf("USER", "ASSISTANT")),
         ).orEmpty()
-        assertEquals("啥子七 · 斯啾伊", participants)
+        assertEquals("角色甲 · 角色乙", participants)
         assertFalse(participants.contains("USER"))
         assertFalse(participants.contains("ASSISTANT"))
         assertEquals(
@@ -39,8 +39,8 @@ class MemoryNarrativeNamesTest {
     @Test
     fun `global records resolve names from their originating conversation partner`() {
         val first = Assistant(
-            name = "斯啾伊",
-            memoryNarrativeUserName = "啥子七",
+            name = "角色乙",
+            memoryNarrativeUserName = "角色甲",
         )
         val second = Assistant(
             name = "另一位",
@@ -55,8 +55,8 @@ class MemoryNarrativeNamesTest {
             sharedNameFormat = "%1\$s 与 %2\$s",
         )
 
-        assertEquals("啥子七", names.selfName)
-        assertEquals("斯啾伊", names.companionName)
+        assertEquals("角色甲", names.selfName)
+        assertEquals("角色乙", names.companionName)
     }
 
     @Test
@@ -80,8 +80,8 @@ class MemoryNarrativeNamesTest {
     @Test
     fun `recall test uses the originating names for a global memory`() {
         val first = Assistant(
-            name = "斯啾伊",
-            memoryNarrativeUserName = "啥子七",
+            name = "角色乙",
+            memoryNarrativeUserName = "角色甲",
         )
         val second = Assistant(
             name = "另一位",
@@ -111,10 +111,10 @@ class MemoryNarrativeNamesTest {
             )
         }
 
-        assertEquals("啥子七与斯啾伊的项目", readable.title)
-        assertEquals("啥子七和斯啾伊一起完成了记忆库修复。", readable.content)
-        assertEquals(listOf("啥子七", "斯啾伊"), readable.tags)
-        assertEquals(listOf("啥子七", "斯啾伊"), readable.matchedTerms)
-        assertEquals("啥子七与斯啾伊都确认了结果", readable.reason)
+        assertEquals("角色甲与角色乙的项目", readable.title)
+        assertEquals("角色甲和角色乙一起完成了记忆库修复。", readable.content)
+        assertEquals(listOf("角色甲", "角色乙"), readable.tags)
+        assertEquals(listOf("角色甲", "角色乙"), readable.matchedTerms)
+        assertEquals("角色甲与角色乙都确认了结果", readable.reason)
     }
 }

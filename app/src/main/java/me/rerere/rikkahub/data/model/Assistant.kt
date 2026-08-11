@@ -149,6 +149,12 @@ data class AssistantMemory(
     val kind: MemoryKind = MemoryKind.OTHER,
     @Transient
     val approvalSource: MemoryApprovalSource = MemoryApprovalSource.LEGACY,
+    /** Runtime authorization identity for UI mutations; never serialized into prompts/tools. */
+    @Transient
+    val scopeId: String? = null,
+    /** Runtime CAS value paired with [scopeId]. */
+    @Transient
+    val revision: Int? = null,
 )
 
 @Serializable

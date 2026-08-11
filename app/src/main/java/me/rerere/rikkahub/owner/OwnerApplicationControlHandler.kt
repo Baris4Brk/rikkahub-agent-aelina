@@ -135,7 +135,7 @@ class OwnerApplicationControlHandler(
             "plugin_install_managed", "plugin_uninstall" -> needsUserAction(index, action, "The package file must be resolved and verified by the private package installer.")
             "memory_list" -> memoryList(index, request, action)
             "memory_configure_assistant" -> memoryConfigure(index, action)
-            "memory_delete" -> memoryDelete(index, action)
+            "memory_delete" -> memoryDelete(index, request, action)
             "prompt_library_list", "lorebook_list" -> promptLibraryList(index, action)
             "prompt_injection_upsert" -> promptInjectionUpsert(index, action)
             "prompt_injection_delete" -> promptInjectionDelete(index, action)
@@ -211,7 +211,9 @@ class OwnerApplicationControlHandler(
             is ControlReceipt.SafetyChanged -> if (safetySnapshot() != receipt.before) {
                 OwnerActionValidation(true, "OWNER_STATE_VERIFIED", "Safety capability settings were read back.")
             } else invalid("OWNER_VERIFY_FAILED", "Safety capability settings did not change.")
-            is ControlReceipt.MemoryArchived -> if (memories.getMemoryEntity(receipt.memoryId)?.lifecycleStatus == "ARCHIVED") {
+            is ControlReceipt.MemoryArchived -> if (
+                memories.getMemoryEntity(receipt.scopeId, receipt.memoryId)?.lifecycleStatus == "ARCHIVED"
+            ) {
                 OwnerActionValidation(true, "OWNER_STATE_VERIFIED", "Memory archive state was read back.")
             } else invalid("OWNER_VERIFY_FAILED", "Memory did not enter the archived state.")
             is ControlReceipt.AsrChanged -> {
@@ -253,7 +255,11 @@ class OwnerApplicationControlHandler(
                 OwnerCompensationResult(true, "SAFETY_CAPABILITIES_RESTORED")
             }
             is ControlReceipt.MemoryArchived -> {
-                memories.restoreMemory(receipt.memoryId)
+                memories.restoreMemory(
+                    scopeId = receipt.scopeId,
+                    id = receipt.memoryId,
+                    expectedRevision = receipt.archivedRevision,
+                )
                 OwnerCompensationResult(true, "MEMORY_RESTORED")
             }
             is ControlReceipt.AsrChanged -> {
@@ -355,16 +361,43 @@ class OwnerApplicationControlHandler(
         })
     }
 
-    private suspend fun memoryDelete(index: Int, action: OwnerAction): OwnerAppliedAction {
+    private suspend fun memoryDelete(
+        index: Int,
+        request: OwnerOperationRequest,
+        action: OwnerAction,
+    ): OwnerAppliedAction {
         val id = action.arguments.int("memory_id")
             ?: return failure(index, action, "MEMORY_ID_REQUIRED", "memory_id is required.")
-        val before = memories.getMemoryEntity(id)
+        val assistantId = action.arguments.uuid("assistant_id")
+            ?: runCatching { Uuid.parse(request.assistantId) }.getOrNull()
+            ?: return failure(index, action, "ASSISTANT_ID_INVALID", "Owner assistant ID is invalid.")
+        val assistant = settingsStore.settingsFlow.value.assistants
+            .firstOrNull { it.id == assistantId }
+            ?: return failure(index, action, "ASSISTANT_NOT_FOUND", "Assistant does not exist.")
+        val scopeId = if (assistant.useGlobalMemory) {
+            MemoryRepository.GLOBAL_MEMORY_ID
+        } else {
+            assistant.id.toString()
+        }
+        val before = memories.getMemoryEntity(scopeId, id)
             ?: return failure(index, action, "MEMORY_NOT_FOUND", "Memory record does not exist.")
         if (before.lifecycleStatus == "ARCHIVED") {
             return success(index, action, "MEMORY_ALREADY_ARCHIVED", "Memory is already archived.")
         }
-        memories.deleteMemory(id)
-        return success(index, action, "MEMORY_ARCHIVED", "Memory was revision-safely archived.", receipt = ControlReceipt.MemoryArchived(id))
+        memories.deleteMemory(scopeId = scopeId, id = id, expectedRevision = before.revision)
+        val archivedRevision = memories.getMemoryEntity(scopeId, id)?.revision
+            ?: return failure(index, action, "OWNER_VERIFY_FAILED", "Archived memory disappeared.")
+        return success(
+            index,
+            action,
+            "MEMORY_ARCHIVED",
+            "Memory was revision-safely archived.",
+            receipt = ControlReceipt.MemoryArchived(
+                memoryId = id,
+                scopeId = scopeId,
+                archivedRevision = archivedRevision,
+            ),
+        )
     }
 
     private suspend fun memoryConfigure(index: Int, action: OwnerAction): OwnerAppliedAction {
@@ -1173,7 +1206,11 @@ class OwnerApplicationControlHandler(
         data class SettingsChanged(val before: Settings) : ControlReceipt
         data class PluginChanged(val before: InstalledPluginRecord) : ControlReceipt
         data class SafetyChanged(val before: SafetySnapshot) : ControlReceipt
-        data class MemoryArchived(val memoryId: Int) : ControlReceipt
+        data class MemoryArchived(
+            val memoryId: Int,
+            val scopeId: String,
+            val archivedRevision: Int,
+        ) : ControlReceipt
         data class AsrChanged(
             val beforeProviders: List<ASRProviderSetting>,
             val beforeSelected: Uuid?,
@@ -1211,7 +1248,7 @@ class OwnerApplicationControlHandler(
             "run_list" to setOf("limit"), "run_get" to setOf("request_id"), "run_cancel" to setOf("conversation_id", "command_id"), "run_retry" to setOf("conversation_id"),
             "quick_capture_get" to emptySet(), "quick_capture_update" to setOf("enabled", "target_mode", "fixed_assistant_id", "prompt", "auto_send", "backend", "area_mode", "bubble_size_dp", "bubble_opacity", "bubble_edge", "bubble_y_fraction"), "quick_capture_trigger" to emptySet(),
             "plugin_list" to emptySet(), "plugin_runtime_set" to setOf("enabled"), "plugin_install_managed" to setOf("managed_file_id"), "plugin_approve" to setOf("plugin_id"), "plugin_set_enabled" to setOf("plugin_id", "enabled"), "plugin_bind" to setOf("plugin_id", "assistant_id", "enabled"), "plugin_uninstall" to setOf("plugin_id"),
-            "memory_list" to setOf("assistant_id", "limit"), "memory_configure_assistant" to setOf("assistant_id", "enabled", "use_global", "recent_chats_reference"), "memory_delete" to setOf("memory_id"),
+            "memory_list" to setOf("assistant_id", "limit"), "memory_configure_assistant" to setOf("assistant_id", "enabled", "use_global", "recent_chats_reference"), "memory_delete" to setOf("memory_id", "assistant_id"),
             "prompt_library_list" to emptySet(), "prompt_injection_upsert" to setOf("definition"), "prompt_injection_delete" to setOf("injection_id"), "quick_message_create" to setOf("message_id", "title", "content"), "quick_message_update" to setOf("message_id", "title", "content"), "quick_message_delete" to setOf("message_id"), "lorebook_list" to emptySet(), "lorebook_upsert" to setOf("definition"), "lorebook_delete" to setOf("lorebook_id"),
             "asr_list" to emptySet(), "asr_create" to setOf("asr_id", "type", "name", "websocket_url", "model", "language", "sample_rate", "vault_slot_id"), "asr_update" to setOf("asr_id", "name", "websocket_url", "model", "language", "sample_rate", "vault_slot_id"), "asr_delete" to setOf("asr_id"), "asr_set_default" to setOf("asr_id"),
             "channel_get" to emptySet(), "web_channel_update" to setOf("enabled", "port", "jwt_enabled", "localhost_only"), "telegram_channel_update" to setOf("enabled", "vault_slot_id", "default_chat_id", "whitelist", "assistant_id", "stream_screenshots"),

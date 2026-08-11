@@ -2238,4 +2238,15 @@ mDNS 地址：使用 .local 主机名，同一网络中的其他设备可通过�
   <string name="assistant_page_generation_turn_budget_effective">当前上限：%1$d 分钟</string>
   <string name="assistant_page_generation_turn_budget_effective_auto">自动：%1$d 分钟</string>
   <string name="assistant_page_generation_turn_budget_global">自动：全局运行时上限</string>
+  <string name="notification_channel_accessibility_keep_alive">无障碍保护</string>
+  <string name="accessibility_keep_alive_title">无障碍保护</string>
+  <string name="accessibility_keep_alive_starting">正在启动无障碍长期保护…</string>
+  <string name="accessibility_keep_alive_active">无障碍服务已开启并受到保护。</string>
+  <string name="accessibility_keep_alive_recovering">正在恢复 RikkaHub 无障碍服务…</string>
+  <string name="accessibility_keep_alive_waiting_for_bind">已开启；正在等待 Android 重新连接服务。</string>
+  <string name="accessibility_keep_alive_privilege_required">自动恢复需要 WRITE_SECURE_SETTINGS 或已授权的 Shizuku 服务。</string>
+  <string name="accessibility_keep_alive_open_settings">无障碍设置</string>
+  <string name="accessibility_keep_alive_stop">停止常驻</string>
+  <string name="setting_page_accessibility_keep_alive">保持无障碍开启</string>
+  <string name="setting_page_accessibility_keep_alive_desc">运行前台监控；若 Android 断开或关闭 RikkaHub 无障碍服务，则只恢复 RikkaHub。</string>
 </resources>

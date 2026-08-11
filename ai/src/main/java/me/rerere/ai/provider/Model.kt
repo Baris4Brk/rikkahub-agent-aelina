@@ -26,6 +26,11 @@ data class Model(
     val supportedParameters: List<String> = emptyList(),
     val pricePromptPerToken: Double? = null,
     val priceCompletionPerToken: Double? = null,
+    /**
+     * Versioned/locally verified hard capability. Provider catalog values belong in
+     * [contextLength], not here. A null value means enforcement uses user policy plus the app cap.
+     */
+    val trustedContextWindowTokens: Int? = null,
 )
 
 @Serializable

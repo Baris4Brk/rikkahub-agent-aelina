@@ -50,4 +50,4 @@ content.
 The release gate is local JVM tests, Kotlin compilation, Android-test-source compilation, APK
 assembly, manifest inspection, and signature/hash inspection. No connected Android tests,
 instrumentation, test APK, data reset, or ADB installation is part of normal validation for the
-Honor primary phone.
+primary device.

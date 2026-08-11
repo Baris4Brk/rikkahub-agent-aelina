@@ -313,41 +313,6 @@ private fun UIMessage.withFinalAnswerRecovery(
     )
 }
 
-/**
- * Replace older tool-result `Image` parts with a small text elision so the same JPEGs
- * aren't re-encoded into base64 on every subsequent step. We keep the
- * [IMAGE_KEEP_LAST_N_TOOL_RESULTS] most-recent tool-result-bearing assistant messages
- * verbatim and elide everything older. User uploads (`role=USER`) are NEVER elided —
- * those are real input the model needs to reason over. Assistant-generated images
- * (model image-gen output) are also kept verbatim as those are visible product, not
- * intermediate reasoning state.
- */
-private fun List<UIMessage>.ageOldToolImages(): List<UIMessage> {
-    var toolResultsWithImagesSeen = 0
-    return this.asReversed().map { msg ->
-        if (msg.role == MessageRole.USER) return@map msg
-        val hasImageInTool = msg.parts.any { p ->
-            p is UIMessagePart.Tool && p.output.any { it is UIMessagePart.Image }
-        }
-        if (!hasImageInTool) return@map msg
-        toolResultsWithImagesSeen++
-        if (toolResultsWithImagesSeen <= IMAGE_KEEP_LAST_N_TOOL_RESULTS) return@map msg
-        val newParts = msg.parts.map { part ->
-            if (part is UIMessagePart.Tool) {
-                val newOutput = part.output.map { o ->
-                    if (o is UIMessagePart.Image) {
-                        UIMessagePart.Text(
-                            "[image elided — original at ${o.url}; superseded by newer screenshots]"
-                        )
-                    } else o
-                }
-                part.copy(output = newOutput)
-            } else part
-        }
-        msg.copy(parts = newParts)
-    }.asReversed()
-}
-
 @Serializable
 sealed interface GenerationChunk {
     data class Messages(
@@ -397,8 +362,6 @@ private const val MAX_LOOP_GUARD_TRIPS_PER_TURN = 6
  * action; take new screenshot, compare" — needs both the previous and the current
  * screenshot in context. Anything older has been superseded.
  */
-private const val IMAGE_KEEP_LAST_N_TOOL_RESULTS = 2
-
 /**
  * Some read-only tools measure a real-time signal where re-calling after a TTL is
  * legitimate (battery drains, screens change, sensors update). For these, the loop guard
@@ -525,6 +488,10 @@ class GenerationHandler(
         capabilitySubject: CapabilitySubject? = null,
         selectedPrivilegedConversation: Boolean = false,
         memories: List<AssistantMemory>? = null,
+        /** One frozen validity boundary shared by memory read, prompt packing and lastAccess. */
+        memoryFrozenNowMs: Long = System.currentTimeMillis(),
+        /** Opaque, privacy-safe handle into the bounded retrieval diagnostics store. */
+        memoryRetrievalTraceId: String? = null,
         tools: List<Tool> = emptyList(),
         /** Definitions used only to resume already-persisted calls; never sent to a Provider. */
         runtimeOnlyTools: List<Tool> = emptyList(),
@@ -675,6 +642,11 @@ class GenerationHandler(
             .maxOfOrNull { it.attempt }
             ?: 0
         var modelCallIndex = 0
+        // Flow-local by design: a cold Flow may have multiple collectors, and no continuation
+        // boundary may leak across commands. Only history before the active user turn is frozen;
+        // the live user/assistant/tool tail and all execution gates remain current.
+        var continuationSnapshot: ToolLoopContinuationSnapshot? = null
+        var continuationHistoryEpoch = 0
 
         // One extra index is reserved solely for a tool-free summary after a tool that completed
         // on the last planned step. [generationFinalizationStep] prevents that index from starting
@@ -772,6 +744,22 @@ class GenerationHandler(
                 },
             ).joinToString("\n\n").ifBlank { null }
 
+            // A Pending tool is waiting for the user's approval. Stop before resolving any
+            // provider schemas or projections; this loop iteration must not prepare a request.
+            if (pendingTools.isEmpty()) {
+                val lastHasPending = messages.lastOrNull()?.parts?.any { part ->
+                    part is UIMessagePart.Tool && part.isPending
+                } == true
+                if (lastHasPending) {
+                    Log.i(
+                        TAG,
+                        "generateText: last message has Pending tools; waiting for approval, " +
+                            "not regenerating",
+                    )
+                    break
+                }
+            }
+
             val completingAlreadyAcceptedTools = pendingTools.isNotEmpty() &&
                 !finalizationStep.skipResumableTools
             val candidateTools = buildList {
@@ -791,10 +779,17 @@ class GenerationHandler(
                             )
                         },
                         onUpdate = { id, input ->
-                            memoryRepo.updateMemory(id, input)
+                            memoryRepo.updateMemory(
+                                scopeId = memoryAssistantId,
+                                id = id,
+                                input = input,
+                            )
                         },
                         onDelete = { id ->
-                            memoryRepo.deleteMemory(id)
+                            memoryRepo.deleteMemory(
+                                scopeId = memoryAssistantId,
+                                id = id,
+                            )
                         },
                         onQuery = { input ->
                             memoryRepo.queryDetailed(
@@ -804,15 +799,20 @@ class GenerationHandler(
                                 limit = input.limit,
                                 tags = input.tags,
                                 kind = input.kind,
-                                includeArchived = input.includeArchived,
+                                includeArchived = false,
+                                frozenNowMs = memoryFrozenNowMs,
                             )
                         },
                     ).let(this::addAll)
                 }
                 addAll(tools)
             }
-            val candidateSurface = ToolSurfaceBuilder.build(candidateTools)
-            val providerToolsInternal = buildList {
+            // Resolve each candidate schema once so the catalogue snapshot and any selected
+            // provider definition describe the same capability bytes for this loop iteration.
+            val candidateSurface = ToolSurfaceBuilder.build(
+                candidateTools.materializeProviderToolSchemas(),
+            )
+            val providerToolDefinitions = buildList {
                 Log.i(TAG, "generateInternal: build tools($assistant)")
                 if (!forceFinalization || completingAlreadyAcceptedTools) {
                     val pinnedToolNames = pendingTools.mapTo(linkedSetOf()) { it.toolName }
@@ -823,29 +823,81 @@ class GenerationHandler(
                     }
                 }
             }
-            val toolsInternal = (providerToolsInternal + runtimeOnlyTools)
+            val toolsInternal = (providerToolDefinitions + runtimeOnlyTools)
                 .distinctBy { it.name }
-
-            // Mixed-state guard: if the last message has tools STILL in Pending (waiting
-            // on user approval keyboard) but nothing canResumeExecution, the existing
-            // path would call generateInternal and start a brand-new assistant turn,
-            // orphaning the Pending tool. Bail out instead and let handleToolApproval
-            // re-enter when the user taps the keyboard.
-            if (pendingTools.isEmpty()) {
-                val lastHasPending = messages.lastOrNull()?.parts?.any { p ->
-                    p is UIMessagePart.Tool && p.isPending
-                } == true
-                if (lastHasPending) {
-                    Log.i(TAG, "generateText: last message has Pending tools; waiting for approval, not regenerating")
-                    break
-                }
-            }
 
             val toolsToProcess: List<UIMessagePart.Tool>
 
             // Skip generation if we have approved/denied tool calls to handle
             if (pendingTools.isEmpty()) {
                 try {
+                    var contextProjectionMode = "ordinary"
+                    var continuationHistoryEpochReason: String? = null
+                    var frozenPrefixMessageCount = 0
+                    val continuationContextMessages = when {
+                        forceFinalization -> {
+                            contextProjectionMode = "final_answer_compaction"
+                            continuationHistoryEpochReason = "finalization"
+                            messages.compactCurrentTurnForFinalAnswer()
+                        }
+                        messages.lastOrNull()?.getTools()?.isNotEmpty() == true -> {
+                            contextProjectionMode = "tool_continuation_snapshot"
+                            var activeSnapshot = continuationSnapshot
+                            var projection = activeSnapshot?.project(messages)
+                            if (
+                                activeSnapshot == null ||
+                                projection is ToolLoopSnapshotProjection.Invalid
+                            ) {
+                                continuationHistoryEpochReason = when (projection) {
+                                    is ToolLoopSnapshotProjection.Invalid -> {
+                                        Log.w(
+                                            TAG,
+                                            "tool continuation history epoch invalidated: " +
+                                                projection.reason,
+                                        )
+                                        projection.reason.name.lowercase()
+                                    }
+                                    else -> "tool_continuation_started"
+                                }
+                                val candidateSnapshot = ToolLoopContinuationSnapshot.capture(
+                                    liveMessages = messages,
+                                    ordinaryMessageLimit = assistant.contextMessageSize,
+                                )
+                                val candidateProjection = candidateSnapshot?.project(messages)
+                                if (candidateProjection is ToolLoopSnapshotProjection.Valid) {
+                                    activeSnapshot = candidateSnapshot
+                                    projection = candidateProjection
+                                    continuationSnapshot = candidateSnapshot
+                                    continuationHistoryEpoch += 1
+                                    Log.i(
+                                        TAG,
+                                        "tool continuation history epoch=" +
+                                            "$continuationHistoryEpoch frozenPrefix=" +
+                                            candidateSnapshot.frozenPrefix.size,
+                                    )
+                                } else {
+                                    activeSnapshot = null
+                                    projection = candidateProjection
+                                    continuationSnapshot = null
+                                    Log.w(
+                                        TAG,
+                                        "tool continuation snapshot unavailable; " +
+                                            "using full lossless live context",
+                                    )
+                                }
+                            }
+                            frozenPrefixMessageCount = activeSnapshot?.frozenPrefix?.size ?: 0
+                            when (projection) {
+                                is ToolLoopSnapshotProjection.Valid -> projection.messages
+                                is ToolLoopSnapshotProjection.Invalid,
+                                null,
+                                -> messages
+                            }
+                        }
+                        else -> null
+                    }
+                    val providerToolsInternal = providerToolDefinitions
+                        .materializeProviderToolSchemas()
                     stepTerminal = generateInternal(
                         assistant = assistant,
                         settings = settings,
@@ -877,6 +929,8 @@ class GenerationHandler(
                         provider = provider,
                         tools = providerToolsInternal,
                         memories = memories ?: emptyList(),
+                        memoryFrozenNowMs = memoryFrozenNowMs,
+                        memoryRetrievalTraceId = memoryRetrievalTraceId,
                         stream = if (forceFinalization) false else assistant.streamOutput,
                         processingStatus = processingStatus,
                         conversationSystemPrompt = conversationSystemPrompt,
@@ -884,14 +938,11 @@ class GenerationHandler(
                         conversationLorebookIds = conversationLorebookIds,
                         workspaceCwd = workspaceCwd,
                         runControl = runControl,
-                        contextMessages = if (forceFinalization) {
-                            messages.compactCurrentTurnForFinalAnswer()
-                        } else if (messages.lastOrNull()?.getTools()?.isNotEmpty() == true) {
-                            messages.selectToolLoopContinuationContext()
-                                .compactCompletedToolHistoryForContinuation()
-                        } else {
-                            null
-                        },
+                        contextMessages = continuationContextMessages,
+                        continuationHistoryEpoch = continuationHistoryEpoch,
+                        continuationHistoryEpochReason = continuationHistoryEpochReason,
+                        contextProjectionMode = contextProjectionMode,
+                        frozenPrefixMessageCount = frozenPrefixMessageCount,
                         requestPurpose = if (forceFinalization) {
                             GenerationRequestPurpose.FINAL_ANSWER_RECOVERY
                         } else {
@@ -1086,6 +1137,8 @@ class GenerationHandler(
                                             provider = provider,
                                             tools = emptyList(),
                                             memories = memories ?: emptyList(),
+                                            memoryFrozenNowMs = memoryFrozenNowMs,
+                                            memoryRetrievalTraceId = memoryRetrievalTraceId,
                                             stream = recoveryStream,
                                             processingStatus = processingStatus,
                                             conversationSystemPrompt = conversationSystemPrompt,
@@ -1094,6 +1147,9 @@ class GenerationHandler(
                                             workspaceCwd = workspaceCwd,
                                             runControl = runControl,
                                             contextMessages = recoveryBase.compactCurrentTurnForFinalAnswer(),
+                                            continuationHistoryEpoch = continuationHistoryEpoch,
+                                            continuationHistoryEpochReason = "final_answer_recovery",
+                                            contextProjectionMode = "final_answer_compaction",
                                             requestPurpose = GenerationRequestPurpose.FINAL_ANSWER_RECOVERY,
                                             diagnosticHandle = generationDiagnostics,
                                             providerTailMessages = recoveryTailMessages,
@@ -2317,6 +2373,8 @@ class GenerationHandler(
         provider: ProviderSetting,
         tools: List<Tool>,
         memories: List<AssistantMemory>,
+        memoryFrozenNowMs: Long,
+        memoryRetrievalTraceId: String?,
         stream: Boolean,
         processingStatus: MutableStateFlow<String?> = MutableStateFlow(null),
         conversationSystemPrompt: String? = null,
@@ -2325,6 +2383,10 @@ class GenerationHandler(
         workspaceCwd: String? = null,
         runControl: GenerationRunControl? = null,
         contextMessages: List<UIMessage>? = null,
+        continuationHistoryEpoch: Int = 0,
+        continuationHistoryEpochReason: String? = null,
+        contextProjectionMode: String = "ordinary",
+        frozenPrefixMessageCount: Int = 0,
         requestPurpose: GenerationRequestPurpose = GenerationRequestPurpose.NORMAL,
         diagnosticHandle: GenerationDiagnosticHandle,
         providerTailMessages: ProviderTailMessages = ProviderTailMessages.Empty,
@@ -2339,7 +2401,11 @@ class GenerationHandler(
         usageBase: TokenUsage? = null,
     ): GenerationTerminal {
         val sourceContext = contextMessages ?: messages
-        val selectedContext = sourceContext.selectOrdinaryChatContext(assistant.contextMessageSize)
+        // Explicit projections are already selected at a stable boundary. Selecting them again
+        // after the live tool tail grows can slide that boundary and invalidate the provider
+        // prefix, even though no historical content changed.
+        val selectedContext = contextMessages
+            ?: messages.selectOrdinaryChatContext(assistant.contextMessageSize)
         if (selectedContext.size < sourceContext.size) {
             val boundaryHash = selectedContext.firstOrNull()?.id
                 ?.toString()
@@ -2354,9 +2420,9 @@ class GenerationHandler(
                     "start=${sourceContext.size - selectedContext.size} boundary=$boundaryHash",
             )
         }
-        val persistentSteeringContext = preparePersistentSteeringContext(
-            selectedContext.ageOldToolImages(),
-        )
+        // Do not re-age historical tool images on every continuation. A new screenshot must not
+        // rewrite the cached prefix or remove visual evidence that a long task may still need.
+        val persistentSteeringContext = preparePersistentSteeringContext(selectedContext)
         val invocationSurfaceAddendum = conversationId?.let { id ->
             invocationSurfaceContextProvider
                 ?.currentContext(callOrigin, id, commandId)
@@ -2372,59 +2438,78 @@ class GenerationHandler(
         // preserving the long history prefix across tasks and the exact prefix inside tool loops.
         // Responses/native providers keep the established combined system layout.
         val useAnchoredVolatileContext = provider is ProviderSetting.OpenAI && !provider.useResponseApi
-        var breakdownAssistantPrompt = ""
-        var breakdownUserIdentityPrompt = ""
-        var breakdownMemoryPrompt = ""
-        var breakdownRecentChatsPrompt = ""
-        var breakdownToolPrompts = emptyList<String>()
-        val systemPromptLayout = run {
-            // Conversation-level system prompt override (upstream): when the assistant
-            // allows it and the conversation supplies one, it replaces the assistant prompt.
-            val effectiveSystemPrompt =
-                if (assistant.allowConversationSystemPrompt && !conversationSystemPrompt.isNullOrBlank()) {
-                    conversationSystemPrompt
-                } else {
-                    assistant.systemPrompt
-                }
-            val memoryPrompt = if (assistant.enableMemory) {
-                buildMemoryPrompt(
-                    memories = memories,
-                    includeContextual = requestPurpose == GenerationRequestPurpose.NORMAL,
-                )
-            } else ""
-            val recentChatsPrompt = if (
-                requestPurpose == GenerationRequestPurpose.NORMAL && assistant.enableRecentChatsReference
-            ) {
-                buildRecentChatsPrompt(assistant, conversationRepo)
-            } else ""
-            val toolPrompts = tools.map { tool -> tool.systemPrompt(model, messages) }
-            val userIdentityPrompt = buildUserIdentityPrompt(
-                settings.displaySetting.userNickname,
-            )
-            breakdownAssistantPrompt = effectiveSystemPrompt
-            breakdownUserIdentityPrompt = userIdentityPrompt
-            breakdownMemoryPrompt = memoryPrompt
-            breakdownRecentChatsPrompt = recentChatsPrompt
-            breakdownToolPrompts = toolPrompts
+        val contextPreparer = GenerationProviderContextPreparer()
+        val requestedMaxTokens = if (requestPurpose == GenerationRequestPurpose.FINAL_ANSWER_RECOVERY) {
+            FINAL_ANSWER_MAX_TOKENS
+        } else {
+            assistant.maxTokens
+        }
+        // Only a provider-owned/local capability may lower the hard window automatically.
+        // Catalog contextLength remains advisory because it can be stale or route-dependent.
+        val trustedContextWindowTokens = providerImpl.resolveTrustedContextWindowTokens(
+            providerSetting = provider,
+            model = model,
+        )
+        val resolvedContextWindow = contextPreparer.resolveWindow(
+            configuredContextWindowTokens = model.userContextWindowTokens,
+            trustedContextWindowTokens = trustedContextWindowTokens,
+            advertisedContextWindowTokens = model.contextLength,
+        )
+        // Conversation-level system prompt override (upstream): when the assistant allows it,
+        // the conversation value replaces the assistant prompt.
+        val breakdownAssistantPrompt =
+            if (assistant.allowConversationSystemPrompt && !conversationSystemPrompt.isNullOrBlank()) {
+                conversationSystemPrompt
+            } else {
+                assistant.systemPrompt
+            }
+        val breakdownRecentChatsPrompt = if (
+            requestPurpose == GenerationRequestPurpose.NORMAL && assistant.enableRecentChatsReference
+        ) {
+            buildRecentChatsPrompt(assistant, conversationRepo)
+        } else ""
+        val breakdownToolPrompts = tools.map { tool -> tool.systemPrompt(model, messages) }
+        val breakdownUserIdentityPrompt = buildUserIdentityPrompt(
+            settings.displaySetting.userNickname,
+        )
+
+        fun createSystemPromptLayout(memoryPrompt: String): ProviderSystemPromptLayout {
             // Split stable instructions from runtime data. Chat Completions anchor runtime data
             // to the current user turn (below); otherwise an ever-changing device/memory
             // addendum can cut the reusable prefix after only the system prompt.
             val (stableSystem, volatileSystem) = systemPromptBuilder.buildSections(
-                assistantPrompt = effectiveSystemPrompt,
-                userIdentityPrompt = userIdentityPrompt,
+                assistantPrompt = breakdownAssistantPrompt,
+                userIdentityPrompt = breakdownUserIdentityPrompt,
                 memoryPrompt = memoryPrompt,
-                recentChatsPrompt = recentChatsPrompt,
-                toolPrompts = toolPrompts,
+                recentChatsPrompt = breakdownRecentChatsPrompt,
+                toolPrompts = breakdownToolPrompts,
                 systemAddendum = providerSystemAddendum,
             )
-            ProviderSystemPromptLayout.create(
+            return ProviderSystemPromptLayout.create(
                 stableSystem = stableSystem,
                 volatileSystem = volatileSystem,
                 conversationMessages = providerTailMessages.appendTo(persistentSteeringContext.messages),
                 useAnchoredVolatileContext = useAnchoredVolatileContext,
             )
         }
-        val contextPreparer = GenerationProviderContextPreparer()
+
+        val layoutWithoutMemory = createSystemPromptLayout(memoryPrompt = "")
+        val memoryPromptBudget = contextPreparer.conservativeMemoryBudget(
+            resolvedWindow = resolvedContextWindow,
+            requestedOutputTokens = requestedMaxTokens,
+            tools = tools,
+            builtInTools = model.tools,
+            baseMessages = layoutWithoutMemory.applyVolatileContext(
+                layoutWithoutMemory.initialMessages,
+            ),
+        )
+        val memoryCompileResult = compileMemoryPrompt(
+            memories = if (assistant.enableMemory) memories else emptyList(),
+            includeContextual = requestPurpose == GenerationRequestPurpose.NORMAL,
+            maxTokens = memoryPromptBudget,
+        )
+        val breakdownMemoryPrompt = memoryCompileResult.text
+        val systemPromptLayout = createSystemPromptLayout(breakdownMemoryPrompt)
         val providerIdentityMessages = prepareSecondUserProviderMessages(systemPromptLayout.initialMessages)
         val providerEphemeralMessages = if (
             secretEgressBinding != null &&
@@ -2439,7 +2524,11 @@ class GenerationHandler(
             messages = providerEphemeralMessages,
             configuredContextWindowTokens = model.userContextWindowTokens,
             advertisedContextWindowTokens = model.contextLength,
-        )
+            trustedContextWindowTokens = trustedContextWindowTokens,
+            requestedOutputTokens = requestedMaxTokens,
+            tools = tools,
+            builtInTools = model.tools,
+        ).requireLosslessProviderContext(stage = "pre_transform")
         val providerContext = initialContextPreparation.messages
         val transformedMessages = providerContext.transforms(
             transformers = transformers,
@@ -2456,30 +2545,46 @@ class GenerationHandler(
             messages = systemPromptLayout.applyVolatileContext(transformedMessages),
             configuredContextWindowTokens = model.userContextWindowTokens,
             advertisedContextWindowTokens = model.contextLength,
-        )
+            trustedContextWindowTokens = trustedContextWindowTokens,
+            requestedOutputTokens = requestedMaxTokens,
+            tools = tools,
+            builtInTools = model.tools,
+        ).requireLosslessProviderContext(stage = "post_transform")
         val internalMessages = contextPreparation.messages
-        val requestedMaxTokens = if (requestPurpose == GenerationRequestPurpose.FINAL_ANSWER_RECOVERY) {
-            FINAL_ANSWER_MAX_TOKENS
-        } else {
-            assistant.maxTokens
-        }
         Log.i(
             TAG,
-            "contextPolicy: windowTokens=${contextPreparation.configuredContextWindowTokens}, " +
+            "contextPolicy: windowTokens=${contextPreparation.enforcedWindowTokens}, " +
                 "estimatedRequestTokens=${contextPreparation.estimatedRequestTokens}, " +
                 "summaryUsed=${contextPreparation.summaryUsed}, " +
-                "windowSource=user_configured_manual, " +
+                "windowSource=${resolvedContextWindow.source}, " +
+                "memoryBudgetTokens=$memoryPromptBudget, " +
+                "memoryInjected=${memoryCompileResult.actualIncludedIds.size}, " +
+                "memoryDropped=${memoryCompileResult.dropped.size}, " +
                 "advertisedModelWindowTokens=${contextPreparation.advertisedContextWindowTokens ?: "none"}",
         )
 
         var messages: List<UIMessage> = messages
         var terminalTracker = GenerationTerminalTracker()
+        val memoryScopeId = if (assistant.useGlobalMemory) {
+            MemoryRepository.GLOBAL_MEMORY_ID
+        } else {
+            assistant.id.toString()
+        }
+        val providerCacheIdentity = buildProviderCacheIdentity(
+            conversationId = conversationId?.toString(),
+            assistantId = assistant.id.toString(),
+            memoryScopeId = memoryScopeId,
+            actualMemoryIds = memoryCompileResult.actualIncludedIds,
+            compilerRevision = memoryCompileResult.compilerRevision,
+        )
         val params = TextGenerationParams(
             model = model,
             temperature = assistant.temperature,
             topP = assistant.topP,
-            maxTokens = requestedMaxTokens,
+            // The exact reserve used by the final hard gate is the value sent on the wire.
+            maxTokens = contextPreparation.effectiveMaxOutputTokens,
             tools = tools,
+            providerCacheIdentity = providerCacheIdentity,
             reasoningLevel = if (requestPurpose == GenerationRequestPurpose.FINAL_ANSWER_RECOVERY) {
                 ReasoningLevel.OFF
             } else {
@@ -2501,7 +2606,26 @@ class GenerationHandler(
             },
         )
         var providerStarted = false
+        var memoryAccessRecorded = false
         var providerCallUsage: TokenUsage? = null
+        suspend fun recordActualMemoryAccess() {
+            if (memoryAccessRecorded || memoryCompileResult.actualIncludedIds.isEmpty()) return
+            memoryAccessRecorded = true
+            try {
+                memoryRepo.markLastAccessed(
+                    scopeId = memoryScopeId,
+                    memoryIds = memoryCompileResult.actualIncludedIds.toSet(),
+                    accessedAtMs = memoryFrozenNowMs,
+                    frozenNowMs = memoryFrozenNowMs,
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                // Usage bookkeeping must not turn a valid, already-gated request into a chat
+                // outage. The scoped DAO still fails closed and never touches foreign rows.
+                Log.w(TAG, "Unable to update memory lastAccess", error)
+            }
+        }
         fun markProviderStarted() {
             if (providerStarted) return
             providerStarted = true
@@ -2527,13 +2651,15 @@ class GenerationHandler(
             requestMode = requestMode,
             finalMessages = internalMessages,
             tools = tools,
+            builtInTools = model.tools,
             assistantPrompt = breakdownAssistantPrompt,
             userIdentityPrompt = breakdownUserIdentityPrompt,
             toolSystemPrompts = breakdownToolPrompts,
             memoryPrompt = breakdownMemoryPrompt,
             recentChatsPrompt = breakdownRecentChatsPrompt,
             dynamicSystemAddendum = providerSystemAddendum,
-            memoryCount = memories.size,
+            memoryCount = memoryCompileResult.actualIncludedIds.size,
+            memoryRetrievalTraceId = memoryRetrievalTraceId,
             enabledSkillNames = assistant.enabledSkills,
             toolCatalogCandidateCount = toolDiscoveryMetrics?.candidateCount,
             toolCatalogSelectedSchemaCount = toolDiscoveryMetrics?.selectedSchemaCount,
@@ -2541,6 +2667,14 @@ class GenerationHandler(
             toolFastLaneShortcutLibraryCount = toolDiscoveryMetrics?.fastLaneShortcutLibraryCount,
             toolFastLaneInjectedSchemaCount = toolDiscoveryMetrics?.fastLaneInjectedSchemaCount,
             toolFastLaneBundleId = toolDiscoveryMetrics?.fastLaneBundleId,
+            continuationHistoryEpoch = continuationHistoryEpoch,
+            continuationHistoryEpochReason = continuationHistoryEpochReason,
+            contextProjectionMode = contextProjectionMode,
+            frozenPrefixMessageCount = frozenPrefixMessageCount,
+            fingerprintKey = diagnosticHandle.fingerprintKey,
+        ).withContextBudget(
+            effectiveContextWindowTokens = contextPreparation.enforcedWindowTokens,
+            requestedOutputTokens = contextPreparation.effectiveMaxOutputTokens,
         )
         diagnosticHandle.recordRequestBreakdown(context.filesDir, breakdown)
         val watchdogEnabled = stream &&
@@ -2552,6 +2686,7 @@ class GenerationHandler(
                 ProviderTurnRequest(
                     stream = stream,
                     streamCall = {
+                        recordActualMemoryAccess()
                         providerImpl.streamText(
                             providerSetting = provider,
                             messages = internalMessages,
@@ -2560,6 +2695,7 @@ class GenerationHandler(
                     },
                     retryStreamCall = if (watchdogEnabled) {
                         {
+                            recordActualMemoryAccess()
                             providerImpl.streamText(
                                 providerSetting = provider,
                                 messages = internalMessages,
@@ -2570,6 +2706,7 @@ class GenerationHandler(
                         null
                     },
                     singleCall = {
+                        recordActualMemoryAccess()
                         providerImpl.generateText(
                             providerSetting = provider,
                             messages = internalMessages,
@@ -2690,7 +2827,7 @@ class GenerationHandler(
                 contextPreparation.estimatedRequestTokens,
             ),
             contextPlannedTokens = contextPreparation.estimatedRequestTokens,
-            contextWindowTokens = contextPreparation.configuredContextWindowTokens,
+            contextWindowTokens = contextPreparation.enforcedWindowTokens,
             contextCompressed = contextPreparation.summaryUsed,
             historicalReasoningRemoved = 0,
         )

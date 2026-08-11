@@ -10,7 +10,7 @@ contracts only; its ToolPkg/ObjectBox/runtime implementations are not copied.
 
 - Keep the existing ConversationRuntime, steering UI, final-answer recovery, AI-key overlay,
   YOYO binding, emergency stop, and self-preservation policies.
-- Never mutate or test against `啥子七` / `啥子七报道` or Android user 100.
+- Never mutate or test against protected production assistants or non-owner Android profiles.
 - Do not modify or build the Operit checkout.
 - Run one Gradle process at a time on Windows.
 
@@ -28,7 +28,7 @@ contracts only; its ToolPkg/ObjectBox/runtime implementations are not copied.
 | Step | Status | Verification |
 |---|---|---|
 | P0-1 sub-agent execution contract | IMPLEMENTED | Target tests passed; see `01-subagent-contract.md` |
-| P0-2 memory Top-K | IMPLEMENTED | JVM and HONOR migration tests passed; see `02-memory-retrieval.md` |
+| P0-2 memory Top-K | IMPLEMENTED | JVM and offline migration tests passed; see `02-memory-retrieval.md` |
 | P0-3 workspace rules | IMPLEMENTED | Target tests passed; see `03-workspace-rules.md` |
 | P0-4 bounded deep research | IMPLEMENTED | Target tests passed; see `04-deep-research.md` |
 | P0-5 setup transaction | IMPLEMENTED | Target tests passed; see `05-setup-transaction.md` |

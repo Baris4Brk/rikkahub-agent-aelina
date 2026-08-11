@@ -54,6 +54,7 @@ import me.rerere.rikkahub.data.db.migrations.MIGRATION_38_39
 import me.rerere.rikkahub.data.db.migrations.MIGRATION_39_40
 import me.rerere.rikkahub.data.db.migrations.MIGRATION_40_41
 import me.rerere.rikkahub.data.db.migrations.MIGRATION_41_42
+import me.rerere.rikkahub.data.db.migrations.MIGRATION_42_43
 import me.rerere.rikkahub.data.repository.MemorySearchIndex
 import me.rerere.rikkahub.data.repository.MemoryRetriever
 import me.rerere.rikkahub.memory.AndroidMemoryWorkScheduler
@@ -133,6 +134,7 @@ val dataSourceModule = module {
                 MIGRATION_39_40,
                 MIGRATION_40_41,
                 MIGRATION_41_42,
+                MIGRATION_42_43,
             )
             .addCallback(object : RoomDatabase.Callback() {
                 override fun onOpen(db: SupportSQLiteDatabase) {
@@ -212,6 +214,11 @@ val dataSourceModule = module {
     }
     single<MemorySearchIndex> { MemoryFtsManager(get()) }
     single { MemoryRetriever(get()) }
+    single {
+        me.rerere.rikkahub.data.repository.MemoryRetrievalDiagnosticsStore(
+            filesDir = get<Context>().filesDir,
+        )
+    }
     single { MemoryMetadataReconciler(get(), get()) }
     single<MemoryWorkScheduler> { AndroidMemoryWorkScheduler(get()) }
     single<MemoryCaptureStore> { RoomMemoryCaptureStore(get()) }

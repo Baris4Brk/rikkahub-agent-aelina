@@ -17,6 +17,7 @@ import me.rerere.ai.provider.ModelType
 import me.rerere.ai.provider.Modality
 import me.rerere.ai.provider.ProviderManager
 import me.rerere.ai.provider.ProviderSetting
+import me.rerere.ai.context.ABSOLUTE_CONTEXT_WINDOW_TOKENS
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.datastore.findModelById
@@ -652,8 +653,16 @@ class OwnerSettingsOperationHandler(
         }
         val contextLength = definition.int("context_length") ?: existing?.contextLength
         val userWindow = definition.int("user_context_window_tokens") ?: existing?.userContextWindowTokens ?: 1_000_000
-        if (contextLength != null && contextLength !in 1..10_000_000 || userWindow !in 1..10_000_000) {
-            return failure(index, action.type, "MODEL_CONTEXT_INVALID", "Context windows must be between 1 and 10000000 tokens.")
+        if (contextLength != null && contextLength !in 1..10_000_000) {
+            return failure(index, action.type, "MODEL_CONTEXT_INVALID", "Advertised context length must be between 1 and 10000000 tokens.")
+        }
+        if (userWindow !in 1..ABSOLUTE_CONTEXT_WINDOW_TOKENS) {
+            return failure(
+                index,
+                action.type,
+                "MODEL_CONTEXT_INVALID",
+                "User context window must be between 1 and $ABSOLUTE_CONTEXT_WINDOW_TOKENS tokens.",
+            )
         }
         val model = Model(
             id = existing?.id ?: requestedId ?: Uuid.random(),

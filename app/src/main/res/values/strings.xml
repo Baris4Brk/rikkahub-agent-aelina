@@ -2374,4 +2374,15 @@
   <string name="assistant_page_generation_turn_budget_effective">Current limit: %1$d minutes</string>
   <string name="assistant_page_generation_turn_budget_effective_auto">Automatic: %1$d minutes</string>
   <string name="assistant_page_generation_turn_budget_global">Automatic: global runtime limit</string>
+  <string name="notification_channel_accessibility_keep_alive">Accessibility Protection</string>
+  <string name="accessibility_keep_alive_title">Accessibility protection</string>
+  <string name="accessibility_keep_alive_starting">Starting long-running accessibility protection…</string>
+  <string name="accessibility_keep_alive_active">Accessibility service is active and protected.</string>
+  <string name="accessibility_keep_alive_recovering">Restoring the RikkaHub accessibility service…</string>
+  <string name="accessibility_keep_alive_waiting_for_bind">Enabled; waiting for Android to reconnect the service.</string>
+  <string name="accessibility_keep_alive_privilege_required">Recovery needs WRITE_SECURE_SETTINGS or an authorized Shizuku service.</string>
+  <string name="accessibility_keep_alive_open_settings">Accessibility settings</string>
+  <string name="accessibility_keep_alive_stop">Stop persistence</string>
+  <string name="setting_page_accessibility_keep_alive">Keep accessibility enabled</string>
+  <string name="setting_page_accessibility_keep_alive_desc">Run a foreground monitor and restore only RikkaHub if Android disconnects or disables its accessibility service.</string>
 </resources>

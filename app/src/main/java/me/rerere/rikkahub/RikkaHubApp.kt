@@ -59,6 +59,7 @@ const val CHAT_COMPLETED_NOTIFICATION_CHANNEL_ID = "chat_completed"
 const val CHAT_LIVE_UPDATE_NOTIFICATION_CHANNEL_ID = "chat_live_update"
 const val WEB_SERVER_NOTIFICATION_CHANNEL_ID = "web_server"
 const val WORKSPACE_PROCESS_NOTIFICATION_CHANNEL_ID = "workspace_process"
+const val ACCESSIBILITY_KEEP_ALIVE_NOTIFICATION_CHANNEL_ID = "accessibility_keep_alive"
 
 class RikkaHubApp : Application() {
     private var dependencyGraphStarted = false
@@ -98,6 +99,16 @@ class RikkaHubApp : Application() {
             Log.e(TAG, "Unable to install the system-assistant session adapter", error)
         }
         this.createNotificationChannel()
+        val keepAccessibilityAlive =
+            me.rerere.rikkahub.service.AccessibilityKeepAliveState
+                .initializeFromSystemAuthorization(
+                    context = this,
+                    authorized = me.rerere.rikkahub.data.ai.tools.local.AccessibilityServiceHandle
+                        .isEnabledInSettings(this),
+                )
+        if (keepAccessibilityAlive) {
+            me.rerere.rikkahub.service.AccessibilityKeepAliveService.start(this)
+        }
         me.rerere.rikkahub.pet.PetDailyArchiveScheduler.schedule(this)
 
         // Restore any headless conversation IDs that survived a process kill; must run
@@ -730,6 +741,17 @@ class RikkaHubApp : Application() {
             .setShowBadge(false)
             .build()
         notificationManager.createNotificationChannel(workspaceProcessChannel)
+
+        val accessibilityKeepAliveChannel = NotificationChannelCompat
+            .Builder(
+                ACCESSIBILITY_KEEP_ALIVE_NOTIFICATION_CHANNEL_ID,
+                NotificationManagerCompat.IMPORTANCE_LOW,
+            )
+            .setName(getString(R.string.notification_channel_accessibility_keep_alive))
+            .setVibrationEnabled(false)
+            .setShowBadge(false)
+            .build()
+        notificationManager.createNotificationChannel(accessibilityKeepAliveChannel)
 
         val alarmChannel = NotificationChannelCompat
             .Builder("alarm", NotificationManagerCompat.IMPORTANCE_HIGH)

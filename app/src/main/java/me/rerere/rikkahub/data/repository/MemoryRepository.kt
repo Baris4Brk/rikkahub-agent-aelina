@@ -10,6 +10,7 @@ import me.rerere.rikkahub.memory.MemoryMutationCommand
 import me.rerere.rikkahub.memory.MemoryMutationCoordinator
 import me.rerere.rikkahub.memory.MemoryMutationResult
 import me.rerere.rikkahub.memory.MemoryKind
+import me.rerere.rikkahub.memory.MemoryExpiryUpdate
 import me.rerere.rikkahub.memory.MemoryQueryRecord
 import me.rerere.rikkahub.memory.MemoryWriteInput
 import me.rerere.rikkahub.utils.JsonInstant
@@ -49,6 +50,7 @@ class MemoryRepository(
         assistantId: kotlin.uuid.Uuid?,
         includeGlobal: Boolean,
         limit: Int = 16,
+        frozenNowMs: Long = System.currentTimeMillis(),
     ): List<AssistantMemory> {
         val scopeId = when {
             includeGlobal -> GLOBAL_MEMORY_ID
@@ -57,7 +59,7 @@ class MemoryRepository(
         }
         return memoryDAO.getUserApprovedStandingMemories(
             scopeId = scopeId,
-            nowMs = System.currentTimeMillis(),
+            nowMs = frozenNowMs,
             limit = limit.coerceIn(1, 32),
         ).map(MemoryEntity::toAssistantMemory)
     }
@@ -69,37 +71,79 @@ class MemoryRepository(
         limit: Int = DEFAULT_MEMORY_TOP_K,
         maxChars: Int = DEFAULT_MEMORY_PROMPT_MAX_CHARS,
         excludeMemoryIds: Set<Int> = emptySet(),
-    ): List<MemoryMatch> = retriever.queryRelevant(
+        frozenNowMs: Long = System.currentTimeMillis(),
+    ): List<MemoryMatch> = retrieveRelevant(
         assistantId = assistantId,
         query = query,
         includeGlobal = includeGlobal,
         limit = limit,
         maxChars = maxChars,
         excludeMemoryIds = excludeMemoryIds,
+        frozenNowMs = frozenNowMs,
+    ).matches
+
+    suspend fun retrieveRelevant(
+        assistantId: kotlin.uuid.Uuid?,
+        query: String,
+        includeGlobal: Boolean,
+        limit: Int = DEFAULT_MEMORY_TOP_K,
+        maxChars: Int = DEFAULT_MEMORY_PROMPT_MAX_CHARS,
+        excludeMemoryIds: Set<Int> = emptySet(),
+        frozenNowMs: Long,
+        querySource: MemoryRetrievalQuerySource = MemoryRetrievalQuerySource.UNSPECIFIED,
+    ): MemoryRetrievalResult = retriever.retrieve(
+        MemoryRetrievalRequest(
+            assistantId = assistantId,
+            query = query,
+            includeGlobal = includeGlobal,
+            limit = limit,
+            maxChars = maxChars,
+            excludeMemoryIds = excludeMemoryIds,
+            frozenNowMs = frozenNowMs,
+            querySource = querySource,
+        ),
     )
 
     suspend fun deleteMemoriesOfAssistant(assistantId: String) {
-        memoryDAO.deleteMemoriesOfAssistant(assistantId)
+        mutationCoordinator.purgeScope(assistantId)
     }
 
-    suspend fun updateContent(id: Int, content: String): AssistantMemory {
-        return updateMemory(id, MemoryWriteInput(content = content))
+    suspend fun updateContent(
+        scopeId: String,
+        id: Int,
+        content: String,
+        expectedRevision: Int? = null,
+    ): AssistantMemory {
+        return updateMemory(
+            scopeId = scopeId,
+            id = id,
+            input = MemoryWriteInput(content = content),
+            expectedRevision = expectedRevision,
+        )
     }
 
-    suspend fun updateMemory(id: Int, input: MemoryWriteInput): AssistantMemory {
+    suspend fun updateMemory(
+        scopeId: String,
+        id: Int,
+        input: MemoryWriteInput,
+        expectedRevision: Int? = null,
+    ): AssistantMemory {
         val result = mutationCoordinator.mutate(
             MemoryMutationCommand.Update(
                 memoryId = id,
+                expectedScopeId = scopeId,
+                expectedRevision = expectedRevision,
                 title = input.title,
                 content = input.content,
                 kind = input.kind,
                 tags = input.tags,
                 importance = input.importance,
-                expiresAtMs = input.expiresAtMs,
+                expiryUpdate = input.expiresAtMs?.let(MemoryExpiryUpdate::Set)
+                    ?: input.expiryUpdate,
                 approvalSource = MemoryApprovalSource.MEMORY_TOOL,
             ),
         )
-        return result.toAssistantMemory(id)
+        return result.toAssistantMemory(scopeId, id)
     }
 
     suspend fun addMemory(
@@ -130,13 +174,15 @@ class MemoryRepository(
                 originAssistantId = originAssistantId,
             ),
         )
-        return result.toAssistantMemory()
+        return result.toAssistantMemory(scopeId)
     }
 
-    suspend fun deleteMemory(id: Int) {
+    suspend fun deleteMemory(scopeId: String, id: Int, expectedRevision: Int? = null) {
         when (mutationCoordinator.mutate(
             MemoryMutationCommand.Archive(
                 memoryId = id,
+                expectedScopeId = scopeId,
+                expectedRevision = expectedRevision,
                 approvalSource = MemoryApprovalSource.MEMORY_TOOL,
             ),
         )) {
@@ -147,10 +193,12 @@ class MemoryRepository(
         }
     }
 
-    suspend fun restoreMemory(id: Int) {
+    suspend fun restoreMemory(scopeId: String, id: Int, expectedRevision: Int? = null) {
         when (mutationCoordinator.mutate(
             MemoryMutationCommand.Restore(
                 memoryId = id,
+                expectedScopeId = scopeId,
+                expectedRevision = expectedRevision,
                 approvalSource = MemoryApprovalSource.MEMORY_TOOL,
             ),
         )) {
@@ -161,7 +209,30 @@ class MemoryRepository(
         }
     }
 
-    suspend fun getMemoryEntity(id: Int): MemoryEntity? = memoryDAO.getMemoryById(id)
+    suspend fun getMemoryEntity(scopeId: String, id: Int): MemoryEntity? =
+        memoryDAO.getMemoryById(id, scopeId)
+
+    suspend fun markLastAccessed(
+        scopeId: String,
+        memoryIds: Set<Int>,
+        accessedAtMs: Long,
+        frozenNowMs: Long,
+    ): Int = if (memoryIds.isEmpty()) {
+        0
+    } else {
+        memoryDAO.markLastAccessed(memoryIds.toList(), scopeId, accessedAtMs, frozenNowMs)
+    }
+
+    suspend fun invalidateSourceConversation(scopeId: String, conversationId: String): Int =
+        mutationCoordinator.invalidateSourceConversation(scopeId, conversationId)
+
+    suspend fun invalidateSourceMessages(
+        scopeId: String,
+        conversationId: String,
+        messageIds: Set<String>,
+    ): Int = mutationCoordinator.invalidateSourceMessages(scopeId, conversationId, messageIds)
+
+    suspend fun runRetention(): Int = mutationCoordinator.runRetention()
 
     suspend fun queryDetailed(
         assistantId: kotlin.uuid.Uuid?,
@@ -171,6 +242,7 @@ class MemoryRepository(
         tags: Set<String> = emptySet(),
         kind: MemoryKind? = null,
         includeArchived: Boolean = false,
+        frozenNowMs: Long = System.currentTimeMillis(),
     ): List<MemoryQueryRecord> {
         if (includeArchived) {
             val scopeId = if (includeGlobal) GLOBAL_MEMORY_ID else assistantId?.toString()
@@ -208,9 +280,17 @@ class MemoryRepository(
             includeGlobal = includeGlobal,
             limit = (limit.coerceIn(1, 20) * 3).coerceAtMost(64),
             maxChars = 20_000,
+            frozenNowMs = frozenNowMs,
         )
         return matches.mapNotNull { match ->
-            val entity = memoryDAO.getMemoryById(match.memory.id) ?: return@mapNotNull null
+            val expectedScopeId = if (includeGlobal) GLOBAL_MEMORY_ID else assistantId?.toString()
+                ?: return@mapNotNull null
+            val entity = memoryDAO.getActiveConfirmedMemoryById(
+                id = match.memory.id,
+                scopeId = expectedScopeId,
+                nowMs = frozenNowMs,
+            )
+                ?: return@mapNotNull null
             val entityTags = runCatching {
                 JsonInstant.decodeFromString<List<String>>(entity.tagsJson)
             }.getOrDefault(emptyList())
@@ -233,14 +313,17 @@ class MemoryRepository(
         }.take(limit.coerceIn(1, 20))
     }
 
-    private suspend fun MemoryMutationResult.toAssistantMemory(fallbackId: Int? = null): AssistantMemory {
+    private suspend fun MemoryMutationResult.toAssistantMemory(
+        scopeId: String,
+        fallbackId: Int? = null,
+    ): AssistantMemory {
         val id = when (this) {
             is MemoryMutationResult.Applied -> memoryId
             MemoryMutationResult.NotFound -> error("Memory record #${fallbackId ?: "?"} not found")
             MemoryMutationResult.Conflict -> error("Memory record changed or is duplicated")
             is MemoryMutationResult.Rejected -> error("Memory mutation rejected: $code")
         }
-        val memory = memoryDAO.getMemoryById(id) ?: error("Memory record #$id not found")
+        val memory = memoryDAO.getMemoryById(id, scopeId) ?: error("Memory record #$id not found")
         return memory.toAssistantMemory()
     }
 }
@@ -252,4 +335,6 @@ private fun MemoryEntity.toAssistantMemory(): AssistantMemory = AssistantMemory(
     kind = runCatching { MemoryKind.valueOf(memoryKind) }.getOrDefault(MemoryKind.OTHER),
     approvalSource = runCatching { MemoryApprovalSource.valueOf(approvalSource) }
         .getOrDefault(MemoryApprovalSource.LEGACY),
+    scopeId = assistantId,
+    revision = revision,
 )

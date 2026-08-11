@@ -37,7 +37,7 @@ class MemoryBatchFailureRecoveryTest {
                     )
                 },
                 narrativeIdentityResolver = MemoryNarrativeIdentityResolver {
-                    MemoryNarrativeIdentity(selfName = "啥子七", companionName = "斯啾伊")
+                    MemoryNarrativeIdentity(selfName = "角色甲", companionName = "角色乙")
                 },
                 idGenerator = { "generated" },
                 nowMs = { 10_000L },
@@ -46,11 +46,11 @@ class MemoryBatchFailureRecoveryTest {
             coordinator.process(MemoryProcessRequest(TEST_SCOPE, "worker"))
 
             val proposal = store.commits.single().candidates.single().proposal
-            assertEquals("啥子七和斯啾伊的长期偏好", proposal.title)
-            assertEquals("啥子七 与 斯啾伊 确认了一个长期偏好。", proposal.content)
-            assertEquals("斯啾伊 observed a stable preference", proposal.reason)
+            assertEquals("角色甲和角色乙的长期偏好", proposal.title)
+            assertEquals("角色甲 与 角色乙 确认了一个长期偏好。", proposal.content)
+            assertEquals("角色乙 observed a stable preference", proposal.reason)
             assertEquals(listOf("USER", "ASSISTANT"), proposal.participants)
-            assertEquals(listOf("啥子七偏好"), proposal.tags)
+            assertEquals(listOf("角色甲偏好"), proposal.tags)
         }
 
     @Test
@@ -67,7 +67,7 @@ class MemoryBatchFailureRecoveryTest {
                     MemoryExtractorResult.Success("""{"version":2,"proposals":[],"relations":[]}""")
                 },
                 narrativeIdentityResolver = MemoryNarrativeIdentityResolver {
-                    MemoryNarrativeIdentity(selfName = "啥子七", companionName = "斯啾伊")
+                    MemoryNarrativeIdentity(selfName = "角色甲", companionName = "角色乙")
                 },
                 idGenerator = { "generated" },
                 nowMs = { 10_000L },
@@ -75,8 +75,8 @@ class MemoryBatchFailureRecoveryTest {
 
             coordinator.process(MemoryProcessRequest(TEST_SCOPE, "worker"))
 
-            assertEquals("啥子七", received?.selfName)
-            assertEquals("斯啾伊", received?.companionName)
+            assertEquals("角色甲", received?.selfName)
+            assertEquals("角色乙", received?.companionName)
         }
 
     @Test
@@ -201,6 +201,7 @@ class MemoryBatchFailureRecoveryTest {
             scopeId: String,
             query: String,
             limit: Int,
+            frozenNowMs: Long,
         ): List<ExistingMemoryRecord> = emptyList()
 
         override suspend fun commit(commit: MemoryProcessCommit): MemoryCommitResult {
@@ -222,6 +223,8 @@ class MemoryBatchFailureRecoveryTest {
 
         override suspend fun markFailed(
             captureIds: List<String>,
+            scopeId: String,
+            workerId: String,
             code: String,
             message: String?,
             retryPolicy: MemoryFailureRetryPolicy,

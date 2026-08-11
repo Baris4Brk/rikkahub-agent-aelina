@@ -53,6 +53,8 @@ class GenerationDiagnosticHandle internal constructor(
     val generationId: String,
     internal val sequence: Long,
 ) {
+    internal val fingerprintKey: ByteArray = newRequestBreakdownFingerprintKey()
+
     @Volatile
     internal var diagnostic: RecentGenerationDiagnostic? = null
 
@@ -197,14 +199,18 @@ object RecentGenerationDiagnostics {
         filesDir: File,
         breakdown: RequestBreakdownDiagnostic,
     ) {
-        synchronized(handle) {
-            handle.requestBreakdown = breakdown
-            handle.diagnostic = handle.diagnostic?.copy(
-                recordedAtEpochMs = System.currentTimeMillis(),
-                requestBreakdown = breakdown,
-            )
+        val linked = synchronized(handle) {
+            breakdown.withPreviousRequest(handle.requestBreakdown).also { current ->
+                handle.requestBreakdown = current
+                handle.diagnostic = handle.diagnostic?.copy(
+                    recordedAtEpochMs = System.currentTimeMillis(),
+                    requestBreakdown = current,
+                )
+            }
         }
-        RequestBreakdownDiagnosticsStore.write(filesDir, breakdown)
+        // The last-call snapshot is useful before a provider returns, but only completed usage
+        // samples enter the bounded trend history. This avoids two full history rewrites per call.
+        RequestBreakdownDiagnosticsStore.write(filesDir, linked, includeHistory = false)
     }
 
     internal fun recordProviderUsage(

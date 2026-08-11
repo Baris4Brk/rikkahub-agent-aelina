@@ -24,18 +24,24 @@ import me.rerere.ai.core.MessageRole
  */
 internal class ProviderSystemPromptLayout private constructor(
     val initialMessages: List<UIMessage>,
-    private val anchoredVolatileContext: String?,
+    private val volatileContext: String?,
+    private val useAnchoredVolatileContext: Boolean,
 ) {
     /** Adds provider-only runtime context after input transformers have run. */
     fun applyVolatileContext(messages: List<UIMessage>): List<UIMessage> {
-        val volatile = anchoredVolatileContext?.takeIf(String::isNotBlank) ?: return messages
-        val suffix = buildString {
-            appendLine()
-            appendLine()
-            appendLine("<provider_runtime_context>")
-            appendLine(volatile)
-            append("</provider_runtime_context>")
+        val volatile = volatileContext?.takeIf(String::isNotBlank) ?: return messages
+        val runtimeSection = renderProviderRuntimeContext(volatile)
+        if (!useAnchoredVolatileContext) {
+            val systemIndex = messages.indexOfFirst { it.role == MessageRole.SYSTEM }
+            if (systemIndex < 0) return listOf(UIMessage.system(runtimeSection)) + messages
+            val system = messages[systemIndex]
+            return messages.toMutableList().apply {
+                this[systemIndex] = system.copy(
+                    parts = system.parts + UIMessagePart.Text(runtimeSection),
+                )
+            }
         }
+        val suffix = "\n\n$runtimeSection"
         val userIndex = messages.indexOfLast { it.role == MessageRole.USER }
         if (userIndex < 0) {
             return messages + UIMessage.user(suffix.trimStart())
@@ -62,7 +68,7 @@ internal class ProviderSystemPromptLayout private constructor(
             conversationMessages: List<UIMessage>,
             useAnchoredVolatileContext: Boolean,
         ): ProviderSystemPromptLayout {
-            val providerStableSystem = if (useAnchoredVolatileContext) {
+            val providerStableSystem = if (volatileSystem.isNotBlank()) {
                 listOf(stableSystem, PROVIDER_RUNTIME_CONTEXT_POLICY)
                     .filter(String::isNotBlank)
                     .joinToString("\n\n")
@@ -70,28 +76,32 @@ internal class ProviderSystemPromptLayout private constructor(
                 stableSystem
             }
             val initialMessages = buildList {
-                if (useAnchoredVolatileContext) {
-                    if (providerStableSystem.isNotBlank()) add(UIMessage.system(providerStableSystem))
-                } else {
-                    val systemParts = buildList {
-                        if (stableSystem.isNotBlank()) add(UIMessagePart.Text(stableSystem))
-                        if (volatileSystem.isNotBlank()) add(UIMessagePart.Text(volatileSystem))
-                    }
-                    if (systemParts.isNotEmpty()) {
-                        add(UIMessage(role = MessageRole.SYSTEM, parts = systemParts))
-                    }
-                }
+                if (providerStableSystem.isNotBlank()) add(UIMessage.system(providerStableSystem))
                 addAll(conversationMessages)
             }
 
             return ProviderSystemPromptLayout(
                 initialMessages = initialMessages,
-                anchoredVolatileContext = volatileSystem.takeIf {
-                    useAnchoredVolatileContext && it.isNotBlank()
-                },
+                volatileContext = volatileSystem.takeIf(String::isNotBlank),
+                useAnchoredVolatileContext = useAnchoredVolatileContext,
             )
         }
     }
+}
+
+/**
+ * The runtime envelope is structural, while its body can contain user-derived memory, titles and
+ * tool observations. Prevent any body value from manufacturing a second opening/closing boundary.
+ * This is a structural guarantee only; callers must still label untrusted observations as data.
+ */
+internal fun escapeProviderRuntimeContextBoundaries(value: String): String =
+    Regex("<(?=\\s*/?\\s*provider_runtime_context\\b)", RegexOption.IGNORE_CASE)
+        .replace(value) { "\\u003c" }
+
+private fun renderProviderRuntimeContext(value: String): String = buildString {
+    appendLine("<provider_runtime_context>")
+    appendLine(escapeProviderRuntimeContextBoundaries(value))
+    append("</provider_runtime_context>")
 }
 
 private const val PROVIDER_RUNTIME_CONTEXT_POLICY =

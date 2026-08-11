@@ -1987,4 +1987,15 @@
   <string name="assistant_page_generation_turn_budget_effective">Текущий лимит: %1$d мин.</string>
   <string name="assistant_page_generation_turn_budget_effective_auto">Автоматически: %1$d мин.</string>
   <string name="assistant_page_generation_turn_budget_global">Автоматически: глобальный лимит выполнения</string>
+  <string name="notification_channel_accessibility_keep_alive">Защита специальных возможностей</string>
+  <string name="accessibility_keep_alive_title">Защита специальных возможностей</string>
+  <string name="accessibility_keep_alive_starting">Запуск постоянной защиты службы специальных возможностей…</string>
+  <string name="accessibility_keep_alive_active">Служба специальных возможностей активна и защищена.</string>
+  <string name="accessibility_keep_alive_recovering">Восстановление службы специальных возможностей RikkaHub…</string>
+  <string name="accessibility_keep_alive_waiting_for_bind">Служба включена; ожидается повторное подключение Android.</string>
+  <string name="accessibility_keep_alive_privilege_required">Для восстановления требуется WRITE_SECURE_SETTINGS или авторизованная служба Shizuku.</string>
+  <string name="accessibility_keep_alive_open_settings">Настройки специальных возможностей</string>
+  <string name="accessibility_keep_alive_stop">Остановить поддержку</string>
+  <string name="setting_page_accessibility_keep_alive">Не отключать специальные возможности</string>
+  <string name="setting_page_accessibility_keep_alive_desc">Фоновый мониторинг восстанавливает только службу RikkaHub, если Android отключит её или разорвёт соединение.</string>
 </resources>

@@ -7,13 +7,13 @@ class MemoryNarrativeIdentityTest {
     @Test
     fun `configured names replace protocol roles in readable memory output`() {
         val identity = resolveMemoryNarrativeIdentity(
-            configuredSelfName = "啥子七",
+            configuredSelfName = "角色甲",
             configuredCompanionName = "",
-            assistantName = "斯啾伊",
+            assistantName = "角色乙",
         )
 
-        assertEquals("啥子七", identity.selfName)
-        assertEquals("斯啾伊", identity.companionName)
+        assertEquals("角色甲", identity.selfName)
+        assertEquals("角色乙", identity.companionName)
     }
 
     @Test

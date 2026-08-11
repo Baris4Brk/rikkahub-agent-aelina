@@ -66,4 +66,6 @@ data class MemoryCaptureEntity(
     val narrativeEventsEnabled: Boolean = false,
     @ColumnInfo(name = "insights_theories_enabled", defaultValue = "0")
     val insightsTheoriesEnabled: Boolean = false,
+    @ColumnInfo(name = "payload_purged_at_ms")
+    val payloadPurgedAtMs: Long? = null,
 )

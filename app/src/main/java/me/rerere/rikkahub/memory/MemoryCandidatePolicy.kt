@@ -30,6 +30,7 @@ class MemoryCandidatePolicy(
      */
     fun isSafeNewCreate(proposal: MemoryProposal): Boolean =
         proposal.action == MemoryCandidateAction.CREATE &&
+            proposal.truthStatus == MemoryTruthStatus.CONFIRMED &&
             proposal.confidence >= SAFE_CREATE_CONFIDENCE &&
             (proposal.kind in AUTO_APPLY_KINDS || proposal.isSafeNarrativeCreate()) &&
             contentGuard.inspect(proposal.title + "\n" + proposal.content).isEmpty()

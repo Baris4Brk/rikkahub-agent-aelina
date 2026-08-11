@@ -1,6 +1,6 @@
 # P0 release verification
 
-Status: COMPLETE (OFFLINE AND HONOR DEVICE)
+Status: COMPLETE (OFFLINE VERIFICATION ENVIRONMENT)
 
 Completed:
 
@@ -14,21 +14,18 @@ Completed:
 - Standards review fixed new-line-length, stale database-version documentation, and duplicated
   compensation code. Spec review found and fixed the missing DeferredExecution classification for
   `research_start`, `research_status`, and `research_cancel`.
-- A complete user-0 pre-P0 backup was written to
-  `I:\RikkaHubBackups\AAK-AN00\20260718-115149` before installation. The 11,368,338,944-byte
-  archive has 165,976 entries and SHA-256
-  `0D457F55638EF8C789FB6E5AAFC4082FCF62DCF5B4BD1609C194F412F4E1A2EC`.
-- Covered installation preserved application data. The real database opened at version 30 with
+- A verified offline backup was completed before installation. Local paths, timestamps, archive
+  sizes, entry counts, and digests are intentionally omitted from this document.
+- Covered installation preserved application data. The migration fixture opened at version 30 with
   the expected memory metadata, FTS5 projection, `simple` tokenizer, synchronization triggers,
   and Room identity.
-- The device's framework SQLite lacks FTS5. The production and migration-test paths now share the
-  bundled SQLite adapter; the final device run of `Migration_29_30_Test` reported `OK (1 test)`.
+- The compatibility environment's framework SQLite lacks FTS5. The production and migration-test
+  paths now share the bundled SQLite adapter; the isolated migration verification passed.
 - A temporary, tool-free clone of an Assistant explicitly marked for testing completed one real
   model turn with the expected fixed answer. The clone, conversation, reports, test databases,
   instrumentation package, and temporary instrumentation sources were deleted afterward.
-- Final v170 restarted successfully after a user-0 force-stop. The crash buffer remained empty,
-  notification-listener access remained enabled, and MagicVoice/YOYO remained the assistant,
-  voice-interaction service, recognition service, and `ROLE_ASSISTANT` holder.
+- Final v170 restarted successfully in the explicitly authorized offline environment. The crash
+  buffer remained empty and required access bindings remained enabled.
 - Final ARM64 APK: versionCode 170, versionName `2.3.1-agent-up242.6`, 99,393,032 bytes.
 - APK v2 signature verified; signer certificate SHA-256:
   `DAB0E125537683B4E6F161AEDBF126DEF730C90DE94A1A98317E12A77481A45B`.
@@ -36,5 +33,5 @@ Completed:
 - APK content inspection confirmed the bundled Deep Research skill and arm64 SQLite extension are
   present.
 
-Scope remained Android user 0 throughout. Android user 100, the protected personal Assistants
-`啥子七` / `啥子七报道`, YOYO settings, and the read-only Operit checkout were not modified.
+Scope remained the explicitly authorized owner profile throughout. Non-owner profiles, protected
+production assistants, OEM assistant settings, and the read-only reference checkout were not modified.

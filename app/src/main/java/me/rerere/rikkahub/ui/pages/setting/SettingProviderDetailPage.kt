@@ -99,6 +99,7 @@ import me.rerere.ai.provider.ModelType
 import me.rerere.ai.provider.ProviderManager
 import me.rerere.ai.provider.ProviderSetting
 import me.rerere.ai.provider.TextGenerationParams
+import me.rerere.ai.context.ABSOLUTE_CONTEXT_WINDOW_TOKENS
 import me.rerere.ai.registry.ModelRegistry
 import me.rerere.ai.ui.UIMessage
 import me.rerere.rikkahub.R
@@ -527,7 +528,7 @@ private fun ModelSettingsForm(
         mutableStateOf(model.userContextWindowTokens.toString())
     }
     val parsedUserContextWindowTokens = userContextWindowTokensText.trim().toIntOrNull()
-        ?.takeIf { it > 0 }
+        ?.takeIf { it in 1..ABSOLUTE_CONTEXT_WINDOW_TOKENS }
 
     fun setModelId(id: String) {
         val inputModality = ModelRegistry.MODEL_INPUT_MODALITIES.getData(id)
@@ -627,7 +628,9 @@ private fun ModelSettingsForm(
                             value = userContextWindowTokensText,
                             onValueChange = { value ->
                                 userContextWindowTokensText = value
-                                value.trim().toIntOrNull()?.takeIf { it > 0 }?.let { tokens ->
+                                value.trim().toIntOrNull()
+                                    ?.takeIf { it in 1..ABSOLUTE_CONTEXT_WINDOW_TOKENS }
+                                    ?.let { tokens ->
                                     onModelChange(model.copy(userContextWindowTokens = tokens))
                                 }
                             },

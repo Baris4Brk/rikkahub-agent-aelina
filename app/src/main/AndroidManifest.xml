@@ -40,9 +40,9 @@
   <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
   <uses-permission android:name="android.permission.WRITE_SETTINGS"
       tools:ignore="ProtectedPermissions" />
-  <!-- ADB-granted only on the owner's Honor AAK-AN00. The lightweight active-assistant
-       guard uses this solely to restore the three fixed ai_key_* Global rows when
-       MagicKey overwrites them; the app exposes no arbitrary settings-write interface. -->
+  <!-- Granted only on explicitly configured primary-device builds. This is consumed by two fixed,
+       non-generic repair paths: restoring the three ai_key_* Global rows when the OEM assistant
+       overwrites them, and restoring only RikkaHub's own accessibility component. -->
   <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS"
       tools:ignore="ProtectedPermissions" />
   <uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" />
@@ -507,6 +507,26 @@
         android:name="android.accessibilityservice"
         android:resource="@xml/accessibility_service_config" />
     </service>
+
+    <service
+      android:name=".service.AccessibilityKeepAliveService"
+      android:exported="false"
+      android:foregroundServiceType="specialUse">
+      <property
+        android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+        android:value="user-enabled monitoring and recovery of RikkaHub accessibility automation" />
+    </service>
+
+    <receiver
+      android:name=".service.AccessibilityKeepAliveBootReceiver"
+      android:enabled="true"
+      android:exported="true"
+      android:permission="android.permission.RECEIVE_BOOT_COMPLETED">
+      <intent-filter>
+        <action android:name="android.intent.action.BOOT_COMPLETED" />
+        <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+      </intent-filter>
+    </receiver>
 
     <service
       android:name=".assistant.SystemAssistantAccessibilityButtonService"

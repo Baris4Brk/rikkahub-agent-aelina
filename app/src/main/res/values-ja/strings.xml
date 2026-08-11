@@ -1988,4 +1988,15 @@ mDNSアドレス: .localホスト名を使用し、IPを知らなくても同じ
   <string name="assistant_page_generation_turn_budget_effective">現在の上限：%1$d 分</string>
   <string name="assistant_page_generation_turn_budget_effective_auto">自動：%1$d 分</string>
   <string name="assistant_page_generation_turn_budget_global">自動：グローバル実行時間上限</string>
+  <string name="notification_channel_accessibility_keep_alive">ユーザー補助の保護</string>
+  <string name="accessibility_keep_alive_title">ユーザー補助の保護</string>
+  <string name="accessibility_keep_alive_starting">ユーザー補助の常時保護を開始しています…</string>
+  <string name="accessibility_keep_alive_active">ユーザー補助サービスは有効で保護されています。</string>
+  <string name="accessibility_keep_alive_recovering">RikkaHub のユーザー補助サービスを復元しています…</string>
+  <string name="accessibility_keep_alive_waiting_for_bind">有効です。Android がサービスを再接続するのを待っています。</string>
+  <string name="accessibility_keep_alive_privilege_required">復元には WRITE_SECURE_SETTINGS または許可済みの Shizuku サービスが必要です。</string>
+  <string name="accessibility_keep_alive_open_settings">ユーザー補助設定</string>
+  <string name="accessibility_keep_alive_stop">常駐を停止</string>
+  <string name="setting_page_accessibility_keep_alive">ユーザー補助を有効に保つ</string>
+  <string name="setting_page_accessibility_keep_alive_desc">フォアグラウンドで監視し、Android が RikkaHub のユーザー補助サービスを切断または無効にした場合は RikkaHub だけを復元します。</string>
 </resources>

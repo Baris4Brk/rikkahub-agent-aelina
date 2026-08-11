@@ -372,6 +372,7 @@ class MemoryV2CoordinatorTest {
             scopeId: String,
             query: String,
             limit: Int,
+            frozenNowMs: Long,
         ): List<ExistingMemoryRecord> = existing
 
         override suspend fun commit(commit: MemoryProcessCommit): MemoryCommitResult {
@@ -391,6 +392,8 @@ class MemoryV2CoordinatorTest {
 
         override suspend fun markFailed(
             captureIds: List<String>,
+            scopeId: String,
+            workerId: String,
             code: String,
             message: String?,
             retryPolicy: MemoryFailureRetryPolicy,

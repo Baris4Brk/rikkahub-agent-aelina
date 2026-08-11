@@ -306,11 +306,22 @@ class MemoryCenterVM(
                 content = editedContent ?: original.content,
             )
         }
-        review(MemoryReviewCommand.Accept(candidate.id, proposal))
+        review(
+            MemoryReviewCommand.Accept(
+                candidateId = candidate.id,
+                expectedScopeId = candidate.scopeId,
+                editedProposal = proposal,
+            ),
+        )
     }
 
-    fun rejectCandidate(candidateId: String) {
-        review(MemoryReviewCommand.Reject(candidateId))
+    fun rejectCandidate(candidate: MemoryCandidateEntity) {
+        review(
+            MemoryReviewCommand.Reject(
+                candidateId = candidate.id,
+                expectedScopeId = candidate.scopeId,
+            ),
+        )
     }
 
     /**
@@ -322,7 +333,12 @@ class MemoryCenterVM(
             candidate.takeIf { it.status == "PENDING_REVIEW" }
                 ?.takeIf { candidate.hasNoReviewFlags() }
                 ?.takeIf { candidatePolicy.isSafeNewCreate(candidate.toProposal()) }
-                ?.let { MemoryReviewCommand.Accept(it.id) }
+                ?.let {
+                    MemoryReviewCommand.Accept(
+                        candidateId = it.id,
+                        expectedScopeId = it.scopeId,
+                    )
+                }
         }
     }
 
@@ -330,7 +346,12 @@ class MemoryCenterVM(
     fun rejectAllPendingCandidates() {
         reviewPendingCandidates { candidate ->
             candidate.takeIf { it.status == "PENDING_REVIEW" }
-                ?.let { MemoryReviewCommand.Reject(it.id) }
+                ?.let {
+                    MemoryReviewCommand.Reject(
+                        candidateId = it.id,
+                        expectedScopeId = it.scopeId,
+                    )
+                }
         }
     }
 
@@ -363,8 +384,11 @@ class MemoryCenterVM(
         }
     }
 
-    suspend fun loadMemories(ids: List<Int>): List<MemoryEntity> =
-        ids.mapNotNull { memoryDao.getMemoryById(it) }
+    suspend fun loadMemories(
+        candidate: MemoryCandidateEntity,
+        ids: List<Int>,
+    ): List<MemoryEntity> =
+        if (ids.isEmpty()) emptyList() else memoryDao.getMemoriesByIds(ids, candidate.scopeId)
 
     suspend fun resolveSource(candidate: MemoryCandidateEntity): MemorySourceLocation? {
         val conversationId = runCatching { Uuid.parse(candidate.sourceConversationId) }.getOrNull()
@@ -381,20 +405,24 @@ class MemoryCenterVM(
         return MemorySourceLocation(conversationId, nodeId)
     }
 
-    fun archive(memoryId: Int) {
+    fun archive(memory: MemoryEntity) {
         mutate(
             MemoryMutationCommand.Archive(
-                memoryId,
-                MemoryApprovalSource.MANUAL_UI,
+                memoryId = memory.id,
+                expectedScopeId = memory.assistantId,
+                expectedRevision = memory.revision,
+                approvalSource = MemoryApprovalSource.MANUAL_UI,
             ),
         )
     }
 
-    fun restore(memoryId: Int) {
+    fun restore(memory: MemoryEntity) {
         mutate(
             MemoryMutationCommand.Restore(
-                memoryId,
-                MemoryApprovalSource.MANUAL_UI,
+                memoryId = memory.id,
+                expectedScopeId = memory.assistantId,
+                expectedRevision = memory.revision,
+                approvalSource = MemoryApprovalSource.MANUAL_UI,
             ),
         )
     }
@@ -403,29 +431,35 @@ class MemoryCenterVM(
         mutate(
             MemoryMutationCommand.Update(
                 memoryId = memory.id,
+                expectedScopeId = memory.assistantId,
                 expectedRevision = memory.revision,
                 title = input.title,
                 content = input.content,
                 kind = input.kind,
                 tags = input.tags,
                 importance = input.importance,
-                expiresAtMs = input.expiresAtMs,
+                expiryUpdate = input.expiresAtMs?.let(
+                    me.rerere.rikkahub.memory.MemoryExpiryUpdate::Set,
+                ) ?: input.expiryUpdate,
                 approvalSource = MemoryApprovalSource.MANUAL_UI,
             ),
         )
     }
 
-    fun restoreRevision(memoryId: Int, revision: Int) {
+    fun restoreRevision(memory: MemoryEntity, revision: Int) {
         mutate(
             MemoryMutationCommand.RestoreRevision(
-                memoryId,
-                revision,
-                MemoryApprovalSource.MANUAL_UI,
+                memoryId = memory.id,
+                expectedScopeId = memory.assistantId,
+                expectedCurrentRevision = memory.revision,
+                revision = revision,
+                approvalSource = MemoryApprovalSource.MANUAL_UI,
             ),
         )
     }
 
-    fun revisions(memoryId: Int) = memoryV2Dao.observeRevisions(memoryId)
+    fun revisions(memory: MemoryEntity) =
+        memoryV2Dao.observeRevisions(memory.id, memory.assistantId)
 
     fun createMemory(input: MemoryWriteInput) {
         viewModelScope.launch(Dispatchers.IO) {

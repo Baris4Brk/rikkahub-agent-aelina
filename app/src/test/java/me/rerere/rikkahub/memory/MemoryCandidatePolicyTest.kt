@@ -54,6 +54,9 @@ class MemoryCandidatePolicyTest {
 
         assertTrue(policy.isSafeNewCreate(safeCreate))
         assertFalse(policy.isSafeNewCreate(safeCreate.copy(confidence = 0.89f)))
+        assertFalse(policy.isSafeNewCreate(safeCreate.copy(truthStatus = MemoryTruthStatus.PROVISIONAL)))
+        assertFalse(policy.isSafeNewCreate(safeCreate.copy(truthStatus = MemoryTruthStatus.DISPUTED)))
+        assertFalse(policy.isSafeNewCreate(safeCreate.copy(truthStatus = MemoryTruthStatus.SUPERSEDED)))
         assertFalse(
             policy.isSafeNewCreate(
                 safeCreate.copy(

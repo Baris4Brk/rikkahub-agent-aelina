@@ -76,4 +76,4 @@
 - `:app:assembleRelease`：Release Kotlin、R8、资源优化和 Vital Lint 均通过；最终打包因本机没有配置 `release.storeFile` 发布签名而停止。
 - `:app:lintDebug`：执行完成，但仓库现有基线仍有 796 errors / 560 warnings / 7 hints，主要是 678 项历史 MissingTranslation 与 89 项 Compose LocalContext 资源规则；本轮没有批量改写这些无关 UI/本地化文件。
 
-Honor AAK-AN00 未运行 ADB、instrumentation、UIAutomator、connected 测试或测试 APK。
+主力设备未运行 ADB、instrumentation、UIAutomator、connected 测试或测试 APK。

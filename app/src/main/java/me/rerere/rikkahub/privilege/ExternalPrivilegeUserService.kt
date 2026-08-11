@@ -1,11 +1,13 @@
 package me.rerere.rikkahub.privilege
 
 import android.content.Context
+import android.content.ComponentName
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.ImageReader
 import android.os.Parcel
+import android.os.SystemClock
 import android.os.Process as AndroidProcess
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.buildJsonObject
@@ -15,6 +17,8 @@ import me.rerere.rikkahub.data.ai.tools.HardlineCommandGuard
 import me.rerere.rikkahub.data.ai.tools.local.ExternalPrivilegeActionResult
 import me.rerere.rikkahub.data.ai.tools.local.ExternalPrivilegeBridgePrivilege
 import me.rerere.rikkahub.data.ai.tools.local.ProtectedPackagePolicy
+import me.rerere.rikkahub.service.AccessibilityServiceListPolicy
+import me.rerere.rikkahub.service.RikkaAccessibilityService
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
@@ -90,6 +94,80 @@ class ExternalPrivilegeUserService() : IExternalPrivilegeBridgeService.Stub() {
         ),
         successMessage = "App cache cleared.",
     )
+
+    /**
+     * Fixed, owner-user-only repair operation for RikkaHub's own accessibility component.
+     * The caller cannot supply a component, setting key, value, or shell command.
+     */
+    override fun ensureAccessibilityServiceEnabled(userId: Int, forceRebind: Boolean): String {
+        if (userId != OWNER_USER_ID) {
+            return encode(
+                ExternalPrivilegeActionResult(
+                    ok = false,
+                    code = "OWNER_USER_ONLY",
+                    message = "Accessibility recovery is restricted to Android user 0.",
+                ),
+            )
+        }
+        val component = ComponentName(
+            applicationPackageName,
+            RikkaAccessibilityService::class.java.name,
+        ).flattenToString()
+        val read = readEnabledAccessibilityServices(userId)
+        if (!read.ok) return encode(read)
+
+        var current = read.output
+        if (forceRebind && AccessibilityServiceListPolicy.contains(current, component)) {
+            val withoutOwnService = AccessibilityServiceListPolicy.remove(current, component)
+            val remove = writeEnabledAccessibilityServices(userId, withoutOwnService)
+            if (!remove.ok) return encode(remove)
+            SystemClock.sleep(ACCESSIBILITY_REBIND_SETTLE_MS)
+            current = withoutOwnService
+        }
+
+        val withOwnService = AccessibilityServiceListPolicy.add(current, component)
+        if (!AccessibilityServiceListPolicy.contains(current, component) || forceRebind) {
+            var write = writeEnabledAccessibilityServices(userId, withOwnService)
+            if (!write.ok && forceRebind) {
+                // A rebind pulse already removed the component. Retry the narrow rollback once
+                // before returning a failure so a transient settings-service error cannot strand it.
+                write = writeEnabledAccessibilityServices(userId, withOwnService)
+            }
+            if (!write.ok) return encode(write)
+        }
+        val enableGlobal = runFixedCommand(
+            listOf(
+                SETTINGS.absolutePath,
+                "--user",
+                userId.toString(),
+                "put",
+                "secure",
+                "accessibility_enabled",
+                "1",
+            ),
+            MUTATION_TIMEOUT_MS,
+        )
+        if (!enableGlobal.ok) return encode(enableGlobal)
+
+        val verified = readEnabledAccessibilityServices(userId)
+        if (!verified.ok) return encode(verified)
+        if (!AccessibilityServiceListPolicy.contains(verified.output, component)) {
+            return encode(
+                ExternalPrivilegeActionResult(
+                    ok = false,
+                    code = "VERIFY_FAILED",
+                    message = "Android did not retain RikkaHub's accessibility component.",
+                ),
+            )
+        }
+        return encode(
+            ExternalPrivilegeActionResult(
+                ok = true,
+                code = if (forceRebind) "ACCESSIBILITY_REBOUND" else "ACCESSIBILITY_RESTORED",
+                message = "RikkaHub accessibility authorization was restored.",
+            ),
+        )
+    }
 
     override fun runCommand(requestJson: String): String {
         val request = try {
@@ -415,6 +493,34 @@ class ExternalPrivilegeUserService() : IExternalPrivilegeBridgeService.Stub() {
         val result = runFixedCommand(command, MUTATION_TIMEOUT_MS)
         return encode(if (result.ok) result.copy(message = successMessage) else result)
     }
+
+    private fun readEnabledAccessibilityServices(userId: Int): CommandResult = runFixedCommand(
+        listOf(
+            SETTINGS.absolutePath,
+            "--user",
+            userId.toString(),
+            "get",
+            "secure",
+            "enabled_accessibility_services",
+        ),
+        MUTATION_TIMEOUT_MS,
+    )
+
+    private fun writeEnabledAccessibilityServices(
+        userId: Int,
+        value: String,
+    ): CommandResult = runFixedCommand(
+        listOf(
+            SETTINGS.absolutePath,
+            "--user",
+            userId.toString(),
+            "put",
+            "secure",
+            "enabled_accessibility_services",
+            value,
+        ),
+        MUTATION_TIMEOUT_MS,
+    )
 
     private fun runFixedCommand(command: List<String>, timeoutMs: Long): CommandResult {
         val canonical = command.joinToString(" ")
@@ -766,6 +872,8 @@ class ExternalPrivilegeUserService() : IExternalPrivilegeBridgeService.Stub() {
         private const val MUTATION_TIMEOUT_MS = 10_000L
         private const val MAX_FIXED_OUTPUT_BYTES = 1_048_576
         private const val MAX_USER_ID = 999
+        private const val OWNER_USER_ID = 0
+        private const val ACCESSIBILITY_REBIND_SETTLE_MS = 250L
         private const val ROOT_UID = 0
         private const val SHELL_UID = 2_000
         private const val STREAM_TASKS_PER_COMMAND = 3
@@ -786,6 +894,7 @@ class ExternalPrivilegeUserService() : IExternalPrivilegeBridgeService.Stub() {
         )
         private val SETSID = File("/system/bin/setsid")
         private val KILL = File("/system/bin/kill")
+        private val SETTINGS = File("/system/bin/settings")
         private val STATIC_PROTECTED_PACKAGES = setOf(
             "android",
             "com.android.systemui",

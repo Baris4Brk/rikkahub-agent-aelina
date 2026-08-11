@@ -46,10 +46,10 @@ import me.rerere.rikkahub.utils.navigateToChatPage
 fun MemoryReviewTab(
     candidates: LazyPagingItems<MemoryCandidateEntity>,
     narrativeNamesForOrigin: (String?) -> MemoryNarrativeNames,
-    onLoadMemories: suspend (List<Int>) -> List<MemoryEntity>,
+    onLoadMemories: suspend (MemoryCandidateEntity, List<Int>) -> List<MemoryEntity>,
     onResolveSource: suspend (MemoryCandidateEntity) -> MemorySourceLocation?,
     onAccept: (MemoryCandidateEntity, String?, String?) -> Unit,
-    onReject: (String) -> Unit,
+    onReject: (MemoryCandidateEntity) -> Unit,
     onAcceptSafeNew: () -> Unit,
     onRejectAllPending: () -> Unit,
 ) {
@@ -129,7 +129,7 @@ fun MemoryReviewTab(
                         onResolveSource = onResolveSource,
                         onAccept = { onAccept(candidate, null, null) },
                         onEditAccept = { editing = candidate },
-                        onReject = { onReject(candidate.id) },
+                        onReject = { onReject(candidate) },
                     )
                 }
             }
@@ -154,7 +154,7 @@ private fun MemoryCandidateCard(
     candidate: MemoryCandidateEntity,
     narrativeNames: MemoryNarrativeNames,
     narrativeNamesForOrigin: (String?) -> MemoryNarrativeNames,
-    onLoadMemories: suspend (List<Int>) -> List<MemoryEntity>,
+    onLoadMemories: suspend (MemoryCandidateEntity, List<Int>) -> List<MemoryEntity>,
     onResolveSource: suspend (MemoryCandidateEntity) -> MemorySourceLocation?,
     onAccept: () -> Unit,
     onEditAccept: () -> Unit,
@@ -168,7 +168,7 @@ private fun MemoryCandidateCard(
     }
     var oldMemories by remember(candidate.id) { mutableStateOf<List<MemoryEntity>>(emptyList()) }
     LaunchedEffect(candidate.id, targetIds) {
-        oldMemories = onLoadMemories(targetIds)
+        oldMemories = onLoadMemories(candidate, targetIds)
     }
     val risks = remember(candidate.riskFlagsJson) {
         runCatching { JsonInstant.decodeFromString<List<String>>(candidate.riskFlagsJson) }

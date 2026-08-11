@@ -60,10 +60,10 @@ fun MemoryLibraryTab(
     onFilterChange: ((MemoryLibraryFilter) -> MemoryLibraryFilter) -> Unit,
     onCreate: (MemoryWriteInput) -> Unit,
     onUpdate: (MemoryEntity, MemoryWriteInput) -> Unit,
-    onArchive: (Int) -> Unit,
-    onRestore: (Int) -> Unit,
-    revisions: (Int) -> Flow<List<MemoryRevisionEntity>>,
-    onRestoreRevision: (Int, Int) -> Unit,
+    onArchive: (MemoryEntity) -> Unit,
+    onRestore: (MemoryEntity) -> Unit,
+    revisions: (MemoryEntity) -> Flow<List<MemoryRevisionEntity>>,
+    onRestoreRevision: (MemoryEntity, Int) -> Unit,
 ) {
     var query by remember(filter.query) { mutableStateOf(filter.query) }
     var editing by remember { mutableStateOf<MemoryEntity?>(null) }
@@ -190,18 +190,18 @@ fun MemoryLibraryTab(
         MemoryDetailDialog(
             memory = memory,
             narrativeNames = narrativeNamesForOrigin(memory.originAssistantId),
-            revisions = revisions(memory.id),
+            revisions = revisions(memory),
             onDismiss = { detail = null },
             onEdit = { editing = memory },
             onArchive = {
-                onArchive(memory.id)
+                onArchive(memory)
                 detail = null
             },
             onRestore = {
-                onRestore(memory.id)
+                onRestore(memory)
                 detail = null
             },
-            onRestoreRevision = { revision -> onRestoreRevision(memory.id, revision) },
+            onRestoreRevision = { revision -> onRestoreRevision(memory, revision) },
         )
     }
     if (showingFilters) {

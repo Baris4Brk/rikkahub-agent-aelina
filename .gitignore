@@ -42,6 +42,24 @@ app/google-services.json
 # Local diagnostics may contain device logs, database snapshots, preferences, or identifiers.
 /.codex-diagnostics/
 
+# Local safety snapshots, crash dumps, and replay logs may contain source fragments or paths.
+/.safety-artifacts/
+/hs_err_pid*.log
+/replay_pid*.log
+/*.hprof
+
+# Environment and signing credentials must never enter a public or private source snapshot.
+.env
+.env.*
+!*.env.example
+!*.env.sample
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pem
+*.key
+
 # Temporary screenshots captured while diagnosing local builds.
 /tmp-rikkahub-*.png
 

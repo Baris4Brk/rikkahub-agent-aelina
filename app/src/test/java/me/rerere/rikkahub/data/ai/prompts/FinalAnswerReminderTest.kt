@@ -33,7 +33,7 @@ class FinalAnswerReminderTest {
     fun `blank prompt falls back but a custom prompt is preserved`() {
         assertEquals(DEFAULT_FINAL_ANSWER_REMINDER_PROMPT, resolveFinalAnswerReminderPrompt("  "))
 
-        val custom = "请只给出最后结论，并继续称呼我为斯啾伊。"
+        val custom = "请只给出最后结论，并继续称呼我为示例昵称。"
         assertEquals(custom, resolveFinalAnswerReminderPrompt(custom))
     }
 }

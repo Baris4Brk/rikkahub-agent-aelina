@@ -33,4 +33,10 @@ data class MemoryRevisionEntity(
     val sourceMessageIdsJson: String = "[]",
     @ColumnInfo("created_at_ms")
     val createdAtMs: Long,
+    @ColumnInfo("reason_code")
+    val reasonCode: String? = null,
+    @ColumnInfo("cause_memory_id")
+    val causeMemoryId: Int? = null,
+    @ColumnInfo("cause_link_id")
+    val causeLinkId: String? = null,
 )

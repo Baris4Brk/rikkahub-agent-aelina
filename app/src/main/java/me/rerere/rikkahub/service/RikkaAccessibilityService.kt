@@ -73,6 +73,9 @@ class RikkaAccessibilityService : AccessibilityService() {
         instance = this
         _running.value = true
         publishWindowState(event = null)
+        if (AccessibilityKeepAliveState.recordAccessibilityConnection(this)) {
+            AccessibilityKeepAliveService.start(this)
+        }
         Log.i(TAG, "AccessibilityService connected")
     }
 
@@ -81,6 +84,7 @@ class RikkaAccessibilityService : AccessibilityService() {
         instance = null
         _running.value = false
         _lastActions.value = emptyList()
+        AccessibilityKeepAliveService.start(this)
         Log.i(TAG, "AccessibilityService unbound")
         return super.onUnbind(intent)
     }

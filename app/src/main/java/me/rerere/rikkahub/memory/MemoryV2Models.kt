@@ -63,6 +63,21 @@ enum class MemoryCandidateStatus {
 enum class MemoryLifecycleStatus {
     ACTIVE,
     ARCHIVED,
+    EXPIRED,
+    STALE,
+}
+
+enum class MemoryRelationCandidateStatus {
+    PENDING,
+    ACCEPTED,
+    REJECTED,
+    INVALIDATED,
+}
+
+enum class MemoryLinkLifecycleStatus {
+    ACTIVE,
+    SUSPENDED,
+    INVALIDATED,
 }
 
 enum class MemoryApprovalSource {
@@ -79,6 +94,15 @@ enum class MemoryRevisionOperation {
     MERGE,
     ARCHIVE,
     RESTORE,
+    EXPIRE,
+    STALE,
+}
+
+enum class MemoryLinkRevisionOperation {
+    CREATE,
+    SUSPEND,
+    RESTORE,
+    INVALIDATE,
 }
 
 data class CompletedMemoryTurn(
@@ -119,6 +143,8 @@ data class MemoryCaptureRecord(
     val conversationContextTurns: Int = MEMORY_DEFAULT_CONVERSATION_CONTEXT_TURNS,
     val narrativeEventsEnabled: Boolean = false,
     val insightsTheoriesEnabled: Boolean = false,
+    /** Worker which owns the PROCESSING lease. Mutating a capture requires this exact owner. */
+    val leaseOwner: String? = null,
 )
 
 sealed interface MemoryCaptureResult {
@@ -230,7 +256,16 @@ data class MemoryRecordSnapshot(
     val occurredAtMs: Long? = null,
     val participants: List<String> = emptyList(),
     val outcome: String? = null,
+    val sourceType: String = "LEGACY",
+    val sourceConversationId: String? = null,
+    val sourceMessageIds: List<String> = emptyList(),
 )
+
+sealed interface MemoryExpiryUpdate {
+    data object Keep : MemoryExpiryUpdate
+    data object Clear : MemoryExpiryUpdate
+    data class Set(val expiresAtMs: Long) : MemoryExpiryUpdate
+}
 
 data class MemoryWriteInput(
     val title: String? = null,
@@ -240,6 +275,8 @@ data class MemoryWriteInput(
     val importance: Float? = null,
     val confidence: Float? = null,
     val expiresAtMs: Long? = null,
+    /** Edit-only expiry intent. A missing expiresAtMs must not silently clear an existing TTL. */
+    val expiryUpdate: MemoryExpiryUpdate = MemoryExpiryUpdate.Keep,
 )
 
 data class MemoryQueryRecord(
@@ -311,12 +348,22 @@ data class MemoryCandidateDecision(
 )
 
 data class MemoryProcessCommit(
+    val batchId: String,
     val scopeId: String,
     val assistantId: String,
+    val workerId: String,
     val conversationId: String,
     val captures: List<MemoryCaptureRecord>,
     val candidates: List<MemoryCandidateDecision>,
+    val relations: List<MemoryRelationDecision> = emptyList(),
     val nowMs: Long,
+)
+
+data class MemoryRelationDecision(
+    val id: String,
+    val proposal: MemoryRelationProposal,
+    val sourceExpectedRevision: Int? = null,
+    val targetExpectedRevision: Int? = null,
 )
 
 data class MemoryCommitResult(
@@ -328,10 +375,14 @@ data class MemoryCommitResult(
 sealed interface MemoryReviewCommand {
     data class Accept(
         val candidateId: String,
+        val expectedScopeId: String,
         val editedProposal: MemoryProposal? = null,
     ) : MemoryReviewCommand
 
-    data class Reject(val candidateId: String) : MemoryReviewCommand
+    data class Reject(
+        val candidateId: String,
+        val expectedScopeId: String,
+    ) : MemoryReviewCommand
 }
 
 sealed interface MemoryReviewResult {
@@ -341,6 +392,30 @@ sealed interface MemoryReviewResult {
     data object AlreadyResolved : MemoryReviewResult
     data object NotFound : MemoryReviewResult
     data class Failed(val code: String) : MemoryReviewResult
+}
+
+sealed interface MemoryRelationReviewCommand {
+    val expectedScopeId: String
+    val relationCandidateId: String
+
+    data class Accept(
+        override val relationCandidateId: String,
+        override val expectedScopeId: String,
+    ) : MemoryRelationReviewCommand
+
+    data class Reject(
+        override val relationCandidateId: String,
+        override val expectedScopeId: String,
+    ) : MemoryRelationReviewCommand
+}
+
+sealed interface MemoryRelationReviewResult {
+    data class Applied(val linkId: String) : MemoryRelationReviewResult
+    data object Rejected : MemoryRelationReviewResult
+    data object Conflict : MemoryRelationReviewResult
+    data object AlreadyResolved : MemoryRelationReviewResult
+    data object NotFound : MemoryRelationReviewResult
+    data class Failed(val code: String) : MemoryRelationReviewResult
 }
 
 sealed interface MemoryMutationCommand {
@@ -363,28 +438,35 @@ sealed interface MemoryMutationCommand {
 
     data class Update(
         val memoryId: Int,
+        val expectedScopeId: String,
         val expectedRevision: Int? = null,
         val title: String? = null,
         val content: String,
         val kind: MemoryKind? = null,
         val tags: List<String>? = null,
         val importance: Float? = null,
-        val expiresAtMs: Long? = null,
+        val expiryUpdate: MemoryExpiryUpdate = MemoryExpiryUpdate.Keep,
         val approvalSource: MemoryApprovalSource,
     ) : MemoryMutationCommand
 
     data class Archive(
         val memoryId: Int,
+        val expectedScopeId: String,
+        val expectedRevision: Int? = null,
         val approvalSource: MemoryApprovalSource,
     ) : MemoryMutationCommand
 
     data class Restore(
         val memoryId: Int,
+        val expectedScopeId: String,
+        val expectedRevision: Int? = null,
         val approvalSource: MemoryApprovalSource,
     ) : MemoryMutationCommand
 
     data class RestoreRevision(
         val memoryId: Int,
+        val expectedScopeId: String,
+        val expectedCurrentRevision: Int? = null,
         val revision: Int,
         val approvalSource: MemoryApprovalSource,
     ) : MemoryMutationCommand

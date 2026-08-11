@@ -51,6 +51,7 @@ import me.rerere.rikkahub.data.db.entity.MemoryCaptureEntity
 import me.rerere.rikkahub.data.db.entity.MemoryRevisionEntity
 import me.rerere.rikkahub.data.db.entity.MemoryEvidenceEntity
 import me.rerere.rikkahub.data.db.entity.MemoryLinkEntity
+import me.rerere.rikkahub.data.db.entity.MemoryLinkRevisionEntity
 import me.rerere.rikkahub.data.db.entity.MemoryRelationCandidateEntity
 import me.rerere.rikkahub.data.db.entity.MemoryBackfillRunEntity
 import me.rerere.rikkahub.data.db.entity.MessageNodeEntity
@@ -94,6 +95,7 @@ import me.rerere.rikkahub.owner.db.HostOperationEventEntity
         MemoryRevisionEntity::class,
         MemoryEvidenceEntity::class,
         MemoryLinkEntity::class,
+        MemoryLinkRevisionEntity::class,
         MemoryRelationCandidateEntity::class,
         MemoryBackfillRunEntity::class,
         GenMediaEntity::class,
@@ -127,7 +129,7 @@ import me.rerere.rikkahub.owner.db.HostOperationEventEntity
     ],
     // v33 freezes the conversation-context limit with each queued capture so changing the
     // setting later cannot split or enlarge a batch that has already been accepted.
-    version = 42,
+    version = 43,
     autoMigrations = [
         AutoMigration(from = 1, to = 2),
         AutoMigration(from = 2, to = 3),

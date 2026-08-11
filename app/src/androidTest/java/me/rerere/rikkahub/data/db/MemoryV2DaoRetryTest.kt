@@ -96,6 +96,7 @@ class MemoryV2DaoRetryTest {
             1,
             dao.claimCapture(
                 id = requeued.id,
+                scopeId = scopeId,
                 workerId = "new-worker",
                 leaseUntilMs = nowMs + 1_000L,
                 nowMs = nowMs,
@@ -133,6 +134,8 @@ class MemoryV2DaoRetryTest {
                 1,
                 dao.markCapturesFailed(
                     ids = listOf("configuration-failure"),
+                    scopeId = scopeId,
+                    workerId = "worker",
                     state = "FAILED",
                     code = "memory_extraction_model_missing",
                     message = "The selected extraction model is unavailable.",
@@ -212,6 +215,7 @@ class MemoryV2DaoRetryTest {
             0,
             dao.claimCapture(
                 id = "terminal-failure",
+                scopeId = scopeId,
                 workerId = "automatic-worker",
                 leaseUntilMs = nowMs + 1_000L,
                 nowMs = nowMs,
@@ -294,6 +298,77 @@ class MemoryV2DaoRetryTest {
         assertEquals(2, recovered.retryCount)
         assertNull(recovered.leaseOwner)
         assertNull(recovered.leaseUntilMs)
+    }
+
+    @Test
+    fun reclaimedLease_rejectsEveryMutationFromTheOldWorker() = runBlocking {
+        dao.insertCapture(
+            MemoryCaptureEntity(
+                id = "reclaimed",
+                assistantId = "assistant",
+                scopeId = "scope",
+                conversationId = "conversation",
+                userMessageId = "user",
+                assistantMessageId = "assistant-message",
+                origin = "APP_UI",
+                autoSaveMode = "SAFE_NEW_ONLY",
+                userText = "remember this",
+                assistantText = "acknowledged",
+                state = "PROCESSING",
+                retryCount = 1,
+                createdAtMs = 1L,
+                updatedAtMs = 2L,
+                leaseOwner = "old-worker",
+                leaseUntilMs = 100L,
+            ),
+        )
+        assertEquals(1, dao.recoverExpiredLeases(100L))
+        assertEquals(
+            1,
+            dao.claimCapture(
+                id = "reclaimed",
+                scopeId = "scope",
+                workerId = "new-worker",
+                leaseUntilMs = 1_000L,
+                nowMs = 101L,
+            ),
+        )
+
+        assertEquals(
+            0,
+            dao.releaseClaimedCaptures(
+                ids = listOf("reclaimed"),
+                scopeId = "scope",
+                workerId = "old-worker",
+                nowMs = 102L,
+            ),
+        )
+        assertEquals(
+            0,
+            dao.markCapturesFailed(
+                ids = listOf("reclaimed"),
+                scopeId = "scope",
+                workerId = "old-worker",
+                state = "FAILED",
+                code = "OLD_WORKER",
+                message = null,
+                requiresManualRetry = false,
+                nowMs = 102L,
+            ),
+        )
+        assertEquals(
+            1,
+            dao.markCapturesProcessed(
+                ids = listOf("reclaimed"),
+                scopeId = "scope",
+                assistantId = "assistant",
+                conversationId = "conversation",
+                workerId = "new-worker",
+                nowMs = 102L,
+                processingOutcome = "NO_LONG_TERM_SIGNAL",
+                candidateCount = 0,
+            ),
+        )
     }
 
     private class RecordingScheduler : MemoryWorkScheduler {

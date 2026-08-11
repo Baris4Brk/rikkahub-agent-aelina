@@ -11,6 +11,7 @@ import androidx.room.PrimaryKey
         Index(value = ["scope_id", "status", "created_at_ms"]),
         Index("source_conversation_id"),
         Index("applied_memory_id"),
+        Index("batch_id"),
     ],
 )
 data class MemoryCandidateEntity(
@@ -66,4 +67,6 @@ data class MemoryCandidateEntity(
     val participantsJson: String = "[]",
     @ColumnInfo(name = "outcome")
     val outcome: String? = null,
+    @ColumnInfo(name = "batch_id")
+    val batchId: String? = null,
 )
