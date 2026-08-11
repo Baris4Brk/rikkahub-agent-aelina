@@ -48,7 +48,13 @@ class ProviderVisionDescriptionClient(
                     parts = listOf(UIMessagePart.Image("file://${imageFile.absolutePath}")),
                 ),
             ),
-            params = TextGenerationParams(model = model),
+            params = TextGenerationParams(
+                model = model,
+                // Some OpenCode-compatible vision models reject reasoning_effort="none"
+                // instead of treating it as disabled. This request is one-shot visual
+                // extraction, so omit the reasoning configuration when it is OFF.
+                omitReasoningConfigurationWhenOff = true,
+            ),
         )
         val text = response.choices.firstOrNull()?.message?.toText()?.trim().orEmpty()
         require(text.isNotEmpty()) { "visual_description_empty" }

@@ -278,14 +278,46 @@ class AndroidTermuxManagedSupervisor(
                 command -v setsid >/dev/null 2>&1 || { printf 'state=failed\nexit_code=127\n' > "§dir/status"; exit 0; }
                 setsid sh "§dir/command.sh" >"§dir/stdout.log" 2>"§dir/stderr.log" </dev/null &
                 pid=§!
-                pgid="§(current_pgid "§pid")"
-                start_ticks="§(start_ticks "§pid")"
-                case "§pid:§pgid:§start_ticks" in *[!0-9:]*) fail identity_invalid;; esac
-                printf 'pid=%s\npgid=%s\nstart_ticks=%s\n' "§pid" "§pgid" "§start_ticks" > "§dir/identity"
-                rm -f "§dir/command.sh"
-                printf 'state=running\n' > "§dir/status"
-                wait "§pid"; code=§?
-                printf 'state=exited\nexit_code=%s\n' "§code" > "§dir/status"
+                pgid=""
+                start_ticks=""
+                n=0
+                # A short command can exit before /proc/§pid/stat is observable. Give the
+                # process a bounded hand-off window before deciding whether it is terminal.
+                while [ "§n" -lt 40 ]; do
+                  pgid="§(current_pgid "§pid")"
+                  start_ticks="§(start_ticks "§pid")"
+                  if [ -n "§pgid" ] && [ -n "§start_ticks" ]; then break; fi
+                  if ! kill -0 "§pid" 2>/dev/null; then break; fi
+                  sleep 0.01
+                  n=§((n+1))
+                done
+                if [ -n "§pgid" ] && [ -n "§start_ticks" ]; then
+                  case "§pid:§pgid:§start_ticks" in *[!0-9:]*) fail identity_invalid;; esac
+                  printf 'pid=%s\npgid=%s\nstart_ticks=%s\n' "§pid" "§pgid" "§start_ticks" > "§dir/identity.tmp"
+                  mv -f "§dir/identity.tmp" "§dir/identity"
+                  rm -f "§dir/command.sh"
+                  printf 'state=running\n' > "§dir/status"
+                  wait "§pid"; code=§?
+                  printf 'state=exited\nexit_code=%s\n' "§code" > "§dir/status"
+                else
+                  # If metadata never appeared while the process was alive, do not leave an
+                  # unmanaged command behind. A terminal command has no real start tick, so use
+                  # a numeric sentinel rather than the exit code (which is not process identity).
+                  if kill -0 "§pid" 2>/dev/null; then
+                    kill -TERM "§pid" 2>/dev/null || true
+                    wait "§pid"; code=§?
+                    printf 'state=failed\nexit_code=%s\n' "§code" > "§dir/status"
+                  else
+                    wait "§pid"; code=§?
+                    printf 'state=exited\nexit_code=%s\n' "§code" > "§dir/status"
+                  fi
+                  fallback_pgid="§{pgid:-0}"
+                  case "§fallback_pgid" in *[!0-9]*|'') fallback_pgid=0;; esac
+                  fallback_start_ticks="0"
+                  printf 'pid=%s\npgid=%s\nstart_ticks=%s\n' "§pid" "§fallback_pgid" "§fallback_start_ticks" > "§dir/identity.tmp"
+                  mv -f "§dir/identity.tmp" "§dir/identity"
+                  rm -f "§dir/command.sh"
+                fi
                 ;;
               status)
                 verify_token

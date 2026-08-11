@@ -66,10 +66,17 @@ internal class ReverseGeocodeCoordinatorImpl(
             }
         }
         if (request.allowExternal && settings?.externalEnabled == true) {
-            val configured = settings.providers.firstOrNull { it.enabled && it.type == ReverseGeocoderProviderKind.AMAP }
-            val backend = configured?.let { configuredBackend(it.id) }
-            if (backend != null) {
-                val external = executeBackend(request, backend, configured.configRevision, explicit = false)
+            val configuredProviders = settings.providers
+                .filter { it.enabled && it.type != ReverseGeocoderProviderKind.NOMINATIM }
+                .sortedBy { it.priority }
+            var lastExternal: ReverseGeocodeResolution? = null
+            for (config in configuredProviders) {
+                val backend = configuredBackend(config.id) ?: continue
+                lastExternal = executeBackend(request, backend, config.configRevision, explicit = false)
+                if (lastExternal is ReverseGeocodeResolution.Success) break
+            }
+            val external = lastExternal
+            if (external != null) {
                 val previousAttempts = lastFailure?.attemptedProviders.orEmpty()
                 return when (external) {
                     is ReverseGeocodeResolution.Success -> external.copy(
@@ -92,13 +99,14 @@ internal class ReverseGeocodeCoordinatorImpl(
         val config = settingsStore?.settingsFlow?.value?.reverseGeocodingSettings?.normalized()
             ?.providers?.firstOrNull { it.id == providerId && it.enabled }
             ?: return null
-        val localVault = vault ?: return null
         val localHttp = http ?: return null
         return when (config.type) {
-            ReverseGeocoderProviderKind.AMAP -> AmapReverseGeocoder(config, localVault, localHttp)
-            ReverseGeocoderProviderKind.NOMINATIM,
-            ReverseGeocoderProviderKind.BIGDATA_CLOUD,
-            -> null
+            ReverseGeocoderProviderKind.AMAP -> {
+                val localVault = vault ?: return null
+                AmapReverseGeocoder(config, localVault, localHttp)
+            }
+            ReverseGeocoderProviderKind.BIGDATA_CLOUD -> BigDataCloudReverseGeocoder(config, localHttp)
+            ReverseGeocoderProviderKind.NOMINATIM -> null
         }
     }
 

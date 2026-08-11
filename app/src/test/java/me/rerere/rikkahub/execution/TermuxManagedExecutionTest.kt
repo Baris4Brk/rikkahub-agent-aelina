@@ -162,6 +162,18 @@ class TermuxManagedExecutionTest {
         assertEquals(64, AndroidTermuxManagedSupervisor.SCRIPT_SHA256.length)
     }
 
+    @Test
+    fun `supervisor script handles commands that exit before proc metadata is visible`() {
+        val script = AndroidTermuxManagedSupervisor.SUPERVISOR_SCRIPT
+
+        assertTrue(script.contains("while [ \"\$n\" -lt 40 ]"))
+        assertTrue(script.contains("kill -0 \"\$pid\""))
+        assertTrue(script.contains("wait \"\$pid\""))
+        assertTrue(script.contains("fallback_pgid"))
+        assertTrue(script.contains("fallback_start_ticks=\"0\""))
+        assertTrue(script.contains("identity.tmp"))
+    }
+
     private fun startable(
         supervisor: FakeSupervisor,
         ledger: InMemoryLedger,

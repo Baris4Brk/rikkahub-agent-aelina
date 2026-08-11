@@ -134,6 +134,9 @@ object OcrTransformer : InputMessageTransformer, KoinComponent {
                 ),
                 params = TextGenerationParams(
                     model = model,
+                    // OpenCode-compatible vision endpoints reject reasoning_effort="none".
+                    // OCR does not need a reasoning budget, so leave the field out when OFF.
+                    omitReasoningConfigurationWhenOff = true,
                 ),
             )
         }

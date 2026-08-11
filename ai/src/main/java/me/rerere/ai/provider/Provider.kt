@@ -66,6 +66,14 @@ data class TextGenerationParams(
      */
     @Transient
     val omitReasoningConfigurationWhenOff: Boolean = false,
+    /**
+     * Retry hint for network-backed providers. A provider may use an isolated connection pool
+     * for this attempt so a stream that was pinned to a degraded keep-alive connection is not
+     * retried on that same transport. It is deliberately transient and never enters a request
+     * body.
+     */
+    @Transient
+    val freshConnection: Boolean = false,
     val customHeaders: List<CustomHeader> = emptyList(),
     val customBody: List<CustomBody> = emptyList(),
 )

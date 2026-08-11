@@ -2473,7 +2473,7 @@ class GenerationHandler(
         )
 
         var messages: List<UIMessage> = messages
-        val terminalTracker = GenerationTerminalTracker()
+        var terminalTracker = GenerationTerminalTracker()
         val params = TextGenerationParams(
             model = model,
             temperature = assistant.temperature,
@@ -2543,6 +2543,10 @@ class GenerationHandler(
             toolFastLaneBundleId = toolDiscoveryMetrics?.fastLaneBundleId,
         )
         diagnosticHandle.recordRequestBreakdown(context.filesDir, breakdown)
+        val watchdogEnabled = stream &&
+            provider is ProviderSetting.OpenAI &&
+            !provider.useResponseApi
+        val providerAttemptBaseMessages = messages
         val providerOutcome = try {
             DefaultProviderTurnRunner(runControl).run(
                 ProviderTurnRequest(
@@ -2553,6 +2557,17 @@ class GenerationHandler(
                             messages = internalMessages,
                             params = params,
                         )
+                    },
+                    retryStreamCall = if (watchdogEnabled) {
+                        {
+                            providerImpl.streamText(
+                                providerSetting = provider,
+                                messages = internalMessages,
+                                params = params.copy(freshConnection = true),
+                            )
+                        }
+                    } else {
+                        null
                     },
                     singleCall = {
                         providerImpl.generateText(
@@ -2576,8 +2591,9 @@ class GenerationHandler(
                             messages = redactor.redactMessages(messages)
                         }
                         chunk.usage?.let { usage ->
-                            providerCallUsage = providerCallUsage.merge(usage)
-                            val accumulated = usageBase.accumulate(providerCallUsage)
+                            val mergedUsage = providerCallUsage.merge(usage)
+                            providerCallUsage = mergedUsage
+                            val accumulated = usageBase.accumulate(mergedUsage)
                             messages = messages.mapIndexed { index, message ->
                                 if (index == messages.lastIndex) {
                                     message.copy(usage = accumulated)
@@ -2587,6 +2603,39 @@ class GenerationHandler(
                             }
                         }
                         onUpdateMessages(messages)
+                    },
+                    onBeforeRetry = { stall ->
+                        val seconds = stall.observationMillis.coerceAtLeast(1L) / 1_000.0
+                        val estimatedTps = stall.observedProgressUnits / seconds
+                        Log.w(
+                            TAG,
+                            "provider stream watchdog: reason=${stall.reason}, " +
+                                "progressUnits=${stall.observedProgressUnits}, " +
+                                "windowMs=${stall.observationMillis}, " +
+                                "estimatedTps=${"%.2f".format(estimatedTps)}; " +
+                                "rolling back partial output and retrying on a fresh connection",
+                        )
+                        // No tool executes until this complete provider turn returns. Restore the
+                        // exact pre-attempt snapshot so the retry cannot duplicate partial text,
+                        // reasoning, tool arguments, or partial usage in the UI/database.
+                        messages = providerAttemptBaseMessages
+                        providerCallUsage = null
+                        terminalTracker = GenerationTerminalTracker()
+                        onUpdateMessages(messages)
+
+                        diagnosticHandle.recordRequestBreakdown(
+                            context.filesDir,
+                            breakdown.copy(
+                                recordedAtEpochMs = System.currentTimeMillis(),
+                                providerCallIndex = diagnosticHandle.nextProviderCallIndex(),
+                                requestMode = "$requestMode:watchdog_retry",
+                            ),
+                        )
+                    },
+                    watchdogConfig = if (watchdogEnabled) {
+                        ProviderStreamWatchdogConfig()
+                    } else {
+                        null
                     },
                 )
             )

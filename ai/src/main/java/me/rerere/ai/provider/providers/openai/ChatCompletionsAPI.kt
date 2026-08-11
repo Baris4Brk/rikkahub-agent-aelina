@@ -59,6 +59,7 @@ import me.rerere.common.http.jsonArrayOrNull
 import me.rerere.common.http.jsonObjectOrNull
 import me.rerere.common.http.jsonPrimitiveOrNull
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.ConnectionPool
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -67,6 +68,7 @@ import okhttp3.Response
 import okhttp3.sse.EventSource
 import okhttp3.sse.EventSourceListener
 import okhttp3.sse.EventSources
+import java.util.concurrent.TimeUnit
 import kotlin.time.Clock
 
 private const val TAG = "ChatCompletionsAPI"
@@ -167,6 +169,16 @@ private val JWT_PATTERN = Regex(
 )
 private val WHITESPACE_PATTERN = Regex("\\s+")
 
+/** Use an isolated, non-retaining pool for the one watchdog retry. */
+internal fun OkHttpClient.forProviderStreamAttempt(freshConnection: Boolean): OkHttpClient =
+    if (!freshConnection) {
+        this
+    } else {
+        newBuilder()
+            .connectionPool(ConnectionPool(0, 1, TimeUnit.NANOSECONDS))
+            .build()
+    }
+
 class ChatCompletionsAPI(
     private val client: OkHttpClient,
     private val keyRoulette: KeyRoulette
@@ -239,6 +251,7 @@ class ChatCompletionsAPI(
         messages: List<UIMessage>,
         params: TextGenerationParams,
     ): Flow<MessageChunk> = callbackFlow {
+        val attemptClient = client.forProviderStreamAttempt(params.freshConnection)
         val requestBody = buildChatCompletionRequest(
             messages = messages,
             params = params,
@@ -354,10 +367,13 @@ class ChatCompletionsAPI(
             }
         }
 
-        val eventSource = EventSources.createFactory(client).newEventSource(request, listener)
+        val eventSource = EventSources.createFactory(attemptClient).newEventSource(request, listener)
 
         awaitClose {
             eventSource.cancel()
+            if (attemptClient !== client) {
+                attemptClient.connectionPool.evictAll()
+            }
         }
     }.bufferProviderStream()
 
