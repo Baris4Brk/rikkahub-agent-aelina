@@ -9,6 +9,7 @@ import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.BufferOverflow
@@ -21,12 +22,19 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.selects.selectUnbiased
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import me.rerere.rikkahub.data.ai.GenerationRunControl
 import me.rerere.rikkahub.data.ai.tools.CancelRequestResult
 import me.rerere.rikkahub.data.ai.tools.ToolCancelReason
+import me.rerere.rikkahub.diagnostics.agenttiming.AgentTimingEventKind
+import me.rerere.rikkahub.diagnostics.agenttiming.AgentTimingTraceStatus
+import me.rerere.ai.context.ProviderContextOverflowException
 import me.rerere.rikkahub.data.db.entity.PendingChatCommandEntity
 import me.rerere.rikkahub.assistant.SecondUserAuthorityRegistry
 import me.rerere.rikkahub.data.ai.ToolCallOrigin
@@ -45,6 +53,88 @@ fun interface RuntimeCommandExecutor {
 fun interface RuntimeHydrator {
     suspend fun hydrate()
 }
+
+/** Per-run rolling lease. The opaque claim never escapes the runtime authority boundary. */
+private class CommandLeaseSession(
+    private val queue: DurableCommandQueue,
+    initialClaim: CommandClaim,
+) : RuntimeAuthorityLease {
+    private val mutex = Mutex()
+    private var claim: CommandClaim? = initialClaim
+
+    override suspend fun <T> mutateWithCurrentClaim(
+        block: suspend (CommandClaim) -> T,
+    ): T? = mutex.withLock {
+        val current = claim ?: return@withLock null
+        block(current).also { claim = null }
+    }
+
+    suspend fun renew(): Boolean = mutex.withLock {
+        val current = claim ?: return@withLock false
+        when (val result = queue.renewFenced(current)) {
+            is CommandTransitionResult.Renewed -> {
+                claim = result.claim
+                true
+            }
+            else -> {
+                claim = null
+                false
+            }
+        }
+    }
+
+    suspend fun finish(
+        terminal: DurableCommandState,
+        errorCode: String?,
+    ): Boolean = mutex.withLock {
+        val current = claim ?: return@withLock false
+        when (queue.finishFenced(current, terminal, errorCode)) {
+            is CommandTransitionResult.Applied,
+            is CommandTransitionResult.Duplicate -> {
+                claim = null
+                true
+            }
+            else -> {
+                claim = null
+                false
+            }
+        }
+    }
+
+    suspend fun finishAndWaitingLineage(
+        terminal: DurableCommandState,
+        errorCode: String?,
+    ): CommandLineageFinishResult = mutex.withLock {
+        val current = claim
+            ?: return@withLock CommandLineageFinishResult.Conflict(null, "RESUME_CLAIM_MISSING")
+        val result = queue.finishFencedAndWaitingLineage(current, terminal, errorCode)
+        // Success, exact duplicate, and conflict all retire this process's opaque claim. A
+        // conflict is authority ambiguity and must be recovered from the durable row, not retried
+        // with a token whose fence may already have advanced.
+        claim = null
+        result
+    }
+
+    suspend fun markWaitingApproval(): Boolean = mutex.withLock {
+        val current = claim ?: return@withLock false
+        when (queue.markWaitingApprovalFenced(current)) {
+            is CommandTransitionResult.Applied,
+            is CommandTransitionResult.Duplicate -> {
+                claim = null
+                true
+            }
+            else -> {
+                claim = null
+                false
+            }
+        }
+    }
+}
+
+private data class DurableFinishConfirmation(
+    val confirmed: Boolean,
+    val terminalizedCommandIds: List<Uuid> = emptyList(),
+)
 
 sealed interface PetInteractionSlotResult<out T> {
     data class Completed<T>(val value: T) : PetInteractionSlotResult<T>
@@ -70,11 +160,13 @@ class ConversationRuntime(
     private val repairer: RuntimeRepairer = RuntimeRepairer { _, _ -> InterruptCleanupResult.Completed },
     private val persistenceCoordinator: PersistenceCoordinator = NoOpPersistenceCoordinator(),
     private val durableQueue: DurableCommandQueue? = null,
+    private val commandAuthority: RuntimeCommandAuthority? = null,
     private val onBecameIdle: (Uuid) -> Unit = {},
     private val onRunJobChanged: (Job?) -> Unit = {},
     private val onRunStarted: suspend (CommandEnvelope<out ChatCommand>) -> AutoCloseable? = { null },
     private val onPersistSteering: suspend (me.rerere.rikkahub.data.ai.SteeringNote) -> Unit = {},
     private val onRunFinished: (CommandEnvelope<out ChatCommand>, CommandOutcome) -> Unit = { _, _ -> },
+    private val onPetRunStarted: suspend () -> AutoCloseable? = { null },
     private val onCancellationTimeout: (CommandEnvelope<out EmergencyCommand>, Throwable) -> Unit = { _, _ -> },
     private val hydrationTimeout: Duration = 30.seconds,
     private val cancellationGracePeriod: Duration = 5.seconds,
@@ -112,6 +204,8 @@ class ConversationRuntime(
     private var cancellationWatchdog: Job? = null
     private val pendingNormalIndex = PendingNormalIndex()
     private var queuePaused = false
+    /** Cleared only by rebuilding/reconciling the runtime with the approval authority. */
+    private var approvalBarrierReconciliationRequired = false
     private val stateRevision = AtomicLong(0L)
     private val acceptanceLock = Any()
     private val acceptedCommands = ConcurrentHashMap<Uuid, CommandEnvelope<out ChatCommand>>()
@@ -119,6 +213,9 @@ class ConversationRuntime(
     private val steeringFallbackCommands = ConcurrentHashMap<Uuid, SendMessageCommand>()
     private val terminalizingCommandIds = ConcurrentHashMap.newKeySet<Uuid>()
     private val finishedOutcomes = ConcurrentHashMap<Uuid, CommandOutcome>()
+    private val durableRunLeases = ConcurrentHashMap<Uuid, CommandLeaseSession>()
+    /** Durable suspension barriers. Their command Deferreds stay open until a later final commit. */
+    private val waitingCommandIds = ConcurrentHashMap.newKeySet<Uuid>()
     private val petInteractionMutex = Mutex()
     @Volatile private var activePetInteractionJob: Job? = null
 
@@ -151,7 +248,7 @@ class ConversationRuntime(
             sessionScope.launch(dispatchers.io + CoroutineName("Conversation-$conversationId-lease")) {
                 while (currentCoroutineContext().isActive) {
                     delay(15.seconds)
-                    runSuspendCatching { queue.recoverExpired() }
+                    runSuspendCatching { queue.recoverExpiredFenced() }
                     durableWakeup.trySend(Unit)
                 }
             }
@@ -192,7 +289,12 @@ class ConversationRuntime(
                 PetInteractionSlotResult.Busy
             } else {
                 activePetInteractionJob = currentCoroutineContext()[Job]
-                PetInteractionSlotResult.Completed(block())
+                val foregroundLease = runSuspendCatching { onPetRunStarted() }.getOrNull()
+                try {
+                    PetInteractionSlotResult.Completed(block())
+                } finally {
+                    runCatching { foregroundLease?.close() }
+                }
             }
         } finally {
             activePetInteractionJob = null
@@ -203,24 +305,6 @@ class ConversationRuntime(
     internal suspend fun enqueueEnvelope(envelope: CommandEnvelope<out ChatCommand>): SubmitResult {
         if (!sessionJob.isActive) return reject(envelope, "Runtime unavailable")
         activePetInteractionJob?.cancel(CancellationException("Pet interaction preempted by chat command"))
-        val regenerate = envelope.command as? RegenerateCommand
-        if (regenerate?.policy == RegeneratePolicy.INTERRUPT_CURRENT) {
-            return replaceEmergencyEnvelope(
-                CommandEnvelope(
-                    id = envelope.id,
-                    conversationId = envelope.conversationId,
-                    command = InterruptRegenerateCommand(regenerate),
-                    origin = envelope.origin,
-                    createdAt = envelope.createdAt,
-                    sequence = envelope.sequence,
-                    expiresAt = envelope.expiresAt,
-                    dedupeKey = envelope.dedupeKey,
-                    dependencies = envelope.dependencies,
-                    result = envelope.result,
-                )
-            )
-        }
-
         // Acceptance is one linearized decision. Without this short critical section,
         // simultaneous retries can each pass the finished/accepted checks and one duplicate
         // can temporarily publish an outcome for the still-running original command.
@@ -259,17 +343,42 @@ class ConversationRuntime(
         if (envelope.command !is EmergencyCommand) {
             when (val durableResult = persistDurable(envelope)) {
                 is DurableSubmitResult.InvalidPayload -> {
-                    complete(envelope, CommandOutcome.Rejected(durableResult.reason))
+                    complete(envelope, CommandOutcome.Rejected(durableResult.reason), persistDurable = false)
                     return SubmitResult.Rejected(durableResult.reason)
                 }
                 is DurableSubmitResult.AlreadyExists -> {
-                    complete(
-                        envelope,
-                        CommandOutcome.Superseded(durableResult.commandId),
-                        persistDurable = false,
-                    )
-                    durableWakeup.trySend(Unit)
-                    return SubmitResult.Accepted(durableResult.commandId)
+                    val row = durableQueue?.findAuthorityRow(durableResult.commandId)
+                    val terminal = row?.durableTerminalOutcomeOrNull()
+                    when {
+                        terminal != null -> {
+                            complete(envelope, terminal, persistDurable = false)
+                            return SubmitResult.Accepted(durableResult.commandId)
+                        }
+                        row?.state == DurableCommandState.PENDING.name ||
+                            row?.state == DurableCommandState.INTERRUPTED.name -> Unit
+                        row?.state == DurableCommandState.WAITING_APPROVAL.name -> {
+                            waitingCommandIds.add(envelope.id)
+                            _runtimeState.value = restingRuntimeState()
+                            durableWakeup.trySend(Unit)
+                            refreshQueueStatus()
+                            return SubmitResult.Accepted(durableResult.commandId)
+                        }
+                        row?.state == DurableCommandState.RUNNING.name -> {
+                            // Another valid lease still owns this exact command. Keep the mirror
+                            // Deferred open; recovery will decide its terminal result.
+                            durableWakeup.trySend(Unit)
+                            return SubmitResult.Accepted(durableResult.commandId)
+                        }
+                        else -> {
+                            val reason = "Existing durable command authority is unavailable"
+                            complete(
+                                envelope,
+                                CommandOutcome.Rejected(reason),
+                                persistDurable = false,
+                            )
+                            return SubmitResult.Rejected(reason)
+                        }
+                    }
                 }
                 is DurableSubmitResult.DedupeHit -> {
                     complete(
@@ -282,38 +391,45 @@ class ConversationRuntime(
                 }
                 is DurableSubmitResult.Inserted -> Unit
             }
+            envelope.agentTimingSubmission?.handle?.mark(AgentTimingEventKind.DURABLE_ADMITTED)
         }
-        return when (val command = envelope.command) {
+        val admittedEnvelope = acceptedCommands[envelope.id] ?: envelope
+        return when (val command = admittedEnvelope.command) {
             is PetDialogueCommand -> reject(envelope, "PetDialogueCommand uses the non-durable pet slot")
             is EmergencyCommand -> reject(envelope, "EmergencyCommand must use submitEmergency")
             is ResumeAfterApprovalCommand -> tryEnqueue(
                 approvalResumeChannel,
-                envelope as CommandEnvelope<ResumeAfterApprovalCommand>,
+                admittedEnvelope as CommandEnvelope<ResumeAfterApprovalCommand>,
                 8,
                 approvalResumeWakeup,
             )
             is ToolApprovalCommand -> tryEnqueue(
                 approvalChannel,
-                envelope as CommandEnvelope<ToolApprovalCommand>,
+                admittedEnvelope as CommandEnvelope<ToolApprovalCommand>,
                 16,
                 approvalWakeup,
             )
             is SteerCommand -> if (command.applyPolicy == SteeringApplyPolicy.AFTER_CHECKPOINT) {
-                registerSoftSteering(envelope as CommandEnvelope<SteerCommand>)
+                registerSoftSteering(admittedEnvelope as CommandEnvelope<SteerCommand>)
             } else {
                 tryEnqueue(
                     steeringChannel,
-                    envelope as CommandEnvelope<SteerCommand>,
+                    admittedEnvelope as CommandEnvelope<SteerCommand>,
                     8,
                     steeringWakeup,
                 )
             }
             is CancelCurrentToolCommand -> tryEnqueue(
                 toolControlChannel,
-                envelope as CommandEnvelope<CancelCurrentToolCommand>,
+                admittedEnvelope as CommandEnvelope<CancelCurrentToolCommand>,
                 8,
                 toolControlWakeup,
             )
+            is RegenerateCommand -> if (command.policy == RegeneratePolicy.INTERRUPT_CURRENT) {
+                enqueuePersistedInterruptRegenerate(admittedEnvelope as CommandEnvelope<RegenerateCommand>)
+            } else {
+                enqueueNormal(admittedEnvelope as CommandEnvelope<NormalCommand>)
+            }
             is ResumeQueueCommand,
             is ClearPendingQueueCommand,
             is CancelQueuedCommand,
@@ -322,12 +438,37 @@ class ConversationRuntime(
             is PromoteQueuedMessageToSteeringCommand ->
                 tryEnqueue(
                     queueControlChannel,
-                    envelope as CommandEnvelope<out NormalCommand>,
+                    admittedEnvelope as CommandEnvelope<out NormalCommand>,
                     8,
                     queueControlWakeup,
                 )
-            is NormalCommand -> enqueueNormal(envelope as CommandEnvelope<NormalCommand>)
+            is NormalCommand -> enqueueNormal(admittedEnvelope as CommandEnvelope<NormalCommand>)
         }
+    }
+
+    private fun enqueuePersistedInterruptRegenerate(
+        envelope: CommandEnvelope<RegenerateCommand>,
+    ): SubmitResult {
+        val interrupt = CommandEnvelope(
+            id = envelope.id,
+            conversationId = envelope.conversationId,
+            command = InterruptRegenerateCommand(envelope.command),
+            origin = envelope.origin,
+            createdAt = envelope.createdAt,
+            sequence = envelope.sequence,
+            expiresAt = envelope.expiresAt,
+            dedupeKey = envelope.dedupeKey,
+            dependencies = envelope.dependencies,
+            lineage = envelope.lineage,
+            agentTimingSubmission = envelope.agentTimingSubmission,
+            result = envelope.result,
+        )
+        acceptedCommands.replace(envelope.id, envelope, interrupt)
+        emergencySlot.getAndSet(interrupt)?.let { previous ->
+            complete(previous, CommandOutcome.Superseded(interrupt.id))
+        }
+        emergencyWakeup.trySend(Unit)
+        return SubmitResult.Accepted(interrupt.id)
     }
 
     private suspend fun persistDurable(
@@ -336,11 +477,30 @@ class ConversationRuntime(
         val queue = durableQueue ?: return DurableSubmitResult.Inserted(envelope.id)
         val encoded = runCatching { CommandCodec.encodeDurable(envelope.command, envelope.origin) }
             .getOrElse { return DurableSubmitResult.InvalidPayload(it.message ?: "Command encoding failed") }
+        val parentCommandId = envelope.lineage?.parentCommandId
+        val authoritySubjectId = if (parentCommandId != null) {
+            val parentId = parentCommandId
+            val parent = queue.findAuthorityRow(parentId)
+                ?: return DurableSubmitResult.InvalidPayload("Command parent authority is missing")
+            val parentLineage = CommandLineageContext.fromAuthorityRowOrNull(parent)
+                ?: return DurableSubmitResult.InvalidPayload("Command parent lineage is invalid")
+            val lineage = checkNotNull(envelope.lineage)
+            if (parent.conversationId != envelope.conversationId.toString() ||
+                parentLineage.assistantIdSnapshot != lineage.assistantIdSnapshot ||
+                parentLineage.lineageId != lineage.lineageId ||
+                parentLineage.branchAnchorMessageId != lineage.branchAnchorMessageId
+            ) {
+                return DurableSubmitResult.InvalidPayload("Command parent authority does not match")
+            }
+            parent.authoritySubjectId
+        } else {
+            authoritySubjectFor(envelope)
+        }
         val entity = PendingChatCommandEntity(
             id = envelope.id.toString(),
-            schemaVersion = 1,
+            schemaVersion = if (commandAuthority != null) 2 else 1,
             conversationId = envelope.conversationId.toString(),
-            authoritySubjectId = authoritySubjectFor(envelope),
+            authoritySubjectId = authoritySubjectId,
             type = encoded.first,
             payloadJson = encoded.second,
             state = DurableCommandState.PENDING.name,
@@ -359,8 +519,33 @@ class ConversationRuntime(
             expiresAt = envelope.expiresAt?.toEpochMilliseconds(),
             lastErrorCode = null,
             lastErrorMessage = null,
+            assistantIdSnapshot = envelope.lineage?.assistantIdSnapshot?.toString(),
+            lineageId = envelope.lineage?.lineageId?.toString(),
+            parentCommandId = envelope.lineage?.parentCommandId?.toString(),
+            branchAnchorMessageId = envelope.lineage?.branchAnchorMessageId?.toString(),
+            stateVersion = 0L,
         )
-        return runSuspendCatching { queue.submitDurable(entity) }
+        val authority = commandAuthority
+        return if (authority != null) {
+            runSuspendCatching { authority.admit(envelope, entity, authoritySubjectId) }
+                .fold(
+                    onSuccess = { admitted ->
+                        if (envelope.lineage?.branchAnchorMessageRevision == null) {
+                            @Suppress("UNCHECKED_CAST")
+                            val upgraded = envelope.copy(
+                                lineage = envelope.lineage?.copy(
+                                    branchAnchorMessageRevision = admitted.branchAnchorMessageRevision,
+                                ),
+                            ) as CommandEnvelope<out ChatCommand>
+                            acceptedCommands.replace(envelope.id, envelope, upgraded)
+                        }
+                        admitted.result
+                    },
+                    onFailure = {
+                        DurableSubmitResult.InvalidPayload(it.message ?: "Authority admission failed")
+                    },
+                )
+        } else runSuspendCatching { queue.submitDurable(entity) }
             .getOrElse { DurableSubmitResult.InvalidPayload(it.message ?: "Durable submit failed") }
     }
 
@@ -436,15 +621,27 @@ class ConversationRuntime(
             val reason = "这条补充暂时没能放到下一条，请稍后在恢复项中确认"
             // Preserve the original steer payload for explicit recovery. A failed rewrite
             // must never crash the event loop or be finalized as an unrecoverable FAILED row.
-            durableQueue?.let { queue ->
+            val terminalResult = durableQueue?.let { queue ->
                 runSuspendCatching {
-                    queue.resolvePending(
-                        id = envelope.id.toString(),
-                        state = DurableCommandState.MANUAL_CONFIRMATION,
-                        errorCode = "STEERING_FALLBACK_REWRITE_FAILED",
-                        errorMessage = rewriteFailure.message ?: reason,
+                    queue.finishUnclaimedFenced(
+                        id = envelope.id,
+                        terminal = DurableCommandState.MANUAL_CONFIRMATION,
+                        errorCode = "STEERING_REWRITE_FAILED",
                     )
-                }
+                }.getOrNull()
+            }
+            val terminalConfirmed = durableQueue == null ||
+                terminalResult is CommandTransitionResult.Applied ||
+                terminalResult is CommandTransitionResult.Duplicate
+            if (!terminalConfirmed) {
+                // The durable row remains authoritative. Publishing a local failure here could
+                // let the original STEER replay after restart even though the caller was told it
+                // had been parked for recovery. Keep the Deferred open and stop consuming work
+                // until durable reconciliation can establish one terminal truth.
+                queuePaused = true
+                _runtimeState.value = RuntimeState.Paused
+                refreshQueueStatus()
+                return SubmitResult.Accepted(envelope.id)
             }
             _steeringEntries.update { entries ->
                 val current = entries[envelope.id] ?: return@update entries
@@ -472,6 +669,8 @@ class ConversationRuntime(
             expiresAt = envelope.expiresAt,
             dedupeKey = envelope.dedupeKey,
             dependencies = envelope.dependencies,
+            lineage = envelope.lineage,
+            agentTimingSubmission = envelope.agentTimingSubmission,
             result = envelope.result,
         )
         acceptedCommands.replace(envelope.id, envelope, replacement)
@@ -578,16 +777,53 @@ class ConversationRuntime(
         outcome: CommandOutcome,
         persistDurable: Boolean = true,
     ) {
-        // Command outcomes are exactly-once. A shutdown/clear race may observe
-        // the same envelope through both acceptedCommands and a channel drain.
-        val durableResolver = durableQueue.takeIf {
-            persistDurable && envelope.command !is EmergencyCommand
+        val queue = durableQueue.takeIf {
+            persistDurable && envelope.lineage != null
         }
-        val ownsTerminalizationMarker = durableResolver != null && terminalizingCommandIds.add(envelope.id)
-        if (!envelope.result.complete(outcome)) {
-            if (ownsTerminalizationMarker) terminalizingCommandIds.remove(envelope.id)
+        if (queue != null) {
+            if (!terminalizingCommandIds.add(envelope.id)) return
+            sessionScope.launch(dispatchers.io + CoroutineName("Conversation-$conversationId-terminal-${envelope.id}")) {
+                val result = runSuspendCatching {
+                    val combined = commandAuthority?.finishUnclaimed(
+                        envelope = envelope,
+                        terminalState = outcome.toDurableState(),
+                        errorCode = outcome.toDurableErrorCode(),
+                    ) == true
+                    if (combined) CommandTransitionResult.Duplicate(
+                        requireNotNull(queue.findAuthorityRow(envelope.id)),
+                    ) else queue.finishUnclaimedFenced(
+                        id = envelope.id,
+                        terminal = outcome.toDurableState(),
+                        errorCode = outcome.toDurableErrorCode(),
+                    )
+                }.getOrNull()
+                val confirmed = result is CommandTransitionResult.Applied ||
+                    result is CommandTransitionResult.Duplicate
+                if (confirmed) {
+                    terminalizingCommandIds.remove(envelope.id)
+                    completeInMemory(envelope, outcome)
+                    durableWakeup.trySend(Unit)
+                } else {
+                    // Keep the marker: the row is still the authority and will be reconciled after
+                    // restart. Never publish success to the caller before its terminal CAS commits.
+                    queuePaused = true
+                    _runtimeState.value = RuntimeState.Paused
+                    refreshQueueStatus()
+                }
+            }
             return
         }
+        completeInMemory(envelope, outcome)
+    }
+
+    private fun completeInMemory(
+        envelope: CommandEnvelope<out ChatCommand>,
+        outcome: CommandOutcome,
+    ) {
+        // Command outcomes are exactly-once. A shutdown/clear race may observe the same envelope
+        // through both acceptedCommands and a channel drain.
+        if (!envelope.result.complete(outcome)) return
+        waitingCommandIds.remove(envelope.id)
         if (envelope.command is SteerCommand) {
             steeringFallbackCommands.remove(envelope.id)
         }
@@ -607,28 +843,41 @@ class ConversationRuntime(
                 finishedOutcomes.putIfAbsent(envelope.id, outcome)
             }
         }
-        // Control commands are durable too. Complete their Room row asynchronously so
-        // the event loop never performs suspend/IO work while resolving a Deferred.
-        durableResolver?.let { queue ->
-            sessionScope.launch(dispatchers.io) {
-                val resolved = runSuspendCatching {
-                    queue.resolvePending(
-                        id = envelope.id.toString(),
-                        state = outcome.toDurableState(),
-                        errorCode = (outcome as? CommandOutcome.Failed)?.error?.javaClass?.simpleName,
-                        errorMessage = (outcome as? CommandOutcome.Failed)?.error?.message,
-                    )
-                }.getOrDefault(false)
-                // Keep the marker when Room could not confirm the terminal state. That row
-                // remains recoverable after restart, but this live Runtime must never replay it.
-                if (resolved) terminalizingCommandIds.remove(envelope.id)
-                durableWakeup.trySend(Unit)
-            }
-        }
         if (finishedOutcomes.size > 256) {
             finishedOutcomes.keys.firstOrNull()?.let { finishedOutcomes.remove(it) }
         }
         refreshQueueStatus()
+    }
+
+    private fun PendingChatCommandEntity.durableTerminalOutcomeOrNull(): CommandOutcome? =
+        when (runCatching { DurableCommandState.valueOf(state) }.getOrNull()) {
+            DurableCommandState.COMPLETED -> CommandOutcome.Completed
+            DurableCommandState.CANCELLED -> CommandOutcome.Cancelled
+            DurableCommandState.FAILED,
+            DurableCommandState.MANUAL_CONFIRMATION,
+            -> {
+                val code = lastErrorCode
+                    ?.takeIf { it.matches(Regex("[A-Z][A-Z0-9_]{0,63}")) }
+                    ?: if (state == DurableCommandState.MANUAL_CONFIRMATION.name) {
+                        "MANUAL_CONFIRMATION"
+                    } else {
+                        "COMMAND_FAILED"
+                    }
+                CommandOutcome.Failed(
+                    StableCommandException(code, "Durable command ended with $code"),
+                )
+            }
+            else -> null
+        }
+
+    private fun CommandOutcome.toDurableErrorCode(): String? = when (this) {
+        is CommandOutcome.Failed -> (error as? DurableCommandFailure)?.durableErrorCode
+            ?: "COMMAND_FAILED"
+        is CommandOutcome.Rejected -> "COMMAND_REJECTED"
+        is CommandOutcome.Conflict -> "COMMAND_CONFLICT"
+        is CommandOutcome.SkippedDependencyFailed -> "DEPENDENCY_FAILED"
+        is CommandOutcome.Superseded -> "SUPERSEDED_REGENERATE"
+        else -> null
     }
 
     private fun dependencyOutcome(envelope: CommandEnvelope<out ChatCommand>): CommandOutcome? {
@@ -650,7 +899,7 @@ class ConversationRuntime(
     private fun refreshQueueStatus() {
         val snapshot = pendingNormalIndex.snapshot()
         _queueStatus.value = QueueStatus(
-            paused = queuePaused,
+            paused = queuePaused || approvalBarrierReconciliationRequired,
             pendingCount = snapshot.size,
             activeCommandId = activeRun?.commandId,
             pendingCommandIds = snapshot.map { it.id },
@@ -658,37 +907,69 @@ class ConversationRuntime(
         _queuedMessages.value = pendingNormalIndex.uiSnapshot()
     }
 
+    private fun restingRuntimeState(): RuntimeState = when {
+        queuePaused || approvalBarrierReconciliationRequired -> RuntimeState.Paused
+        waitingCommandIds.isNotEmpty() -> RuntimeState.WaitingApproval
+        else -> RuntimeState.Idle
+    }
+
     private suspend fun restoreDurableCommands() {
         val queue = durableQueue ?: return
-        queue.recoverExpired()
-        val rows = queue.scanPending().filter { it.conversationId == conversationId.toString() }
-        rows.sortedWith(compareByDescending<PendingChatCommandEntity> { it.priority }.thenBy { it.sequence })
+        queue.recoverExpiredFenced()
+        val waitingRows = queue.scanWaiting(conversationId)
+        val durableWaitingIds = hashSetOf<Uuid>()
+        waitingRows.forEach { row ->
+            val commandId = Uuid.parse(row.id)
+            if (!isCurrentAuthorityRow(row)) {
+                queue.finishUnclaimedFenced(
+                    commandId,
+                    DurableCommandState.CANCELLED,
+                    errorCode = "AUTHORITY_REVOKED",
+                )
+                return@forEach
+            }
+            val envelope = queue.decodeFencedEnvelope(row) ?: run {
+                queue.finishUnclaimedFenced(
+                    commandId,
+                    DurableCommandState.MANUAL_CONFIRMATION,
+                    errorCode = "PAYLOAD_DECODE_FAILED",
+                )
+                return@forEach
+            }
+            durableWaitingIds.add(envelope.id)
+            commandAuthority?.adoptRestored(envelope, row.authoritySubjectId)
+            waitingCommandIds.add(envelope.id)
+            acceptedCommands.putIfAbsent(envelope.id, envelope)
+        }
+        waitingCommandIds.retainAll(durableWaitingIds)
+        val rows = queue.scanReplayable(conversationId)
+        rows.sortedWith(
+            compareByDescending<PendingChatCommandEntity> { it.priority }
+                .thenBy { it.sequence }
+                .thenBy { it.id },
+        )
             .forEach { row ->
                 val commandId = Uuid.parse(row.id)
                 if (acceptedCommands.containsKey(commandId) || commandId in terminalizingCommandIds) {
                     return@forEach
                 }
                 if (!isCurrentAuthorityRow(row)) {
-                    queue.resolvePending(
-                        row.id,
+                    queue.finishUnclaimedFenced(
+                        Uuid.parse(row.id),
                         DurableCommandState.CANCELLED,
-                        errorCode = "SECOND_USER_AUTHORITY_REVOKED",
-                        errorMessage = "Second-user authority changed before this command resumed",
+                        errorCode = "AUTHORITY_REVOKED",
                     )
                     return@forEach
                 }
-                val envelope = queue.decodeEnvelope(row) ?: run {
-                    queue.resolvePending(
-                        row.id,
+                val envelope = queue.decodeFencedEnvelope(row) ?: run {
+                    queue.finishUnclaimedFenced(
+                        Uuid.parse(row.id),
                         DurableCommandState.MANUAL_CONFIRMATION,
                         errorCode = "PAYLOAD_DECODE_FAILED",
-                        errorMessage = "Persisted command payload could not be decoded",
                     )
                     return@forEach
                 }
-                // A WAITING_APPROVAL row represents a suspended generation, not a new
-                // message. Keep it durable for the approval UI; never replay the model.
-                if (row.state == DurableCommandState.WAITING_APPROVAL.name) return@forEach
+                commandAuthority?.adoptRestored(envelope, row.authoritySubjectId)
                 acceptedCommands[envelope.id] = envelope
                 when (val command = envelope.command) {
                     is ResumeQueueCommand,
@@ -744,6 +1025,7 @@ class ConversationRuntime(
                     else -> complete(envelope, CommandOutcome.Rejected("Unsupported durable command type"))
                 }
             }
+        _runtimeState.value = restingRuntimeState()
         refreshQueueStatus()
     }
 
@@ -804,7 +1086,7 @@ class ConversationRuntime(
         }
         _hydrationState.value = HydrationState.Hydrated
         restoreDurableCommands()
-        _runtimeState.value = RuntimeState.Idle
+        _runtimeState.value = restingRuntimeState()
         var controlBurst = 0
         while (currentCoroutineContext().isActive) {
             activeRun?.takeIf { it.job.isCompleted }?.let { handleRunFinished(it) }
@@ -835,7 +1117,7 @@ class ConversationRuntime(
         }
     }
 
-    private fun handleEmergency(): Boolean {
+    private suspend fun handleEmergency(): Boolean {
         val envelope = emergencySlot.getAndSet(null) ?: return false
         when (val command = envelope.command) {
             is StopCommand -> {
@@ -850,8 +1132,38 @@ class ConversationRuntime(
                 if (run == null) {
                     val stop = pendingStop
                     pendingStop = null
-                    stop?.let { complete(it, CommandOutcome.Completed) }
-                    _runtimeState.value = if (queuePaused) RuntimeState.Paused else RuntimeState.Idle
+                    when (val cancellation = cancelWaitingApprovalBarrier("USER_STOPPED")) {
+                        is CommandWaitingCancellationResult.Applied -> {
+                            completeTerminalizedWaiting(
+                                cancellation.terminalizedCommandIds,
+                                CommandOutcome.Cancelled,
+                            )
+                            // The approval projection cannot be invalidated in this command
+                            // transaction yet. Keep FIFO paused even when pauseQueue=false.
+                            approvalBarrierReconciliationRequired = true
+                            queuePaused = true
+                            stop?.let { complete(it, CommandOutcome.Completed) }
+                        }
+                        CommandWaitingCancellationResult.NoOp -> {
+                            stop?.let { complete(it, CommandOutcome.Completed) }
+                        }
+                        is CommandWaitingCancellationResult.Conflict -> {
+                            approvalBarrierReconciliationRequired = true
+                            queuePaused = true
+                            stop?.let {
+                                complete(
+                                    it,
+                                    CommandOutcome.Failed(
+                                        StableCommandException(
+                                            "WAITING_CANCELLATION_CONFLICT",
+                                            "Waiting approval cancellation could not be committed",
+                                        ),
+                                    ),
+                                )
+                            }
+                        }
+                    }
+                    _runtimeState.value = restingRuntimeState()
                 } else {
                     _runtimeState.value = RuntimeState.Cancelling(run.id)
                     run.control.markStoppedBy(envelope.id)
@@ -867,8 +1179,43 @@ class ConversationRuntime(
                 pendingStop = null
                 queuePaused = false
                 val run = activeRun
-                if (run == null) startRun(envelope)
-                else {
+                if (run == null) {
+                    when (val cancellation = cancelWaitingApprovalBarrier("USER_INTERRUPTED")) {
+                        CommandWaitingCancellationResult.NoOp -> startRun(envelope)
+                        is CommandWaitingCancellationResult.Applied -> {
+                            completeTerminalizedWaiting(
+                                cancellation.terminalizedCommandIds,
+                                CommandOutcome.Cancelled,
+                            )
+                            approvalBarrierReconciliationRequired = true
+                            queuePaused = true
+                            complete(
+                                envelope,
+                                CommandOutcome.Failed(
+                                    StableCommandException(
+                                        "APPROVAL_BARRIER_REQUIRES_RECONCILIATION",
+                                        "Approval barrier was cancelled; replacement was not started",
+                                    ),
+                                ),
+                            )
+                            _runtimeState.value = RuntimeState.Paused
+                        }
+                        is CommandWaitingCancellationResult.Conflict -> {
+                            approvalBarrierReconciliationRequired = true
+                            queuePaused = true
+                            complete(
+                                envelope,
+                                CommandOutcome.Failed(
+                                    StableCommandException(
+                                        "WAITING_CANCELLATION_CONFLICT",
+                                        "Waiting approval cancellation could not be committed",
+                                    ),
+                                ),
+                            )
+                            _runtimeState.value = RuntimeState.Paused
+                        }
+                    }
+                } else {
                     pendingAfterCancel?.let { complete(it, CommandOutcome.Superseded(envelope.id)) }
                     pendingAfterCancel = envelope
                     _runtimeState.value = RuntimeState.Cancelling(run.id)
@@ -882,6 +1229,24 @@ class ConversationRuntime(
         }
         refreshQueueStatus()
         return true
+    }
+
+    private suspend fun cancelWaitingApprovalBarrier(
+        errorCode: String,
+    ): CommandWaitingCancellationResult {
+        if (waitingCommandIds.isEmpty()) return CommandWaitingCancellationResult.NoOp
+        val queue = durableQueue
+            ?: return CommandWaitingCancellationResult.Conflict("WAITING_QUEUE_UNAVAILABLE")
+        val result = runSuspendCatching {
+            queue.cancelWaitingForConversation(conversationId, errorCode)
+        }.getOrElse {
+            return CommandWaitingCancellationResult.Conflict("WAITING_CANCELLATION_FAILED")
+        }
+        return if (result == CommandWaitingCancellationResult.NoOp && waitingCommandIds.isNotEmpty()) {
+            CommandWaitingCancellationResult.Conflict("WAITING_MEMORY_AUTHORITY_MISMATCH")
+        } else {
+            result
+        }
     }
 
     private fun scheduleCancellationTimeout(
@@ -932,6 +1297,7 @@ class ConversationRuntime(
     }
 
     private fun handleApprovalResume(): Boolean {
+        if (approvalBarrierReconciliationRequired) return false
         val envelope = approvalResumeChannel.tryReceive().getOrNull() ?: return false
         if (activeRun == null) {
             startRun(envelope)
@@ -945,6 +1311,7 @@ class ConversationRuntime(
     }
 
     private fun handleApproval(): Boolean {
+        if (approvalBarrierReconciliationRequired) return false
         val envelope = approvalChannel.tryReceive().getOrNull() ?: return false
         if (activeRun == null) {
             startRun(envelope)
@@ -1074,9 +1441,17 @@ class ConversationRuntime(
         val envelope = queueControlChannel.tryReceive().getOrNull() ?: return false
         when (val command = envelope.command) {
             is ResumeQueueCommand -> {
-                queuePaused = false
-                complete(envelope, CommandOutcome.Completed)
-                startPendingIfReady()
+                if (approvalBarrierReconciliationRequired) {
+                    queuePaused = true
+                    complete(
+                        envelope,
+                        CommandOutcome.Conflict("Approval authority requires reconciliation"),
+                    )
+                } else {
+                    queuePaused = false
+                    complete(envelope, CommandOutcome.Completed)
+                    startPendingIfReady()
+                }
             }
             is ClearPendingQueueCommand -> {
                 clearPendingQueue(CommandOutcome.Cancelled)
@@ -1193,6 +1568,8 @@ class ConversationRuntime(
             expiresAt = current.expiresAt,
             dedupeKey = current.dedupeKey,
             dependencies = current.dependencies,
+            lineage = current.lineage,
+            agentTimingSubmission = current.agentTimingSubmission,
             result = current.result,
         )
         if (!pendingNormalIndex.replace(current.id, updated)) {
@@ -1244,6 +1621,8 @@ class ConversationRuntime(
             expiresAt = current.expiresAt,
             dedupeKey = current.dedupeKey,
             dependencies = current.dependencies,
+            lineage = current.lineage,
+            agentTimingSubmission = current.agentTimingSubmission,
             result = current.result,
         )
         if (!acceptedCommands.replace(current.id, current, promoted)) {
@@ -1265,7 +1644,10 @@ class ConversationRuntime(
     }
 
     private fun startPendingIfReady(): Boolean {
-        if (activeRun != null || queuePaused) return false
+        if (
+            activeRun != null || queuePaused || approvalBarrierReconciliationRequired ||
+            waitingCommandIds.isNotEmpty()
+        ) return false
         val envelope = pendingNormalIndex.peek() ?: return false
         return when (val dependency = dependencyOutcome(envelope)) {
             null -> false
@@ -1299,18 +1681,28 @@ class ConversationRuntime(
         return updated
     }
 
-    private suspend fun claimDurable(envelope: CommandEnvelope<out ChatCommand>) {
-        // Emergency commands never go through persistDurable, so there is no durable row
-        // to claim. Claiming them fails with "already claimed or unavailable" and aborts
-        // the run before the executor runs (e.g. interrupt regenerate looks like a no-op).
-        if (envelope.command is EmergencyCommand) return
-        val queue = durableQueue ?: return
-        val claimed = queue.claim(envelope.id.toString())
-        check(claimed) { "Durable command ${envelope.id} is already claimed or unavailable" }
+    private suspend fun claimDurable(
+        envelope: CommandEnvelope<out ChatCommand>,
+    ): CommandLeaseSession? {
+        val queue = durableQueue ?: return null
+        // Pure Stop/legacy emergency envelopes are process-local. A persisted interrupt-regenerate
+        // retains lineage and therefore must still acquire the durable row before it cancels work.
+        if (envelope.lineage == null) return null
+        return when (val result = queue.claimFenced(envelope.id)) {
+            is CommandClaimResult.Claimed -> CommandLeaseSession(queue, result.claim)
+            is CommandClaimResult.LegacyBlocked -> error("Durable command lineage is legacy")
+            is CommandClaimResult.Unavailable -> error(
+                "Durable command ${envelope.id} is already claimed or unavailable",
+            )
+        }
     }
 
-    private suspend fun finishDurable(envelope: CommandEnvelope<out ChatCommand>, outcome: CommandOutcome) {
-        val queue = durableQueue ?: return
+    private suspend fun finishDurable(
+        envelope: CommandEnvelope<out ChatCommand>,
+        outcome: CommandOutcome,
+    ): DurableFinishConfirmation {
+        val queue = durableQueue ?: return DurableFinishConfirmation(confirmed = true)
+        if (envelope.lineage == null) return DurableFinishConfirmation(confirmed = true)
         val state = when (outcome) {
             CommandOutcome.Completed -> DurableCommandState.COMPLETED
             CommandOutcome.Cancelled -> DurableCommandState.CANCELLED
@@ -1321,14 +1713,63 @@ class ConversationRuntime(
             is CommandOutcome.Superseded -> DurableCommandState.CANCELLED
             is CommandOutcome.NotApplied -> DurableCommandState.COMPLETED
         }
-        queue.complete(
-            id = envelope.id.toString(),
-            state = state,
-            error = (outcome as? CommandOutcome.Failed)?.error,
-        )
+        val errorCode = when (outcome) {
+            is CommandOutcome.Failed -> (outcome.error as? DurableCommandFailure)?.durableErrorCode
+                ?: "COMMAND_FAILED"
+            is CommandOutcome.Rejected -> "COMMAND_REJECTED"
+            is CommandOutcome.Conflict -> "COMMAND_CONFLICT"
+            is CommandOutcome.SkippedDependencyFailed -> "DEPENDENCY_FAILED"
+            else -> null
+        }
+        val lease = durableRunLeases.remove(envelope.id)
+        return if (lease != null) {
+            if (envelope.command is ResumeAfterApprovalCommand) {
+                when (val result = lease.finishAndWaitingLineage(state, errorCode)) {
+                    is CommandLineageFinishResult.Applied -> DurableFinishConfirmation(
+                        confirmed = true,
+                        terminalizedCommandIds = result.terminalizedCommandIds,
+                    )
+                    is CommandLineageFinishResult.Duplicate -> DurableFinishConfirmation(
+                        confirmed = true,
+                        terminalizedCommandIds = result.terminalizedCommandIds,
+                    )
+                    is CommandLineageFinishResult.Conflict -> DurableFinishConfirmation(false)
+                }
+            } else {
+                DurableFinishConfirmation(
+                    confirmed = lease.finish(state, errorCode),
+                    terminalizedCommandIds = listOf(envelope.id),
+                )
+            }
+        } else {
+            when (queue.finishUnclaimedFenced(envelope.id, state, errorCode)) {
+                is CommandTransitionResult.Applied,
+                is CommandTransitionResult.Duplicate -> DurableFinishConfirmation(
+                    confirmed = true,
+                    terminalizedCommandIds = listOf(envelope.id),
+                )
+                else -> DurableFinishConfirmation(false)
+            }
+        }
+    }
+
+    /** Completes suspended callers only after their terminal authority rows committed. */
+    private fun completeTerminalizedWaiting(
+        commandIds: Collection<Uuid>,
+        outcome: CommandOutcome,
+    ) {
+        commandIds.forEach { commandId ->
+            if (!waitingCommandIds.remove(commandId)) return@forEach
+            acceptedCommands[commandId]?.let { suspended ->
+                completeInMemory(suspended, outcome)
+                runCatching { onRunFinished(suspended, outcome) }
+            }
+        }
     }
 
     private fun startRun(envelope: CommandEnvelope<out ChatCommand>) {
+        val timing = envelope.agentTimingSubmission?.handle
+        timing?.mark(AgentTimingEventKind.RUNTIME_DEQUEUED)
         // A guidance item that missed its run is rewritten into this normal FIFO command.
         // Once that command starts, the purple fallback card has served its purpose and must
         // leave the temporary input-area UI.
@@ -1388,6 +1829,12 @@ class ConversationRuntime(
                 }
             }
         }
+        if (envelope.command is ResumeAfterApprovalCommand) {
+            timing?.resumeActiveSegment(control.runId)
+            timing?.mark(AgentTimingEventKind.RESUME_STARTED)
+        } else {
+            timing?.bindRun(control.runId)
+        }
         val outcome = CompletableDeferred<RunOutcome>()
         val job = sessionScope.launch(start = CoroutineStart.LAZY) {
             val result = try {
@@ -1397,25 +1844,47 @@ class ConversationRuntime(
                 if (claimResult.isFailure) {
                     RunOutcome.Failed(claimResult.exceptionOrNull() ?: IllegalStateException("Durable claim failed"))
                 } else {
+                    val durableLease = claimResult.getOrNull()
+                    if (durableLease != null) durableRunLeases[envelope.id] = durableLease
+                    if (durableLease != null) {
+                        val authoritySubjectId = durableQueue?.findAuthorityRow(envelope.id)
+                            ?.authoritySubjectId
+                        commandAuthority?.attachRun(
+                            envelope,
+                            durableLease,
+                            control,
+                            authoritySubjectId,
+                        )
+                    }
                     // A lease callback is part of the run's lifecycle. Do not turn a
                     // cancellation while claiming the durable command into a normal
                     // failure that leaves a RUNNING row without a live worker.
                     val lease = runSuspendCatching { onRunStarted(envelope) }.getOrNull()
-                    val durableLeaseJob = durableQueue?.let { queue ->
-                        sessionScope.launch(dispatchers.io + CoroutineName("Conversation-$conversationId-lease-${envelope.id}")) {
+                    val ownerJob = currentCoroutineContext()[Job]
+                    val durableLeaseJob = durableLease?.let { leaseSession ->
+                        launch(dispatchers.io + CoroutineName("Conversation-$conversationId-lease-${envelope.id}")) {
                             while (currentCoroutineContext().isActive) {
                                 delay(10.seconds)
-                                runSuspendCatching { queue.renew(envelope.id.toString()) }
+                                val renewed = runSuspendCatching { leaseSession.renew() }.getOrDefault(false)
+                                if (!renewed) {
+                                    control.fenceUpdates()
+                                    control.requestCancelAllTools(ToolCancelReason.SHUTDOWN)
+                                    control.requestProviderCancel(ToolCancelReason.SHUTDOWN)
+                                    ownerJob?.cancel(CancellationException("Durable command lease was lost"))
+                                    break
+                                }
                             }
                         }
                     }
                     try {
+                        timing?.mark(AgentTimingEventKind.RUN_STARTED)
                         executor.execute(envelope, control)
                     } finally {
+                        timing?.mark(AgentTimingEventKind.RUN_ENDED)
                         // The lease must be released even when the executor is cancelled.
                         // AutoCloseable.close() is deliberately best-effort and synchronous;
                         // the callback owns any async heartbeat cancellation.
-                        durableLeaseJob?.cancel()
+                        withContext(NonCancellable) { durableLeaseJob?.cancelAndJoin() }
                         lease?.let { runCatching { it.close() } }
                     }
                 }
@@ -1524,20 +1993,36 @@ class ConversationRuntime(
             }
         }
         _steeringStatus.value = run.control.steeringStates()
-        activeRun = null
-        activeEnvelope = null
-        onRunJobChanged(null)
+        envelope?.agentTimingSubmission?.handle?.let { timing ->
+            when {
+                // ChatService records the approval boundary only after the correlated pending
+                // state has been applied to the in-memory session. Re-recording it here from a
+                // deduplicated tool-id set would move the boundary later and under-count blank or
+                // duplicate tool-call ids.
+                outcome is RunOutcome.WaitingApproval -> Unit
+                envelope.command is ToolApprovalCommand -> Unit
+                run.control.stoppedBy != null || run.control.interruptedBy != null || outcome == null ->
+                    timing.finish(AgentTimingTraceStatus.CANCELLED)
+                persistenceFailure != null -> timing.finish(AgentTimingTraceStatus.FAILED)
+                outcome is RunOutcome.Completed -> timing.finish(AgentTimingTraceStatus.COMPLETED)
+                outcome is RunOutcome.Failed && outcome.error.hasCause<ProviderContextOverflowException>() ->
+                    timing.finish(AgentTimingTraceStatus.CONTEXT_OVERFLOW)
+                outcome is RunOutcome.Failed && outcome.error.hasCause<TimeoutCancellationException>() ->
+                    timing.finish(AgentTimingTraceStatus.TIMED_OUT)
+                outcome is RunOutcome.Failed || outcome is RunOutcome.Rejected || outcome is RunOutcome.Conflict ->
+                    timing.finish(AgentTimingTraceStatus.FAILED)
+                else -> timing.finish(AgentTimingTraceStatus.CANCELLED)
+            }
+        }
         var replacementToStart: CommandEnvelope<out EmergencyCommand>? = null
         when {
             run.control.stoppedBy != null -> {
-                if (envelope != null) complete(envelope, CommandOutcome.Cancelled, persistDurable = false)
                 val stop = pendingStop
                 pendingStop = null
                 stop?.let { complete(it, CommandOutcome.Completed) }
-                _runtimeState.value = if (queuePaused) RuntimeState.Paused else RuntimeState.Idle
+                _runtimeState.value = restingRuntimeState()
             }
             run.control.interruptedBy != null -> {
-                if (envelope != null) complete(envelope, CommandOutcome.Cancelled, persistDurable = false)
                 val next = pendingAfterCancel
                 pendingAfterCancel = null
                 if (next != null) {
@@ -1555,24 +2040,13 @@ class ConversationRuntime(
                         )
                     }
                 } else {
-                    _runtimeState.value = if (queuePaused) RuntimeState.Paused else RuntimeState.Idle
+                    _runtimeState.value = restingRuntimeState()
                 }
             }
             else -> {
-                if (envelope != null) {
-                    val commandOutcome = persistenceFailure?.let { CommandOutcome.Failed(it) }
-                        ?: outcome.toCommandOutcome()
-                    // Active-run rows are finalized once, below, after the persistence
-                    // barrier (or moved to WAITING_APPROVAL). Avoid a competing async write.
-                    complete(
-                        envelope,
-                        commandOutcome,
-                        persistDurable = false,
-                    )
-                }
                 _runtimeState.value = when (outcome) {
                     is RunOutcome.WaitingApproval -> RuntimeState.WaitingApproval
-                    else -> if (queuePaused) RuntimeState.Paused else RuntimeState.Idle
+                    else -> restingRuntimeState()
                 }
             }
         }
@@ -1582,17 +2056,77 @@ class ConversationRuntime(
                 else -> persistenceFailure?.let { CommandOutcome.Failed(it) }
                     ?: outcome.toCommandOutcome()
             }
-            runSuspendCatching {
-                if (outcome is RunOutcome.WaitingApproval) {
-                    durableQueue?.resolvePending(
-                        id = envelope.id.toString(),
-                        state = DurableCommandState.WAITING_APPROVAL,
+            val durableConfirmation = runSuspendCatching {
+                val runAuthority = run.control.runtimeCommandAuthority()
+                if (outcome !is RunOutcome.WaitingApproval &&
+                    runAuthority != null &&
+                    !runAuthority.isTerminalCommitted()
+                ) {
+                    runAuthority.finishFallback(
+                        terminalState = finalOutcome.toDurableState(),
+                        errorCode = finalOutcome.toDurableErrorCode(),
+                    )
+                }
+                val authority = run.control.authorityResult()
+                if (outcome is RunOutcome.WaitingApproval && authority?.isWaitingCommitted() == true) {
+                    durableRunLeases.remove(envelope.id)
+                    DurableFinishConfirmation(confirmed = true)
+                } else if (outcome !is RunOutcome.WaitingApproval && authority?.isTerminalCommitted() == true) {
+                    durableRunLeases.remove(envelope.id)
+                    DurableFinishConfirmation(
+                        confirmed = true,
+                        terminalizedCommandIds = authority.terminalizedCommandIds(),
+                    )
+                } else if (outcome is RunOutcome.WaitingApproval) {
+                    val lease = durableRunLeases.remove(envelope.id)
+                    DurableFinishConfirmation(
+                        confirmed = lease?.markWaitingApproval()
+                            ?: (durableQueue == null || envelope.lineage == null),
                     )
                 } else {
                     finishDurable(envelope, finalOutcome)
                 }
+            }.getOrDefault(DurableFinishConfirmation(false))
+            if (!durableConfirmation.confirmed) {
+                // Do not publish an in-memory success before the authority row is fenced. The
+                // expired claim remains recoverable after restart; pause this runtime instead of
+                // dispatching more work on an ambiguous command timeline.
+                if (envelope.command is ResumeAfterApprovalCommand) {
+                    approvalBarrierReconciliationRequired = true
+                }
+                queuePaused = true
+                activeRun = null
+                activeEnvelope = null
+                onRunJobChanged(null)
+                _runtimeState.value = RuntimeState.Paused
+                refreshQueueStatus()
+                return
             }
-            onRunFinished(envelope, finalOutcome)
+            if (outcome is RunOutcome.WaitingApproval) {
+                // WAITING is a durable suspension checkpoint, not a terminal command result.
+                // Keep both the accepted envelope and its Deferred until a later resume commits
+                // the final lineage outcome.
+                waitingCommandIds.add(envelope.id)
+                _runtimeState.value = restingRuntimeState()
+            } else {
+                commandAuthority?.release(
+                    durableConfirmation.terminalizedCommandIds.ifEmpty { listOf(envelope.id) },
+                )
+                completeTerminalizedWaiting(
+                    durableConfirmation.terminalizedCommandIds,
+                    finalOutcome,
+                )
+                complete(envelope, finalOutcome, persistDurable = false)
+                runCatching { onRunFinished(envelope, finalOutcome) }
+            }
+        }
+        activeRun = null
+        activeEnvelope = null
+        onRunJobChanged(null)
+        if (replacementToStart == null) {
+            // Final resume may have removed the last WAITING barrier after the earlier state
+            // projection. Recompute only after the durable transaction and in-memory completion.
+            _runtimeState.value = restingRuntimeState()
         }
         replacementToStart?.let(::startRun)
         if (persistenceFailure == null && repairFailure == null && !startPendingIfReady() && !hasRetainedWork) {
@@ -1633,6 +2167,17 @@ class ConversationRuntime(
         pendingStop = null
         refreshQueueStatus()
     }
+}
+
+private inline fun <reified T : Throwable> Throwable.hasCause(): Boolean {
+    var current: Throwable? = this
+    while (current != null) {
+        if (current is T) return true
+        val next = current.cause
+        if (next === current) return false
+        current = next
+    }
+    return false
 }
 
 private data class CancellationTimeout(

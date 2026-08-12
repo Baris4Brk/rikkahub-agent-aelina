@@ -1,6 +1,7 @@
 package me.rerere.rikkahub.data.repository
 
 import android.database.sqlite.SQLiteBlobTooBigException
+import android.util.Log
 import androidx.paging.Pager
 import androidx.paging.PagingConfig
 import androidx.paging.PagingData
@@ -25,6 +26,17 @@ import me.rerere.rikkahub.data.db.entity.MessageNodeEntity
 import me.rerere.rikkahub.data.files.FilesManager
 import me.rerere.rikkahub.data.model.Conversation
 import me.rerere.rikkahub.data.model.MessageNode
+import me.rerere.rikkahub.data.authority.source.ConversationSourceAuthorityCommit
+import me.rerere.rikkahub.data.authority.source.ConversationSourceAuthorityWriter
+import me.rerere.rikkahub.data.authority.source.ConversationSourceScope
+import me.rerere.rikkahub.data.authority.source.ConversationSourceScopeKind
+import me.rerere.rikkahub.data.authority.source.ConversationSourceSnapshot
+import me.rerere.rikkahub.data.authority.source.ConversationSourceSnapshotFactory
+import me.rerere.rikkahub.memory.MemorySourceVersion
+import me.rerere.rikkahub.memory.MemoryScopeSourceInvalidation
+import me.rerere.rikkahub.memory.MemorySourceInvalidationBatch
+import me.rerere.rikkahub.memory.memoryCaptureSourcesForMessage
+import me.rerere.rikkahub.memory.memorySourceTextDigest
 import me.rerere.rikkahub.utils.JsonInstant
 import java.time.Instant
 import kotlin.uuid.Uuid
@@ -38,8 +50,10 @@ class ConversationRepository(
     private val messageFtsManager: MessageFtsManager,
     private val deletionPolicy: ConversationDeletionPolicy,
     private val memoryRepository: MemoryRepository,
+    private val sourceAuthorityWriter: ConversationSourceAuthorityWriter,
 ) {
     companion object {
+        private const val TAG = "ConversationRepository"
         private const val PAGE_SIZE = 20
         private const val INITIAL_LOAD_SIZE = 40
     }
@@ -262,13 +276,20 @@ class ConversationRepository(
     }
 
     suspend fun insertConversation(conversation: Conversation) {
-        database.withTransaction {
+        val authorityCommits = database.withTransaction {
             persistConversationInCurrentTransaction(conversation, insert = true)
+            reconcileOrdinarySourceInCurrentTransaction(conversation)
         }
+        authorityCommits.forEach(sourceAuthorityWriter::dispatchPostCommit)
         messageFtsManager.indexConversation(conversation)
     }
 
-    suspend fun updateConversation(conversation: Conversation): ConversationUpdateResult {
+    suspend fun updateConversation(
+        conversation: Conversation,
+        sourceInvalidationMode: ConversationSourceInvalidationMode =
+            ConversationSourceInvalidationMode.APPLY,
+        sourceInvalidationNowMs: Long = System.currentTimeMillis(),
+    ): ConversationUpdateResult {
         // Read the stored owner before writing. A caller can update title, prompt, pinned state,
         // and message graph on the protected second-user session, but no in-app route may move
         // that session to another assistant and thereby evade its deletion/authority guard.
@@ -277,9 +298,23 @@ class ConversationRepository(
         if (stored.assistantId != conversation.assistantId && !deletionPolicy.canReassignAssistant(stored)) {
             return ConversationUpdateResult.RetainedSecondUser(stored.id)
         }
-        database.withTransaction {
-            persistConversationInCurrentTransaction(conversation, insert = false)
+        val authorityCommits = database.withTransaction {
+            persistConversationInCurrentTransaction(
+                conversation = conversation,
+                insert = false,
+                sourceInvalidationMode = sourceInvalidationMode,
+                sourceInvalidationNowMs = sourceInvalidationNowMs,
+            )
+            if (sourceInvalidationMode == ConversationSourceInvalidationMode.SKIP_TRANSIENT_WRITE) {
+                emptyList()
+            } else {
+                reconcileOrdinarySourceInCurrentTransaction(
+                    conversation = conversation,
+                    occurredAtMs = sourceInvalidationNowMs,
+                )
+            }
         }
+        authorityCommits.forEach(sourceAuthorityWriter::dispatchPostCommit)
         messageFtsManager.indexConversation(conversation)
         return ConversationUpdateResult.Updated(conversation.id)
     }
@@ -294,6 +329,9 @@ class ConversationRepository(
     suspend fun persistConversationInCurrentTransaction(
         conversation: Conversation,
         insert: Boolean? = null,
+        sourceInvalidationMode: ConversationSourceInvalidationMode =
+            ConversationSourceInvalidationMode.APPLY,
+        sourceInvalidationNowMs: Long = System.currentTimeMillis(),
     ) {
         check(database.inTransaction()) { "conversation_transaction_required" }
         val entity = conversationToConversationEntity(conversation)
@@ -301,10 +339,147 @@ class ConversationRepository(
         if (shouldInsert) {
             conversationDAO.insert(entity)
         } else {
+            if (sourceInvalidationMode == ConversationSourceInvalidationMode.APPLY) {
+                val storedEntity = conversationDAO.getConversationById(conversation.id.toString())
+                if (storedEntity != null) {
+                    val previousSources = loadPersistedSelectedSourceVersionsInCurrentTransaction(
+                        conversation.id.toString(),
+                    )
+                    val nextSources = conversation.selectedMemorySourceVersions()
+                    val plan = planConversationSourceInvalidation(
+                        previousAssistantScopeId = storedEntity.assistantId,
+                        nextAssistantScopeId = conversation.assistantId.toString(),
+                        previousSelectedMessageIds = previousSources.messageIds(),
+                        nextSelectedMessageIds = nextSources.messageIds(),
+                        previousSelectedSourceVersions = previousSources,
+                        nextSelectedSourceVersions = nextSources,
+                    )
+                    applySourceInvalidationPlan(
+                        conversationId = conversation.id.toString(),
+                        plan = plan,
+                        nowMs = sourceInvalidationNowMs,
+                    )
+                }
+            }
             conversationDAO.update(entity)
             messageNodeDAO.deleteByConversation(conversation.id.toString())
         }
         saveMessageNodes(conversation.id.toString(), conversation.messageNodes)
+    }
+
+    /**
+     * Exact graph mutation used by the combined command coordinators. It deliberately does not
+     * reconcile or dispatch on its own: the outer coordinator owns both operations.
+     */
+    suspend fun persistAuthorityGraphInCurrentTransaction(
+        conversation: Conversation,
+        scope: ConversationSourceScope,
+        insert: Boolean? = null,
+        sourceInvalidationMode: ConversationSourceInvalidationMode =
+            ConversationSourceInvalidationMode.APPLY,
+        sourceInvalidationNowMs: Long = System.currentTimeMillis(),
+    ): ConversationSourceSnapshot {
+        persistConversationInCurrentTransaction(
+            conversation = conversation,
+            insert = insert,
+            sourceInvalidationMode = sourceInvalidationMode,
+            sourceInvalidationNowMs = sourceInvalidationNowMs,
+        )
+        return ConversationSourceSnapshotFactory.fromConversation(
+            scope = scope,
+            conversation = conversation,
+            occurredAtMs = sourceInvalidationNowMs,
+        )
+    }
+
+    private suspend fun reconcileOrdinarySourceInCurrentTransaction(
+        conversation: Conversation,
+        occurredAtMs: Long = System.currentTimeMillis(),
+    ): List<ConversationSourceAuthorityCommit> {
+        check(database.inTransaction()) { "conversation_source_authority_transaction_required" }
+        val snapshot = ConversationSourceSnapshotFactory.fromConversation(
+            scope = ConversationSourceScope(
+                ConversationSourceScopeKind.ASSISTANT,
+                conversation.assistantId.toString(),
+            ),
+            conversation = conversation,
+            occurredAtMs = occurredAtMs,
+        )
+        return sourceAuthorityWriter.reconcileAllKnownScopesInCurrentTransaction(snapshot)
+    }
+
+    /**
+     * Atomically commits a regeneration's final graph and the source invalidation calculated from
+     * its durable pre-regeneration selected branch. Intermediate regeneration snapshots must use
+     * [ConversationSourceInvalidationMode.SKIP_TRANSIENT_WRITE] and finish through this method.
+     */
+    suspend fun finalizeTransientConversationUpdate(
+        conversation: Conversation,
+        baselineAssistantScopeId: String,
+        baselineSelectedMessageIds: Collection<String>,
+        baselineSelectedSourceVersions: Collection<MemorySourceVersion> = emptyList(),
+        sourceInvalidationNowMs: Long,
+    ): ConversationUpdateResult {
+        val normalizedBaselineScopeId = baselineAssistantScopeId.trim()
+        if (normalizedBaselineScopeId.isEmpty()) {
+            return ConversationUpdateResult.RetainedSecondUser(conversation.id)
+        }
+        val stored = getConversationById(conversation.id)
+            ?: return ConversationUpdateResult.Missing(conversation.id)
+        // Regeneration is never an ownership mutation. If another writer moved the conversation,
+        // fail this finalization instead of moving it back under a stale assistant snapshot.
+        if (stored.assistantId != conversation.assistantId) {
+            return ConversationUpdateResult.RetainedSecondUser(stored.id)
+        }
+
+        var missingDuringCommit = false
+        var ownerChangedDuringCommit = false
+        database.withTransaction {
+            val authoritativeEntity = conversationDAO.getConversationById(conversation.id.toString())
+            if (authoritativeEntity == null) {
+                missingDuringCommit = true
+                return@withTransaction
+            }
+            if (authoritativeEntity.assistantId != conversation.assistantId.toString() ||
+                authoritativeEntity.assistantId != normalizedBaselineScopeId
+            ) {
+                ownerChangedDuringCommit = true
+                return@withTransaction
+            }
+            val nextSources = conversation.selectedMemorySourceVersions()
+            val plan = planConversationSourceInvalidation(
+                previousAssistantScopeId = normalizedBaselineScopeId,
+                nextAssistantScopeId = conversation.assistantId.toString(),
+                previousSelectedMessageIds = baselineSelectedMessageIds.toSet(),
+                nextSelectedMessageIds = nextSources.messageIds(),
+                previousSelectedSourceVersions = baselineSelectedSourceVersions.toSet(),
+                nextSelectedSourceVersions = nextSources,
+            )
+            applySourceInvalidationPlan(
+                conversationId = conversation.id.toString(),
+                plan = plan,
+                nowMs = sourceInvalidationNowMs,
+            )
+            persistConversationInCurrentTransaction(
+                conversation = conversation,
+                insert = false,
+                sourceInvalidationMode =
+                    ConversationSourceInvalidationMode.SKIP_TRANSIENT_WRITE,
+                sourceInvalidationNowMs = sourceInvalidationNowMs,
+            )
+        }
+        if (missingDuringCommit) return ConversationUpdateResult.Missing(conversation.id)
+        if (ownerChangedDuringCommit) {
+            return ConversationUpdateResult.RetainedSecondUser(conversation.id)
+        }
+        // The authority transaction is already committed. A derived FTS failure or cancellation
+        // must not make the caller restore the old graph after source tombstones became durable.
+        try {
+            messageFtsManager.indexConversation(conversation)
+        } catch (error: Exception) {
+            Log.w(TAG, "Final regeneration search projection refresh failed", error)
+        }
+        return ConversationUpdateResult.Updated(conversation.id)
     }
 
     /** Refreshes the non-authoritative FTS projection after a critical transaction commits. */
@@ -330,24 +505,36 @@ class ConversationRepository(
         if (!deletionPolicy.canDelete(fullConversation)) {
             return ConversationDeletionResult.RetainedSecondUser(fullConversation.id)
         }
-        messageFtsManager.deleteConversation(fullConversation.id.toString())
-        database.withTransaction {
+        var authorityCommits: List<ConversationSourceAuthorityCommit> = emptyList()
+        val deleted = database.withTransaction {
             val conversationId = fullConversation.id.toString()
+            val authoritativeEntity = conversationDAO.getConversationById(conversationId)
+                ?: return@withTransaction false
+            val sourceInvalidationNowMs = System.currentTimeMillis()
             // Captures may belong to the assistant scope or to the shared global scope. Resolve
             // exact provenance in both domains before the authoritative source messages vanish.
+            // Re-read the owner under the write transaction: a concurrent assistant move after
+            // the policy preflight must not leave the new assistant scope uninvaldated.
             memoryRepository.invalidateSourceConversation(
-                scopeId = fullConversation.assistantId.toString(),
+                scopeIds = setOf(
+                    authoritativeEntity.assistantId,
+                    MemoryRepository.GLOBAL_MEMORY_ID,
+                ),
                 conversationId = conversationId,
+                nowMs = sourceInvalidationNowMs,
             )
-            memoryRepository.invalidateSourceConversation(
-                scopeId = MemoryRepository.GLOBAL_MEMORY_ID,
+            authorityCommits = sourceAuthorityWriter.tombstoneAllScopesInCurrentTransaction(
                 conversationId = conversationId,
+                occurredAtMs = sourceInvalidationNowMs,
             )
             // message_node 会通过 CASCADE 自动删除
-            conversationDAO.delete(
-                conversationToConversationEntity(fullConversation)
-            )
+            conversationDAO.delete(authoritativeEntity)
+            true
         }
+        if (!deleted) return ConversationDeletionResult.Missing(fullConversation.id)
+        authorityCommits.forEach(sourceAuthorityWriter::dispatchPostCommit)
+        // FTS is a derived projection, so mutate it only after the authoritative transaction.
+        messageFtsManager.deleteConversation(fullConversation.id.toString())
         filesManager.deleteChatFiles(fullConversation.files)
         return ConversationDeletionResult.Deleted(fullConversation.id)
     }
@@ -530,7 +717,150 @@ class ConversationRepository(
         }
         messageNodeDAO.insertAll(entities)
     }
+
+    private suspend fun loadPersistedSelectedSourceVersionsInCurrentTransaction(
+        conversationId: String,
+    ): Set<MemorySourceVersion> {
+        check(database.inTransaction()) { "conversation_transaction_required" }
+        return messageNodeDAO.getNodesOfConversation(conversationId)
+            .asSequence()
+            .mapNotNull { entity ->
+                JsonInstant.decodeFromString<List<UIMessage>>(entity.messages)
+                    .getOrNull(entity.selectIndex)
+            }
+            .flatMap { message -> message.memorySourceVersions().asSequence() }
+            .toSet()
+    }
+
+    private suspend fun applySourceInvalidationPlan(
+        conversationId: String,
+        plan: ConversationSourceInvalidationPlan,
+        nowMs: Long,
+    ): Int {
+        check(database.inTransaction()) { "conversation_transaction_required" }
+        val allScopes = plan.invalidateWholeScopeIds + plan.invalidateMessageScopeIds
+        if (allScopes.isEmpty()) return 0
+        return memoryRepository.invalidateSources(
+            batch = MemorySourceInvalidationBatch(
+                conversationId = conversationId,
+                scopes = allScopes.map { scopeId ->
+                    MemoryScopeSourceInvalidation(
+                        scopeId = scopeId,
+                        invalidateWholeConversation = scopeId in plan.invalidateWholeScopeIds,
+                        removedMessageIds = if (scopeId in plan.invalidateMessageScopeIds) {
+                            plan.removedMessageIds
+                        } else {
+                            emptySet()
+                        },
+                        removedSourceVersions = if (scopeId in plan.invalidateMessageScopeIds) {
+                            plan.changedSourceVersions
+                        } else {
+                            emptySet()
+                        },
+                    )
+                },
+            ),
+            nowMs = nowMs,
+        )
+    }
 }
+
+/**
+ * APPLY is the safe default for every authoritative write. SKIP_TRANSIENT_WRITE is only for a
+ * persisted snapshot that is guaranteed to be restored on failure or finalized through
+ * [ConversationRepository.finalizeTransientConversationUpdate].
+ */
+enum class ConversationSourceInvalidationMode {
+    APPLY,
+    SKIP_TRANSIENT_WRITE,
+}
+
+internal data class ConversationSourceInvalidationPlan(
+    val invalidateWholeScopeIds: Set<String>,
+    val invalidateMessageScopeIds: Set<String>,
+    val removedMessageIds: Set<String>,
+    val changedSourceVersions: Set<MemorySourceVersion> = emptySet(),
+)
+
+internal fun planConversationSourceInvalidation(
+    previousAssistantScopeId: String,
+    nextAssistantScopeId: String,
+    previousSelectedMessageIds: Set<String>,
+    nextSelectedMessageIds: Set<String>,
+    previousSelectedSourceVersions: Set<MemorySourceVersion> = emptySet(),
+    nextSelectedSourceVersions: Set<MemorySourceVersion> = emptySet(),
+): ConversationSourceInvalidationPlan {
+    val previousScope = previousAssistantScopeId.trim()
+    val nextScope = nextAssistantScopeId.trim()
+    require(previousScope.isNotEmpty()) { "previous_assistant_scope_required" }
+    require(nextScope.isNotEmpty()) { "next_assistant_scope_required" }
+
+    val normalizedPreviousVersions = normalizeMemorySourceVersions(
+        previousSelectedSourceVersions,
+    )
+    val normalizedNextVersions = normalizeMemorySourceVersions(nextSelectedSourceVersions)
+    val normalizedPreviousIds = previousSelectedMessageIds.asSequence()
+        .map(String::trim)
+        .filter(String::isNotEmpty)
+        .toSet() + normalizedPreviousVersions.messageIds()
+    val normalizedNextIds = nextSelectedMessageIds.asSequence()
+        .map(String::trim)
+        .filter(String::isNotEmpty)
+        .toSet() + normalizedNextVersions.messageIds()
+    val removedIds = normalizedPreviousIds - normalizedNextIds
+    val changedVersions = normalizedPreviousVersions.filterTo(mutableSetOf()) { oldVersion ->
+        oldVersion.messageId in normalizedNextIds && oldVersion !in normalizedNextVersions
+    }
+    val assistantMoved = previousScope != nextScope
+    val wholeScopes = if (assistantMoved) setOf(previousScope) else emptySet()
+    val messageScopes = when {
+        removedIds.isEmpty() && changedVersions.isEmpty() -> emptySet()
+        assistantMoved -> setOf(MemoryRepository.GLOBAL_MEMORY_ID)
+        else -> setOf(previousScope, MemoryRepository.GLOBAL_MEMORY_ID)
+    }
+    return ConversationSourceInvalidationPlan(
+        invalidateWholeScopeIds = wholeScopes,
+        invalidateMessageScopeIds = messageScopes - wholeScopes,
+        removedMessageIds = removedIds,
+        changedSourceVersions = changedVersions,
+    )
+}
+
+internal fun Conversation.selectedMemorySourceVersions(): Set<MemorySourceVersion> =
+    messageNodes.asSequence()
+    .mapNotNull { node -> node.messages.getOrNull(node.selectIndex) }
+    .flatMap { message -> message.memorySourceVersions().asSequence() }
+    .toSet()
+
+internal fun Conversation.selectedMessageIds(): Set<String> =
+    selectedMemorySourceVersions().messageIds()
+
+private fun UIMessage.memorySourceVersions(): List<MemorySourceVersion> =
+    memoryCaptureSourcesForMessage(this).map { source ->
+        MemorySourceVersion(
+            messageId = source.messageId,
+            consumedTextDigest = memorySourceTextDigest(source.text),
+        )
+    }
+
+private fun Iterable<MemorySourceVersion>.messageIds(): Set<String> =
+    mapTo(mutableSetOf(), MemorySourceVersion::messageId)
+
+private fun normalizeMemorySourceVersions(
+    versions: Set<MemorySourceVersion>,
+): Set<MemorySourceVersion> = versions.asSequence()
+    .map { version ->
+        MemorySourceVersion(
+            messageId = version.messageId.trim(),
+            consumedTextDigest = version.consumedTextDigest.trim().lowercase(),
+        )
+    }
+    .filter { version ->
+        version.messageId.isNotEmpty() &&
+            version.consumedTextDigest.length == 64 &&
+            version.consumedTextDigest.all { char -> char in '0'..'9' || char in 'a'..'f' }
+    }
+    .toSet()
 
 /**
  * 轻量级的会话查询结果，不包含 nodes 和 suggestions 字段

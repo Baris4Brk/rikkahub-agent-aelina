@@ -172,7 +172,10 @@ class MemoryBatchFailureRecoveryTest {
             assertEquals(1, result.autoApplied)
             assertEquals(1, store.commits.size)
             assertEquals(30, store.commits.single().captures.size)
-            assertEquals(listOf("user-30"), store.commits.single().candidates.single().proposal.evidenceMessageIds)
+            assertEquals(
+                listOf("user-30", "assistant-30"),
+                store.commits.single().candidates.single().proposal.evidenceMessageIds,
+            )
             assertTrue(extractionRequest?.isConversationContextCompacted == true)
             assertEquals((1..30).map { "T$it" }, extractionRequest?.turns?.map { it.evidenceRef })
         }

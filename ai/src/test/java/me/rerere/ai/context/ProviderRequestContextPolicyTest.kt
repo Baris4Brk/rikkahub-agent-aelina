@@ -1,6 +1,8 @@
 package me.rerere.ai.context
 
+import kotlin.coroutines.cancellation.CancellationException
 import me.rerere.ai.core.MessageRole
+import me.rerere.ai.core.Tool
 import me.rerere.ai.provider.ProviderCacheIdentity
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
@@ -98,5 +100,35 @@ class ProviderRequestContextPolicyTest {
             opaqueSha256 = "123e4567-e89b-12d3-a456-426614174000",
             compilerRevision = "memory-v1",
         )
+    }
+
+    @Test(expected = CancellationException::class)
+    fun `schema token estimator propagates cancellation`() {
+        ProviderRequestTokenEstimator().estimateToolSchemaTokens(
+            listOf(
+                Tool(
+                    name = "cancelled_schema",
+                    description = "",
+                    parameters = { throw CancellationException("cancel schema") },
+                    execute = { emptyList() },
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun `schema token estimator keeps conservative fallback for ordinary failures`() {
+        val tokens = ProviderRequestTokenEstimator().estimateToolSchemaTokens(
+            listOf(
+                Tool(
+                    name = "broken_schema",
+                    description = "",
+                    parameters = { error("schema unavailable") },
+                    execute = { emptyList() },
+                ),
+            ),
+        )
+
+        assertEquals(256, tokens)
     }
 }

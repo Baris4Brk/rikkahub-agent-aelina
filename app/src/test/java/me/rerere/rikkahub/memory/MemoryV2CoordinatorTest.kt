@@ -8,6 +8,83 @@ import kotlin.uuid.Uuid
 
 class MemoryV2CoordinatorTest {
     @Test
+    fun `lease fencing uses a fresh clock while proposal validation keeps its frozen clock`() =
+        runBlocking {
+            var clockReads = 0
+            val processStore = RecordingMemoryProcessingStore(
+                claimed = listOf(memoryCaptureRecord(index = 1)),
+            )
+            val coordinator: MemoryV2Coordinator = DefaultMemoryV2Coordinator(
+                captureStore = InMemoryMemoryCaptureStore(),
+                workScheduler = RecordingMemoryWorkScheduler(),
+                processingStore = processStore,
+                extractor = MemoryExtractor {
+                    MemoryExtractorResult.Success("""{"version":1,"proposals":[]}""")
+                },
+                idGenerator = { Uuid.random().toString() },
+                nowMs = { if (clockReads++ == 0) 1_000L else 2_000L },
+            )
+
+            assertTrue(
+                coordinator.process(MemoryProcessRequest(MEMORY_TEST_SCOPE, "worker")) is
+                    MemoryProcessResult.Completed,
+            )
+            assertEquals(1_000L, processStore.commits.single().nowMs)
+            assertEquals(2_000L, processStore.commits.single().leaseNowMs)
+        }
+
+    @Test
+    fun `failed extraction fences the lease with a fresh clock`() = runBlocking {
+        var clockReads = 0
+        val processStore = RecordingMemoryProcessingStore(
+            claimed = listOf(memoryCaptureRecord(index = 1)),
+        )
+        val coordinator: MemoryV2Coordinator = DefaultMemoryV2Coordinator(
+            captureStore = InMemoryMemoryCaptureStore(),
+            workScheduler = RecordingMemoryWorkScheduler(),
+            processingStore = processStore,
+            extractor = MemoryExtractor {
+                MemoryExtractorResult.Failure("synthetic_failure")
+            },
+            idGenerator = { Uuid.random().toString() },
+            nowMs = { if (clockReads++ == 0) 1_000L else 2_000L },
+        )
+
+        assertTrue(
+            coordinator.process(MemoryProcessRequest(MEMORY_TEST_SCOPE, "worker")) is
+                MemoryProcessResult.Completed,
+        )
+        assertEquals(listOf(2_000L), processStore.failureTimes)
+    }
+
+    @Test
+    fun `relation review reaches the processing store with the exact scope and frozen time`() =
+        runBlocking {
+            val processStore = RecordingMemoryProcessingStore(
+                claimed = emptyList(),
+                relationReviewResult = MemoryRelationReviewResult.Applied("link-7"),
+            )
+            val coordinator: MemoryV2Coordinator = DefaultMemoryV2Coordinator(
+                captureStore = InMemoryMemoryCaptureStore(),
+                workScheduler = RecordingMemoryWorkScheduler(),
+                processingStore = processStore,
+                idGenerator = { "generated-id" },
+                nowMs = { 12_345L },
+            )
+            val command = MemoryRelationReviewCommand.Accept(
+                relationCandidateId = "relation-1",
+                expectedScopeId = "scope-owned-by-row",
+            )
+
+            assertEquals(
+                MemoryRelationReviewResult.Applied("link-7"),
+                coordinator.reviewRelation(command),
+            )
+            assertEquals(listOf(command), processStore.relationReviews)
+            assertEquals(listOf(12_345L), processStore.relationReviewTimes)
+        }
+
+    @Test
     fun `quick capture memory is disabled by default and works only after explicit origin opt in`() =
         runBlocking {
             val store = InMemoryMemoryCaptureStore()
@@ -331,7 +408,7 @@ class MemoryV2CoordinatorTest {
     )
 
     private companion object {
-        const val MEMORY_TEST_SCOPE = "assistant-scope"
+        const val MEMORY_TEST_SCOPE = "00000000-0000-0000-0000-000000000001"
     }
 
     private class InMemoryMemoryCaptureStore : MemoryCaptureStore {
@@ -363,8 +440,13 @@ class MemoryV2CoordinatorTest {
     private class RecordingMemoryProcessingStore(
         private val claimed: List<MemoryCaptureRecord>,
         private val existing: List<ExistingMemoryRecord> = emptyList(),
+        private val relationReviewResult: MemoryRelationReviewResult =
+            MemoryRelationReviewResult.NotFound,
     ) : MemoryProcessingStore {
         val commits = mutableListOf<MemoryProcessCommit>()
+        val relationReviews = mutableListOf<MemoryRelationReviewCommand>()
+        val relationReviewTimes = mutableListOf<Long>()
+        val failureTimes = mutableListOf<Long>()
 
         override suspend fun claim(request: MemoryClaimRequest): List<MemoryCaptureRecord> = claimed
 
@@ -398,7 +480,9 @@ class MemoryV2CoordinatorTest {
             message: String?,
             retryPolicy: MemoryFailureRetryPolicy,
             nowMs: Long,
-        ) = Unit
+        ) {
+            failureTimes += nowMs
+        }
 
         override suspend fun pauseScope(scopeId: String, reason: String, nowMs: Long) = Unit
 
@@ -406,5 +490,14 @@ class MemoryV2CoordinatorTest {
             command: MemoryReviewCommand,
             nowMs: Long,
         ): MemoryReviewResult = MemoryReviewResult.NotFound
+
+        override suspend fun reviewRelation(
+            command: MemoryRelationReviewCommand,
+            nowMs: Long,
+        ): MemoryRelationReviewResult {
+            relationReviews += command
+            relationReviewTimes += nowMs
+            return relationReviewResult
+        }
     }
 }

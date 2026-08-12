@@ -7,13 +7,17 @@ import androidx.paging.PagingConfig
 import androidx.paging.cachedIn
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.datastore.findProvider
@@ -32,6 +36,8 @@ import me.rerere.rikkahub.memory.MemoryMutationCoordinator
 import me.rerere.rikkahub.memory.MemoryMutationResult
 import me.rerere.rikkahub.memory.MemoryReviewCommand
 import me.rerere.rikkahub.memory.MemoryReviewResult
+import me.rerere.rikkahub.memory.MemoryRelationReviewCommand
+import me.rerere.rikkahub.memory.MemoryRelationReviewResult
 import me.rerere.rikkahub.memory.MemoryV2Coordinator
 import me.rerere.rikkahub.memory.MemoryWorkRequest
 import me.rerere.rikkahub.memory.MemoryWorkScheduler
@@ -39,11 +45,29 @@ import me.rerere.rikkahub.memory.MemoryApprovalSource
 import me.rerere.rikkahub.memory.MemoryWriteInput
 import me.rerere.rikkahub.data.db.entity.MemoryCandidateEntity
 import me.rerere.rikkahub.data.db.entity.MemoryEntity
+import me.rerere.rikkahub.data.db.entity.MemoryRelationCandidateEntity
 import me.rerere.rikkahub.memory.MemoryCandidateAction
 import me.rerere.rikkahub.memory.MemoryCandidatePolicy
 import me.rerere.rikkahub.memory.MemoryKind
 import me.rerere.rikkahub.memory.MemoryProposal
 import me.rerere.rikkahub.memory.resolveMemoryExtractionModel
+import me.rerere.rikkahub.memory.dreaming.diagnostics.DreamObserverDiagnostics
+import me.rerere.rikkahub.memory.dreaming.diagnostics.DreamObserverScopeDiagnostic
+import me.rerere.rikkahub.memory.dreaming.model.DreamScopeId
+import me.rerere.rikkahub.memory.dreaming.review.DreamClaimMutationTarget
+import me.rerere.rikkahub.memory.dreaming.review.DreamCorrectionDraft
+import me.rerere.rikkahub.memory.dreaming.review.DreamCorrectionResult
+import me.rerere.rikkahub.memory.dreaming.review.DreamEvidenceRevealResult
+import me.rerere.rikkahub.memory.dreaming.review.DreamEvidenceSummary
+import me.rerere.rikkahub.memory.dreaming.review.DreamReviewMutationResult
+import me.rerere.rikkahub.memory.dreaming.review.DreamReviewProjection
+import me.rerere.rikkahub.memory.dreaming.review.DreamReviewReadResult
+import me.rerere.rikkahub.memory.dreaming.review.DreamReviewRepository
+import me.rerere.rikkahub.memory.dreaming.review.DreamReviewFence
+import me.rerere.rikkahub.memory.dreaming.runtime.DreamSynthesisCoordinator
+import me.rerere.rikkahub.memory.dreaming.runtime.DreamingCostPolicy
+import me.rerere.rikkahub.memory.dreaming.runtime.DreamingScopePreferenceMutation
+import me.rerere.rikkahub.memory.dreaming.runtime.DreamingScopePreferences
 import me.rerere.rikkahub.utils.JsonInstant
 import kotlin.uuid.Uuid
 
@@ -58,6 +82,9 @@ class MemoryCenterVM(
     private val coordinator: MemoryV2Coordinator,
     private val scheduler: MemoryWorkScheduler,
     private val conversationRepository: ConversationRepository,
+    private val dreamObserverDiagnostics: DreamObserverDiagnostics,
+    private val dreamReviewRepository: DreamReviewRepository,
+    private val dreamSynthesisCoordinator: DreamSynthesisCoordinator,
 ) : ViewModel() {
     private val candidatePolicy = MemoryCandidatePolicy()
     private val assistantId = Uuid.parse(id)
@@ -78,6 +105,72 @@ class MemoryCenterVM(
     private val scopeId = combine(assistant, viewGlobal) { assistant, global ->
         if (global) MemoryRepository.GLOBAL_MEMORY_ID else assistant.id.toString()
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), assistantId.toString())
+
+    val developerMode = settingsStore.settingsFlow
+        .map { settings -> settings.developerMode }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+
+    private val observerDiagnosticsRefresh = MutableStateFlow(0L)
+    val observerDiagnostic = combine(
+        scopeId,
+        developerMode,
+        observerDiagnosticsRefresh,
+    ) { scope, enabled, _ -> scope to enabled }
+        .flatMapLatest { (scope, enabled) ->
+            flow<DreamObserverScopeDiagnostic?> {
+                if (!enabled) {
+                    emit(null)
+                    return@flow
+                }
+                val typedScope = DreamScopeId.parseOrNull(scope)
+                emit(typedScope?.let { dreamObserverDiagnostics.readScope(it) })
+            }.catch { error ->
+                if (error is CancellationException) throw error
+                emit(null)
+            }
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
+    val dreamProjection = scopeId
+        .flatMapLatest { rawScope ->
+            val typedScope = requireNotNull(DreamScopeId.parseOrNull(rawScope))
+            dreamReviewRepository.observeScope(typedScope)
+                .map<DreamReviewProjection, DreamReviewProjection?> { it }
+                .catch { error ->
+                    if (error is CancellationException) throw error
+                    emit(null)
+                }
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
+    val dreamingScopePreferences = combine(
+        scopeId,
+        settingsStore.settingsFlow,
+    ) { rawScope, settings ->
+        val typedScope = requireNotNull(DreamScopeId.parseOrNull(rawScope))
+        settings.dreamingPreferences.forScope(typedScope)
+    }.stateIn(
+        viewModelScope,
+        SharingStarted.WhileSubscribed(5_000),
+        DreamingScopePreferences(),
+    )
+
+    val dreamingCostPolicy = settingsStore.settingsFlow
+        .map { settings -> settings.dreamingPreferences.failClosed().costPolicy }
+        .stateIn(
+            viewModelScope,
+            SharingStarted.WhileSubscribed(5_000),
+            DreamingCostPolicy(),
+        )
+
+    val dreamDetailState = MutableStateFlow<MemoryDreamDetailState>(MemoryDreamDetailState.Closed)
+
+    /** Command authorization must not wait for the asynchronous combine/stateIn propagation. */
+    private fun currentCommandScopeId(): String = if (viewGlobal.value) {
+        MemoryRepository.GLOBAL_MEMORY_ID
+    } else {
+        assistantId.toString()
+    }
 
     val library = combine(scopeId, libraryFilter) { scope, filter -> scope to filter }
         .flatMapLatest { (scope, filter) ->
@@ -101,6 +194,10 @@ class MemoryCenterVM(
         }.flow
     }.cachedIn(viewModelScope)
 
+    val relationCandidates = scopeId
+        .flatMapLatest { scope -> memoryV2Dao.observePendingRelationCandidates(scope) }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
     val stats = scopeId.flatMapLatest { scope ->
         val memoryCounts = combine(
             memoryDao.observeActiveCount(scope, System.currentTimeMillis()),
@@ -108,8 +205,11 @@ class MemoryCenterVM(
         ) { active, archived -> active to archived }
         val queueCounts = combine(
             memoryV2Dao.observePendingCandidateCount(scope),
+            memoryV2Dao.observePendingRelationCandidates(scope).map { it.size },
             memoryV2Dao.observeCaptureStatusCounts(scope),
-        ) { review, captures -> review to captures }
+        ) { memoryReview, relationReview, captures ->
+            Triple(memoryReview, relationReview, captures)
+        }
         combine(
             memoryCounts,
             queueCounts,
@@ -119,8 +219,9 @@ class MemoryCenterVM(
                 active = memories.first,
                 archived = memories.second,
                 pendingReview = queues.first,
-                captures = queues.second,
+                captures = queues.third,
                 lastProcessedAtMs = last,
+                pendingRelationReview = queues.second,
             )
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), MemoryCenterStats())
@@ -160,6 +261,12 @@ class MemoryCenterVM(
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     val recallTestState = MutableStateFlow<MemoryRecallTestState>(MemoryRecallTestState.Idle)
+
+    fun refreshObserverDiagnostics() {
+        observerDiagnosticsRefresh.update { current ->
+            if (current == Long.MAX_VALUE) 0L else current + 1L
+        }
+    }
     val lastActionMessage = MutableStateFlow<String?>(null)
 
     init {
@@ -171,6 +278,7 @@ class MemoryCenterVM(
     }
 
     fun setViewGlobal(global: Boolean) {
+        closeDreamClaim()
         viewGlobal.value = global
     }
 
@@ -274,7 +382,7 @@ class MemoryCenterVM(
 
     fun processNow(retryFailed: Boolean = false) {
         viewModelScope.launch(Dispatchers.IO) {
-            val scope = scopeId.value
+            val scope = currentCommandScopeId()
             if (retryFailed) memoryV2Dao.retryScope(scope, System.currentTimeMillis())
             scheduler.schedule(MemoryWorkRequest(scope, 0L))
             lastActionMessage.value = "scheduled"
@@ -292,6 +400,27 @@ class MemoryCenterVM(
                 is MemoryReviewResult.Failed -> "failed"
             }
         }
+    }
+
+    fun reviewRelation(command: MemoryRelationReviewCommand) {
+        viewModelScope.launch(Dispatchers.IO) {
+            lastActionMessage.value = when (coordinator.reviewRelation(command)) {
+                is MemoryRelationReviewResult.Applied -> "accepted"
+                MemoryRelationReviewResult.Rejected -> "rejected"
+                MemoryRelationReviewResult.Conflict -> "conflict"
+                MemoryRelationReviewResult.AlreadyResolved -> "already_resolved"
+                MemoryRelationReviewResult.NotFound -> "not_found"
+                is MemoryRelationReviewResult.Failed -> "failed"
+            }
+        }
+    }
+
+    fun acceptRelationCandidate(candidate: MemoryRelationCandidateEntity) {
+        reviewRelation(candidate.reviewCommand(accept = true))
+    }
+
+    fun rejectRelationCandidate(candidate: MemoryRelationCandidateEntity) {
+        reviewRelation(candidate.reviewCommand(accept = false))
     }
 
     fun acceptCandidate(
@@ -361,7 +490,7 @@ class MemoryCenterVM(
         viewModelScope.launch(Dispatchers.IO) {
             var changed = 0
             var conflict = false
-            val pending = memoryV2Dao.observePendingCandidates(scopeId.value).first()
+            val pending = memoryV2Dao.observePendingCandidates(currentCommandScopeId()).first()
             pending.forEach { candidate ->
                 val command = commandFor(candidate) ?: return@forEach
                 when (coordinator.review(command)) {
@@ -464,7 +593,7 @@ class MemoryCenterVM(
     fun createMemory(input: MemoryWriteInput) {
         viewModelScope.launch(Dispatchers.IO) {
             val command = MemoryMutationCommand.Create(
-                scopeId = scopeId.value,
+                scopeId = currentCommandScopeId(),
                 title = input.title,
                 content = input.content,
                 kind = input.kind ?: me.rerere.rikkahub.memory.MemoryKind.OTHER,
@@ -515,6 +644,173 @@ class MemoryCenterVM(
         }
     }
 
+    fun openDreamClaim(target: DreamClaimMutationTarget) {
+        if (target.fence.scopeId != currentDreamScopeId()) {
+            dreamDetailState.value = MemoryDreamDetailState.Failed(target, "scope_changed")
+            return
+        }
+        dreamDetailState.value = MemoryDreamDetailState.Loading(target)
+        viewModelScope.launch(Dispatchers.IO) {
+            val next = try {
+                when (val result = dreamReviewRepository.readClaim(target)) {
+                    is DreamReviewReadResult.Found -> MemoryDreamDetailState.Ready(result.value)
+                    is DreamReviewReadResult.Conflict -> {
+                        MemoryDreamDetailState.Failed(target, "conflict_${result.conflict.name.lowercase()}")
+                    }
+                    DreamReviewReadResult.NotFound -> MemoryDreamDetailState.Failed(target, "not_found")
+                    DreamReviewReadResult.InvalidState -> MemoryDreamDetailState.Failed(target, "invalid_state")
+                    DreamReviewReadResult.Corrupt -> MemoryDreamDetailState.Failed(target, "corrupt")
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                MemoryDreamDetailState.Failed(target, "failed")
+            }
+            val current = dreamDetailState.value
+            if (current is MemoryDreamDetailState.Loading &&
+                current.target == target &&
+                target.fence.scopeId == currentDreamScopeId()
+            ) {
+                dreamDetailState.value = next
+            }
+        }
+    }
+
+    fun closeDreamClaim() {
+        dreamDetailState.value = MemoryDreamDetailState.Closed
+    }
+
+    /** Sensitive excerpts are deliberately ephemeral and must not survive backgrounding. */
+    fun onDreamUiHidden() = closeDreamClaim()
+
+    fun revealDreamEvidence(summary: DreamEvidenceSummary) {
+        val ready = dreamDetailState.value as? MemoryDreamDetailState.Ready ?: return
+        if (summary !in ready.detail.evidence ||
+            summary.reference.scopeId != currentDreamScopeId() ||
+            summary.reference in ready.revealingEvidence
+        ) {
+            return
+        }
+        dreamDetailState.value = ready.copy(
+            revealingEvidence = ready.revealingEvidence + summary.reference,
+        )
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = try {
+                dreamReviewRepository.revealEvidence(summary.reference)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                DreamEvidenceRevealResult.Corrupt
+            }
+            val latest = dreamDetailState.value as? MemoryDreamDetailState.Ready ?: return@launch
+            if (latest.detail.target != ready.detail.target) return@launch
+            dreamDetailState.value = when (result) {
+                is DreamEvidenceRevealResult.Revealed -> latest.copy(
+                    revealedEvidence = latest.revealedEvidence + (summary.reference to result.excerpt),
+                    revealingEvidence = latest.revealingEvidence - summary.reference,
+                )
+                is DreamEvidenceRevealResult.Invalid,
+                DreamEvidenceRevealResult.NotFound,
+                DreamEvidenceRevealResult.Corrupt,
+                -> latest.copy(revealingEvidence = latest.revealingEvidence - summary.reference)
+            }
+        }
+    }
+
+    fun rejectDreamClaim(target: DreamClaimMutationTarget) {
+        if (target.fence.scopeId != currentDreamScopeId()) {
+            lastActionMessage.value = "conflict"
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = try {
+                dreamReviewRepository.reject(target)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                DreamReviewMutationResult.Corrupt
+            }
+            lastActionMessage.value = result.toDreamActionMessage()
+            if (result is DreamReviewMutationResult.Applied) closeDreamClaim()
+        }
+    }
+
+    fun correctDreamClaim(draft: DreamCorrectionDraft) {
+        if (draft.target.fence.scopeId != currentDreamScopeId()) {
+            lastActionMessage.value = "conflict"
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = try {
+                dreamReviewRepository.correct(draft)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                DreamCorrectionResult.Corrupt
+            }
+            lastActionMessage.value = result.toDreamActionMessage()
+            if (result is DreamCorrectionResult.Applied ||
+                result is DreamCorrectionResult.AuthorityAppliedRebuildPending
+            ) {
+                closeDreamClaim()
+            }
+        }
+    }
+
+    fun clearDreamDerived(fence: DreamReviewFence) {
+        if (fence.scopeId != currentDreamScopeId()) {
+            lastActionMessage.value = "conflict"
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = try {
+                dreamReviewRepository.clearDerived(fence)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                DreamReviewMutationResult.Corrupt
+            }
+            lastActionMessage.value = result.toDreamActionMessage()
+            if (result is DreamReviewMutationResult.Applied || result is DreamReviewMutationResult.AlreadyClear) {
+                closeDreamClaim()
+            }
+        }
+    }
+
+    fun updateDreamingScopePreference(mutation: DreamingScopePreferenceMutation) {
+        val renderedScope = currentDreamScopeId()
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val change = settingsStore.updateDreamingScopePreferences(renderedScope, mutation)
+                dreamSynthesisCoordinator.onSettingsChanged(
+                    renderedScope,
+                    change.previous,
+                    change.current,
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                lastActionMessage.value = "failed"
+            }
+        }
+    }
+
+    fun updateDreamingCostPolicy(policy: DreamingCostPolicy) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val change = settingsStore.updateDreamingCostPolicy(policy)
+                dreamSynthesisCoordinator.onCostPolicyChanged(change.previous, change.current)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                lastActionMessage.value = "failed"
+            }
+        }
+    }
+
+    private fun currentDreamScopeId(): DreamScopeId =
+        requireNotNull(DreamScopeId.parseOrNull(currentCommandScopeId()))
+
     companion object {
         const val MIN_IDLE_MINUTES = 1
         const val MAX_IDLE_MINUTES = 1_440
@@ -534,16 +830,39 @@ class MemoryCenterVM(
     }
 }
 
+private fun DreamReviewMutationResult.toDreamActionMessage(): String = when (this) {
+    is DreamReviewMutationResult.Applied -> "accepted"
+    is DreamReviewMutationResult.Conflict -> "conflict"
+    DreamReviewMutationResult.AlreadyClear -> "already_resolved"
+    DreamReviewMutationResult.NotFound -> "not_found"
+    DreamReviewMutationResult.InvalidState,
+    DreamReviewMutationResult.Corrupt,
+    -> "failed"
+}
+
+private fun DreamCorrectionResult.toDreamActionMessage(): String = when (this) {
+    is DreamCorrectionResult.Applied -> "accepted"
+    is DreamCorrectionResult.AuthorityAppliedRebuildPending -> "dream_authority_applied_rebuild_pending"
+    is DreamCorrectionResult.Conflict -> "conflict"
+    DreamCorrectionResult.NotFound -> "not_found"
+    DreamCorrectionResult.InvalidState,
+    DreamCorrectionResult.Corrupt,
+    is DreamCorrectionResult.AuthorityRejected,
+    -> "failed"
+}
+
 internal fun memoryCenterStats(
     active: Int,
     archived: Int,
     pendingReview: Int,
     captures: MemoryCaptureStatusCounts,
     lastProcessedAtMs: Long?,
+    pendingRelationReview: Int = 0,
 ) = MemoryCenterStats(
     active = active,
     archived = archived,
-    pendingReview = pendingReview,
+    pendingReview = pendingReview + pendingRelationReview,
+    pendingRelationReview = pendingRelationReview,
     pendingCaptures = captures.pendingCaptures,
     processingCaptures = captures.processingCaptures,
     processedCaptures = captures.processedCaptures,

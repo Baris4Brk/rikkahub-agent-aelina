@@ -150,7 +150,8 @@ val MEMORY_FTS_V31_BACKFILL_SQL = MEMORY_FTS_BACKFILL_SQL
 internal val MEMORY_FTS_SEARCH_SQL = """
     SELECT m.id, m.title, m.content, m.updated_at_ms, m.importance,
            bm25(memory_fts, 5.0, 1.0, 1.5, 2.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-               AS fts_rank
+               AS fts_rank,
+           m.revision
     FROM memory_fts
     INNER JOIN MemoryEntity AS m ON m.id = memory_fts.rowid
     WHERE memory_fts MATCH jieba_query(?)
@@ -258,31 +259,31 @@ private fun ensureCurrentMemoryFtsTriggers(db: SupportSQLiteDatabase) {
     }
 }
 
+/**
+ * Drift is limited to row identity and the four fields tokenized by FTS. Scope, lifecycle, truth,
+ * expiry, ranking metadata and timestamps are read from the authoritative MemoryEntity join at
+ * query time. Comparing their intentionally stale UNINDEXED snapshots here would turn an archive,
+ * last-access update or expiry materialization into a full-table retokenization on next open.
+ */
+internal val MEMORY_FTS_DRIFT_SQL = """
+    SELECT 1
+    FROM MemoryEntity AS m
+    LEFT JOIN memory_fts AS f ON f.rowid = m.id
+    WHERE f.rowid IS NULL
+       OR f.title IS NOT m.title
+       OR f.content IS NOT m.content
+       OR f.outcome IS NOT m.outcome
+       OR f.tags_search IS NOT m.tags_search
+    UNION ALL
+    SELECT 1
+    FROM memory_fts AS f
+    LEFT JOIN MemoryEntity AS m ON m.id = f.rowid
+    WHERE m.id IS NULL
+    LIMIT 1
+""".trimIndent()
+
 private fun memoryFtsProjectionHasDrift(db: SupportSQLiteDatabase): Boolean =
-    db.query(
-        """
-        SELECT 1
-        FROM MemoryEntity AS m
-        LEFT JOIN memory_fts AS f ON f.rowid = m.id
-        WHERE f.rowid IS NULL
-           OR CAST(f.memory_id AS INTEGER) IS NOT m.id
-           OR f.title IS NOT m.title
-           OR f.content IS NOT m.content
-           OR f.outcome IS NOT m.outcome
-           OR f.tags_search IS NOT m.tags_search
-           OR f.assistant_id IS NOT m.assistant_id
-           OR CAST(f.updated_at_ms AS INTEGER) IS NOT m.updated_at_ms
-           OR CAST(f.importance AS REAL) IS NOT m.importance
-           OR f.lifecycle_status IS NOT m.lifecycle_status
-           OR CAST(f.expires_at_ms AS INTEGER) IS NOT m.expires_at_ms
-        UNION ALL
-        SELECT 1
-        FROM memory_fts AS f
-        LEFT JOIN MemoryEntity AS m ON m.id = f.rowid
-        WHERE m.id IS NULL
-        LIMIT 1
-        """.trimIndent(),
-    ).use { cursor -> cursor.moveToFirst() }
+    db.query(MEMORY_FTS_DRIFT_SQL).use { cursor -> cursor.moveToFirst() }
 
 private fun rebuildMemoryFtsRows(db: SupportSQLiteDatabase) {
     memoryFtsTransaction(db) {
@@ -367,6 +368,7 @@ class MemoryFtsManager(
                     updatedAtMs = cursor.getLong(3),
                     importance = cursor.getFloat(4),
                     ftsRank = cursor.getDouble(5),
+                    revision = cursor.getInt(6),
                 )
             }
         }

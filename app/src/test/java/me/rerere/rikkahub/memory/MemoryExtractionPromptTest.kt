@@ -112,7 +112,7 @@ class MemoryExtractionPromptTest {
                 conversationId = "conversation-id",
                 turns = prepared.turns,
                 existingMemories = existing,
-                evidenceRefToMessageId = prepared.evidenceRefToMessageId,
+                evidenceRefToSourceIdentities = prepared.evidenceRefToSourceIdentities,
                 isConversationContextCompacted = prepared.isConversationContextCompacted,
             ),
         )

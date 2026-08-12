@@ -21,6 +21,8 @@ import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import me.rerere.rikkahub.data.db.ImportedDatabaseReconciler
+import me.rerere.rikkahub.learning.storage.restore.ColdRestoreStartupCoordinator
+import me.rerere.rikkahub.learning.storage.restore.ColdRestoreStartupResult
 import java.io.File
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
@@ -70,11 +72,52 @@ class RikkaHubApp : Application() {
             Log.i(TAG, "Skipping full app initialization in a lightweight runtime process")
             return
         }
+        // A database restore is prepared and swapped only here, before Room/Koin/WorkManager can
+        // obtain either database. Ambiguous or post-boundary failure deliberately leaves the app
+        // in a closed DEGRADED process instead of reopening an old Learning timeline.
+        val coldRestore = ColdRestoreStartupCoordinator.run(this)
+        when (coldRestore) {
+            ColdRestoreStartupResult.NoPendingRestore,
+            ColdRestoreStartupResult.Complete,
+            -> Unit
+            ColdRestoreStartupResult.RebuildRequired ->
+                Log.i(TAG, "Cold restore committed; Learning rebuild is required")
+            is ColdRestoreStartupResult.LiveDatabaseUnchanged ->
+                Log.w(TAG, "Cold restore preparation refused: ${coldRestore.reasonCode}")
+            ColdRestoreStartupResult.Busy -> {
+                Log.e(TAG, "Cold restore lock is busy; dependency graph will remain closed")
+                return
+            }
+            is ColdRestoreStartupResult.DegradedRestartRequired -> {
+                Log.e(
+                    TAG,
+                    "Cold restore is degraded; dependency graph will remain closed: " +
+                        coldRestore.reasonCode,
+                )
+                return
+            }
+        }
         // Reconcile the database before Room or any DI/DB layer opens it.
         // This creates fork-only tables and stamps the correct identity hash so
         // a restored official RikkaHub backup (which lacks agent tables) can be
         // opened by Room without crashing on "no such table" or hash mismatch.
         ImportedDatabaseReconciler.reconcile(this)
+
+        // The production Learning feature source is currently fail-closed/all-disabled. A
+        // committed restore therefore has no derived runtime to bootstrap now: validate the exact
+        // installed authority stream, discard only the quarantined old timeline, and retain the
+        // main outbox for a future opt-in rebuild. Failure keeps the journal for retry but must not
+        // brick ordinary chat startup after the main swap has already committed.
+        if (coldRestore == ColdRestoreStartupResult.RebuildRequired ||
+            coldRestore == ColdRestoreStartupResult.Complete
+        ) {
+            if (!ColdRestoreStartupCoordinator.finalizeDisabledDerivedState(this)) {
+                Log.w(
+                    TAG,
+                    "Cold restore derived-state cleanup deferred; journal retained for retry",
+                )
+            }
+        }
 
         startKoin {
             androidLogger()
@@ -83,6 +126,14 @@ class RikkaHubApp : Application() {
             modules(appModule, viewModelModule, dataSourceModule, repositoryModule)
         }
         dependencyGraphStarted = true
+        // Scheduling is flag-gated and content-free. With the production-default flags disabled
+        // this only reconciles stale Learning work identities; it never opens Learning Room.
+        runCatching {
+            get<me.rerere.rikkahub.learning.jobs.LearningWorkScheduler>()
+                .scheduleStartupAndRecovery()
+        }.onFailure { error ->
+            Log.w(TAG, "Learning maintenance scheduling unavailable", error)
+        }
         get<AppScope>().launch(Dispatchers.IO) {
             runCatching {
                 get<me.rerere.rikkahub.assistant.SecondUserAuthorityService>()

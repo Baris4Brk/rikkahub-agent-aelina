@@ -1,6 +1,7 @@
 package me.rerere.rikkahub.di
 
 import android.content.Context
+import me.rerere.rikkahub.data.db.dao.MemoryV2Dao
 import me.rerere.rikkahub.data.files.FileFolders
 import me.rerere.rikkahub.data.files.FilesManager
 import me.rerere.rikkahub.data.files.SkillManager
@@ -26,7 +27,7 @@ import java.io.File
 
 val repositoryModule = module {
     single {
-        ConversationRepository(get(), get(), get(), get(), get(), get(), get(), get())
+        ConversationRepository(get(), get(), get(), get(), get(), get(), get(), get(), get())
     }
 
     single { me.rerere.rikkahub.data.repository.ConversationDeletionPolicy(get()) }
@@ -41,7 +42,12 @@ val repositoryModule = module {
     }
 
     single {
-        MemoryRepository(get(), get(), get())
+        MemoryRepository(
+            memoryDAO = get(),
+            retriever = get(),
+            mutationCoordinator = get(),
+            memoryV2Dao = get<MemoryV2Dao>(),
+        )
     }
 
     single {

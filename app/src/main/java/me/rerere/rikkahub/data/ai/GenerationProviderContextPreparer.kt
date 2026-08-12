@@ -30,11 +30,30 @@ internal data class GenerationProviderContextPreparation(
 )
 
 /**
+ * Product policy for a request that fits only after changing its provider projection.
+ *
+ * Both policies operate on an immutable provider-side copy. Neither policy edits persisted chat
+ * messages. Hard overflow of the fixed prefix or active turn is rejected before this policy is
+ * applied.
+ */
+internal enum class ProviderContextProjectionPolicy {
+    /** Permit bounded pruning and expose every change through [ProviderContextGateTrace]. */
+    OBSERVABLE_PRUNING,
+
+    /** Reject when the gate would strip reasoning, drop a completed turn, or clamp output. */
+    STRICT_LOSSLESS,
+}
+
+/** Deliberate product choice for ordinary chat; change only through an explicit policy decision. */
+internal val ORDINARY_GENERATION_CONTEXT_PROJECTION_POLICY =
+    ProviderContextProjectionPolicy.OBSERVABLE_PRUNING
+
+/**
  * Raised at the provider seam when fitting the request would require an implicit semantic change.
  *
- * The lower-level gate still exposes its projection for diagnostics and focused policy tests, but
- * ordinary generation must never silently remove history/reasoning or shorten the requested model
- * output. The user can then explicitly compress history or adjust the configured budget.
+ * The lower-level gate still exposes its projection for diagnostics and focused policy tests.
+ * [ProviderContextProjectionPolicy.STRICT_LOSSLESS] selects this failure instead of accepting the
+ * provider-only projection.
  */
 internal class ProviderContextRequiresExplicitAdjustmentException(
     stage: String,
@@ -60,6 +79,15 @@ internal fun GenerationProviderContextPreparation.requireLosslessProviderContext
         throw ProviderContextRequiresExplicitAdjustmentException(stage, trace)
     }
     return this
+}
+
+/** Applies the selected product policy at an explicit provider-boundary stage. */
+internal fun GenerationProviderContextPreparation.applyProviderContextProjectionPolicy(
+    policy: ProviderContextProjectionPolicy,
+    stage: String,
+): GenerationProviderContextPreparation = when (policy) {
+    ProviderContextProjectionPolicy.OBSERVABLE_PRUNING -> this
+    ProviderContextProjectionPolicy.STRICT_LOSSLESS -> requireLosslessProviderContext(stage)
 }
 
 /**

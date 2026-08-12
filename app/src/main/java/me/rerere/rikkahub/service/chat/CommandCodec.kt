@@ -1,10 +1,14 @@
 package me.rerere.rikkahub.service.chat
 
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import me.rerere.rikkahub.memory.MemorySourceVersion
 import kotlin.uuid.Uuid
 
 object CommandCodec {
@@ -43,6 +47,20 @@ object CommandCodec {
             put("expectedTargetVersion", command.regeneration.expectedTargetVersion)
             put("expectedBranchHeadMessageId", command.regeneration.expectedBranchHeadMessageId.toString())
             put("policy", command.regeneration.policy.name)
+            command.regeneration.baselineAssistantScopeId?.trim()?.takeIf(String::isNotEmpty)
+                ?.let { put("baselineAssistantScopeId", it) }
+            put("baselineSelectedMessageIds", buildJsonArray {
+                command.regeneration.baselineSelectedMessageIds.asSequence()
+                    .map(String::trim)
+                    .filter(String::isNotEmpty)
+                    .distinct()
+                    .sorted()
+                    .forEach { messageId -> add(messageId) }
+            })
+            put(
+                "baselineSelectedSourceVersions",
+                encodeSourceVersions(command.regeneration.baselineSelectedSourceVersions),
+            )
         }.toString()
         is ToolApprovalCommand -> "tool_approval" to buildJsonObject {
             put("toolCallId", command.toolCallId)
@@ -53,6 +71,8 @@ object CommandCodec {
             })
             command.toolName?.let { put("toolName", it) }
             put("scope", command.scope)
+            command.approvalId?.let { put("approvalId", it) }
+            command.executionId?.let { put("executionId", it) }
             command.expectedStateVersion?.let { put("expectedStateVersion", it) }
             command.resolutionRequestId?.let { put("resolutionRequestId", it) }
         }.toString()
@@ -70,6 +90,20 @@ object CommandCodec {
             put("expectedTargetVersion", command.expectedTargetVersion)
             put("expectedBranchHeadMessageId", command.expectedBranchHeadMessageId.toString())
             put("policy", command.policy.name)
+            command.baselineAssistantScopeId?.trim()?.takeIf(String::isNotEmpty)
+                ?.let { put("baselineAssistantScopeId", it) }
+            put("baselineSelectedMessageIds", buildJsonArray {
+                command.baselineSelectedMessageIds.asSequence()
+                    .map(String::trim)
+                    .filter(String::isNotEmpty)
+                    .distinct()
+                    .sorted()
+                    .forEach { messageId -> add(messageId) }
+            })
+            put(
+                "baselineSelectedSourceVersions",
+                encodeSourceVersions(command.baselineSelectedSourceVersions),
+            )
         }.toString()
         ResumeAfterApprovalCommand -> "resume_after_approval" to "{}"
         is ResumeQueueCommand -> "resume_queue" to buildJsonObject {
@@ -124,6 +158,17 @@ object CommandCodec {
                     policy = RegeneratePolicy.valueOf(
                         root["policy"]?.jsonPrimitive?.content ?: RegeneratePolicy.INTERRUPT_CURRENT.name
                     ),
+                    baselineAssistantScopeId = root["baselineAssistantScopeId"]?.jsonPrimitive
+                        ?.content?.trim()?.takeIf(String::isNotEmpty),
+                    baselineSelectedMessageIds = root["baselineSelectedMessageIds"]?.jsonArray
+                        ?.mapNotNull { element ->
+                            element.jsonPrimitive.content.trim().takeIf(String::isNotEmpty)
+                        }
+                        ?.distinct()
+                        .orEmpty(),
+                    baselineSelectedSourceVersions = decodeSourceVersions(
+                        root["baselineSelectedSourceVersions"]?.jsonArray,
+                    ),
                 )
             )
             "stop" -> StopCommand(root["pauseQueue"]?.jsonPrimitive?.content?.toBooleanStrictOrNull() ?: true)
@@ -140,6 +185,8 @@ object CommandCodec {
                     decision = decodedDecision,
                     toolName = root["toolName"]?.jsonPrimitive?.content,
                     scope = root["scope"]?.jsonPrimitive?.content ?: "Once",
+                    approvalId = root["approvalId"]?.jsonPrimitive?.content,
+                    executionId = root["executionId"]?.jsonPrimitive?.content,
                     expectedStateVersion = root["expectedStateVersion"]?.jsonPrimitive?.content
                         ?.toLongOrNull(),
                     resolutionRequestId = root["resolutionRequestId"]?.jsonPrimitive?.content,
@@ -161,6 +208,17 @@ object CommandCodec {
                 expectedTargetVersion = root["expectedTargetVersion"]?.jsonPrimitive?.content?.toLongOrNull() ?: return@runCatching null,
                 expectedBranchHeadMessageId = Uuid.parse(root["expectedBranchHeadMessageId"]?.jsonPrimitive?.content ?: return@runCatching null),
                 policy = RegeneratePolicy.valueOf(root["policy"]?.jsonPrimitive?.content ?: RegeneratePolicy.INTERRUPT_CURRENT.name),
+                baselineAssistantScopeId = root["baselineAssistantScopeId"]?.jsonPrimitive
+                    ?.content?.trim()?.takeIf(String::isNotEmpty),
+                baselineSelectedMessageIds = root["baselineSelectedMessageIds"]?.jsonArray
+                    ?.mapNotNull { element ->
+                        element.jsonPrimitive.content.trim().takeIf(String::isNotEmpty)
+                    }
+                    ?.distinct()
+                    .orEmpty(),
+                baselineSelectedSourceVersions = decodeSourceVersions(
+                    root["baselineSelectedSourceVersions"]?.jsonArray,
+                ),
             )
             "resume_after_approval" -> ResumeAfterApprovalCommand
             "resume_queue" -> ResumeQueueCommand(root["startNextImmediately"]?.jsonPrimitive?.content?.toBooleanStrictOrNull() ?: true)
@@ -185,4 +243,49 @@ object CommandCodec {
             else -> null
         }
     }.getOrNull()
+
+    private fun encodeSourceVersions(
+        versions: Collection<MemorySourceVersion>,
+    ) = buildJsonArray {
+        normalizeSourceVersions(versions).forEach { version ->
+            add(buildJsonObject {
+                put("messageId", version.messageId)
+                put("consumedTextDigest", version.consumedTextDigest)
+            })
+        }
+    }
+
+    private fun decodeSourceVersions(
+        elements: kotlinx.serialization.json.JsonArray?,
+    ): List<MemorySourceVersion> = normalizeSourceVersions(
+        elements.orEmpty().mapNotNull { element ->
+            runCatching {
+                val source = element.jsonObject
+                MemorySourceVersion(
+                    messageId = source["messageId"]?.jsonPrimitive?.content.orEmpty(),
+                    consumedTextDigest = source["consumedTextDigest"]
+                        ?.jsonPrimitive?.content.orEmpty(),
+                )
+            }.getOrNull()
+        },
+    )
+
+    private fun normalizeSourceVersions(
+        versions: Collection<MemorySourceVersion>,
+    ): List<MemorySourceVersion> = versions.asSequence()
+        .map { version ->
+            MemorySourceVersion(
+                messageId = version.messageId.trim(),
+                consumedTextDigest = version.consumedTextDigest.trim().lowercase(),
+            )
+        }
+        .filter { version ->
+            version.messageId.isNotEmpty() &&
+                version.consumedTextDigest.matches(SHA_256_HEX)
+        }
+        .distinct()
+        .sortedWith(compareBy(MemorySourceVersion::messageId, MemorySourceVersion::consumedTextDigest))
+        .toList()
+
+    private val SHA_256_HEX = Regex("[0-9a-f]{64}")
 }

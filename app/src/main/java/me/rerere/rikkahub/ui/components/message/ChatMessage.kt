@@ -45,6 +45,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.LinkAnnotation
@@ -82,6 +83,9 @@ import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.data.model.AssistantAffectScope
 import me.rerere.rikkahub.data.model.MessageNode
 import me.rerere.rikkahub.data.model.replaceRegexes
+import me.rerere.rikkahub.diagnostics.agenttiming.AgentTimingFirstVisibleDrawMarker
+import me.rerere.rikkahub.diagnostics.agenttiming.AgentTimingToolSnapshot
+import me.rerere.rikkahub.diagnostics.agenttiming.AgentTimingTraceSnapshot
 import me.rerere.rikkahub.ui.components.richtext.MarkdownBlock
 import me.rerere.rikkahub.ui.components.richtext.ZoomableAsyncImage
 import me.rerere.rikkahub.ui.components.richtext.buildMarkdownPreviewHtml
@@ -120,6 +124,8 @@ fun ChatMessage(
     onClearTranslation: (UIMessage) -> Unit = {},
     onToolApproval: ((toolCallId: String, approved: Boolean, reason: String, scope: me.rerere.rikkahub.service.ChatService.ApprovalScope, toolName: String) -> Unit)? = null,
     onToolAnswer: ((toolCallId: String, answer: String) -> Unit)? = null,
+    agentTiming: AgentTimingTraceSnapshot? = null,
+    agentTimingDrawMarker: AgentTimingFirstVisibleDrawMarker? = null,
 ) {
     val message = node.messages[node.selectIndex]
     val settings = LocalSettings.current.displaySetting
@@ -134,8 +140,34 @@ fun ChatMessage(
     val navController = LocalNavController.current
     val context = LocalContext.current
     val colorScheme = MaterialTheme.colorScheme
+    val agentTimingTools = if (agentTiming == null) {
+        emptyList()
+    } else {
+        remember(message.id, message.parts, agentTiming) {
+            val messageTools = message.parts.filterIsInstance<UIMessagePart.Tool>()
+            val associated = agentTiming.tools.filter {
+                it.assistantMessageId == null || it.assistantMessageId == message.id
+            }
+            matchAgentTimingTools(messageTools.map { it.toolCallId }, associated)
+        }
+    }
+    val firstDrawModifier = if (agentTimingDrawMarker == null) {
+        Modifier
+    } else {
+        val view = LocalView.current
+        Modifier.drawWithContent {
+            drawContent()
+            if (agentTimingDrawMarker.captureAfterDraw()) {
+                // Store mutation and StateFlow publication are deliberately deferred off the
+                // draw pass. The draw thread only executes a clock read and one CAS.
+                view.post { agentTimingDrawMarker.publishCaptured() }
+            }
+        }
+    }
     Column(
-        modifier = modifier.fillMaxWidth(),
+        modifier = modifier
+            .then(firstDrawModifier)
+            .fillMaxWidth(),
         horizontalAlignment = if (message.role == MessageRole.USER) Alignment.End else Alignment.Start,
         verticalArrangement = Arrangement.spacedBy(4.dp)
     ) {
@@ -173,6 +205,7 @@ fun ChatMessage(
                 onToolApproval = onToolApproval,
                 onToolAnswer = onToolAnswer,
                 onUserMessageClick = if (message.role == MessageRole.USER) onEdit else null,
+                agentTimingTools = agentTimingTools,
             )
 
             message.translation?.let { translation ->
@@ -217,7 +250,7 @@ fun ChatMessage(
         )
 
         ProvideTextStyle(textStyle) {
-            ChatMessageNerdLine(message = message)
+            ChatMessageNerdLine(message = message, agentTiming = agentTiming)
         }
 
     }
@@ -277,6 +310,7 @@ private fun MessagePartsBlock(
     onToolApproval: ((toolCallId: String, approved: Boolean, reason: String, scope: me.rerere.rikkahub.service.ChatService.ApprovalScope, toolName: String) -> Unit)? = null,
     onToolAnswer: ((toolCallId: String, answer: String) -> Unit)? = null,
     onUserMessageClick: (() -> Unit)? = null,
+    agentTimingTools: List<AgentTimingToolSnapshot?> = emptyList(),
 ) {
     val context = LocalContext.current
     val contentColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
@@ -361,12 +395,17 @@ private fun MessagePartsBlock(
                             }
 
                             is ThinkingStep.ToolStep -> {
-                                key(step.tool.toolCallId.ifBlank { step.hashCode().toString() }) {
+                                // toolCallId is provider-controlled and may be blank or duplicated.
+                                // The message-local occurrence keeps Compose state/card identity apart.
+                                val toolIndex = step.messageToolOrdinal
+                                key("${step.tool.toolCallId}#$toolIndex") {
                                     ChatMessageToolStep(
                                         tool = step.tool,
                                         loading = loading && !step.tool.isExecuted,
                                         onToolApproval = onToolApproval,
                                         onToolAnswer = onToolAnswer,
+                                        agentTiming = toolIndex.takeIf { it >= 0 }
+                                            ?.let { buildAgentToolTiming(agentTimingTools.getOrNull(it)) },
                                     )
                                 }
                             }

@@ -145,6 +145,7 @@ class MemoryV2DaoRetryTest {
             )
 
             val failed = dao.findCaptureByTurn(
+                scopeId = scopeId,
                 conversationId = "conversation",
                 assistantMessageId = "assistant-message",
                 captureSource = "AUTOMATIC_TURN",
@@ -165,6 +166,7 @@ class MemoryV2DaoRetryTest {
 
             assertEquals(1, dao.retryScope(scopeId, nowMs + 1L))
             val requeued = dao.findCaptureByTurn(
+                scopeId = scopeId,
                 conversationId = "conversation",
                 assistantMessageId = "assistant-message",
                 captureSource = "AUTOMATIC_TURN",
@@ -296,6 +298,74 @@ class MemoryV2DaoRetryTest {
         ).single()
         assertEquals("PENDING", recovered.state)
         assertEquals(2, recovered.retryCount)
+        assertNull(recovered.leaseOwner)
+        assertNull(recovered.leaseUntilMs)
+    }
+
+    @Test
+    fun expiredLease_rejectsReleaseAndFailureBeforeRecovery() = runBlocking {
+        dao.insertCapture(
+            MemoryCaptureEntity(
+                id = "expired-owner",
+                assistantId = "assistant",
+                scopeId = "scope",
+                conversationId = "conversation",
+                userMessageId = "user",
+                assistantMessageId = "assistant-message",
+                origin = "APP_UI",
+                autoSaveMode = "SAFE_NEW_ONLY",
+                userText = "remember this",
+                assistantText = "acknowledged",
+                state = "PROCESSING",
+                retryCount = 1,
+                createdAtMs = 1L,
+                updatedAtMs = 2L,
+                leaseOwner = "expired-worker",
+                leaseUntilMs = 100L,
+            ),
+        )
+
+        assertEquals(
+            0,
+            dao.releaseClaimedCaptures(
+                ids = listOf("expired-owner"),
+                scopeId = "scope",
+                workerId = "expired-worker",
+                nowMs = 100L,
+            ),
+        )
+        assertEquals(
+            0,
+            dao.markCapturesFailed(
+                ids = listOf("expired-owner"),
+                scopeId = "scope",
+                workerId = "expired-worker",
+                state = "FAILED",
+                code = "EXPIRED_WORKER",
+                message = null,
+                requiresManualRetry = false,
+                nowMs = 100L,
+            ),
+        )
+
+        val stillOwned = dao.findCaptureByTurn(
+            scopeId = "scope",
+            conversationId = "conversation",
+            assistantMessageId = "assistant-message",
+            captureSource = "AUTOMATIC_TURN",
+        )!!
+        assertEquals("PROCESSING", stillOwned.state)
+        assertEquals("expired-worker", stillOwned.leaseOwner)
+        assertEquals(100L, stillOwned.leaseUntilMs)
+
+        assertEquals(1, dao.recoverExpiredLeases(100L))
+        val recovered = dao.findClaimableCaptures(
+            scopeId = "scope",
+            conversationId = "conversation",
+            captureSource = "AUTOMATIC_TURN",
+            limit = 1,
+        ).single()
+        assertEquals("PENDING", recovered.state)
         assertNull(recovered.leaseOwner)
         assertNull(recovered.leaseUntilMs)
     }

@@ -124,6 +124,75 @@ sealed interface TurnPlan {
 }
 
 /**
+ * Monotonic ownership fence for asynchronous SDK callbacks.
+ *
+ * LiteRT may deliver callbacks after `cancelProcess()` returns. A channel being closed is not a
+ * sufficient guard because those callbacks can still mutate the live Conversation bookkeeping.
+ * Every inference therefore owns one epoch. Callback side effects are performed only through
+ * [guard] / [finish]; cancelling an epoch first revokes that ownership and returns its payload so
+ * the caller can cancel native work outside this monitor.
+ *
+ * This class deliberately has no Android or LiteRT dependencies so the race contract can be
+ * exercised by local JVM tests.
+ */
+internal class InferenceEpochFence<T : Any> {
+    data class Token internal constructor(val value: Long)
+
+    private data class Active<T>(val token: Token, val payload: T)
+
+    private val monitor = Any()
+    private var nextEpoch = 0L
+    private var active: Active<T>? = null
+
+    fun begin(payload: T): Token = synchronized(monitor) {
+        check(active == null) { "An inference epoch is already active" }
+        check(nextEpoch != Long.MAX_VALUE) { "Inference epoch exhausted" }
+        val token = Token(++nextEpoch)
+        active = Active(token, payload)
+        token
+    }
+
+    /** Run [action] atomically with the epoch check. Returns false for a stale callback. */
+    fun guard(token: Token, action: (T) -> Unit): Boolean = synchronized(monitor) {
+        val current = active
+        if (current?.token != token) return@synchronized false
+        action(current.payload)
+        true
+    }
+
+    /** Accept one terminal callback and revoke the epoch before any later callback can run. */
+    fun finish(token: Token, action: (T) -> Unit): Boolean = synchronized(monitor) {
+        val current = active
+        if (current?.token != token) return@synchronized false
+        active = null
+        action(current.payload)
+        true
+    }
+
+    /** Revoke [token], returning its payload exactly once to the cancellation path. */
+    fun cancel(token: Token): T? = synchronized(monitor) {
+        val current = active
+        if (current?.token != token) return@synchronized null
+        active = null
+        current.payload
+    }
+
+    /**
+     * Revoke whichever inference is active, if any. [onIdle] runs under the same monitor as
+     * [begin], closing the setup race where stop observes no epoch just before a stream starts.
+     */
+    fun cancelCurrent(onIdle: () -> Unit = {}): T? = synchronized(monitor) {
+        val current = active
+        if (current == null) {
+            onIdle()
+            return@synchronized null
+        }
+        active = null
+        current.payload
+    }
+}
+
+/**
  * Thrown when a `.litertlm` model file is structurally broken in a way that retrying
  * with a different accelerator won't fix (e.g. corrupt tokenizer data, invalid magic
  * number, schema mismatch). Callers should treat [modelPath] as permanently unloadable,
@@ -195,14 +264,19 @@ class LiteRtVisionUnavailableException(
  *
  * # Concurrency
  *
- * A single [mutex] serialises all access. The mutex is held for the full duration of each
- * inference, so [LoadedModel.processed] is only ever touched by one coroutine at a time.
+ * A single [mutex] serialises load/stream/teardown work. SDK callbacks and the synchronous
+ * [stop] entry point additionally use a monotonic inference epoch: cancellation revokes the
+ * epoch before calling native code, so a late callback cannot publish output, warm-prefix state,
+ * or telemetry into a later run. [loaded] is volatile because [stop] cannot wait for [mutex]
+ * while that mutex is intentionally held for the duration of inference.
  */
 class LiteRtRuntime(private val context: Context) {
 
     private val mutex = Mutex()
     private val artifactFingerprintMutex = Mutex()
+    @Volatile
     private var loaded: LoadedModel? = null
+    private val inferenceEpochs = InferenceEpochFence<ActiveInference>()
     private val artifactFingerprints = mutableMapOf<String, CachedArtifactFingerprint>()
 
     private data class ModelArtifactStat(
@@ -378,6 +452,13 @@ class LiteRtRuntime(private val context: Context) {
         /** Monotonic timestamp of the last [streamTurns] invocation. The idle-teardown
          *  watchdog ([armIdleTeardown]) uses this to decide whether to close the engine. */
         @Volatile var lastUseAtMs: Long = android.os.SystemClock.elapsedRealtime(),
+    )
+
+    /** State needed to stop a native call without reading mutable [loaded] again. */
+    private class ActiveInference(
+        val instance: LoadedModel,
+        var conversation: Conversation,
+        val closeStream: () -> Unit,
     )
 
     /**
@@ -572,7 +653,7 @@ class LiteRtRuntime(private val context: Context) {
             )
             current.conversationKey = desiredConversationKey
             current.conversationSpec = desiredConversationSpec
-            current.processed.clear()
+            synchronized(current) { current.processed.clear() }
             return@withLock LoadOutcome(
                 accelerator = accel,
                 visionEnabled = current.engineKey.supportImage,
@@ -932,24 +1013,49 @@ class LiteRtRuntime(private val context: Context) {
             val instance = loaded
                 ?: throw IllegalStateException("Call ensureLoaded(...) before streamTurns()")
 
+            // Register the epoch before inspecting warm state. If stop() races this setup it
+            // either clears the old prefix before the plan is made, or revokes this epoch and
+            // prevents sendMessageAsync below. There is no gap where a stopped warm plan can run.
+            val activeInference = ActiveInference(
+                instance = instance,
+                conversation = instance.conversation,
+                closeStream = {
+                    close(CancellationException("LiteRT inference stopped"))
+                },
+            )
+            val epoch = inferenceEpochs.begin(activeInference)
+
+            try {
             val hasMedia = images.isNotEmpty() || audioClips.isNotEmpty() ||
                 history.any(Turn::containsMedia)
             val historySignatures = history.map { it.signature }
-            val plan = planTurns(instance.processed, historySignatures, hasMedia)
-
-            val inputText: String = when (plan) {
-                is TurnPlan.Warm -> history[plan.sendFromIndex].rawText
-                TurnPlan.Cold -> {
-                    // ensureLoaded may have kept a warm Conversation that this turn cannot
-                    // reuse (a /new, an edit, a regeneration, a tool round-trip, or media).
-                    // Recreate it to clear the KV cache, then send the full history.
-                    recreateConversationLocked(instance)
-                    instance.processed.clear()
-                    coldBlob
+            var inputText = ""
+            val prepared = inferenceEpochs.guard(epoch) {
+                lastTelemetry = null
+                val plan = synchronized(instance) {
+                    planTurns(instance.processed.toList(), historySignatures, hasMedia)
                 }
+                inputText = when (plan) {
+                    is TurnPlan.Warm -> history[plan.sendFromIndex].rawText
+                    TurnPlan.Cold -> {
+                        // ensureLoaded may have kept a warm Conversation that this turn cannot
+                        // reuse (a /new, an edit, a regeneration, a tool round-trip, or media).
+                        // Recreate it to clear the KV cache, then send the full history.
+                        recreateConversationLocked(instance)
+                        synchronized(instance) { instance.processed.clear() }
+                        coldBlob
+                    }
+                }
+                activeInference.conversation = instance.conversation
+            }
+            if (!prepared) {
+                // stop() already closed the channel. Keep awaitClose as the callbackFlow
+                // lifecycle boundary; its cancellation is idempotent for this stale epoch.
+                awaitClose { cancelInference(epoch) }
+                return@withLock
             }
 
-            val conv = instance.conversation
+            val conv = activeInference.conversation
             // Build Contents in Gallery's order: images and audio first, text last.
             val contentList = mutableListOf<Content>()
             for (image in images) contentList.add(Content.ImageBytes(image.toPngByteArray()))
@@ -965,58 +1071,96 @@ class LiteRtRuntime(private val context: Context) {
             val callStartedNs = System.nanoTime()
             var firstMessageNs: Long = 0L
             var lastCumulative = ""
-            conv.sendMessageAsync(
-                Contents.of(contentList),
-                object : MessageCallback {
-                    override fun onMessage(message: Message) {
-                        if (firstMessageNs == 0L) firstMessageNs = System.nanoTime()
-                        message.channels["thought"]?.let { thinking ->
-                            if (thinking.isNotEmpty()) onThinking?.invoke(thinking)
-                        }
-                        val text = message.toString()
-                        if (text.isNotEmpty()) {
-                            lastCumulative = text
-                            trySend(text)
-                        }
-                    }
-                    override fun onDone() {
-                        // The Conversation's KV cache now holds [history…] + the assistant
-                        // turn just generated. Record that so the NEXT call can warm-continue
-                        // if it is a clean single-turn append. Mutating [processed] here is
-                        // safe: the mutex is held for this whole streamTurns invocation.
-                        val nextProcessed = processedPrefixAfterCompletion(
-                            historySignatures = historySignatures,
-                            assistantSignature = turnSignature(ROLE_ASSISTANT, lastCumulative),
-                            consumedMedia = hasMedia,
-                        )
-                        instance.processed.clear()
-                        instance.processed.addAll(nextProcessed)
-                        // Stamp telemetry for the provider to read + persist.
-                        val endNs = System.nanoTime()
-                        val prefillMs = if (firstMessageNs > 0L)
-                            (firstMessageNs - callStartedNs) / 1_000_000L else 0L
-                        val decodeMs = if (firstMessageNs > 0L)
-                            (endNs - firstMessageNs) / 1_000_000L else 0L
-                        lastTelemetry = StreamTelemetry(
-                            prefillMs = prefillMs,
-                            decodeMs = decodeMs,
-                            inputCharCount = telemetryInputChars,
-                            outputCharCount = lastCumulative.length,
-                            specDecodingEngaged = instance.speculativeDecodingEngaged,
-                        )
-                        instance.lastUseAtMs = android.os.SystemClock.elapsedRealtime()
-                        close()
-                    }
-                    override fun onError(throwable: Throwable) {
-                        // The KV-cache state is now unknown — force the next turn cold.
-                        instance.processed.clear()
-                        instance.lastUseAtMs = android.os.SystemClock.elapsedRealtime()
-                        if (throwable is CancellationException) close() else close(throwable)
-                    }
-                },
-                emptyMap(),
-            )
-            awaitClose { /* SDK callback already closed the channel above. */ }
+            val sent = inferenceEpochs.guard(epoch) {
+                    conv.sendMessageAsync(
+                        Contents.of(contentList),
+                        object : MessageCallback {
+                            override fun onMessage(message: Message) {
+                                // Epoch validation is deliberately the first callback action.
+                                // A revoked callback must not emit, invoke thinking handlers, or
+                                // change telemetry-local accumulators used by a later terminal call.
+                                if (!inferenceEpochs.guard(epoch) {
+                                        if (firstMessageNs == 0L) firstMessageNs = System.nanoTime()
+                                        message.channels["thought"]?.let { thinking ->
+                                            if (thinking.isNotEmpty()) onThinking?.invoke(thinking)
+                                        }
+                                        val text = message.toString()
+                                        if (text.isNotEmpty()) {
+                                            lastCumulative = text
+                                            trySend(text)
+                                        }
+                                    }
+                                ) return
+                            }
+
+                            override fun onDone() {
+                                // finish() both validates and revokes this epoch atomically. A
+                                // duplicate or post-cancel onDone therefore cannot make a partial
+                                // native KV cache look reusable or overwrite current telemetry.
+                                val accepted = inferenceEpochs.finish(epoch) {
+                                    val nextProcessed = processedPrefixAfterCompletion(
+                                        historySignatures = historySignatures,
+                                        assistantSignature = turnSignature(
+                                            ROLE_ASSISTANT,
+                                            lastCumulative,
+                                        ),
+                                        consumedMedia = hasMedia,
+                                    )
+                                    synchronized(instance) {
+                                        instance.processed.clear()
+                                        instance.processed.addAll(nextProcessed)
+                                    }
+                                    val endNs = System.nanoTime()
+                                    val prefillMs = if (firstMessageNs > 0L)
+                                        (firstMessageNs - callStartedNs) / 1_000_000L else 0L
+                                    val decodeMs = if (firstMessageNs > 0L)
+                                        (endNs - firstMessageNs) / 1_000_000L else 0L
+                                    lastTelemetry = StreamTelemetry(
+                                        prefillMs = prefillMs,
+                                        decodeMs = decodeMs,
+                                        inputCharCount = telemetryInputChars,
+                                        outputCharCount = lastCumulative.length,
+                                        specDecodingEngaged = instance.speculativeDecodingEngaged,
+                                    )
+                                    instance.lastUseAtMs =
+                                        android.os.SystemClock.elapsedRealtime()
+                                }
+                                if (accepted) close()
+                            }
+
+                            override fun onError(throwable: Throwable) {
+                                // Epoch validation is the first callback action. The current
+                                // Conversation is unusable after any accepted SDK error.
+                                val accepted = inferenceEpochs.finish(epoch) {
+                                    synchronized(instance) { instance.processed.clear() }
+                                    lastTelemetry = null
+                                    instance.lastUseAtMs =
+                                        android.os.SystemClock.elapsedRealtime()
+                                }
+                                if (accepted) {
+                                    if (throwable is CancellationException) close()
+                                    else close(throwable)
+                                }
+                            }
+                        },
+                        emptyMap(),
+                    )
+            }
+            if (!sent) {
+                awaitClose { cancelInference(epoch) }
+                return@withLock
+            }
+            awaitClose {
+                // Collector cancellation must reach the native SDK. Invalidate first:
+                // cancelProcess() is allowed to synchronously trigger a final callback.
+                cancelInference(epoch)
+            }
+            } catch (throwable: Throwable) {
+                // Covers setup/content encoding and synchronous sendMessageAsync failures as
+                // well as cancellation in awaitClose. Idempotent after onDone/onError.
+                cancelInference(epoch)
+                throw throwable
+            }
         } } finally {
             runCatching { hintSession?.close() }
             runCatching { Process.setThreadPriority(callerTid, originalPriority) }
@@ -1028,10 +1172,34 @@ class LiteRtRuntime(private val context: Context) {
 
     /**
      * Cancel the currently-running generation, if any. Safe to call when nothing is
-     * generating. Does NOT tear down the Engine or Conversation; the runtime stays warm.
+     * generating. The Engine stays loaded, but the Conversation's warm prefix is revoked:
+     * native cancellation leaves its KV state undefined, so the next run must recreate it cold.
      */
     fun stop() {
-        try { loaded?.conversation?.cancelProcess() } catch (_: Throwable) {}
+        val active = inferenceEpochs.cancelCurrent {
+            // This block and begin() share the epoch monitor. A stream cannot register between
+            // the "no active inference" decision and clearing the warm prefix.
+            loaded?.let(::invalidateWarmState)
+            lastTelemetry = null
+        } ?: return
+        invalidateWarmState(active.instance)
+        // Revoke the epoch before entering native code. LiteRT is allowed to invoke a
+        // callback synchronously from cancelProcess(); it will now fail the epoch guard.
+        try { active.conversation.cancelProcess() } catch (_: Throwable) {}
+        active.closeStream()
+    }
+
+    /** Cancel one specific flow epoch. Returns silently when a terminal callback won first. */
+    private fun cancelInference(epoch: InferenceEpochFence.Token) {
+        val active = inferenceEpochs.cancel(epoch) ?: return
+        invalidateWarmState(active.instance)
+        try { active.conversation.cancelProcess() } catch (_: Throwable) {}
+    }
+
+    private fun invalidateWarmState(instance: LoadedModel) {
+        synchronized(instance) { instance.processed.clear() }
+        lastTelemetry = null
+        instance.lastUseAtMs = android.os.SystemClock.elapsedRealtime()
     }
 
     /**

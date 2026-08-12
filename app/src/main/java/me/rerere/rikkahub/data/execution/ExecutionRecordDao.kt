@@ -64,6 +64,21 @@ interface ExecutionRecordDao {
     suspend fun getById(id: String): ExecutionRecord?
 
     @Query(
+        "UPDATE execution_records SET owning_assistant_message_id = :messageId, " +
+            "owning_assistant_message_revision = :messageRevision " +
+            "WHERE id = :id AND state_version = :expectedVersion " +
+            "AND owning_assistant_message_id IS NULL " +
+            "AND owning_assistant_message_revision IS NULL " +
+            "AND :messageRevision > 0",
+    )
+    suspend fun bindOwningAssistantMessageIfEmpty(
+        id: String,
+        expectedVersion: Long,
+        messageId: String,
+        messageRevision: Long,
+    ): Int
+
+    @Query(
         "SELECT * FROM execution_records WHERE status NOT IN " +
             "('succeeded', 'failed', 'cancelled', 'timed_out', 'orphaned', 'unknown') " +
             "ORDER BY updated_at_ms ASC",

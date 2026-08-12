@@ -3,6 +3,7 @@ package me.rerere.rikkahub.workflow.model
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -56,6 +57,32 @@ class WorkflowJsonSchemaTest {
     @Test fun `reject unknown tool in actions`() {
         val r = WorkflowJson.parse("""{"name":"X","trigger":{"type":"manual"},"actions":[{"tool":"format_disk","args":{}}]}""", knownTools) as WorkflowJson.ParseResult.Err
         assertEquals("unknown_tool", r.error)
+    }
+
+    @Test fun `reject unknown root key instead of silently ignoring it`() {
+        val r = WorkflowJson.parse(
+            """{"name":"X","trigger":{"type":"manual"},"actions":[{"tool":"show_toast","args":{}}],"future_root":true}""",
+            knownTools,
+        ) as WorkflowJson.ParseResult.Err
+        assertEquals("unknown_root_key", r.error)
+    }
+
+    @Test fun `reject unknown action key instead of silently ignoring it`() {
+        val r = WorkflowJson.parse(
+            """{"name":"X","trigger":{"type":"manual"},"actions":[{"tool":"show_toast","args":{},"shell":true}]}""",
+            knownTools,
+        ) as WorkflowJson.ParseResult.Err
+        assertEquals("unknown_action_key", r.error)
+    }
+
+    @Test fun `reject non-object action args instead of replacing them with empty object`() {
+        listOf("[]", "\"text\"", "false", "1", "null").forEach { badArgs ->
+            val r = WorkflowJson.parse(
+                """{"name":"X","trigger":{"type":"manual"},"actions":[{"tool":"show_toast","args":$badArgs}]}""",
+                knownTools,
+            ) as WorkflowJson.ParseResult.Err
+            assertEquals("bad_action_args", r.error)
+        }
     }
 
     @Test fun `reject too many actions`() {
@@ -138,6 +165,88 @@ class WorkflowJsonSchemaTest {
         assertNotNull(reparsed)
         val t = reparsed!!.trigger as TriggerSpec.BatteryBelow
         assertEquals(15, t.thresholdPercent)
+    }
+
+    @Test fun `capability snapshot survives canonical stored round-trip`() {
+        val parsed = (WorkflowJson.parse(
+            """{"name":"Z","trigger":{"type":"manual"},"actions":[{"tool":"show_toast","args":{"text":"hi"}}]}""",
+            knownTools,
+        ) as WorkflowJson.ParseResult.Ok).definition
+        val expected = WorkflowCapabilitySnapshot.capture(parsed.actions)
+        val reparsed = WorkflowJson.parseStored(
+            WorkflowJson.encode(parsed.copy(capabilitySnapshot = expected)),
+        )
+
+        assertNotNull(reparsed)
+        assertEquals(expected, reparsed!!.capabilitySnapshot)
+    }
+
+    @Test fun `stored snapshot is not recomputed when current action resolution is wider`() {
+        val approvedSnapshot = setOf("memory.read")
+        val definition = WorkflowDefinition(
+            id = "snapshot-freeze",
+            name = "Frozen",
+            trigger = TriggerSpec.Manual,
+            actions = listOf(
+                WorkflowAction(
+                    tool = "memory_tool",
+                    args = kotlinx.serialization.json.buildJsonObject {
+                        put("action", kotlinx.serialization.json.JsonPrimitive("delete"))
+                    },
+                ),
+            ),
+            capabilitySnapshot = approvedSnapshot,
+        )
+
+        val reparsed = WorkflowJson.parseStored(WorkflowJson.encode(definition))!!
+        assertEquals(approvedSnapshot, reparsed.capabilitySnapshot)
+        val currentResolution = WorkflowCapabilitySnapshot.capture(reparsed.actions)
+        assertEquals(setOf("memory.delete"), currentResolution)
+        assertFalse(currentResolution.all(reparsed.capabilitySnapshot::contains))
+    }
+
+    @Test fun `stored compatibility distinguishes legacy absence from persisted snapshot`() {
+        val legacy = WorkflowJson.parseStoredWithCompatibility(
+            """{"id":"legacy","name":"X","trigger":{"type":"manual"},"actions":[{"tool":"show_toast","args":{}}]}""",
+        )!!
+        assertEquals(
+            WorkflowJson.CapabilitySnapshotStorage.LEGACY_MISSING,
+            legacy.capabilitySnapshotStorage,
+        )
+        assertNull(legacy.learnedExecutionCapabilitiesOrNull())
+
+        val current = WorkflowJson.parseStoredWithCompatibility(
+            """{"id":"current","name":"X","trigger":{"type":"manual"},"actions":[{"tool":"show_toast","args":{}}],"capability_snapshot":["tool.show_toast"]}""",
+        )!!
+        assertEquals(
+            WorkflowJson.CapabilitySnapshotStorage.PERSISTED,
+            current.capabilitySnapshotStorage,
+        )
+        assertEquals(setOf("tool.show_toast"), current.definition.capabilitySnapshot)
+    }
+
+    @Test fun `new-format empty capability snapshot fails closed while legacy row remains readable`() {
+        val legacy = """{"id":"legacy","name":"X","trigger":{"type":"manual"},"actions":[{"tool":"show_toast","args":{}}]}"""
+        val emptyCurrent = """{"id":"current","name":"X","trigger":{"type":"manual"},"actions":[{"tool":"show_toast","args":{}}],"capability_snapshot":[]}"""
+
+        assertNotNull(WorkflowJson.parseStored(legacy))
+        assertNull(WorkflowJson.parseStored(emptyCurrent))
+        assertNull(
+            WorkflowJson.parseStoredWithCompatibility(emptyCurrent)!!
+                .learnedExecutionCapabilitiesOrNull(),
+        )
+        val learnedWithoutSnapshot = WorkflowDefinition(
+            id = "learned-empty",
+            name = "Learned",
+            trigger = TriggerSpec.Manual,
+            actions = listOf(
+                WorkflowAction(
+                    tool = "show_toast",
+                    args = kotlinx.serialization.json.buildJsonObject { },
+                ),
+            ),
+        )
+        assertNull(WorkflowJson.encodeForLearned(learnedWithoutSnapshot))
     }
 
     @Test fun `id is generated when absent`() {

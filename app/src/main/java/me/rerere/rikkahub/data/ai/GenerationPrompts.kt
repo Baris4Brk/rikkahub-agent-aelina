@@ -230,6 +230,7 @@ private fun encodePromptSafeMemories(items: List<AssistantMemory>): String =
             items.forEach { memory ->
                 add(buildJsonObject {
                     put("id", memory.id)
+                    memory.revision?.let { put("revision", it) }
                     memory.title?.takeIf(String::isNotBlank)?.let { put("title", it) }
                     put("content", memory.content)
                 })

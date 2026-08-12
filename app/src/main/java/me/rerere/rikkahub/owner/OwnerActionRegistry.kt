@@ -205,10 +205,13 @@ object OwnerActionRegistry {
         ),
         family(
             OwnerToolFamily.MEMORY,
-            "Inspect and configure Assistant memory behavior; memory evidence and revisions remain authoritative.",
+            "Inspect memory, Dreaming status/claim metadata and pending relation reviews, or configure Assistant memory behavior; raw Dreaming evidence is never exposed. memory_delete performs a recoverable archive.",
             action("memory_list", OwnerOperationRisk.READ_ONLY, "assistant_id?, limit?"),
+            action("memory_review_list", OwnerOperationRisk.READ_ONLY, "assistant_id?, limit?"),
+            action("dream_status", OwnerOperationRisk.READ_ONLY, "assistant_id?, limit? (1..20)"),
+            action("dream_claim_explain", OwnerOperationRisk.READ_ONLY, "assistant_id?, dream_scope (exact assistant|global from dream_status), claim_id, expected_revision"),
             action("memory_configure_assistant", OwnerOperationRisk.REVERSIBLE_WRITE, "assistant_id, enabled?, use_global?, recent_chats_reference?"),
-            action("memory_delete", OwnerOperationRisk.IRREVERSIBLE, "memory_id"),
+            action("memory_delete", OwnerOperationRisk.REVERSIBLE_WRITE, "memory_id, memory_scope (exact assistant|global value from memory_list), expected_revision (memory_revision from memory_list), assistant_id?"),
         ),
         family(
             OwnerToolFamily.PROMPT_LIBRARY,

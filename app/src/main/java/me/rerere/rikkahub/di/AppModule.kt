@@ -33,7 +33,22 @@ import org.koin.dsl.module
 
 val appModule = module {
     single<Json> { JsonInstant }
-
+    single<me.rerere.rikkahub.diagnostics.agenttiming.AgentTimingClock> {
+        me.rerere.rikkahub.diagnostics.agenttiming.AndroidAgentTimingClock
+    }
+    single {
+        me.rerere.rikkahub.diagnostics.agenttiming.AgentTimingStore(clock = get())
+    }
+    // Learning only sees bounded, content-free public projections. Dreaming currently exposes no
+    // suitable public projection, so its adapter is intentionally unavailable/fail-closed.
+    single<me.rerere.rikkahub.learning.api.IdentityContextProvider> {
+        me.rerere.rikkahub.learning.adapters.DreamingIdentityAdapter
+    }
+    single {
+        me.rerere.rikkahub.learning.adapters.AgentTimingLearningAdapter(
+            store = get(),
+        )
+    }
     single {
         Highlighter(get())
     }
@@ -849,6 +864,7 @@ val appModule = module {
             conversationRepo = get(),
             memoryRepository = get(),
             memoryRetrievalDiagnostics = get(),
+            agentTimingStore = get(),
             memoryV2Coordinator = get(),
             generationHandler = get(),
             templateTransformer = get(),
@@ -904,6 +920,13 @@ val appModule = module {
             telegramBotPreferences = get(),
             telegramCredentialResolver = get(),
             reverseGeocodeProviderTestGateway = get(),
+            dreamReviewRepository = get(),
+            learningForegroundRegistry = get(),
+            commandAdmissionAuthority = get(),
+            commandAdmissionAuthorityAdapter = get(),
+            waitingApprovalAuthority = get(),
+            finalConversationAuthority = get(),
+            executionMessageAuthorityBinder = get(),
         )
     }
     single {

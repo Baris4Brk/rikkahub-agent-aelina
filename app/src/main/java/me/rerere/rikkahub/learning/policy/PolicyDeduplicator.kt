@@ -1,0 +1,56 @@
+package me.rerere.rikkahub.learning.policy
+
+import java.text.Normalizer
+
+enum class PolicyDuplicateKind {
+    EXACT_ARTIFACT,
+    CANONICAL_TEXT,
+    NONE,
+}
+
+data class PolicyDuplicateMatch(
+    val kind: PolicyDuplicateKind,
+    val existingPolicyId: String?,
+) {
+    init {
+        require((kind == PolicyDuplicateKind.NONE) == (existingPolicyId == null))
+    }
+}
+
+data class ExistingPolicyFingerprint(
+    val policyId: String,
+    val artifactHash: String,
+    val canonicalTextFingerprint: String,
+) {
+    init {
+        require(policyId.matches(Regex("[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}")))
+        require(artifactHash.matches(Regex("[0-9a-f]{64}")))
+    }
+}
+
+object PolicyDeduplicator {
+    fun find(
+        draft: PolicyCandidateDraft,
+        existing: List<ExistingPolicyFingerprint>,
+    ): PolicyDuplicateMatch {
+        existing.sortedBy(ExistingPolicyFingerprint::policyId).firstOrNull {
+            it.artifactHash == draft.artifactHash
+        }?.let { return PolicyDuplicateMatch(PolicyDuplicateKind.EXACT_ARTIFACT, it.policyId) }
+        val canonical = canonicalText(draft)
+        existing.sortedBy(ExistingPolicyFingerprint::policyId).firstOrNull {
+            it.canonicalTextFingerprint == canonical
+        }?.let { return PolicyDuplicateMatch(PolicyDuplicateKind.CANONICAL_TEXT, it.policyId) }
+        return PolicyDuplicateMatch(PolicyDuplicateKind.NONE, null)
+    }
+
+    fun canonicalText(draft: PolicyCandidateDraft): String = Normalizer.normalize(
+        listOf(
+            draft.trigger.value,
+            draft.procedure.value,
+            draft.verification.value,
+            draft.boundary.value,
+            draft.failureMode.value,
+        ).joinToString("\u001f").lowercase(),
+        Normalizer.Form.NFKC,
+    ).replace(Regex("\\s+"), " ").trim()
+}

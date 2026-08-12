@@ -21,8 +21,11 @@ class MemoryCenterStatsPresentationTest {
                 discardedCaptures = 1,
             ),
             lastProcessedAtMs = 9_000L,
+            pendingRelationReview = 3,
         )
 
+        assertEquals(7, stats.pendingReview)
+        assertEquals(3, stats.pendingRelationReview)
         assertEquals(3, stats.pendingCaptures)
         assertEquals(1, stats.processingCaptures)
         assertEquals(12, stats.processedCaptures)

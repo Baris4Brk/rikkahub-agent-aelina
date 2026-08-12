@@ -8,7 +8,10 @@ import androidx.room.PrimaryKey
 @Entity(
     tableName = "memory_captures",
     indices = [
-        Index(value = ["conversation_id", "assistant_message_id", "capture_source"], unique = true),
+        Index(
+            value = ["scope_id", "conversation_id", "assistant_message_id", "capture_source"],
+            unique = true,
+        ),
         Index(value = ["scope_id", "state", "created_at_ms"]),
         Index("lease_until_ms"),
         Index("conversation_id"),
@@ -36,6 +39,8 @@ data class MemoryCaptureEntity(
     val userText: String,
     @ColumnInfo("assistant_text")
     val assistantText: String,
+    @ColumnInfo(name = "source_identities_json", defaultValue = "'[]'")
+    val sourceIdentitiesJson: String = "[]",
     @ColumnInfo(name = "context_turn_limit", defaultValue = "12")
     val contextTurnLimit: Int = 12,
     @ColumnInfo(defaultValue = "'PENDING'")

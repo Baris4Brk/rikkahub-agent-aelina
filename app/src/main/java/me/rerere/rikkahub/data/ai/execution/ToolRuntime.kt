@@ -52,6 +52,8 @@ data class ToolAssessment(
 data class ToolExecutionPlanRequest(
     val toolCallId: String,
     val toolName: String,
+    /** Exact host-owned input-schema SHA-256 frozen with the exposed tool surface. */
+    val toolSchemaFingerprint: String? = null,
     val args: JsonElement,
     val executionContext: ToolExecutionContext?,
     val startableTool: StartableTool?,
@@ -61,7 +63,69 @@ data class ToolExecutionPlanRequest(
     val preExecutionGate: suspend () -> ToolPreExecutionDecision = {
         ToolPreExecutionDecision.Allow
     },
+    /** Optional process-local observer. The caller owns the true queue-entry callback. */
+    val timingHook: ToolExecutionTimingHook? = null,
 )
+
+enum class ToolExecutionTimingOutcome {
+    COMPLETED,
+    REJECTED,
+    TIMED_OUT,
+    CANCELLED,
+    FAILED,
+}
+
+/**
+ * Non-suspending timing seams for one bound tool invocation. Implementations must not block.
+ * Runtime-owned callbacks are exception-isolated; [onQueued] is exposed for the batch scheduler,
+ * because calling it inside [ToolRuntime.execute] would mislabel preflight as queue time.
+ */
+interface ToolExecutionTimingHook {
+    fun onQueued() = Unit
+    fun onPreflightStarted() = Unit
+    fun onPreflightFinished() = Unit
+    fun onExecutionStarted() = Unit
+    fun onRawResultReady() = Unit
+    /** The COMPLETED lifecycle persistence barrier returned; persistence may be degraded. */
+    fun onCompletionLedgerFinished() = Unit
+    fun onTerminal(outcome: ToolExecutionTimingOutcome) = Unit
+}
+
+/** Safe queue-entry seam for callers that schedule tools before [ToolRuntime.execute]. */
+fun ToolExecutionTimingHook?.notifyQueuedSafely() {
+    val hook = this ?: return
+    try {
+        hook.onQueued()
+    } catch (_: Throwable) {
+        // Timing is an optional sidecar and must never alter tool scheduling.
+    }
+}
+
+private class ToolExecutionTimingSession(
+    private val hook: ToolExecutionTimingHook,
+) {
+    private var terminalReported = false
+
+    fun preflightStarted() = safeCall { onPreflightStarted() }
+    fun preflightFinished() = safeCall { onPreflightFinished() }
+    fun executionStarted() = safeCall { onExecutionStarted() }
+    fun rawResultReady() = safeCall { onRawResultReady() }
+    fun completionLedgerFinished() = safeCall { onCompletionLedgerFinished() }
+
+    fun terminal(outcome: ToolExecutionTimingOutcome) {
+        if (terminalReported) return
+        terminalReported = true
+        safeCall { onTerminal(outcome) }
+    }
+
+    private inline fun safeCall(block: ToolExecutionTimingHook.() -> Unit) {
+        try {
+            hook.block()
+        } catch (_: Throwable) {
+            // Observability callbacks are never allowed to change tool behavior.
+        }
+    }
+}
 
 sealed interface ToolPreExecutionDecision {
     data object Allow : ToolPreExecutionDecision
@@ -69,6 +133,12 @@ sealed interface ToolPreExecutionDecision {
         val errorCode: String,
         val reason: String,
     ) : ToolPreExecutionDecision
+}
+
+private fun ToolExecutionPlanResult.timingOutcome(): ToolExecutionTimingOutcome = when (this) {
+    is ToolExecutionPlanResult.Completed -> ToolExecutionTimingOutcome.COMPLETED
+    is ToolExecutionPlanResult.Rejected -> ToolExecutionTimingOutcome.REJECTED
+    is ToolExecutionPlanResult.TimedOut -> ToolExecutionTimingOutcome.TIMED_OUT
 }
 
 sealed interface ToolExecutionPlanResult {
@@ -113,6 +183,8 @@ data class RedactedToolCallContext(
     /** Model-provided call id, used only to correlate a host-side execution record. */
     val toolCallId: String = "",
     val toolName: String,
+    /** Host-only immutable schema identity; PluginHookBridge never serializes it. */
+    val toolSchemaFingerprint: String? = null,
     val effects: Set<ToolEffect>,
     val resourceNamespaces: Set<String>,
     val origin: ToolCallOrigin,
@@ -121,6 +193,8 @@ data class RedactedToolCallContext(
     val assistantId: String,
     val conversationId: String,
     val runId: String,
+    /** Host-only durable command identity; PluginHookBridge never serializes this field. */
+    val commandId: String? = null,
     /** Principal metadata is host-only; PluginHookBridge intentionally does not serialize it. */
     val subjectId: String = "",
     val subjectType: SubjectType? = null,
@@ -209,13 +283,72 @@ class DefaultToolRuntime(
 
     override suspend fun execute(request: ToolExecutionPlanRequest): ToolExecutionPlanResult {
         require(request.wallClockBudgetMs >= 0L) { "wallClockBudgetMs cannot be negative" }
-        val context = request.executionContext ?: return ToolExecutionPlanResult.Rejected(
-            errorCode = "tool_execution_context_missing",
-            detail = "Tool execution requires assistant, conversation, run, and origin identity.",
-        )
+        val timing = request.timingHook?.let(::ToolExecutionTimingSession)
+        timing?.preflightStarted()
+        return try {
+            executeObserved(request, timing).also { result ->
+                timing?.terminal(result.timingOutcome())
+            }
+        } catch (cancelled: CancellationException) {
+            timing?.terminal(ToolExecutionTimingOutcome.CANCELLED)
+            throw cancelled
+        } catch (failure: Throwable) {
+            timing?.terminal(ToolExecutionTimingOutcome.FAILED)
+            throw failure
+        }
+    }
+
+    private suspend fun executeObserved(
+        request: ToolExecutionPlanRequest,
+        timing: ToolExecutionTimingSession?,
+    ): ToolExecutionPlanResult {
+        if (!isValidHostToolCallId(request.toolCallId)) {
+            timing?.preflightFinished()
+            return ToolExecutionPlanResult.Rejected(
+                errorCode = "tool_call_identity_invalid",
+                detail = "The host tool-call identity is empty, oversized, or unsafe.",
+            )
+        }
+        if (
+            request.toolSchemaFingerprint != null &&
+            !request.toolSchemaFingerprint.matches(Regex("[0-9a-f]{64}"))
+        ) {
+            timing?.preflightFinished()
+            return ToolExecutionPlanResult.Rejected(
+                errorCode = "tool_schema_identity_invalid",
+                detail = "The host tool-schema identity is invalid.",
+            )
+        }
+        val suppliedContext = request.executionContext ?: run {
+            timing?.preflightFinished()
+            return ToolExecutionPlanResult.Rejected(
+                errorCode = "tool_execution_context_missing",
+                detail = "Tool execution requires assistant, conversation, run, and origin identity.",
+            )
+        }
+        if (suppliedContext.toolCallId.isNotEmpty() &&
+            suppliedContext.toolCallId != request.toolCallId
+        ) {
+            timing?.preflightFinished()
+            return ToolExecutionPlanResult.Rejected(
+                errorCode = "tool_call_identity_mismatch",
+                detail = "The host tool-call identity changed before execution.",
+            )
+        }
+        if (request.runControl != null && request.runControl.runId != suppliedContext.runId) {
+            timing?.preflightFinished()
+            return ToolExecutionPlanResult.Rejected(
+                errorCode = "tool_run_identity_mismatch",
+                detail = "The run-control identity does not own this tool execution context.",
+            )
+        }
+        // The plan request is the host's canonical invocation identity. Bind it before policy,
+        // lifecycle persistence or StartableTool side effects; never infer it from an execution ID.
+        val context = suppliedContext.copy(toolCallId = request.toolCallId)
         val provisionalRedacted = RedactedToolCallContext(
             toolCallId = request.toolCallId,
             toolName = request.toolName,
+            toolSchemaFingerprint = request.toolSchemaFingerprint,
             effects = setOf(ToolEffect.UNKNOWN),
             resourceNamespaces = emptySet(),
             origin = context.callOrigin,
@@ -223,6 +356,7 @@ class DefaultToolRuntime(
             assistantId = context.assistantId,
             conversationId = context.conversationId.toString(),
             runId = context.runId.toString(),
+            commandId = context.commandId?.toString(),
             subjectId = context.capabilitySubject?.id.orEmpty(),
             subjectType = context.capabilitySubject?.type,
             legacyExecution = request.startableTool == null,
@@ -230,6 +364,7 @@ class DefaultToolRuntime(
         when (val gate = request.preExecutionGate()) {
             ToolPreExecutionDecision.Allow -> Unit
             is ToolPreExecutionDecision.Deny -> {
+                timing?.preflightFinished()
                 notifyRejected(provisionalRedacted, gate.errorCode)
                 return ToolExecutionPlanResult.Rejected(
                     errorCode = gate.errorCode,
@@ -240,6 +375,7 @@ class DefaultToolRuntime(
         val argsObject = request.args as? JsonObject ?: JsonObject(emptyMap())
         val assessment = assess(ToolAssessmentRequest(request.toolName, argsObject, context))
         if (!assessment.accepted) {
+            timing?.preflightFinished()
             notifyRejected(provisionalRedacted, checkNotNull(assessment.errorCode))
             return ToolExecutionPlanResult.Rejected(
                 errorCode = checkNotNull(assessment.errorCode),
@@ -263,6 +399,7 @@ class DefaultToolRuntime(
         )
         var trackingState = ToolTrackingState.TRACKED
         if (request.wallClockBudgetMs == 0L) {
+            timing?.preflightFinished()
             when (dispatchLifecycle(
                 RedactedToolLifecycleEvent(
                     phase = RedactedToolLifecycleEvent.Phase.STARTING,
@@ -275,7 +412,7 @@ class DefaultToolRuntime(
                 LifecycleDispatch.UNTRACKED -> trackingState = ToolTrackingState.UNTRACKED
                 LifecycleDispatch.TRACKED -> Unit
             }
-            dispatchLifecycle(
+            if (dispatchLifecycle(
                 RedactedToolLifecycleEvent(
                     phase = RedactedToolLifecycleEvent.Phase.TIMED_OUT,
                     context = redacted,
@@ -283,7 +420,9 @@ class DefaultToolRuntime(
                     requestedTerminalOutcome = RequestedTerminalOutcome.TIMED_OUT,
                 ),
                 durableTrackingRequired = durableTrackingRequired,
-            )
+            ) == LifecycleDispatch.UNTRACKED) {
+                trackingState = ToolTrackingState.UNTRACKED
+            }
             return ToolExecutionPlanResult.TimedOut(
                 policy = effectivePolicy,
                 executionId = null,
@@ -292,9 +431,11 @@ class DefaultToolRuntime(
         }
         val hookRejection = runInterceptors(redacted)
         if (hookRejection != null) {
+            timing?.preflightFinished()
             notifyRejected(redacted, hookRejection.errorCode)
             return hookRejection
         }
+        timing?.preflightFinished()
 
         var executionId: String? = null
         var timeoutTerminationState: ToolTerminationState? = null
@@ -312,31 +453,38 @@ class DefaultToolRuntime(
                     LifecycleDispatch.UNTRACKED -> trackingState = ToolTrackingState.UNTRACKED
                     LifecycleDispatch.TRACKED -> Unit
                 }
+                timing?.executionStarted()
                 coroutineScope {
                     val handle = request.startableTool?.start(request.args, context) ?: run {
                         val deferred = async(Dispatchers.IO) { request.legacyExecute(request.args) }
                         LegacyToolExecutionHandle(result = deferred)
                     }
                     executionId = handle.executionId
-                    dispatchLifecycle(
+                    if (dispatchLifecycle(
                         RedactedToolLifecycleEvent(
                             phase = RedactedToolLifecycleEvent.Phase.RUNNING,
                             context = redacted,
                             executionId = handle.executionId,
                         ),
                         durableTrackingRequired = durableTrackingRequired,
-                    )
+                    ) == LifecycleDispatch.UNTRACKED) {
+                        trackingState = ToolTrackingState.UNTRACKED
+                    }
                     request.runControl?.registerTool(request.toolCallId, handle)
                     try {
                         val output = handle.awaitResult()
-                        dispatchLifecycle(
+                        timing?.rawResultReady()
+                        if (dispatchLifecycle(
                             RedactedToolLifecycleEvent(
                                 phase = RedactedToolLifecycleEvent.Phase.COMPLETED,
                                 context = redacted,
                                 executionId = handle.executionId,
                             ),
                             durableTrackingRequired = durableTrackingRequired,
-                        )
+                        ) == LifecycleDispatch.UNTRACKED) {
+                            trackingState = ToolTrackingState.UNTRACKED
+                        }
+                        timing?.completionLedgerFinished()
                         ToolExecutionPlanResult.Completed(
                             output = output,
                             policy = effectivePolicy,
@@ -350,7 +498,7 @@ class DefaultToolRuntime(
                             else -> ToolCancelReason.USER_INTERRUPTED
                         }
                         withContext(NonCancellable) {
-                            dispatchLifecycle(
+                            if (dispatchLifecycle(
                                 RedactedToolLifecycleEvent(
                                     phase = RedactedToolLifecycleEvent.Phase.CANCEL_REQUESTED,
                                     context = redacted,
@@ -365,8 +513,10 @@ class DefaultToolRuntime(
                                     },
                                 ),
                                 durableTrackingRequired = durableTrackingRequired,
-                            )
-                            dispatchLifecycle(
+                            ) == LifecycleDispatch.UNTRACKED) {
+                                trackingState = ToolTrackingState.UNTRACKED
+                            }
+                            if (dispatchLifecycle(
                                 RedactedToolLifecycleEvent(
                                     phase = RedactedToolLifecycleEvent.Phase.TERMINATING,
                                     context = redacted,
@@ -380,12 +530,14 @@ class DefaultToolRuntime(
                                     },
                                 ),
                                 durableTrackingRequired = durableTrackingRequired,
-                            )
+                            ) == LifecycleDispatch.UNTRACKED) {
+                                trackingState = ToolTrackingState.UNTRACKED
+                            }
                             val state = cancelHandle(handle, cancelReason)
                             if (cancelReason == ToolCancelReason.TIMEOUT) {
                                 timeoutTerminationState = state
                             } else {
-                                dispatchLifecycle(
+                                if (dispatchLifecycle(
                                     RedactedToolLifecycleEvent(
                                         phase = RedactedToolLifecycleEvent.Phase.CANCELLED,
                                         context = redacted,
@@ -395,12 +547,14 @@ class DefaultToolRuntime(
                                         requestedTerminalOutcome = RequestedTerminalOutcome.CANCELLED,
                                     ),
                                     durableTrackingRequired = durableTrackingRequired,
-                                )
+                                ) == LifecycleDispatch.UNTRACKED) {
+                                    trackingState = ToolTrackingState.UNTRACKED
+                                }
                             }
                         }
                         throw cancelled
                     } catch (failure: Throwable) {
-                        dispatchLifecycle(
+                        if (dispatchLifecycle(
                             RedactedToolLifecycleEvent(
                                 phase = RedactedToolLifecycleEvent.Phase.FAILED,
                                 context = redacted,
@@ -408,7 +562,9 @@ class DefaultToolRuntime(
                                 detail = failure.javaClass.simpleName,
                             ),
                             durableTrackingRequired = durableTrackingRequired,
-                        )
+                        ) == LifecycleDispatch.UNTRACKED) {
+                            trackingState = ToolTrackingState.UNTRACKED
+                        }
                         throw failure
                     } finally {
                         request.runControl?.unregisterTool(request.toolCallId, handle)
@@ -418,7 +574,7 @@ class DefaultToolRuntime(
         }
         if (completed != null) return completed
 
-        dispatchLifecycle(
+        if (dispatchLifecycle(
             RedactedToolLifecycleEvent(
                 phase = RedactedToolLifecycleEvent.Phase.TIMED_OUT,
                 context = redacted,
@@ -428,7 +584,9 @@ class DefaultToolRuntime(
                 requestedTerminalOutcome = RequestedTerminalOutcome.TIMED_OUT,
             ),
             durableTrackingRequired = durableTrackingRequired,
-        )
+        ) == LifecycleDispatch.UNTRACKED) {
+            trackingState = ToolTrackingState.UNTRACKED
+        }
         return ToolExecutionPlanResult.TimedOut(effectivePolicy, executionId, trackingState)
     }
 
@@ -491,8 +649,7 @@ class DefaultToolRuntime(
         trackingHealth.markDegraded("critical_lifecycle_write_failed")
         return when {
             beforeSideEffect && durableTrackingRequired -> LifecycleDispatch.BLOCKED
-            beforeSideEffect -> LifecycleDispatch.UNTRACKED
-            else -> LifecycleDispatch.TRACKED
+            else -> LifecycleDispatch.UNTRACKED
         }
     }
 
@@ -554,3 +711,10 @@ class DefaultToolRuntime(
     }
 
 }
+
+private const val MAX_HOST_TOOL_CALL_ID_CHARS = 256
+
+internal fun isValidHostToolCallId(value: String): Boolean =
+    value.isNotBlank() &&
+        value.length <= MAX_HOST_TOOL_CALL_ID_CHARS &&
+        value.none { it.isISOControl() }

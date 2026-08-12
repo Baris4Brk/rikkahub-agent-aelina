@@ -38,6 +38,18 @@ class GenerationRunControl(
     private var steeringClosed: Boolean = false
     /** IDs admitted through the current execution boundary. Guarded by [steeringLock]. */
     private val executingToolCallIds = linkedSetOf<String>()
+    /** Process-only authority slot. Provider request construction has no reference to this field. */
+    private val commandAuthority = me.rerere.rikkahub.service.chat.RuntimeRunAuthoritySlot()
+
+    internal suspend fun authorityResult(): me.rerere.rikkahub.service.chat.RuntimeAuthorityResult? =
+        commandAuthority.current()
+
+    suspend fun runtimeCommandAuthority(): me.rerere.rikkahub.service.chat.RuntimeRunAuthority? =
+        commandAuthority.current()
+
+    internal suspend fun attachRuntimeCommandAuthority(
+        authority: me.rerere.rikkahub.service.chat.RuntimeRunAuthority,
+    ) = commandAuthority.attach(authority)
 
     @Volatile var interruptedBy: Uuid? = null
         private set

@@ -13,7 +13,6 @@ class MemoryExtractionWorker(
     params: WorkerParameters,
 ) : CoroutineWorker(appContext, params), KoinComponent {
     private val coordinator: MemoryV2Coordinator by inject()
-    private val mutationCoordinator: MemoryMutationCoordinator by inject()
     private val dao: MemoryV2Dao by inject()
     private val scheduler: MemoryWorkScheduler by inject()
 
@@ -32,10 +31,6 @@ class MemoryExtractionWorker(
                 workerId = "memory-worker-${Uuid.random()}",
             ),
         )
-        // Retention and expiry materialization are maintenance, never retrieval correctness.
-        // Run them opportunistically after a real extraction pass; a maintenance fault must not
-        // consume the capture retry budget or replay a successfully committed model call.
-        runCatching { mutationCoordinator.runRetention() }
         return when (val result = processResult) {
             MemoryProcessResult.NothingToDo,
             is MemoryProcessResult.Paused,

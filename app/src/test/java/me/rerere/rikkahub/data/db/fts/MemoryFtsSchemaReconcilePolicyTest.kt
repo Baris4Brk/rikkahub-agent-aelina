@@ -73,4 +73,22 @@ class MemoryFtsSchemaReconcilePolicyTest {
         assertTrue(sql.contains("m.expires_at_ms > ?"))
         assertTrue(sql.contains("select m.id, m.title, m.content"))
     }
+
+    @Test
+    fun `drift checks only row identity and tokenized text`() {
+        val sql = MEMORY_FTS_DRIFT_SQL.lowercase().replace(Regex("\\s+"), " ")
+
+        assertTrue(sql.contains("f.rowid is null"))
+        assertTrue(sql.contains("m.id is null"))
+        assertTrue(sql.contains("f.title is not m.title"))
+        assertTrue(sql.contains("f.content is not m.content"))
+        assertTrue(sql.contains("f.outcome is not m.outcome"))
+        assertTrue(sql.contains("f.tags_search is not m.tags_search"))
+        assertFalse(sql.contains("f.assistant_id"))
+        assertFalse(sql.contains("f.updated_at_ms"))
+        assertFalse(sql.contains("f.importance"))
+        assertFalse(sql.contains("f.lifecycle_status"))
+        assertFalse(sql.contains("f.expires_at_ms"))
+        assertFalse(sql.contains("f.memory_id"))
+    }
 }

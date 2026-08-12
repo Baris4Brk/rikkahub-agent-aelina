@@ -13,6 +13,9 @@ import androidx.room.PrimaryKey
         Index("relation_candidate_id"),
         Index("link_id"),
         Index("message_id"),
+        Index(value = ["conversation_id", "message_id", "source_digest"]),
+        Index(value = ["link_id", "evidence_group_id"]),
+        Index(value = ["memory_id", "evidence_group_id"]),
     ],
 )
 data class MemoryEvidenceEntity(
@@ -28,4 +31,10 @@ data class MemoryEvidenceEntity(
     @ColumnInfo(defaultValue = "'ORIGINAL_MESSAGE'") val quality: String = "ORIGINAL_MESSAGE",
     @ColumnInfo("relation_candidate_id") val relationCandidateId: String? = null,
     @ColumnInfo("link_id") val linkId: String? = null,
+    @ColumnInfo(name = "evidence_group_id", defaultValue = "''")
+    val evidenceGroupId: String = "",
+    @ColumnInfo(name = "source_digest", defaultValue = "''")
+    val sourceDigest: String = "",
+    @ColumnInfo(name = "source_kind", defaultValue = "'TEXT'")
+    val sourceKind: String = "TEXT",
 )

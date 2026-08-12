@@ -1,0 +1,21 @@
+schema_version	case_id	categories	summary
+1	cross_session_fact	cross_session_fact	跨会话延续一条纯合成事实
+1	explicit_preference	explicit_preference	明确且长期的纯合成偏好
+1	temporary_preference	temporary_preference	仅本次会话有效的临时偏好不得长期化
+1	correction_old_suppression	user_correction,old_fact_suppression	纠正后旧事实必须被抑制
+1	knowledge_update	knowledge_update,supersedes	新知识以明确关系替代旧知识
+1	contradiction_supersedes	contradiction,supersedes	矛盾事实不得同时作为当前结论
+1	plan_started	plan_temporal	计划已开始
+1	plan_ended_cancelled	plan_temporal	计划结束或取消后不再作为当前状态
+1	plan_past_unconfirmed	plan_temporal	过去但未确认的计划不得假设仍活跃
+1	multi_project_premise	multi_project_premise	切换项目时保留正确前提且不串项目
+1	assistant_scope	assistant_scope	助手作用域必须隔离
+1	global_scope	global_scope	全局作用域使用显式互斥语义
+1	source_edit	source_edit	来源编辑后旧 revision 失效
+1	source_delete	source_delete	来源删除后派生正文清零
+1	assistant_move	assistant_move	来源移动助手后旧作用域失效
+1	prompt_injection	prompt_injection	提示注入只作为不可信合成数据
+1	emoji_control	emoji_control	emoji 与控制字符边界
+1	hostile_100k	hostile_100k	运行时构造十万汉字对抗输入
+1	incremental_full_drift	incremental_full_drift	增量与全量语义输出必须一致
+1	cas_retry_process_toggle	cas_race,worker_retry,process_death,feature_toggle	CAS 冲突重试进程死亡恢复及开关关闭

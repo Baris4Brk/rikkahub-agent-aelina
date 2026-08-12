@@ -9,12 +9,17 @@ import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.http.HttpHeaders
 import io.pebbletemplates.pebble.PebbleEngine
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import me.rerere.ai.provider.ProviderManager
 import me.rerere.common.http.AcceptLanguageBuilder
 import me.rerere.rikkahub.BuildConfig
 import me.rerere.rikkahub.AppScope
 import me.rerere.rikkahub.data.ai.AIRequestInterceptor
+import me.rerere.rikkahub.data.ai.BoundedDreamRuntimeTelemetryStore
+import me.rerere.rikkahub.data.ai.DreamRuntimeDiagnosticsSink
+import me.rerere.rikkahub.data.ai.DreamRuntimeUsageRecorder
 import me.rerere.rikkahub.data.ai.RequestLoggingInterceptor
 import me.rerere.rikkahub.data.ai.transformers.AssistantTemplateLoader
 import me.rerere.rikkahub.data.ai.GenerationHandler
@@ -55,6 +60,9 @@ import me.rerere.rikkahub.data.db.migrations.MIGRATION_39_40
 import me.rerere.rikkahub.data.db.migrations.MIGRATION_40_41
 import me.rerere.rikkahub.data.db.migrations.MIGRATION_41_42
 import me.rerere.rikkahub.data.db.migrations.MIGRATION_42_43
+import me.rerere.rikkahub.data.db.migrations.MIGRATION_43_44
+import me.rerere.rikkahub.data.db.migrations.MIGRATION_44_45
+import me.rerere.rikkahub.data.db.migrations.MIGRATION_45_46
 import me.rerere.rikkahub.data.repository.MemorySearchIndex
 import me.rerere.rikkahub.data.repository.MemoryRetriever
 import me.rerere.rikkahub.memory.AndroidMemoryWorkScheduler
@@ -71,6 +79,51 @@ import me.rerere.rikkahub.memory.MemoryWorkScheduler
 import me.rerere.rikkahub.memory.ProviderMemoryExtractor
 import me.rerere.rikkahub.memory.RoomMemoryCaptureStore
 import me.rerere.rikkahub.memory.RoomMemoryProcessingStore
+import me.rerere.rikkahub.memory.dreaming.store.DreamObserverStore
+import me.rerere.rikkahub.memory.dreaming.store.DreamPrivacyScrubber
+import me.rerere.rikkahub.memory.dreaming.store.DreamSynthesisStore
+import me.rerere.rikkahub.memory.dreaming.store.RoomDreamObserverStore
+import me.rerere.rikkahub.memory.dreaming.store.RoomDreamPrivacyScrubber
+import me.rerere.rikkahub.memory.dreaming.store.RoomDreamSynthesisStore
+import me.rerere.rikkahub.memory.dreaming.diagnostics.DreamObserverDiagnostics
+import me.rerere.rikkahub.memory.dreaming.diagnostics.StoreDreamObserverDiagnostics
+import me.rerere.rikkahub.memory.dreaming.input.DreamInputBuilder
+import me.rerere.rikkahub.memory.dreaming.orchestration.DreamEpochClock
+import me.rerere.rikkahub.memory.dreaming.orchestration.DreamSynthesisOrchestrator
+import me.rerere.rikkahub.memory.dreaming.orchestration.DreamSynthesisOrchestratorConfig
+import me.rerere.rikkahub.memory.dreaming.runtime.DreamObserverRuntime
+import me.rerere.rikkahub.memory.dreaming.runtime.DreamAppIdleTracker
+import me.rerere.rikkahub.memory.dreaming.runtime.DreamBudgetGate
+import me.rerere.rikkahub.memory.dreaming.runtime.DreamDailyUsageStore
+import me.rerere.rikkahub.memory.dreaming.runtime.DreamInitialSourceTimezoneSource
+import me.rerere.rikkahub.memory.dreaming.runtime.DreamSnapshotProjectionReader
+import me.rerere.rikkahub.memory.dreaming.runtime.DreamingCostPolicySource
+import me.rerere.rikkahub.memory.dreaming.runtime.DreamingFeatureFlagSource
+import me.rerere.rikkahub.memory.dreaming.runtime.DreamingPreferencesSource
+import me.rerere.rikkahub.memory.dreaming.runtime.DreamSynthesisCoordinator
+import me.rerere.rikkahub.memory.dreaming.runtime.DreamSynthesisSchedulingStore
+import me.rerere.rikkahub.memory.dreaming.runtime.DreamSynthesisRuntime
+import me.rerere.rikkahub.memory.dreaming.runtime.DeviceDreamInitialSourceTimezoneSource
+import me.rerere.rikkahub.memory.dreaming.runtime.ProcessLifecycleDreamAppIdleTracker
+import me.rerere.rikkahub.memory.dreaming.runtime.RoomDreamSnapshotProjectionReader
+import me.rerere.rikkahub.memory.dreaming.runtime.SettingsDreamingPreferencesSource
+import me.rerere.rikkahub.memory.dreaming.store.RoomDreamSynthesisSchedulingStore
+import me.rerere.rikkahub.memory.dreaming.review.DefaultDreamReviewRepository
+import me.rerere.rikkahub.memory.dreaming.review.DreamAuthorityCorrectionPort
+import me.rerere.rikkahub.memory.dreaming.review.DreamReviewRepository
+import me.rerere.rikkahub.memory.dreaming.review.DreamReviewStore
+import me.rerere.rikkahub.memory.dreaming.review.MemoryMutationDreamAuthorityCorrectionPort
+import me.rerere.rikkahub.memory.dreaming.review.RoomDreamReviewStore
+import me.rerere.rikkahub.memory.dreaming.source.DreamSourceReader
+import me.rerere.rikkahub.memory.dreaming.source.RoomDreamSourceReader
+import me.rerere.rikkahub.memory.dreaming.synthesis.DreamProposalValidator
+import me.rerere.rikkahub.memory.dreaming.synthesis.DreamSynthesizer
+import me.rerere.rikkahub.memory.dreaming.synthesis.ProviderDreamSynthesizer
+import me.rerere.rikkahub.memory.dreaming.work.AndroidDreamObserverWorkScheduler
+import me.rerere.rikkahub.memory.dreaming.work.AndroidDreamSynthesisWorkScheduler
+import me.rerere.rikkahub.memory.dreaming.work.DreamObserverCommitSignal
+import me.rerere.rikkahub.memory.dreaming.work.DreamObserverWorkScheduler
+import me.rerere.rikkahub.memory.dreaming.work.DreamSynthesisWorkScheduler
 import me.rerere.rikkahub.pet.PetDialogueRepository
 import me.rerere.rikkahub.pet.PetHandoffCoordinator
 import me.rerere.rikkahub.pet.PetDiaryToolProvider
@@ -83,6 +136,11 @@ import me.rerere.rikkahub.pet.PetHandoffRecovery
 import me.rerere.rikkahub.pet.PetDiagnostics
 import me.rerere.rikkahub.pet.behavior.PetActionTraceStore
 import me.rerere.rikkahub.pet.behavior.PetRuntimeDiagnostics
+import me.rerere.rikkahub.learning.handoff.LearningCommandAuthorityEventPort
+import me.rerere.rikkahub.learning.handoff.RoomCommandTransactionRunner
+import me.rerere.rikkahub.service.chat.CommandAuthorityEventPort
+import me.rerere.rikkahub.service.chat.CommandStateTransaction
+import me.rerere.rikkahub.service.chat.CommandTransactionRunner
 import me.rerere.rikkahub.service.chat.DurableCommandQueue
 import me.rerere.rikkahub.data.ai.mcp.McpManager
 import me.rerere.rikkahub.data.agentrun.AgentRunBootRecovery
@@ -101,6 +159,7 @@ import retrofit2.Retrofit
 import retrofit2.converter.kotlinx.serialization.asConverterFactory
 import java.util.Locale
 import java.util.concurrent.TimeUnit
+import java.util.UUID
 
 val dataSourceModule = module {
     single {
@@ -135,8 +194,19 @@ val dataSourceModule = module {
                 MIGRATION_40_41,
                 MIGRATION_41_42,
                 MIGRATION_42_43,
+                MIGRATION_43_44,
+                MIGRATION_44_45,
+                MIGRATION_45_46,
             )
             .addCallback(object : RoomDatabase.Callback() {
+                override fun onCreate(db: SupportSQLiteDatabase) {
+                    me.rerere.rikkahub.data.db.migrations.ensureLearningOutboxStreamSentinel(
+                        db = db,
+                        streamId = UUID.randomUUID().toString(),
+                        createdAtMs = System.currentTimeMillis(),
+                    )
+                }
+
                 override fun onOpen(db: SupportSQLiteDatabase) {
                     val dictDir = SimpleDictManager.extractDict(context)
                     val cursor = db.query("SELECT jieba_dict(?)", arrayOf(dictDir.absolutePath))
@@ -160,7 +230,109 @@ val dataSourceModule = module {
             .build()
     }
 
-    single { DurableCommandQueue(get<AppDatabase>().pendingChatCommandDao()) }
+    // Command authority state and its content-free learning handoff commit atomically in the
+    // primary Room database. Runtime adoption of the opaque claim API is staged separately.
+    single<CommandTransactionRunner> { RoomCommandTransactionRunner(database = get()) }
+    single<CommandAuthorityEventPort> {
+        LearningCommandAuthorityEventPort(
+            appender = get(),
+            featureFlags = get(),
+        )
+    }
+    single {
+        val learningScheduler =
+            get<me.rerere.rikkahub.learning.jobs.LearningWorkScheduler>()
+        CommandStateTransaction(
+            dao = get<AppDatabase>().pendingChatCommandDao(),
+            transactions = get(),
+            events = get(),
+            learningPostCommitWake = {
+                learningScheduler.wake(
+                    me.rerere.rikkahub.learning.jobs.LearningDrainMode.DRAIN_ONLY,
+                )
+            },
+        )
+    }
+    single {
+        DurableCommandQueue(
+            dao = get<AppDatabase>().pendingChatCommandDao(),
+            commandStateTransaction = get(),
+        )
+    }
+    single { get<AppDatabase>().learningOutboxDao() }
+    single { get<AppDatabase>().learningSourceAuthorityDao() }
+    single {
+        me.rerere.rikkahub.data.authority.source.RoomConversationSourceAuthorityStore(
+            dao = get(),
+            isInAuthorityTransaction = { get<AppDatabase>().inTransaction() },
+        )
+    }
+    single<me.rerere.rikkahub.data.authority.source.SourceInvalidationAuthorityEventPort> {
+        val scheduler = get<me.rerere.rikkahub.learning.jobs.LearningWorkScheduler>()
+        me.rerere.rikkahub.learning.handoff.LearningSourceInvalidationAuthorityEventPort(
+            appender = get(),
+            featureFlags = get(),
+            postCommitWake = {
+                scheduler.wake(me.rerere.rikkahub.learning.jobs.LearningDrainMode.DRAIN_ONLY)
+            },
+        )
+    }
+    single {
+        me.rerere.rikkahub.data.authority.source.ConversationSourceAuthorityWriter(
+            store = get<me.rerere.rikkahub.data.authority.source.RoomConversationSourceAuthorityStore>(),
+            events = get(),
+        )
+    }
+    single { me.rerere.rikkahub.data.authority.transaction.CommandStateAdmissionAuthorityAdapter(get()) }
+    single<me.rerere.rikkahub.data.authority.transaction.CommandCompletionAuthorityPort> {
+        me.rerere.rikkahub.data.authority.transaction.CommandStateCompletionAuthorityAdapter(get())
+    }
+    single {
+        me.rerere.rikkahub.data.authority.transaction.CommandAdmissionAuthorityCoordinator(
+            transactions = get(),
+            sources = get(),
+            commands = get(),
+        )
+    }
+    single {
+        me.rerere.rikkahub.data.authority.transaction.WaitingApprovalAuthorityCoordinator(
+            transactions = get(),
+            sources = get(),
+            commands = get(),
+        )
+    }
+    single {
+        me.rerere.rikkahub.data.authority.transaction.FinalConversationAuthorityCoordinator(
+            transactions = get(),
+            sources = get(),
+            commands = get(),
+        )
+    }
+    single {
+        me.rerere.rikkahub.learning.provenance.RoomConversationLearningSourceSnapshotResolver(
+            database = get(),
+            authority = get(),
+            conversations = get(),
+            messageNodes = get(),
+            featureFlags = get(),
+        )
+    }
+    single<me.rerere.rikkahub.learning.provenance.LearningSourceSnapshotResolver> {
+        get<me.rerere.rikkahub.learning.provenance.RoomConversationLearningSourceSnapshotResolver>()
+    }
+    single<me.rerere.rikkahub.learning.jobs.LearningSourceIntegrityResolver> {
+        get<me.rerere.rikkahub.learning.provenance.RoomConversationLearningSourceSnapshotResolver>()
+    }
+    single<me.rerere.rikkahub.learning.jobs.P1LearningRuntimeDependencyFactory> {
+        me.rerere.rikkahub.learning.jobs.ProductionP1LearningRuntimeDependencyFactory(
+            featureFlags = get(),
+            backgroundClient = get(),
+            backgroundHost = get<
+                me.rerere.rikkahub.data.ai.background.SettingsBackedBackgroundGenerationHost
+            >(),
+            mainDatabase = get(),
+        )
+    }
     single { me.rerere.rikkahub.owner.OwnerOperationBootRecovery(get<AppDatabase>().hostOperationDao()) }
 
     single {
@@ -187,6 +359,168 @@ val dataSourceModule = module {
 
     single {
         get<AppDatabase>().memoryV2Dao()
+    }
+
+    single {
+        get<AppDatabase>().dreamDao()
+    }
+
+    // Dormant M4 persistence primitives only; no synthesizer, Worker, or runtime consumer is
+    // registered by the schema migration.
+    single {
+        get<AppDatabase>().dreamSynthesisDao()
+    }
+
+    // M2 Observer only replays payload-free epochs locally. It has no model, prompt, provider, or
+    // GenerationHandler dependency; all Dream generation/use flags remain disabled.
+    single<DreamObserverStore> {
+        RoomDreamObserverStore(database = get(), dreamDao = get())
+    }
+    single<DreamObserverWorkScheduler>(createdAtStart = true) {
+        AndroidDreamObserverWorkScheduler(context = get())
+    }
+    single<DreamSynthesisWorkScheduler> { AndroidDreamSynthesisWorkScheduler(context = get()) }
+    single(createdAtStart = true) {
+        val appScope = get<AppScope>()
+        val synthesisCoordinator = get<DreamSynthesisCoordinator>()
+        DreamObserverCommitSignal(
+            database = get<AppDatabase>(),
+            scheduler = get<DreamObserverWorkScheduler>(),
+            synthesisSignal = {
+                appScope.launch(Dispatchers.IO) {
+                    synthesisCoordinator.onAuthorityCommitted()
+                }
+            },
+        )
+    }
+    single {
+        DreamObserverRuntime(store = get(), scheduler = get())
+    }
+    single<DreamObserverDiagnostics> {
+        StoreDreamObserverDiagnostics(store = get())
+    }
+
+    single {
+        SettingsDreamingPreferencesSource(
+            settingsStore = get(),
+            trustedSchemaReady = true,
+        )
+    }
+    single<DreamingPreferencesSource> { get<SettingsDreamingPreferencesSource>() }
+    single<DreamingFeatureFlagSource> { get<SettingsDreamingPreferencesSource>() }
+    single<DreamingCostPolicySource> { get<SettingsDreamingPreferencesSource>() }
+    single<DreamSnapshotProjectionReader> {
+        RoomDreamSnapshotProjectionReader(
+            database = get(),
+            synthesisDao = get(),
+        )
+    }
+    single<DreamInitialSourceTimezoneSource> { DeviceDreamInitialSourceTimezoneSource }
+    single<DreamAppIdleTracker> { ProcessLifecycleDreamAppIdleTracker(clock = get()) }
+    single<DreamSourceReader> { RoomDreamSourceReader(database = get()) }
+    single { DreamInputBuilder(sourceReader = get()) }
+    single<DreamSynthesizer> { ProviderDreamSynthesizer(settingsStore = get(), providerManager = get()) }
+    single { DreamProposalValidator() }
+    single<DreamEpochClock> { DreamEpochClock { System.currentTimeMillis() } }
+    single {
+        RoomDreamSynthesisSchedulingStore(
+            database = get(),
+            dreamDao = get(),
+        )
+    }
+    single<DreamSynthesisSchedulingStore> { get<RoomDreamSynthesisSchedulingStore>() }
+    single<DreamDailyUsageStore> { get<RoomDreamSynthesisSchedulingStore>() }
+    single {
+        DreamBudgetGate(
+            policySource = get(),
+            usageStore = get(),
+        )
+    }
+    single<DreamPrivacyScrubber> {
+        RoomDreamPrivacyScrubber(
+            database = get(),
+            dreamDao = get(),
+            synthesisDao = get(),
+            memoryDao = get(),
+            memoryV2Dao = get(),
+            json = get(),
+        )
+    }
+    single<DreamSynthesisStore> {
+        RoomDreamSynthesisStore(
+            database = get(),
+            dreamDao = get(),
+            synthesisDao = get(),
+            memoryDao = get(),
+            memoryV2Dao = get(),
+            observerStore = get(),
+            featureFlags = get(),
+            json = get(),
+        )
+    }
+    single {
+        DreamSynthesisOrchestrator(
+            store = get(),
+            inputBuilder = get(),
+            synthesizer = get(),
+            validator = get(),
+            clock = get(),
+            config = DreamSynthesisOrchestratorConfig(
+                compilerRevision = "dream-snapshot-compiler-v1",
+                maxOutputTokens = 2_048,
+                leaseDurationMs = 15L * 60_000L,
+                heartbeatIntervalMs = 2L * 60_000L,
+            ),
+            budgetGate = get(),
+        )
+    }
+    single {
+        DreamSynthesisRuntime(
+            dreamDao = get(),
+            featureFlags = get(),
+            timezoneSource = get(),
+            orchestrator = get(),
+            clock = get(),
+            policySource = get(),
+            idleTracker = get(),
+        )
+    }
+    single(createdAtStart = true) {
+        val coordinator = DreamSynthesisCoordinator(
+            store = get(),
+            featureFlags = get(),
+            policySource = get(),
+            scheduler = get(),
+            clock = get(),
+        )
+        get<AppScope>().launch(Dispatchers.IO) {
+            coordinator.armStartupAndPeriodicRecovery()
+        }
+        coordinator
+    }
+
+    single<DreamReviewStore> {
+        RoomDreamReviewStore(
+            database = get(),
+            dreamDao = get(),
+            synthesisDao = get(),
+            memoryDao = get(),
+            memoryV2Dao = get(),
+            featureFlags = get(),
+            json = get(),
+        )
+    }
+    single<DreamAuthorityCorrectionPort> {
+        MemoryMutationDreamAuthorityCorrectionPort(
+            mutationCoordinator = get(),
+            observerStore = get(),
+        )
+    }
+    single<DreamReviewRepository> {
+        DefaultDreamReviewRepository(
+            store = get(),
+            authority = get(),
+        )
     }
 
     single {
@@ -220,7 +554,7 @@ val dataSourceModule = module {
         )
     }
     single { MemoryMetadataReconciler(get(), get()) }
-    single<MemoryWorkScheduler> { AndroidMemoryWorkScheduler(get()) }
+    single<MemoryWorkScheduler>(createdAtStart = true) { AndroidMemoryWorkScheduler(get()) }
     single<MemoryCaptureStore> { RoomMemoryCaptureStore(get()) }
     single<MemoryProcessingStore> {
         RoomMemoryProcessingStore(
@@ -229,6 +563,8 @@ val dataSourceModule = module {
             memoryV2Dao = get(),
             retriever = get(),
             json = get(),
+            dreamObserverStore = get(),
+            dreamPrivacyScrubber = get(),
         )
     }
     single<MemoryMutationCoordinator> { DefaultMemoryMutationCoordinator(get()) }
@@ -304,12 +640,182 @@ val dataSourceModule = module {
         )
     }
     single { me.rerere.rikkahub.data.execution.ExecutionConsistencyMetrics() }
+    single<me.rerere.rikkahub.learning.model.LearningFeatureFlagSource> {
+        me.rerere.rikkahub.learning.model.SettingsLearningFeatureFlagSource(
+            settingsStore = get(),
+            capabilities = me.rerere.rikkahub.learning.model.LearningFeatureCapabilities(
+                schemaReady = true,
+                typedJobExecutionReady = true,
+            ),
+        )
+    }
+    single { me.rerere.rikkahub.learning.resources.LearningForegroundRegistry() }
+    single<me.rerere.rikkahub.learning.resources.LearningDeviceConditionsSource> {
+        val settingsStore = get<me.rerere.rikkahub.data.datastore.SettingsStore>()
+        me.rerere.rikkahub.learning.resources.AndroidLearningDeviceConditionsSource(
+            context = get(),
+            // Background Learning remains disabled until a persisted user-facing setting is
+            // shipped; this adapter must never infer consent from another feature's toggle.
+            userAllowsBackgroundWork = {
+                settingsStore.settingsFlow.value.learningPreferences.failClosed()
+                    .backgroundWorkAuthorized
+            },
+            userAllowsMeteredNetwork = {
+                settingsStore.settingsFlow.value.learningPreferences.failClosed()
+                    .allowMeteredNetwork
+            },
+        )
+    }
     single {
+        val resourceDiagnostics =
+            get<me.rerere.rikkahub.learning.diagnostics.LearningResourceDiagnostics>()
+        me.rerere.rikkahub.learning.resources.LearningResourceGovernor(
+            foregroundRegistry = get(),
+            conditionsSource = get(),
+            onYield = resourceDiagnostics::recordYield,
+        )
+    }
+    // Authorization remains default-deny and is exact-model scoped. No Chat/Memory/Dreaming
+    // setting can implicitly enable background generation.
+    single<me.rerere.rikkahub.data.ai.background.BackgroundGenerationUserPolicySource> {
+        me.rerere.rikkahub.learning.model.SettingsLearningBackgroundGenerationUserPolicySource(
+            settingsStore = get(),
+        )
+    }
+    single<me.rerere.rikkahub.data.ai.background.BackgroundGenerationSettingsSource> {
+        me.rerere.rikkahub.data.ai.background.SettingsStoreBackgroundGenerationSettingsSource(
+            settingsStore = get(),
+            userPolicySource = get(),
+        )
+    }
+    single<me.rerere.rikkahub.data.ai.background.BackgroundGenerationConfigurationKeyer> {
+        me.rerere.rikkahub.data.ai.background.KeystoreBackgroundGenerationConfigurationKeyer(
+            tokens = get(),
+        )
+    }
+    single {
+        me.rerere.rikkahub.data.ai.background.BackgroundGenerationHostIdentityFactory(
+            configurationKeyer = get(),
+        )
+    }
+    single<me.rerere.rikkahub.data.ai.background.BackgroundTextProviderResolver> {
+        me.rerere.rikkahub.data.ai.background.ProviderManagerBackgroundTextProviderResolver(
+            providerManager = get(),
+        )
+    }
+    single {
+        me.rerere.rikkahub.data.ai.background.SettingsBackedBackgroundGenerationHost(
+            settingsSource = get(),
+            identityFactory = get(),
+            providerResolver = get(),
+        )
+    }
+    single<me.rerere.rikkahub.data.ai.background.BackgroundGenerationBinder> {
+        get<me.rerere.rikkahub.data.ai.background.SettingsBackedBackgroundGenerationHost>()
+    }
+    single<me.rerere.rikkahub.data.ai.background.BackgroundGenerationAuthorizationGate> {
+        get<me.rerere.rikkahub.data.ai.background.SettingsBackedBackgroundGenerationHost>()
+    }
+    single {
+        me.rerere.rikkahub.data.ai.background.BackgroundGenerationClient(
+            governor = get(),
+            binder = get(),
+            authorizationGate = get(),
+        )
+    }
+    single<me.rerere.rikkahub.learning.jobs.LearningWorkScheduler> {
+        me.rerere.rikkahub.learning.jobs.FlagGatedLearningWorkScheduler(
+            context = get(),
+            featureFlags = get(),
+        )
+    }
+    single {
+        me.rerere.rikkahub.learning.handoff.LearningOutboxAppender(database = get())
+    }
+    single<me.rerere.rikkahub.learning.handoff.LearningOutboxReader> {
+        me.rerere.rikkahub.learning.handoff.RoomLearningOutboxReader(database = get())
+    }
+    single<me.rerere.rikkahub.learning.handoff.LearningReconciliationScanner> {
+        me.rerere.rikkahub.learning.handoff.RoomLearningReconciliationScanner(database = get())
+    }
+    single {
+        me.rerere.rikkahub.learning.diagnostics.LearningDiagnosticsStore(
+            filesDir = get<Context>().filesDir,
+        )
+    }
+    single {
+        me.rerere.rikkahub.learning.diagnostics.LearningResourceDiagnostics(
+            store = get(),
+        )
+    }
+    single<me.rerere.rikkahub.learning.runtime.LearningRuntimeFacade> {
+        val flags = get<me.rerere.rikkahub.learning.model.LearningFeatureFlagSource>()
+        me.rerere.rikkahub.learning.runtime.LearningRuntimeFacade(
+            context = get(),
+            isEnabled = {
+                flags.current().let { resolved ->
+                    resolved.isValid && resolved.effective.handoff
+                }
+            },
+            initializer = me.rerere.rikkahub.learning.runtime.LearningRuntimeInitializer {
+                    database, _, frozenNowMs ->
+                database.checkpointDao().recoverInterruptedBootstrap(frozenNowMs)
+            },
+            outboxReader = get(),
+            reconciliationScanner = get(),
+            diagnosticsStore = get(),
+            p1RuntimeDependencyFactory = get(),
+            policyShadowFeatureGate = me.rerere.rikkahub.learning.retrieval.PolicyShadowFeatureGate(
+                flags,
+            ),
+            policyOpaqueIds = me.rerere.rikkahub.learning.retrieval.KeystorePolicyOpaqueIdFactory(
+                get(),
+            ),
+            sqliteOpenHelperFactory = me.rerere.rikkahub.data.db.createAppSQLiteOpenHelperFactory(
+                get(),
+            ),
+        )
+    }
+    single<me.rerere.rikkahub.learning.runtime.LearningRuntimeMaintenancePort> {
+        get<me.rerere.rikkahub.learning.runtime.LearningRuntimeFacade>()
+    }
+    single<me.rerere.rikkahub.learning.retrieval.PolicyShadowRuntimePort> {
+        get<me.rerere.rikkahub.learning.runtime.LearningRuntimeFacade>()
+    }
+    single { me.rerere.rikkahub.learning.privacy.LearningEphemeralScopeRegistry() }
+    single<me.rerere.rikkahub.learning.privacy.LearningDerivedEraseStore> {
+        me.rerere.rikkahub.learning.runtime.FacadeLearningDerivedEraseStore(
+            runtime = get(),
+            ephemeralEraser = get<me.rerere.rikkahub.learning.privacy.LearningEphemeralScopeRegistry>(),
+        )
+    }
+    single {
+        me.rerere.rikkahub.learning.privacy.LearningDerivedEraseService(
+            store = get(),
+            ephemeralRegistry = get(),
+        )
+    }
+    single<me.rerere.rikkahub.learning.jobs.LearningDrainCoordinator> {
+        me.rerere.rikkahub.learning.jobs.FacadeLearningDrainCoordinator(
+            runtime = get(),
+            featureFlags = get(),
+        )
+    }
+    single {
+        val learningScheduler =
+            get<me.rerere.rikkahub.learning.jobs.LearningWorkScheduler>()
         me.rerere.rikkahub.data.execution.ExecutionStateTransaction(
             database = get(),
             recordDao = get(),
             eventDao = get(),
             metrics = get(),
+            learningOutboxAppender = get(),
+            learningFeatureFlags = get(),
+            learningPostCommitWake = {
+                learningScheduler.wake(
+                    me.rerere.rikkahub.learning.jobs.LearningDrainMode.DRAIN_ONLY,
+                )
+            },
         )
     }
     single {
@@ -325,6 +831,12 @@ val dataSourceModule = module {
             dao = get(),
             transaction = get(),
             retention = get(),
+        )
+    }
+    single {
+        me.rerere.rikkahub.data.execution.ExecutionMessageAuthorityBinder(
+            database = get(),
+            dao = get(),
         )
     }
     single {
@@ -347,6 +859,7 @@ val dataSourceModule = module {
             approvalDao = get(),
             executionRepository = get(),
             retentionManager = get(),
+            messageAuthorityBinder = get(),
         )
     }
     single {
@@ -452,6 +965,10 @@ val dataSourceModule = module {
         )
     }
 
+    single { BoundedDreamRuntimeTelemetryStore() }
+    single<DreamRuntimeDiagnosticsSink> { get<BoundedDreamRuntimeTelemetryStore>() }
+    single<DreamRuntimeUsageRecorder> { get<BoundedDreamRuntimeTelemetryStore>() }
+
     single {
         GenerationHandler(
             context = get(),
@@ -472,6 +989,10 @@ val dataSourceModule = module {
             ephemeralToolResults = get(),
             runtimeSecretRedactor = get(),
             toolExperienceRecorder = get(),
+            dreamingFeatureFlags = get(),
+            dreamSnapshotProjectionReader = get(),
+            dreamRuntimeUsageRecorder = get(),
+            dreamRuntimeDiagnosticsSink = get(),
         )
     }
 

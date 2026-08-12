@@ -30,6 +30,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -37,6 +39,16 @@ import me.rerere.rikkahub.R
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.memory.MemoryAutoSaveMode
 import me.rerere.rikkahub.memory.MemoryCaptureOrigin
+import me.rerere.rikkahub.memory.dreaming.runtime.MAX_DREAMING_DAILY_INPUT_TOKEN_LIMIT
+import me.rerere.rikkahub.memory.dreaming.runtime.MAX_DREAMING_DAILY_OUTPUT_TOKEN_LIMIT
+import me.rerere.rikkahub.memory.dreaming.runtime.MAX_DREAMING_DAILY_RUN_LIMIT
+import me.rerere.rikkahub.memory.dreaming.runtime.MAX_DREAMING_IDLE_THRESHOLD_MINUTES
+import me.rerere.rikkahub.memory.dreaming.runtime.MAX_DREAMING_RETRY_LIMIT
+import me.rerere.rikkahub.memory.dreaming.runtime.MIN_DREAMING_IDLE_THRESHOLD_MINUTES
+import me.rerere.rikkahub.memory.dreaming.runtime.DreamNetworkPolicy
+import me.rerere.rikkahub.memory.dreaming.runtime.DreamingCostPolicy
+import me.rerere.rikkahub.memory.dreaming.runtime.DreamingScopePreferenceMutation
+import me.rerere.rikkahub.memory.dreaming.runtime.DreamingScopePreferences
 import kotlin.uuid.Uuid
 
 @Composable
@@ -105,6 +117,8 @@ fun MemorySettingsTab(
     extractionModel: MemoryExtractionModelUiState,
     modelOptions: List<MemoryModelOption>,
     recallState: MemoryRecallTestState,
+    dreamingScopePreferences: DreamingScopePreferences,
+    dreamingCostPolicy: DreamingCostPolicy,
     narrativeNamesForOrigin: (String?) -> MemoryNarrativeNames,
     onUpdateAssistant: ((Assistant) -> Assistant) -> Unit,
     onAutoSaveModeChange: (MemoryAutoSaveMode) -> Unit,
@@ -115,6 +129,8 @@ fun MemorySettingsTab(
     onProcessNow: () -> Unit,
     onRetryFailed: () -> Unit,
     onRecallTest: (String) -> Unit,
+    onDreamingScopePreferenceChange: (DreamingScopePreferenceMutation) -> Unit,
+    onDreamingCostPolicyChange: (DreamingCostPolicy) -> Unit,
 ) {
     val narrativeSelfFallback = stringResource(R.string.memory_v2_narrative_self_fallback)
     val narrativeCompanionFallback = stringResource(R.string.memory_v2_narrative_companion_fallback)
@@ -148,6 +164,43 @@ fun MemorySettingsTab(
             MemoryCenterVM.MAX_CONVERSATION_CONTEXT_TURNS
     var showModelPicker by remember { mutableStateOf(false) }
     var recallQuery by remember { mutableStateOf("") }
+    var dreamNetworkPolicy by remember(dreamingCostPolicy.networkPolicy) {
+        mutableStateOf(dreamingCostPolicy.networkPolicy)
+    }
+    var dreamBatteryNotLow by remember(dreamingCostPolicy.requireBatteryNotLow) {
+        mutableStateOf(dreamingCostPolicy.requireBatteryNotLow)
+    }
+    var dreamCharging by remember(dreamingCostPolicy.requireCharging) {
+        mutableStateOf(dreamingCostPolicy.requireCharging)
+    }
+    var dreamDailyRuns by remember(dreamingCostPolicy.dailyRunLimit) {
+        mutableStateOf(dreamingCostPolicy.dailyRunLimit.toString())
+    }
+    var dreamInputTokens by remember(dreamingCostPolicy.dailyInputTokenLimit) {
+        mutableStateOf(dreamingCostPolicy.dailyInputTokenLimit?.toString().orEmpty())
+    }
+    var dreamOutputTokens by remember(dreamingCostPolicy.dailyOutputTokenLimit) {
+        mutableStateOf(dreamingCostPolicy.dailyOutputTokenLimit?.toString().orEmpty())
+    }
+    var dreamRetryLimit by remember(dreamingCostPolicy.retryLimit) {
+        mutableStateOf(dreamingCostPolicy.retryLimit.toString())
+    }
+    var dreamIdleMinutes by remember(dreamingCostPolicy.idleThresholdMinutes) {
+        mutableStateOf(dreamingCostPolicy.idleThresholdMinutes.toString())
+    }
+    val dreamRunsValue = dreamDailyRuns.toIntOrNull()
+    val dreamInputValue = dreamInputTokens.takeIf(String::isNotBlank)?.toLongOrNull()
+    val dreamOutputValue = dreamOutputTokens.takeIf(String::isNotBlank)?.toLongOrNull()
+    val dreamRetryValue = dreamRetryLimit.toIntOrNull()
+    val dreamIdleValue = dreamIdleMinutes.toIntOrNull()
+    val dreamPolicyValid = dreamRunsValue != null && dreamRunsValue in 0..MAX_DREAMING_DAILY_RUN_LIMIT &&
+        (dreamInputTokens.isBlank() ||
+            (dreamInputValue != null && dreamInputValue in 0L..MAX_DREAMING_DAILY_INPUT_TOKEN_LIMIT)) &&
+        (dreamOutputTokens.isBlank() ||
+            (dreamOutputValue != null && dreamOutputValue in 0L..MAX_DREAMING_DAILY_OUTPUT_TOKEN_LIMIT)) &&
+        dreamRetryValue != null && dreamRetryValue in 0..MAX_DREAMING_RETRY_LIMIT &&
+        dreamIdleValue != null &&
+        dreamIdleValue in MIN_DREAMING_IDLE_THRESHOLD_MINUTES..MAX_DREAMING_IDLE_THRESHOLD_MINUTES
 
     LazyColumn(
         contentPadding = PaddingValues(12.dp),
@@ -211,6 +264,153 @@ fun MemorySettingsTab(
                     description = stringResource(R.string.assistant_page_time_reminder_desc),
                     checked = assistant.enableTimeReminder,
                     onCheckedChange = { enabled -> onUpdateAssistant { it.copy(enableTimeReminder = enabled) } },
+                )
+            }
+        }
+
+        item {
+            SettingsCard(title = stringResource(R.string.memory_dream_settings_title)) {
+                Text(
+                    text = stringResource(R.string.memory_dream_settings_scope_desc),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                SettingSwitchRow(
+                    title = stringResource(R.string.memory_dream_generate),
+                    description = stringResource(R.string.memory_dream_generate_desc),
+                    checked = dreamingScopePreferences.generate,
+                    onCheckedChange = { enabled ->
+                        onDreamingScopePreferenceChange(
+                            DreamingScopePreferenceMutation.SetGenerate(enabled),
+                        )
+                    },
+                )
+                SettingSwitchRow(
+                    title = stringResource(R.string.memory_dream_shadow),
+                    description = stringResource(R.string.memory_dream_shadow_desc),
+                    checked = dreamingScopePreferences.shadow,
+                    onCheckedChange = { enabled ->
+                        onDreamingScopePreferenceChange(
+                            DreamingScopePreferenceMutation.SetShadow(enabled),
+                        )
+                    },
+                )
+                SettingSwitchRow(
+                    title = stringResource(R.string.memory_dream_use),
+                    description = stringResource(R.string.memory_dream_use_desc),
+                    checked = dreamingScopePreferences.use,
+                    onCheckedChange = { enabled ->
+                        onDreamingScopePreferenceChange(
+                            DreamingScopePreferenceMutation.SetUse(enabled),
+                        )
+                    },
+                )
+                SettingSwitchRow(
+                    title = stringResource(R.string.memory_dream_deep),
+                    description = stringResource(R.string.memory_dream_not_available),
+                    checked = false,
+                    enabled = false,
+                    onCheckedChange = {},
+                )
+            }
+        }
+
+        item {
+            SettingsCard(title = stringResource(R.string.memory_dream_cost_policy_title)) {
+                Text(
+                    text = stringResource(R.string.memory_dream_cost_policy_desc),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(stringResource(R.string.memory_dream_network_title))
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    DreamNetworkPolicy.entries.forEach { policy ->
+                        FilterChip(
+                            selected = dreamNetworkPolicy == policy,
+                            onClick = { dreamNetworkPolicy = policy },
+                            label = { Text(policy.title()) },
+                        )
+                    }
+                }
+                SettingSwitchRow(
+                    title = stringResource(R.string.memory_dream_battery_not_low),
+                    description = stringResource(R.string.memory_dream_battery_not_low_desc),
+                    checked = dreamBatteryNotLow,
+                    onCheckedChange = { dreamBatteryNotLow = it },
+                )
+                SettingSwitchRow(
+                    title = stringResource(R.string.memory_dream_require_charging),
+                    description = stringResource(R.string.memory_dream_require_charging_desc),
+                    checked = dreamCharging,
+                    onCheckedChange = { dreamCharging = it },
+                )
+                DreamNumberField(
+                    value = dreamDailyRuns,
+                    onValueChange = { dreamDailyRuns = it.take(2) },
+                    label = stringResource(R.string.memory_dream_daily_runs),
+                    supportingText = stringResource(R.string.memory_dream_daily_runs_desc),
+                    isError = dreamRunsValue == null || dreamRunsValue !in 0..MAX_DREAMING_DAILY_RUN_LIMIT,
+                )
+                DreamNumberField(
+                    value = dreamInputTokens,
+                    onValueChange = { dreamInputTokens = it.take(7) },
+                    label = stringResource(R.string.memory_dream_daily_input_tokens),
+                    supportingText = stringResource(R.string.memory_dream_token_limit_desc),
+                    isError = dreamInputTokens.isNotBlank() &&
+                        (dreamInputValue == null || dreamInputValue !in 0L..MAX_DREAMING_DAILY_INPUT_TOKEN_LIMIT),
+                )
+                DreamNumberField(
+                    value = dreamOutputTokens,
+                    onValueChange = { dreamOutputTokens = it.take(6) },
+                    label = stringResource(R.string.memory_dream_daily_output_tokens),
+                    supportingText = stringResource(R.string.memory_dream_token_limit_desc),
+                    isError = dreamOutputTokens.isNotBlank() &&
+                        (dreamOutputValue == null || dreamOutputValue !in 0L..MAX_DREAMING_DAILY_OUTPUT_TOKEN_LIMIT),
+                )
+                DreamNumberField(
+                    value = dreamRetryLimit,
+                    onValueChange = { dreamRetryLimit = it.take(1) },
+                    label = stringResource(R.string.memory_dream_retry_limit),
+                    supportingText = stringResource(R.string.memory_dream_retry_limit_desc),
+                    isError = dreamRetryValue == null || dreamRetryValue !in 0..MAX_DREAMING_RETRY_LIMIT,
+                )
+                DreamNumberField(
+                    value = dreamIdleMinutes,
+                    onValueChange = { dreamIdleMinutes = it.take(4) },
+                    label = stringResource(R.string.memory_dream_idle_minutes),
+                    supportingText = stringResource(R.string.memory_dream_idle_minutes_desc),
+                    isError = dreamIdleValue == null ||
+                        dreamIdleValue !in MIN_DREAMING_IDLE_THRESHOLD_MINUTES..
+                            MAX_DREAMING_IDLE_THRESHOLD_MINUTES,
+                )
+                Button(
+                    onClick = {
+                        onDreamingCostPolicyChange(
+                            DreamingCostPolicy(
+                                networkPolicy = dreamNetworkPolicy,
+                                requireBatteryNotLow = dreamBatteryNotLow,
+                                requireCharging = dreamCharging,
+                                dailyRunLimit = dreamRunsValue!!,
+                                dailyInputTokenLimit = dreamInputValue,
+                                dailyOutputTokenLimit = dreamOutputValue,
+                                retryLimit = dreamRetryValue!!,
+                                idleThresholdMinutes = dreamIdleValue!!,
+                            ),
+                        )
+                    },
+                    enabled = dreamPolicyValid,
+                ) {
+                    Text(stringResource(R.string.memory_dream_save_policy))
+                }
+                Text(
+                    text = stringResource(R.string.memory_dream_unknown_usage_pauses),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    text = stringResource(R.string.memory_dream_cost_unavailable),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }
@@ -515,6 +715,9 @@ private fun SettingSwitchRow(
     enabled: Boolean = true,
     onCheckedChange: (Boolean) -> Unit,
 ) {
+    val state = stringResource(
+        if (checked) R.string.memory_dream_switch_on else R.string.memory_dream_switch_off,
+    )
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
@@ -530,8 +733,39 @@ private fun SettingSwitchRow(
                 )
             }
         }
-        Switch(checked = checked, enabled = enabled, onCheckedChange = onCheckedChange)
+        Switch(
+            checked = checked,
+            enabled = enabled,
+            onCheckedChange = onCheckedChange,
+            modifier = Modifier.semantics { stateDescription = state },
+        )
     }
+}
+
+@Composable
+private fun DreamNumberField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    label: String,
+    supportingText: String,
+    isError: Boolean,
+) {
+    OutlinedTextField(
+        value = value,
+        onValueChange = { next -> onValueChange(next.filter(Char::isDigit)) },
+        label = { Text(label) },
+        supportingText = { Text(supportingText) },
+        isError = isError,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+        singleLine = true,
+        modifier = Modifier.fillMaxWidth(),
+    )
+}
+
+@Composable
+private fun DreamNetworkPolicy.title(): String = when (this) {
+    DreamNetworkPolicy.CONNECTED -> stringResource(R.string.memory_dream_network_connected)
+    DreamNetworkPolicy.UNMETERED -> stringResource(R.string.memory_dream_network_unmetered)
 }
 
 @Composable

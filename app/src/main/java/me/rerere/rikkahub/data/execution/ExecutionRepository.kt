@@ -4,6 +4,7 @@ import java.security.MessageDigest
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import me.rerere.rikkahub.learning.model.LearningScope
 
 /** Input for a new authoritative execution row. All fields are deliberately non-secret. */
 data class ExecutionRecordDraft(
@@ -12,6 +13,13 @@ data class ExecutionRecordDraft(
     val parentExecutionId: String? = null,
     val commandId: String? = null,
     val conversationId: String? = null,
+    val toolCallId: String? = null,
+    val toolName: String? = null,
+    val toolSchemaFingerprint: String? = null,
+    val owningAssistantMessageId: String? = null,
+    val owningAssistantMessageRevision: Long? = null,
+    /** Frozen at admission. Legacy imported rows may be null, but new runtime rows may not. */
+    val learningScope: LearningScope,
     val subjectId: String,
     val subjectType: String,
     val origin: String,
@@ -26,7 +34,20 @@ data class ExecutionRecordDraft(
     val runtimeHandleSummary: String? = null,
     val runtimeInstanceMarker: String? = null,
     val requestedTerminalOutcome: RequestedTerminalOutcome = RequestedTerminalOutcome.NONE,
-)
+) {
+    init {
+        require(!initialStatus.isTerminal) {
+            "Execution terminal state must be committed through the state transaction"
+        }
+        require(
+            listOf(toolCallId, toolName, toolSchemaFingerprint).all { it == null } ||
+                listOf(toolCallId, toolName, toolSchemaFingerprint).all { it != null },
+        ) { "Execution tool identity must be complete" }
+        require((owningAssistantMessageId == null) == (owningAssistantMessageRevision == null)) {
+            "Execution owning message requires an exact revision"
+        }
+    }
+}
 
 sealed interface ExecutionTransitionResult {
     data class Applied(val record: ExecutionRecord) : ExecutionTransitionResult
@@ -149,6 +170,31 @@ class ExecutionRepository(
     suspend fun mutateObserved(mutation: ExecutionMutation): ExecutionMutationResult =
         transaction.mutate(mutation.sanitized())
 
+    /** Caller must already own the AppDatabase authority transaction. No scheduler is invoked. */
+    suspend fun mutateObservedInCurrentTransaction(
+        mutation: ExecutionMutation,
+    ): ExecutionMutationCommit = transaction.mutateInCurrentTransaction(mutation.sanitized())
+
+    /** Dispatches only after the caller's outer authority transaction has committed. */
+    fun dispatchObservedPostCommit(commit: ExecutionMutationCommit) {
+        transaction.dispatchExternalPostCommit(commit)
+    }
+
+    /** Caller owns the AppDatabase authority transaction; no nested transaction is opened. */
+    suspend fun openInCurrentAuthorityTransaction(
+        draft: ExecutionRecordDraft,
+        mutationId: String = "open:${draft.id}",
+        source: ExecutionStateSource = ExecutionStateSource.LIVE_EVENT,
+        reasonCode: String = "execution_opened",
+    ): ExecutionRecord = mutex.withLock {
+        transaction.openInCurrentTransaction(
+            draft = draft.sanitized(),
+            mutationId = mutationId.take(MAX_MUTATION_ID_CHARS),
+            source = source,
+            reasonCode = reasonCode.take(MAX_REASON_CHARS),
+        )
+    }
+
     suspend fun get(id: String): ExecutionRecord? = dao.getById(id)
 
     suspend fun getInFlight(): List<ExecutionRecord> = dao.getInFlight()
@@ -242,6 +288,10 @@ class ExecutionRepository(
         parentExecutionId = parentExecutionId?.take(480),
         commandId = commandId?.take(480),
         conversationId = conversationId?.take(480),
+        toolCallId = toolCallId?.take(256),
+        toolName = toolName?.take(256),
+        toolSchemaFingerprint = toolSchemaFingerprint,
+        owningAssistantMessageId = owningAssistantMessageId?.take(256),
         subjectId = subjectId.take(160),
         subjectType = subjectType.take(80),
         origin = origin.take(80),
@@ -269,6 +319,13 @@ internal fun ExecutionRecordDraft.toRecord(nowMs: Long): ExecutionRecord = Execu
     parentExecutionId = parentExecutionId,
     commandId = commandId,
     conversationId = conversationId,
+    learningScopeKind = learningScope.kind.name,
+    learningScopeId = learningScope.storageId,
+    toolCallId = toolCallId,
+    toolName = toolName,
+    toolSchemaFingerprint = toolSchemaFingerprint,
+    owningAssistantMessageId = owningAssistantMessageId,
+    owningAssistantMessageRevision = owningAssistantMessageRevision,
     subjectId = subjectId,
     subjectType = subjectType,
     origin = origin,
@@ -291,3 +348,10 @@ internal fun ExecutionRecordDraft.toRecord(nowMs: Long): ExecutionRecord = Execu
     runtimeInstanceMarker = runtimeInstanceMarker,
     requestedTerminalOutcome = requestedTerminalOutcome.name,
 )
+
+/** Parses only the explicitly frozen scope columns; legacy rows are never inferred or promoted. */
+fun ExecutionRecord.learningScopeOrNull(): LearningScope? {
+    val kind = learningScopeKind ?: return null
+    val id = learningScopeId ?: return null
+    return LearningScope.parseOrNull(kind, id)
+}

@@ -42,6 +42,9 @@ app/google-services.json
 # Local diagnostics may contain device logs, database snapshots, preferences, or identifiers.
 /.codex-diagnostics/
 
+# Codex scratch work, research clones, and generated review renders are local-only.
+/.codex_tmp/
+
 # Local safety snapshots, crash dumps, and replay logs may contain source fragments or paths.
 /.safety-artifacts/
 /hs_err_pid*.log

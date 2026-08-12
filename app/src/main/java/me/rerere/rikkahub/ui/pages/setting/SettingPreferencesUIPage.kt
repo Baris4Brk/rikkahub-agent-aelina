@@ -48,6 +48,7 @@ import me.rerere.rikkahub.data.datastore.ChatFontFamily
 import me.rerere.rikkahub.data.datastore.DisplaySetting
 import me.rerere.rikkahub.data.files.FileFolders
 import me.rerere.rikkahub.data.files.FileUtils
+import me.rerere.rikkahub.diagnostics.agenttiming.AgentTimingStore
 import me.rerere.rikkahub.ui.components.nav.BackButton
 import me.rerere.rikkahub.ui.components.richtext.MarkdownBlock
 import me.rerere.rikkahub.ui.components.ui.CardGroup
@@ -57,11 +58,13 @@ import me.rerere.rikkahub.ui.theme.CustomColors
 import me.rerere.rikkahub.ui.theme.rememberChatFontFamily
 import me.rerere.rikkahub.utils.plus
 import org.koin.androidx.compose.koinViewModel
+import org.koin.compose.koinInject
 import java.io.File
 
 @Composable
 fun SettingPreferencesUIPage(vm: SettingVM = koinViewModel()) {
     val settings by vm.settings.collectAsStateWithLifecycle()
+    val agentTimingStore: AgentTimingStore = koinInject()
     var displaySetting by remember(settings) { mutableStateOf(settings.displaySetting) }
     val context = LocalContext.current
     val toaster = LocalToaster.current
@@ -216,6 +219,21 @@ fun SettingPreferencesUIPage(vm: SettingVM = koinViewModel()) {
                                 checked = displaySetting.showTokenUsage,
                                 onCheckedChange = {
                                     updateDisplaySetting(displaySetting.copy(showTokenUsage = it))
+                                }
+                            )
+                        },
+                    )
+                    item(
+                        headlineContent = { Text(stringResource(R.string.setting_display_page_show_agent_timing_title)) },
+                        supportingContent = { Text(stringResource(R.string.setting_display_page_show_agent_timing_desc)) },
+                        trailingContent = {
+                            Switch(
+                                checked = displaySetting.showAgentTiming,
+                                onCheckedChange = { enabled ->
+                                    // This is an immediate in-process fence: disabling invalidates
+                                    // every live recorder before the persisted preference update.
+                                    agentTimingStore.setEnabled(enabled)
+                                    updateDisplaySetting(displaySetting.copy(showAgentTiming = enabled))
                                 }
                             )
                         },

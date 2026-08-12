@@ -18,6 +18,8 @@ import me.rerere.rikkahub.data.capability.CapabilityGrantDao
 import me.rerere.rikkahub.data.capability.CapabilityGrantEntity
 import me.rerere.rikkahub.data.db.dao.AlarmDao
 import me.rerere.rikkahub.data.db.dao.ConversationDAO
+import me.rerere.rikkahub.data.db.dao.DreamDao
+import me.rerere.rikkahub.data.db.dao.DreamSynthesisDao
 import me.rerere.rikkahub.data.db.dao.BrowserLibraryDao
 import me.rerere.rikkahub.data.db.dao.FavoriteDAO
 import me.rerere.rikkahub.data.db.dao.GenMediaDAO
@@ -25,6 +27,9 @@ import me.rerere.rikkahub.data.db.dao.ManagedFileDAO
 import me.rerere.rikkahub.data.db.dao.MemoryDAO
 import me.rerere.rikkahub.data.db.dao.MemoryV2Dao
 import me.rerere.rikkahub.data.db.dao.MessageNodeDAO
+import me.rerere.rikkahub.data.db.dao.LearningOutboxDao
+import me.rerere.rikkahub.data.db.dao.LearningReconciliationAuthorityDao
+import me.rerere.rikkahub.data.db.dao.LearningSourceAuthorityDao
 import me.rerere.rikkahub.data.db.dao.PendingChatCommandDao
 import me.rerere.rikkahub.data.db.dao.PetDialogueDao
 import me.rerere.rikkahub.data.db.dao.ScheduledJobDao
@@ -40,6 +45,11 @@ import me.rerere.rikkahub.toolcatalog.ToolShortcutDao
 import me.rerere.rikkahub.toolcatalog.ToolShortcutEntity
 import me.rerere.rikkahub.data.db.entity.AlarmEntity
 import me.rerere.rikkahub.data.db.entity.ConversationEntity
+import me.rerere.rikkahub.data.db.entity.DreamRunEntity
+import me.rerere.rikkahub.data.db.entity.DreamClaimEntity
+import me.rerere.rikkahub.data.db.entity.DreamClaimVersionEntity
+import me.rerere.rikkahub.data.db.entity.DreamClaimVersionSourceEntity
+import me.rerere.rikkahub.data.db.entity.DreamSnapshotEntity
 import me.rerere.rikkahub.data.db.entity.BrowserBookmarkEntity
 import me.rerere.rikkahub.data.db.entity.BrowserHistoryEntity
 import me.rerere.rikkahub.data.db.entity.FavoriteEntity
@@ -54,7 +64,13 @@ import me.rerere.rikkahub.data.db.entity.MemoryLinkEntity
 import me.rerere.rikkahub.data.db.entity.MemoryLinkRevisionEntity
 import me.rerere.rikkahub.data.db.entity.MemoryRelationCandidateEntity
 import me.rerere.rikkahub.data.db.entity.MemoryBackfillRunEntity
+import me.rerere.rikkahub.data.db.entity.MemorySourceTombstoneEntity
+import me.rerere.rikkahub.data.db.entity.MemoryScopeChangeEntity
+import me.rerere.rikkahub.data.db.entity.MemoryScopeStateEntity
 import me.rerere.rikkahub.data.db.entity.MessageNodeEntity
+import me.rerere.rikkahub.data.db.entity.LearningOutboxEntity
+import me.rerere.rikkahub.data.db.entity.LearningConversationSourceAuthorityEntity
+import me.rerere.rikkahub.data.db.entity.LearningMessageSourceAuthorityEntity
 import me.rerere.rikkahub.data.db.entity.PendingChatCommandEntity
 import me.rerere.rikkahub.data.db.entity.PetDialogueRevisionEntity
 import me.rerere.rikkahub.data.db.entity.PetDialogueSessionEntity
@@ -98,6 +114,14 @@ import me.rerere.rikkahub.owner.db.HostOperationEventEntity
         MemoryLinkRevisionEntity::class,
         MemoryRelationCandidateEntity::class,
         MemoryBackfillRunEntity::class,
+        MemorySourceTombstoneEntity::class,
+        MemoryScopeStateEntity::class,
+        MemoryScopeChangeEntity::class,
+        DreamRunEntity::class,
+        DreamClaimEntity::class,
+        DreamClaimVersionEntity::class,
+        DreamClaimVersionSourceEntity::class,
+        DreamSnapshotEntity::class,
         GenMediaEntity::class,
         MessageNodeEntity::class,
         ManagedFileEntity::class,
@@ -126,10 +150,13 @@ import me.rerere.rikkahub.owner.db.HostOperationEventEntity
         HostOperationEntity::class,
         HostOperationEventEntity::class,
         HostLocalServiceEntity::class,
+        LearningOutboxEntity::class,
+        LearningConversationSourceAuthorityEntity::class,
+        LearningMessageSourceAuthorityEntity::class,
     ],
     // v33 freezes the conversation-context limit with each queued capture so changing the
     // setting later cannot split or enlarge a batch that has already been accepted.
-    version = 43,
+    version = 46,
     autoMigrations = [
         AutoMigration(from = 1, to = 2),
         AutoMigration(from = 2, to = 3),
@@ -167,6 +194,10 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun memoryDao(): MemoryDAO
 
     abstract fun memoryV2Dao(): MemoryV2Dao
+
+    abstract fun dreamDao(): DreamDao
+
+    abstract fun dreamSynthesisDao(): DreamSynthesisDao
 
     abstract fun genMediaDao(): GenMediaDAO
 
@@ -211,6 +242,12 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun hostOperationDao(): HostOperationDao
 
     abstract fun hostLocalServiceDao(): HostLocalServiceDao
+
+    abstract fun learningOutboxDao(): LearningOutboxDao
+
+    abstract fun learningReconciliationAuthorityDao(): LearningReconciliationAuthorityDao
+
+    abstract fun learningSourceAuthorityDao(): LearningSourceAuthorityDao
 }
 
 object TokenUsageConverter {

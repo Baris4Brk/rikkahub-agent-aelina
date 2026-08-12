@@ -3,6 +3,7 @@ package me.rerere.rikkahub.service.chat
 import kotlinx.serialization.Serializable
 import me.rerere.ai.ui.UIMessageAnnotation
 import me.rerere.ai.ui.UIMessagePart
+import me.rerere.rikkahub.memory.MemorySourceVersion
 import kotlin.uuid.Uuid
 
 sealed interface ChatCommand
@@ -62,6 +63,10 @@ data class ToolApprovalCommand(
     val decision: ToolDecision,
     val toolName: String? = null,
     val scope: String = "Once",
+    /** Exact immutable approval projection identity. Null only for legacy denial payloads. */
+    val approvalId: String? = null,
+    /** Exact execution ledger identity bound to [approvalId]. */
+    val executionId: String? = null,
     val expectedStateVersion: Long? = null,
     val resolutionRequestId: String? = null,
 ) : ControlCommand
@@ -90,6 +95,13 @@ data class RegenerateCommand(
     val expectedTargetVersion: Long,
     val expectedBranchHeadMessageId: Uuid,
     val policy: RegeneratePolicy = RegeneratePolicy.INTERRUPT_CURRENT,
+    /**
+     * Durable source baseline captured when the command is admitted. IDs keep old pending rows
+     * decodable; versions let the successful final commit distinguish an edit from a deletion.
+     */
+    val baselineAssistantScopeId: String? = null,
+    val baselineSelectedMessageIds: List<String> = emptyList(),
+    val baselineSelectedSourceVersions: List<MemorySourceVersion> = emptyList(),
 ) : NormalCommand
 
 data class ResumeQueueCommand(

@@ -46,6 +46,8 @@ data class MemorySearchCandidate(
     val updatedAtMs: Long,
     val importance: Float,
     val ftsRank: Double,
+    /** Authoritative revision carried into prompt/cache identity. */
+    val revision: Int? = null,
 )
 
 /** Runtime retrieval result. Persist [MemoryRetrievalTrace], never these query-derived terms. */
@@ -306,31 +308,50 @@ internal fun composeMemoryQuery(query: String): MemoryQueryComposition {
         }
     }
     val normalized = MEMORY_WHITESPACE_REGEX.replace(sanitized, " ").trim()
-    val terms = memoryQueryTerms(normalized)
+    val termComposition = composeMemoryQueryTerms(normalized)
+    val terms = termComposition.terms
     return MemoryQueryComposition(
         query = normalized,
         indexQuery = terms.joinToString(" ").takeWholeCodePoints(MAX_MEMORY_QUERY_CHARS),
         originalChars = query.length,
         terms = terms,
-        truncated = query.length > MAX_MEMORY_QUERY_CHARS,
+        truncated = query.length > MAX_MEMORY_QUERY_CHARS || termComposition.truncated,
         sanitized = containedControlCharacters,
     )
 }
 
 internal fun memoryQueryTerms(query: String): List<String> {
+    return composeMemoryQueryTerms(query).terms
+}
+
+private data class MemoryQueryTermComposition(
+    val terms: List<String>,
+    val truncated: Boolean,
+)
+
+private fun composeMemoryQueryTerms(query: String): MemoryQueryTermComposition {
     val terms = linkedSetOf<String>()
-    for (match in Regex("[\\p{L}\\p{N}_]+").findAll(query.lowercase(Locale.ROOT))) {
+    var truncated = false
+    fun admit(term: String): Boolean {
+        if (term in terms) return true
+        if (terms.size >= MAX_MEMORY_QUERY_TERMS) {
+            truncated = true
+            return false
+        }
+        terms += term
+        return true
+    }
+
+    matches@ for (match in Regex("[\\p{L}\\p{N}_]+").findAll(query.lowercase(Locale.ROOT))) {
         val token = match.value
-        if (token.length <= 128) terms += token
+        if (token.length <= 128 && !admit(token)) break@matches
         if (token.any(::isHanCharacter) && token.length >= 2) {
             for (bigram in token.windowed(size = 2, step = 1)) {
-                terms += bigram
-                if (terms.size >= MAX_MEMORY_QUERY_TERMS) break
+                if (!admit(bigram)) break@matches
             }
         }
-        if (terms.size >= MAX_MEMORY_QUERY_TERMS) break
     }
-    return terms.take(MAX_MEMORY_QUERY_TERMS)
+    return MemoryQueryTermComposition(terms.toList(), truncated)
 }
 
 private fun String.takeWholeCodePoints(maxChars: Int): String {
@@ -396,7 +417,12 @@ private fun MemorySearchCandidate.toScoredMatch(
         if (isEmpty()) add("fts match")
     }.joinToString("; ")
     return MemoryMatch(
-        memory = AssistantMemory(id = id, content = content, title = title),
+        memory = AssistantMemory(
+            id = id,
+            content = content,
+            title = title,
+            revision = revision,
+        ),
         score = score,
         matchedTerms = matchedTerms,
         reason = reason,

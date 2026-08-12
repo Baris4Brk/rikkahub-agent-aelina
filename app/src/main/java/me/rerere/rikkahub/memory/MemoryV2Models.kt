@@ -96,6 +96,7 @@ enum class MemoryRevisionOperation {
     RESTORE,
     EXPIRE,
     STALE,
+    SCRUB,
 }
 
 enum class MemoryLinkRevisionOperation {
@@ -103,7 +104,46 @@ enum class MemoryLinkRevisionOperation {
     SUSPEND,
     RESTORE,
     INVALIDATE,
+    SCRUB,
 }
+
+@Serializable
+enum class MemorySourceRole {
+    USER,
+    ASSISTANT,
+    TOOL,
+}
+
+@Serializable
+enum class MemorySourceKind {
+    TEXT,
+}
+
+/** Exact top-level text source selected for extraction; tool parts are never represented here. */
+@Serializable
+data class MemoryCaptureSourceInput(
+    val messageId: String,
+    val role: MemorySourceRole,
+    val text: String,
+)
+
+/** Durable, content-bound lineage for one member of an atomic evidence group. */
+@Serializable
+data class MemorySourceIdentity(
+    val conversationId: String,
+    val messageId: String,
+    val role: MemorySourceRole,
+    val consumedTextDigest: String,
+    val evidenceGroupId: String,
+    val sourceKind: MemorySourceKind = MemorySourceKind.TEXT,
+)
+
+/** A deleted content version of a still-existing message. */
+@Serializable
+data class MemorySourceVersion(
+    val messageId: String,
+    val consumedTextDigest: String,
+)
 
 data class CompletedMemoryTurn(
     val assistantId: Uuid,
@@ -114,6 +154,8 @@ data class CompletedMemoryTurn(
     val origin: MemoryCaptureOrigin,
     val userText: String,
     val assistantText: String,
+    /** Empty means the normal user/assistant pair is derived by the capture coordinator. */
+    val sourceMessages: List<MemoryCaptureSourceInput> = emptyList(),
     val memoryEnabled: Boolean,
     val autoSaveMode: MemoryAutoSaveMode,
     val allowedOrigins: Set<MemoryCaptureOrigin>,
@@ -139,6 +181,9 @@ data class MemoryCaptureRecord(
     val autoSaveMode: MemoryAutoSaveMode,
     val userText: String,
     val assistantText: String,
+    val sourceIdentities: List<MemorySourceIdentity> = emptyList(),
+    /** Only legacy, unpurged v43 rows may derive the old user/assistant pair on read. */
+    val sourceIdentityFallbackAllowed: Boolean = true,
     val createdAtMs: Long,
     val conversationContextTurns: Int = MEMORY_DEFAULT_CONVERSATION_CONTEXT_TURNS,
     val narrativeEventsEnabled: Boolean = false,
@@ -166,6 +211,8 @@ enum class MemoryCaptureSkipReason {
     HEADLESS,
     NEEDS_FINAL_ANSWER,
     EMPTY_TURN,
+    INVALID_SCOPE,
+    INVALID_SOURCE_IDENTITY,
 }
 
 enum class ManualMemorySelectionResult {
@@ -259,6 +306,7 @@ data class MemoryRecordSnapshot(
     val sourceType: String = "LEGACY",
     val sourceConversationId: String? = null,
     val sourceMessageIds: List<String> = emptyList(),
+    val sourceIdentities: List<MemorySourceIdentity> = emptyList(),
 )
 
 sealed interface MemoryExpiryUpdate {
@@ -296,6 +344,8 @@ data class MemoryQueryRecord(
      * created. This is presentation metadata only; it must not affect query scope or ranking.
      */
     val originAssistantId: String? = null,
+    /** Optimistic-concurrency token that must accompany model/UI mutations. */
+    val revision: Int = 0,
 )
 
 data class MemoryExtractionTurn(
@@ -317,6 +367,8 @@ data class MemoryExtractionRequest(
     val insightsTheoriesEnabled: Boolean = false,
     /** Maps a model-visible evidence token back to its durable source message id. */
     val evidenceRefToMessageId: Map<String, String> = emptyMap(),
+    /** Production lineage: one model citation expands to one complete, content-bound group. */
+    val evidenceRefToSourceIdentities: Map<String, List<MemorySourceIdentity>> = emptyMap(),
     val isConversationContextCompacted: Boolean = false,
     /** Display names for readable output; stable role tokens remain reserved for protocol fields. */
     val narrativeIdentity: MemoryNarrativeIdentity = MemoryNarrativeIdentity(
@@ -356,7 +408,10 @@ data class MemoryProcessCommit(
     val captures: List<MemoryCaptureRecord>,
     val candidates: List<MemoryCandidateDecision>,
     val relations: List<MemoryRelationDecision> = emptyList(),
+    /** Frozen semantic clock used while validating the extracted proposal. */
     val nowMs: Long,
+    /** Fresh wall-clock used only to fence the processing lease at commit time. */
+    val leaseNowMs: Long = nowMs,
 )
 
 data class MemoryRelationDecision(

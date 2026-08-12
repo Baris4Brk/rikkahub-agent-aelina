@@ -4,6 +4,7 @@ import java.io.File
 import java.security.SecureRandom
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
+import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -15,6 +16,8 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import me.rerere.ai.context.ApproximateContextTokenEstimator
+import me.rerere.ai.context.ProviderContextGateTrace
+import me.rerere.ai.context.ProviderContextOverflowKind
 import me.rerere.ai.context.ProviderRequestTokenEstimator
 import me.rerere.ai.core.InputSchema
 import me.rerere.ai.core.MessageRole
@@ -23,6 +26,7 @@ import me.rerere.ai.provider.BuiltInTools
 import me.rerere.ai.provider.DEFAULT_USER_CONTEXT_WINDOW_TOKENS
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
+import me.rerere.rikkahub.data.repository.isValidMemoryRetrievalTraceHandle
 
 private const val REQUEST_BREAKDOWN_DIRECTORY = "diagnostics"
 private const val REQUEST_BREAKDOWN_FILE = "last_request_breakdown.json"
@@ -30,6 +34,13 @@ private const val REQUEST_BREAKDOWN_HISTORY_FILE = "request_breakdown_history.js
 private const val REQUEST_BREAKDOWN_HISTORY_LIMIT = 128
 private const val MESSAGE_FRAMING_TOKENS = 8
 private val requestBreakdownJson = Json { prettyPrint = true; ignoreUnknownKeys = true }
+private val PRIVACY_SAFE_REVISION = Regex("^[A-Za-z0-9._-]{1,64}$")
+private val KNOWN_MEMORY_DROP_REASONS = setOf(
+    "invalid_budget",
+    "contextual_disabled",
+    "duplicate_id",
+    "budget_exceeded",
+)
 
 data class RequestBreakdownSection(
     val name: String,
@@ -37,6 +48,50 @@ data class RequestBreakdownSection(
     val utf8Bytes: Long,
     val estimatedTokens: Int,
 )
+
+/** Fixed labels prevent prompt, query, scope, or identifier data from entering diagnostics. */
+enum class RequestContextGateStage(val diagnosticName: String) {
+    INITIAL("initial"),
+    FINAL("final"),
+}
+
+enum class RequestContextGateStatus(val diagnosticName: String) {
+    SUCCESS("success"),
+    ADJUSTMENT_REQUIRED("adjustment_required"),
+    OVERFLOW("overflow"),
+}
+
+/**
+ * One privacy-safe hard-context-gate attempt. All fields are aggregate counts or fixed enums.
+ * Message token totals already include media; the media fields expose that conservative component
+ * separately when the caller can measure it for the corresponding pre/post-gate payload.
+ */
+data class RequestContextGateDiagnostic(
+    val stage: RequestContextGateStage,
+    val status: RequestContextGateStatus,
+    val contextWindowTokens: Int,
+    val requestedOutputTokens: Int,
+    val effectiveOutputTokens: Int,
+    val safetyMarginTokens: Int,
+    val toolSchemaTokens: Int,
+    val originalMediaTokens: Int? = null,
+    val finalMediaTokens: Int? = null,
+    val originalMessageTokens: Int,
+    val finalMessageTokens: Int,
+    val maximumMessageTokens: Int,
+    val strippedHistoricalReasoningParts: Int,
+    /** Complete old conversation/tool groups removed by the gate. */
+    val droppedOldGroups: Int,
+    val droppedMessages: Int,
+    val outputClamped: Boolean,
+    val overflowKind: ProviderContextOverflowKind? = null,
+) {
+    val originalInputTokens: Int
+        get() = saturatedTokenSum(originalMessageTokens, toolSchemaTokens)
+
+    val finalInputTokens: Int
+        get() = saturatedTokenSum(finalMessageTokens, toolSchemaTokens)
+}
 
 data class RequestBreakdownDiagnostic(
     val recordedAtEpochMs: Long,
@@ -70,6 +125,16 @@ data class RequestBreakdownDiagnostic(
     val memoryCount: Int,
     /** Random retrieval-trace handle; unrelated to conversation, scope, query, or memory ids. */
     val memoryRetrievalTraceId: String? = null,
+    /** Counts after atomic memory compilation, not retrieval candidate counts. */
+    val actualStandingCount: Int? = null,
+    val actualContextualCount: Int? = null,
+    val memoryPromptEstimatedTokens: Int? = null,
+    /** Static, privacy-safe renderer revision; never a memory, scope, or conversation identity. */
+    val memoryCompilerRevision: String? = null,
+    /** Fixed reason labels and aggregate counts only; memory ids are deliberately absent. */
+    val memoryDropReasonCounts: Map<String, Int> = emptyMap(),
+    /** At most one upserted attempt per fixed stage. */
+    val contextGateAttempts: List<RequestContextGateDiagnostic> = emptyList(),
     val enabledSkillNames: List<String>,
     val toolNames: List<String>,
     val wireSections: List<RequestBreakdownSection>,
@@ -111,6 +176,64 @@ data class RequestBreakdownDiagnostic(
                 null
             },
             providerCompletionTokens = completionTokens.coerceAtLeast(0),
+        )
+    }
+
+    /**
+     * Attaches only the aggregate output of the atomic memory compiler. Unknown reason labels are
+     * collapsed to `other` so a caller cannot accidentally persist a prompt, query, UUID, or id.
+     */
+    fun withMemoryCompiler(
+        actualStandingCount: Int,
+        actualContextualCount: Int,
+        memoryPromptEstimatedTokens: Int,
+        memoryCompilerRevision: String,
+        dropReasonCounts: Map<String, Int> = emptyMap(),
+    ): RequestBreakdownDiagnostic = copy(
+        actualStandingCount = actualStandingCount.coerceAtLeast(0),
+        actualContextualCount = actualContextualCount.coerceAtLeast(0),
+        memoryPromptEstimatedTokens = memoryPromptEstimatedTokens.coerceAtLeast(0),
+        memoryCompilerRevision = memoryCompilerRevision
+            .takeIf(PRIVACY_SAFE_REVISION::matches),
+        memoryDropReasonCounts = sanitizeMemoryDropReasonCounts(dropReasonCounts),
+    )
+
+    /**
+     * Upserts a hard-gate attempt by [stage]. The API accepts no free-form stage, status, prompt,
+     * query, scope, UUID, or memory identifier.
+     */
+    fun withContextGate(
+        stage: RequestContextGateStage,
+        status: RequestContextGateStatus,
+        trace: ProviderContextGateTrace,
+        originalMediaTokens: Int? = null,
+        finalMediaTokens: Int? = null,
+    ): RequestBreakdownDiagnostic {
+        val attempt = RequestContextGateDiagnostic(
+            stage = stage,
+            status = status,
+            contextWindowTokens = trace.contextWindowTokens.coerceAtLeast(0),
+            requestedOutputTokens = trace.requestedOutputTokens.coerceAtLeast(0),
+            effectiveOutputTokens = trace.effectiveOutputTokens.coerceAtLeast(0),
+            safetyMarginTokens = trace.safetyMarginTokens.coerceAtLeast(0),
+            toolSchemaTokens = trace.toolSchemaTokens.coerceAtLeast(0),
+            originalMediaTokens = originalMediaTokens?.coerceAtLeast(0),
+            finalMediaTokens = finalMediaTokens?.coerceAtLeast(0),
+            originalMessageTokens = trace.originalMessageTokens.coerceAtLeast(0),
+            finalMessageTokens = trace.finalMessageTokens.coerceAtLeast(0),
+            maximumMessageTokens = trace.maximumMessageTokens.coerceAtLeast(0),
+            strippedHistoricalReasoningParts = trace.strippedHistoricalReasoningParts
+                .coerceAtLeast(0),
+            droppedOldGroups = trace.droppedCompletedTurns.coerceAtLeast(0),
+            droppedMessages = trace.droppedMessages.coerceAtLeast(0),
+            outputClamped = trace.outputClamped,
+            overflowKind = trace.overflowKind,
+        )
+        return copy(
+            contextWindowTokens = attempt.contextWindowTokens,
+            contextGateAttempts = (
+                contextGateAttempts.filterNot { it.stage == stage } + attempt
+                ).sortedBy { it.stage.ordinal },
         )
     }
 
@@ -181,6 +304,14 @@ data class RequestBreakdownDiagnostic(
         append(", projection=").append(contextProjectionMode)
         contextHighWatermarkReached?.let { append(", highWater=").append(it) }
         append(", memories=").append(memoryCount)
+        actualStandingCount?.let { append(", standing=").append(it) }
+        actualContextualCount?.let { append(", contextual=").append(it) }
+        memoryPromptEstimatedTokens?.let { append(", memoryTokens=").append(it) }
+        contextGateAttempts.lastOrNull()?.let { gate ->
+            append(", gate=").append(gate.stage.diagnosticName)
+            append(':').append(gate.status.diagnosticName)
+            append('/').append(gate.finalInputTokens)
+        }
         providerPromptTokens?.let { append(", providerPrompt=").append(it) }
         providerCachedTokens?.let { append(", cached=").append(it) }
         providerCachedPromptBasisPoints?.let { append(", providerCacheBp=").append(it) }
@@ -189,7 +320,7 @@ data class RequestBreakdownDiagnostic(
     }
 
     internal fun toJson(): JsonObject = buildJsonObject {
-        put("schema_version", 3)
+        put("schema_version", 4)
         put("recorded_at_epoch_ms", recordedAtEpochMs)
         put("generation_hash", generationHash)
         put("provider_call_index", providerCallIndex)
@@ -215,7 +346,30 @@ data class RequestBreakdownDiagnostic(
         contextHighWatermarkTokens?.let { put("context_high_watermark_tokens", it) }
         contextHighWatermarkReached?.let { put("context_high_watermark_reached", it) }
         put("memory_count", memoryCount)
-        memoryRetrievalTraceId?.let { put("memory_retrieval_trace_id", it.take(64)) }
+        memoryRetrievalTraceId
+            ?.takeIf(::isValidMemoryRetrievalTraceHandle)
+            ?.let { put("memory_retrieval_trace_id", it) }
+        actualStandingCount?.let { put("actual_standing_count", it) }
+        actualContextualCount?.let { put("actual_contextual_count", it) }
+        memoryPromptEstimatedTokens?.let { put("memory_prompt_estimated_tokens", it) }
+        memoryCompilerRevision
+            ?.takeIf(PRIVACY_SAFE_REVISION::matches)
+            ?.let { put("memory_compiler_revision", it) }
+        val safeMemoryDropReasonCounts = sanitizeMemoryDropReasonCounts(memoryDropReasonCounts)
+        if (safeMemoryDropReasonCounts.isNotEmpty()) {
+            put("memory_drop_reason_counts", buildJsonObject {
+                safeMemoryDropReasonCounts.forEach { (reason, count) ->
+                    put(reason, count)
+                }
+            })
+        }
+        if (contextGateAttempts.isNotEmpty()) {
+            put("context_gate_attempts", buildJsonArray {
+                contextGateAttempts.sortedBy { it.stage.ordinal }.forEach { attempt ->
+                    add(attempt.toJson())
+                }
+            })
+        }
         put("enabled_skill_names", JsonArray(enabledSkillNames.map(::JsonPrimitive)))
         put("tool_names", JsonArray(toolNames.map(::JsonPrimitive)))
         put("estimated_message_tokens", estimatedMessageTokens)
@@ -235,7 +389,9 @@ data class RequestBreakdownDiagnostic(
         put("system_source_hints", systemSourceHints.toJson())
         put(
             "privacy_note",
-            "Counts, names, and aggregate prefix metrics only; transient HMACs and payload text are not persisted.",
+            "Counts, fixed labels, names, aggregate prefix metrics, and non-reversible " +
+                "random-key correlation hashes/handles only; semantic/tool fingerprints, " +
+                "payload/query text, application UUIDs, and memory ids are not persisted.",
         )
     }
 
@@ -340,7 +496,8 @@ data class RequestBreakdownDiagnostic(
                 contextProjectionMode = contextProjectionMode,
                 frozenPrefixMessageCount = frozenPrefixMessageCount.coerceAtLeast(0),
                 memoryCount = memoryCount.coerceAtLeast(0),
-                memoryRetrievalTraceId = memoryRetrievalTraceId?.take(64),
+                memoryRetrievalTraceId = memoryRetrievalTraceId
+                    ?.takeIf(::isValidMemoryRetrievalTraceHandle),
                 enabledSkillNames = enabledSkillNames.map { it.trim() }.filter { it.isNotEmpty() }.distinct().sorted(),
                 toolNames = (
                     tools.map(Tool::name) + builtInToolNames.map { "built_in:$it" }
@@ -368,7 +525,53 @@ data class RequestBreakdownDiagnostic(
     }
 }
 
+private fun RequestContextGateDiagnostic.toJson(): JsonObject = buildJsonObject {
+    put("stage", stage.diagnosticName)
+    put("status", status.diagnosticName)
+    put("context_window_tokens", contextWindowTokens)
+    put("requested_output_tokens", requestedOutputTokens)
+    put("effective_output_tokens", effectiveOutputTokens)
+    put("safety_margin_tokens", safetyMarginTokens)
+    put("tool_schema_tokens", toolSchemaTokens)
+    originalMediaTokens?.let { put("original_media_tokens", it) }
+    finalMediaTokens?.let { put("final_media_tokens", it) }
+    put("original_message_tokens", originalMessageTokens)
+    put("final_message_tokens", finalMessageTokens)
+    put("original_input_tokens", originalInputTokens)
+    put("final_input_tokens", finalInputTokens)
+    put("maximum_message_tokens", maximumMessageTokens)
+    put("stripped_historical_reasoning_parts", strippedHistoricalReasoningParts)
+    put("dropped_old_groups", droppedOldGroups)
+    put("dropped_messages", droppedMessages)
+    put("output_clamped", outputClamped)
+    overflowKind?.let { put("overflow_kind", it.name) }
+}
+
+private fun sanitizeMemoryDropReasonCounts(counts: Map<String, Int>): Map<String, Int> {
+    if (counts.isEmpty()) return emptyMap()
+    val sanitized = linkedMapOf<String, Long>()
+    counts.forEach { (rawReason, rawCount) ->
+        if (rawCount <= 0) return@forEach
+        val normalized = rawReason.trim().lowercase()
+        val reason = normalized.takeIf(KNOWN_MEMORY_DROP_REASONS::contains) ?: "other"
+        sanitized[reason] = (sanitized[reason] ?: 0L) + rawCount.toLong()
+    }
+    return sanitized.toSortedMap().mapValues { (_, count) ->
+        count.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+    }
+}
+
+private fun saturatedTokenSum(left: Int, right: Int): Int =
+    (left.coerceAtLeast(0).toLong() + right.coerceAtLeast(0).toLong())
+        .coerceAtMost(Int.MAX_VALUE.toLong())
+        .toInt()
+
 object RequestBreakdownDiagnosticsStore {
+    /**
+     * [includeHistory] controls ordinary pre-provider snapshots. A rejected hard-gate attempt is
+     * always retained in the same bounded, name-redacted history because no provider usage event
+     * will arrive later to persist it.
+     */
     @Synchronized
     fun write(
         filesDir: File,
@@ -384,7 +587,10 @@ object RequestBreakdownDiagnosticsStore {
                 entry,
             )
             writeAtomically(destination, payload)
-            if (!includeHistory) return@runCatching
+            val rejectedByContextGate = diagnostic.contextGateAttempts.any { attempt ->
+                attempt.status != RequestContextGateStatus.SUCCESS
+            }
+            if (!includeHistory && !rejectedByContextGate) return@runCatching
 
             val historyDestination = File(directory, REQUEST_BREAKDOWN_HISTORY_FILE)
             // The bounded history is for numeric cache trends. User-defined external tool/skill
@@ -407,7 +613,9 @@ object RequestBreakdownDiagnosticsStore {
                     put("entries", JsonArray(historyEntries))
                     put(
                         "privacy_note",
-                        "Bounded aggregate metrics only; no HMAC, payload text, tool name, or skill name is persisted.",
+                        "Bounded aggregate metrics and non-reversible random-key correlation " +
+                            "hashes/handles only; no payload/query text, application UUID, " +
+                            "memory id, tool name, or skill name is persisted.",
                     )
                 },
             )
@@ -483,11 +691,15 @@ private fun List<Tool>.toToolSchemaPayloads(): List<ToolSchemaPayload> = map { t
     ToolSchemaPayload(
         name = tool.name,
         description = tool.description,
-        schema = runCatching {
+        schema = try {
             tool.parameters()?.let { schema ->
                 requestBreakdownJson.encodeToString(InputSchema.serializer(), schema)
             }.orEmpty()
-        }.getOrDefault(""),
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            ""
+        },
     )
 }
 

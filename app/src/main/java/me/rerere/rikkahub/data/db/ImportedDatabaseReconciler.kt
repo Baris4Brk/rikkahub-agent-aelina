@@ -3,9 +3,31 @@ package me.rerere.rikkahub.data.db
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.util.Log
+import java.io.File
+import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.util.UUID
 import me.rerere.rikkahub.data.db.fts.MEMORY_FTS_BACKFILL_SQL
 import me.rerere.rikkahub.data.db.fts.MEMORY_FTS_PORTABLE_CREATE_SQL
 import me.rerere.rikkahub.data.db.fts.MEMORY_FTS_TRIGGER_SQL
+import me.rerere.rikkahub.data.db.migrations.MEMORY_V44_EVIDENCE_INDEX_SQL
+import me.rerere.rikkahub.data.db.migrations.MEMORY_V44_OLD_CAPTURE_UNIQUE_INDEX
+import me.rerere.rikkahub.data.db.migrations.MEMORY_V44_SCOPED_CAPTURE_UNIQUE_INDEX_SQL
+import me.rerere.rikkahub.data.db.migrations.MEMORY_V44_SOURCE_TOMBSTONE_BACKFILL_SQL
+import me.rerere.rikkahub.data.db.migrations.MEMORY_V44_SOURCE_TOMBSTONES_TABLE_SQL
+import me.rerere.rikkahub.data.db.migrations.MEMORY_V45_OBSERVER_SCHEMA_SQL
+import me.rerere.rikkahub.data.db.migrations.MEMORY_V46_DREAM_RUN_COLUMNS
+import me.rerere.rikkahub.data.db.migrations.MEMORY_V46_SCOPE_STATE_COLUMNS
+import me.rerere.rikkahub.data.db.migrations.MEMORY_V46_SYNTHESIS_TABLE_AND_INDEX_SQL
+import me.rerere.rikkahub.data.db.migrations.LEARNING_V46_COMMAND_AUTHORITY_COLUMNS
+import me.rerere.rikkahub.data.db.migrations.LEARNING_V46_EXECUTION_SCOPE_COLUMNS
+import me.rerere.rikkahub.data.db.migrations.LEARNING_V46_OUTBOX_P1_COLUMNS
+import me.rerere.rikkahub.data.db.migrations.LEARNING_V46_OUTBOX_INDEX_SQL
+import me.rerere.rikkahub.data.db.migrations.LEARNING_V46_OUTBOX_TABLE_SQL
+import me.rerere.rikkahub.data.db.migrations.LEARNING_V46_P1_AUTHORITY_INDEX_SQL
+import me.rerere.rikkahub.data.db.migrations.LEARNING_V46_SENTINEL_PAYLOAD_COLUMNS
+import me.rerere.rikkahub.data.db.migrations.LEARNING_V46_SOURCE_AUTHORITY_TABLE_AND_INDEX_SQL
+import me.rerere.rikkahub.data.db.migrations.LEARNING_V46_STREAM_INIT_EVENT_ID
 
 /**
  * Reconciles a database file that was just restored from a backup so Room can open it.
@@ -47,36 +69,53 @@ object ImportedDatabaseReconciler {
 
     /**
      * Room's schema version and identity hash for [AppDatabase]. Both are copied verbatim
-     * from app/schemas/me.rerere.rikkahub.data.db.AppDatabase/43.json. When the schema
+     * from app/schemas/me.rerere.rikkahub.data.db.AppDatabase/46.json. When the schema
      * version is bumped, update BOTH constants (and the table DDL below if the fork-only
      * tables changed) or this reconciliation will silently stop matching.
      */
-    internal const val EXPECTED_VERSION = 43
-    // Copied verbatim from app/schemas/.../43.json after the serial Room schema export.
-    internal const val EXPECTED_IDENTITY_HASH = "993e84f6266c165ffd196d30acb1969d"
-    internal const val PRE_STORAGE_MODE_V35_IDENTITY_HASH = "2a74d694211f0df9f9094c7571ec71dd"
+    internal const val EXPECTED_VERSION = 46
+    internal const val EXPECTED_IDENTITY_HASH = "670bbac26f583e5c08349fe9a950570b"
+    internal const val PRE_P1_V46_IDENTITY_HASH = "102b6a6fc51154abdac792d133d461a3"
+    internal const val PRE_LEARNING_V46_IDENTITY_HASH = "8ef3ddc71d855013202bb11b0493d6e6"
 
     internal enum class ReconcilePlan {
         SKIP,
-        CURRENT_V35_DELTA,
+        CURRENT_V46_P1_DELTA,
+        CURRENT_V46_P0_P1_DELTA,
         FULL_COMPATIBILITY,
+        REFUSE_UNKNOWN_CURRENT,
     }
 
     /**
-     * Same-version development builds cannot use a Room migration. Recognise the one v35
-     * schema that was installed before workspace storage_mode was added and apply only that
-     * additive delta. This path must not touch MemoryEntity: its FTS5 triggers are backed by
-     * the bundled requery SQLite runtime, while this pre-Room reconciler necessarily opens the
-     * file through the device framework SQLite (which does not provide FTS5 on some devices).
+     * Same-version development builds cannot use a Room migration. Only the exact frozen
+     * Dream-only and P0-Learning v46 identities may receive their monotonic, additive deltas.
+     * Any other current-version identity is refused rather than guessed compatible and stamped.
      */
     internal fun reconcilePlan(version: Int, identityHash: String?): ReconcilePlan = when {
         version > EXPECTED_VERSION -> ReconcilePlan.SKIP
         version == EXPECTED_VERSION && identityHash == EXPECTED_IDENTITY_HASH ->
             ReconcilePlan.SKIP
-        version == EXPECTED_VERSION && version == 35 &&
-            identityHash == PRE_STORAGE_MODE_V35_IDENTITY_HASH ->
-            ReconcilePlan.CURRENT_V35_DELTA
+        version == EXPECTED_VERSION && identityHash == PRE_P1_V46_IDENTITY_HASH ->
+            ReconcilePlan.CURRENT_V46_P1_DELTA
+        version == EXPECTED_VERSION && identityHash == PRE_LEARNING_V46_IDENTITY_HASH ->
+            ReconcilePlan.CURRENT_V46_P0_P1_DELTA
+        version == EXPECTED_VERSION -> ReconcilePlan.REFUSE_UNKNOWN_CURRENT
         else -> ReconcilePlan.FULL_COMPATIBILITY
+    }
+
+    /** Pure fail-closed gate shared by the staged-file API and its local JVM contract tests. */
+    internal fun stagedReconcilePlanOrThrow(
+        version: Int,
+        identityHash: String?,
+    ): ReconcilePlan {
+        check(version == EXPECTED_VERSION) {
+            "Staged cold restore requires the current database version"
+        }
+        return reconcilePlan(version, identityHash).also { plan ->
+            check(plan == ReconcilePlan.SKIP) {
+                "Staged database does not have the final current-version identity"
+            }
+        }
     }
 
     /**
@@ -97,7 +136,7 @@ object ImportedDatabaseReconciler {
         "CREATE INDEX IF NOT EXISTS `idx_runs_kind_dom` ON `agent_runs` (`kind`, `domain_id`)",
         "CREATE INDEX IF NOT EXISTS `idx_runs_parent` ON `agent_runs` (`parent_run_id`)",
         "CREATE INDEX IF NOT EXISTS `idx_runs_updated_at` ON `agent_runs` (`updated_at_ms`)",
-        "CREATE TABLE IF NOT EXISTS `execution_records` (`id` TEXT NOT NULL, `trace_id` TEXT NOT NULL, `parent_execution_id` TEXT, `command_id` TEXT, `conversation_id` TEXT, `subject_id` TEXT NOT NULL, `subject_type` TEXT NOT NULL, `origin` TEXT NOT NULL, `capability_keys` TEXT NOT NULL, `resource_summary` TEXT NOT NULL, `runtime` TEXT NOT NULL, `idempotency_key` TEXT, `runtime_handle_summary` TEXT, `status` TEXT NOT NULL, `created_at_ms` INTEGER NOT NULL, `updated_at_ms` INTEGER NOT NULL, `started_at_ms` INTEGER, `heartbeat_at_ms` INTEGER, `finished_at_ms` INTEGER, `cancellation_result` TEXT, `terminal_detail` TEXT, PRIMARY KEY(`id`))",
+        "CREATE TABLE IF NOT EXISTS `execution_records` (`id` TEXT NOT NULL, `trace_id` TEXT NOT NULL, `parent_execution_id` TEXT, `command_id` TEXT, `conversation_id` TEXT, `learning_scope_kind` TEXT, `learning_scope_id` TEXT, `subject_id` TEXT NOT NULL, `subject_type` TEXT NOT NULL, `origin` TEXT NOT NULL, `capability_keys` TEXT NOT NULL, `resource_summary` TEXT NOT NULL, `runtime` TEXT NOT NULL, `idempotency_key` TEXT, `runtime_handle_summary` TEXT, `status` TEXT NOT NULL, `created_at_ms` INTEGER NOT NULL, `updated_at_ms` INTEGER NOT NULL, `started_at_ms` INTEGER, `heartbeat_at_ms` INTEGER, `finished_at_ms` INTEGER, `cancellation_result` TEXT, `terminal_detail` TEXT, PRIMARY KEY(`id`))",
         "CREATE INDEX IF NOT EXISTS `idx_execution_records_status` ON `execution_records` (`status`)",
         "CREATE INDEX IF NOT EXISTS `idx_execution_records_trace` ON `execution_records` (`trace_id`)",
         "CREATE INDEX IF NOT EXISTS `idx_execution_records_parent` ON `execution_records` (`parent_execution_id`)",
@@ -110,6 +149,8 @@ object ImportedDatabaseReconciler {
         "DROP INDEX IF EXISTS `index_alarms_enabled_nextFireAtMs`",
         "CREATE TABLE IF NOT EXISTS `pending_chat_commands` (" +
             "`id` TEXT NOT NULL, `schemaVersion` INTEGER NOT NULL, `conversationId` TEXT NOT NULL, `authoritySubjectId` TEXT, " +
+            "`assistantIdSnapshot` TEXT, `lineageId` TEXT, `parentCommandId` TEXT, " +
+            "`branchAnchorMessageId` TEXT, `stateVersion` INTEGER NOT NULL DEFAULT 0, " +
             "`type` TEXT NOT NULL, `payloadJson` TEXT NOT NULL, `state` TEXT NOT NULL, " +
             "`priority` INTEGER NOT NULL, `sequence` INTEGER NOT NULL, " +
             "`expectedTargetVersion` INTEGER, `expectedBranchHeadMessageId` TEXT, `dedupeKey` TEXT, " +
@@ -436,6 +477,189 @@ object ImportedDatabaseReconciler {
         ).forEach(db::execSQL)
     }
 
+    /** Same-version v44 imports need scope-safe capture identity and source invalidation state. */
+    private fun ensureMemoryV44Schema(db: SQLiteDatabase) {
+        ensureColumns(
+            db,
+            "memory_captures",
+            listOf("source_identities_json" to "TEXT NOT NULL DEFAULT '[]'"),
+        )
+        ensureColumns(
+            db,
+            "MemoryEntity",
+            listOf("source_identities_json" to "TEXT NOT NULL DEFAULT '[]'"),
+        )
+        ensureColumns(
+            db,
+            "memory_revisions",
+            listOf("source_identities_json" to "TEXT NOT NULL DEFAULT '[]'"),
+        )
+        db.execSQL("DROP INDEX IF EXISTS `$MEMORY_V44_OLD_CAPTURE_UNIQUE_INDEX`")
+        db.execSQL(MEMORY_V44_SCOPED_CAPTURE_UNIQUE_INDEX_SQL)
+
+        ensureColumns(
+            db,
+            "memory_evidence",
+            listOf(
+                "evidence_group_id" to "TEXT NOT NULL DEFAULT ''",
+                "source_digest" to "TEXT NOT NULL DEFAULT ''",
+                "source_kind" to "TEXT NOT NULL DEFAULT 'TEXT'",
+            ),
+        )
+        db.execSQL(
+            "UPDATE `memory_evidence` SET `evidence_group_id` = `id` " +
+                "WHERE `evidence_group_id` = ''",
+        )
+        MEMORY_V44_EVIDENCE_INDEX_SQL.forEach(db::execSQL)
+
+        db.execSQL(MEMORY_V44_SOURCE_TOMBSTONES_TABLE_SQL)
+        MEMORY_V44_SOURCE_TOMBSTONE_BACKFILL_SQL.forEach(db::execSQL)
+    }
+
+    /** Same-version v45 imports need the dormant Observer ledger Room expects. */
+    private fun ensureMemoryV45Schema(db: SQLiteDatabase) {
+        MEMORY_V45_OBSERVER_SCHEMA_SQL.forEach(db::execSQL)
+    }
+
+    /** Same-version v46 imports need the dormant Shadow Synthesis schema Room expects. */
+    private fun ensureMemoryV46Schema(db: SQLiteDatabase) {
+        ensureColumns(db, "memory_scope_state", MEMORY_V46_SCOPE_STATE_COLUMNS)
+        ensureColumns(db, "dream_runs", MEMORY_V46_DREAM_RUN_COLUMNS)
+        MEMORY_V46_SYNTHESIS_TABLE_AND_INDEX_SQL.forEach(db::execSQL)
+    }
+
+    private fun tableExists(db: SQLiteDatabase, table: String): Boolean =
+        db.rawQuery(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+            arrayOf(table),
+        ).use { it.moveToFirst() }
+
+    private fun requireP1LearningAuthoritySchema(db: SQLiteDatabase) {
+        val requiredAdditiveColumns = mapOf(
+            "pending_chat_commands" to
+                LEARNING_V46_COMMAND_AUTHORITY_COLUMNS.mapTo(linkedSetOf()) { it.first },
+            "execution_records" to
+                LEARNING_V46_EXECUTION_SCOPE_COLUMNS.mapTo(linkedSetOf()) { it.first },
+            "learning_outbox" to
+                LEARNING_V46_OUTBOX_P1_COLUMNS.mapTo(linkedSetOf()) { it.first },
+        )
+        requiredAdditiveColumns.forEach { (table, requiredColumns) ->
+            check(tableExists(db, table)) { "Missing P1 Learning authority host table" }
+            val actualColumns = db.rawQuery("PRAGMA table_info(`$table`)", null).use { cursor ->
+                val name = cursor.getColumnIndexOrThrow("name")
+                buildSet { while (cursor.moveToNext()) add(cursor.getString(name)) }
+            }
+            check(actualColumns.containsAll(requiredColumns)) {
+                "Missing P1 Learning authority column"
+            }
+        }
+        val expectedTables = mapOf(
+            "learning_conversation_source_authority" to setOf(
+                "scope_kind",
+                "scope_id",
+                "conversation_id",
+                "assistant_id_snapshot",
+                "source_revision",
+                "previous_source_revision",
+                "source_state",
+                "change_kind",
+                "branch_head_message_id",
+                "branch_head_message_revision",
+                "occurred_at_ms",
+                "updated_at_ms",
+            ),
+            "learning_message_source_authority" to setOf(
+                "scope_kind",
+                "scope_id",
+                "conversation_id",
+                "message_id",
+                "message_role",
+                "source_revision",
+                "previous_source_revision",
+                "source_state",
+                "change_kind",
+                "payload_integrity_sha256",
+                "occurred_at_ms",
+                "updated_at_ms",
+            ),
+        )
+        expectedTables.forEach { (table, expectedColumns) ->
+            check(tableExists(db, table)) { "Missing P1 Learning authority table" }
+            val actualColumns = db.rawQuery("PRAGMA table_info(`$table`)", null).use { cursor ->
+                val name = cursor.getColumnIndexOrThrow("name")
+                buildSet { while (cursor.moveToNext()) add(cursor.getString(name)) }
+            }
+            check(actualColumns == expectedColumns) { "Invalid P1 Learning authority columns" }
+        }
+        val requiredIndexes = LEARNING_V46_P1_AUTHORITY_INDEX_SQL
+            .plus(LEARNING_V46_SOURCE_AUTHORITY_TABLE_AND_INDEX_SQL)
+            .filter { it.startsWith("CREATE INDEX") }
+            .mapNotNull { statement ->
+                Regex("`([^`]+)`").find(statement)?.groupValues?.get(1)
+            }
+        requiredIndexes.forEach { index ->
+            val present = db.rawQuery(
+                "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ? LIMIT 1",
+                arrayOf(index),
+            ).use { cursor -> cursor.moveToFirst() }
+            check(present) { "Missing P1 Learning authority index" }
+        }
+    }
+
+    /** Framework-SQLite mirror of the runtime reader's bounded stream integrity checks. */
+    private fun requireHealthyLearningOutbox(db: SQLiteDatabase) {
+        val summary = db.rawQuery(
+            "SELECT COUNT(*), " +
+                "SUM(CASE WHEN `event_type` = 'STREAM_INIT' THEN 1 ELSE 0 END), " +
+                "COUNT(DISTINCT `stream_id`) FROM `learning_outbox`",
+            null,
+        ).use { cursor ->
+            check(cursor.moveToFirst()) { "Learning outbox health query returned no row" }
+            Triple(cursor.getLong(0), cursor.getLong(1), cursor.getLong(2))
+        }
+        check(summary.first > 0L) { "Learning outbox has no stream sentinel" }
+        check(summary.second == 1L) { "Learning outbox must have exactly one stream sentinel" }
+        check(summary.third == 1L) { "Learning outbox contains mixed streams" }
+        val payloadProjection = LEARNING_V46_SENTINEL_PAYLOAD_COLUMNS.joinToString(", ") {
+            "`$it`"
+        }
+        db.rawQuery(
+            "SELECT `seq`, `stream_id`, `event_id`, `event_schema_version`, " +
+                payloadProjection + " " +
+                "FROM `learning_outbox` WHERE `event_type` = 'STREAM_INIT' LIMIT 2",
+            null,
+        ).use { cursor ->
+            check(cursor.moveToFirst()) { "Learning outbox sentinel disappeared" }
+            check(cursor.getLong(0) > 0L) { "Learning outbox sentinel has invalid sequence" }
+            check(runCatching { UUID.fromString(cursor.getString(1)) }.isSuccess) {
+                "Learning outbox sentinel has invalid stream ID"
+            }
+            check(cursor.getString(2) == LEARNING_V46_STREAM_INIT_EVENT_ID) {
+                "Learning outbox sentinel has invalid event ID"
+            }
+            check(cursor.getInt(3) == 1) { "Learning outbox sentinel has invalid schema" }
+            for (column in 4 until cursor.columnCount) {
+                check(cursor.isNull(column)) { "Learning outbox sentinel contains payload fields" }
+            }
+            check(!cursor.moveToNext()) { "Learning outbox contains multiple sentinels" }
+        }
+    }
+
+    private fun insertLearningOutboxStreamSentinel(
+        db: SQLiteDatabase,
+        streamId: String,
+        createdAtMs: Long,
+    ) {
+        require(runCatching { UUID.fromString(streamId) }.isSuccess)
+        require(createdAtMs >= 0L)
+        db.execSQL(
+            "INSERT INTO `learning_outbox` (" +
+                "`stream_id`, `event_id`, `event_type`, `event_schema_version`, " +
+                "`created_at_ms`) VALUES (?, ?, 'STREAM_INIT', 1, ?)",
+            arrayOf<Any>(streamId, LEARNING_V46_STREAM_INIT_EVENT_ID, createdAtMs),
+        )
+    }
+
     private fun ensureBrowserV34Schema(db: SQLiteDatabase) {
         listOf(
             "CREATE TABLE IF NOT EXISTS `browser_bookmarks` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `normalized_url` TEXT NOT NULL, `url` TEXT NOT NULL, `title` TEXT NOT NULL, `created_at_ms` INTEGER NOT NULL, `updated_at_ms` INTEGER NOT NULL)",
@@ -448,7 +672,7 @@ object ImportedDatabaseReconciler {
 
     private fun ensureExecutionV35Schema(db: SQLiteDatabase) {
         listOf(
-            "CREATE TABLE IF NOT EXISTS `execution_records` (`id` TEXT NOT NULL, `trace_id` TEXT NOT NULL, `parent_execution_id` TEXT, `command_id` TEXT, `conversation_id` TEXT, `subject_id` TEXT NOT NULL, `subject_type` TEXT NOT NULL, `origin` TEXT NOT NULL, `capability_keys` TEXT NOT NULL, `resource_summary` TEXT NOT NULL, `runtime` TEXT NOT NULL, `idempotency_key` TEXT, `runtime_handle_summary` TEXT, `status` TEXT NOT NULL, `created_at_ms` INTEGER NOT NULL, `updated_at_ms` INTEGER NOT NULL, `started_at_ms` INTEGER, `heartbeat_at_ms` INTEGER, `finished_at_ms` INTEGER, `cancellation_result` TEXT, `terminal_detail` TEXT, PRIMARY KEY(`id`))",
+            "CREATE TABLE IF NOT EXISTS `execution_records` (`id` TEXT NOT NULL, `trace_id` TEXT NOT NULL, `parent_execution_id` TEXT, `command_id` TEXT, `conversation_id` TEXT, `learning_scope_kind` TEXT, `learning_scope_id` TEXT, `subject_id` TEXT NOT NULL, `subject_type` TEXT NOT NULL, `origin` TEXT NOT NULL, `capability_keys` TEXT NOT NULL, `resource_summary` TEXT NOT NULL, `runtime` TEXT NOT NULL, `idempotency_key` TEXT, `runtime_handle_summary` TEXT, `status` TEXT NOT NULL, `created_at_ms` INTEGER NOT NULL, `updated_at_ms` INTEGER NOT NULL, `started_at_ms` INTEGER, `heartbeat_at_ms` INTEGER, `finished_at_ms` INTEGER, `cancellation_result` TEXT, `terminal_detail` TEXT, PRIMARY KEY(`id`))",
             "CREATE INDEX IF NOT EXISTS `idx_execution_records_status` ON `execution_records` (`status`)",
             "CREATE INDEX IF NOT EXISTS `idx_execution_records_trace` ON `execution_records` (`trace_id`)",
             "CREATE INDEX IF NOT EXISTS `idx_execution_records_parent` ON `execution_records` (`parent_execution_id`)",
@@ -653,17 +877,43 @@ object ImportedDatabaseReconciler {
         )
     }
 
-    private fun reconcileCurrentV35Delta(db: SQLiteDatabase) {
+    private fun reconcileCurrentV46LearningDelta(
+        db: SQLiteDatabase,
+        includeP0Delta: Boolean,
+        newStreamId: String = UUID.randomUUID().toString(),
+    ) {
         db.beginTransaction()
         try {
-            ensureColumns(
-                db,
-                "workspaces",
-                listOf("storage_mode" to "TEXT NOT NULL DEFAULT 'PRIVATE'"),
-            )
-            ensureExecutionV35Schema(db)
-            ensureCapabilityGrantsV35Schema(db)
-            ensurePendingCommandAuthorityV39Schema(db)
+            check(!tableExists(db, "learning_conversation_source_authority") &&
+                !tableExists(db, "learning_message_source_authority")
+            ) {
+                "Pre-P1 v46 identity unexpectedly contains Learning source authority tables"
+            }
+            if (includeP0Delta) {
+                check(!tableExists(db, "learning_outbox")) {
+                    "Pre-Learning v46 identity unexpectedly contains a Learning outbox"
+                }
+            } else {
+                check(tableExists(db, "learning_outbox")) {
+                    "Pre-P1 v46 identity is missing its Learning outbox"
+                }
+            }
+            ensureColumns(db, "pending_chat_commands", LEARNING_V46_COMMAND_AUTHORITY_COLUMNS)
+            ensureColumns(db, "execution_records", LEARNING_V46_EXECUTION_SCOPE_COLUMNS)
+            db.execSQL(LEARNING_V46_OUTBOX_TABLE_SQL)
+            ensureColumns(db, "learning_outbox", LEARNING_V46_OUTBOX_P1_COLUMNS)
+            LEARNING_V46_P1_AUTHORITY_INDEX_SQL.forEach(db::execSQL)
+            LEARNING_V46_OUTBOX_INDEX_SQL.forEach(db::execSQL)
+            LEARNING_V46_SOURCE_AUTHORITY_TABLE_AND_INDEX_SQL.forEach(db::execSQL)
+            if (includeP0Delta) {
+                insertLearningOutboxStreamSentinel(
+                    db = db,
+                    streamId = newStreamId,
+                    createdAtMs = System.currentTimeMillis(),
+                )
+            }
+            requireHealthyLearningOutbox(db)
+            requireP1LearningAuthoritySchema(db)
             stampCurrentIdentity(db)
             db.setTransactionSuccessful()
         } finally {
@@ -682,6 +932,217 @@ object ImportedDatabaseReconciler {
             Log.i(TAG, "reconcile: no database file at ${dbFile.absolutePath}, skipping")
             return
         }
+        reconcileFile(dbFile, swallowFailures = true)
+    }
+
+    /**
+     * Reconciles one already-staged database file and throws on every refusal or failure.
+     *
+     * Unlike [reconcile], this API never logs-and-continues. It is intended only for a private
+     * same-directory cold-restore candidate before the candidate can replace the live database.
+     */
+    @Throws(Exception::class)
+    fun reconcileStagedFileOrThrow(
+        databaseFile: File,
+        expectedStreamId: String,
+        expectedHeadSeq: Long,
+    ) {
+        requireAuthorityStreamDescriptor(expectedStreamId, expectedHeadSeq)
+        requireSafeStagedFile(databaseFile)
+        val plan = SQLiteDatabase.openDatabase(
+            databaseFile.absolutePath,
+            null,
+            SQLiteDatabase.OPEN_READONLY,
+        ).use { db ->
+            val version = db.version
+            check(version == EXPECTED_VERSION) {
+                "Staged cold restore requires the current database version"
+            }
+            reconcilePlan(version, readRoomIdentityHash(db)).also { resolved ->
+                check(resolved == ReconcilePlan.SKIP ||
+                    resolved == ReconcilePlan.CURRENT_V46_P1_DELTA ||
+                    resolved == ReconcilePlan.CURRENT_V46_P0_P1_DELTA
+                ) {
+                    "Staged database identity is outside the exact cold-restore allowlist"
+                }
+            }
+        }
+        when (plan) {
+            ReconcilePlan.CURRENT_V46_P0_P1_DELTA -> {
+                check(expectedHeadSeq == 1L) {
+                    "A pre-Learning staged database can only create its stream sentinel"
+                }
+                SQLiteDatabase.openDatabase(
+                    databaseFile.absolutePath,
+                    null,
+                    SQLiteDatabase.OPEN_READWRITE,
+                ).use { db ->
+                    reconcileCurrentV46LearningDelta(
+                        db = db,
+                        includeP0Delta = true,
+                        newStreamId = expectedStreamId,
+                    )
+                }
+            }
+            ReconcilePlan.CURRENT_V46_P1_DELTA ->
+                SQLiteDatabase.openDatabase(
+                    databaseFile.absolutePath,
+                    null,
+                    SQLiteDatabase.OPEN_READWRITE,
+                ).use { db ->
+                    reconcileCurrentV46LearningDelta(db = db, includeP0Delta = false)
+                }
+            else -> reconcileFile(databaseFile, swallowFailures = false)
+        }
+        normalizeStagedToSingleFileOrThrow(databaseFile)
+        validateStagedFileOrThrow(databaseFile, expectedStreamId, expectedHeadSeq)
+    }
+
+    /** Reopens a reconciled candidate read-only and throws unless its identity is safe to swap. */
+    @Throws(Exception::class)
+    fun validateStagedFileOrThrow(
+        databaseFile: File,
+        expectedStreamId: String,
+        expectedHeadSeq: Long,
+    ) {
+        requireAuthorityStreamDescriptor(expectedStreamId, expectedHeadSeq)
+        requireSafeStagedFile(databaseFile)
+        validateCurrentAuthorityFileOrThrow(
+            databaseFile = databaseFile,
+            expectedStreamId = expectedStreamId,
+            expectedHeadSeq = expectedHeadSeq,
+        )
+    }
+
+    /**
+     * Validates the exact live main database after a cold-start swap.
+     *
+     * This is deliberately separate from [validateStagedFileOrThrow]: allowing the installed
+     * filename in the staged reconciler would let a caller mutate the live database through a
+     * migration-only API. This method is read-only and accepts only `<app data>/databases/rikka_hub`.
+     */
+    @Throws(Exception::class)
+    fun validateInstalledFileOrThrow(
+        databaseFile: File,
+        expectedStreamId: String,
+        expectedHeadSeq: Long,
+    ) {
+        requireAuthorityStreamDescriptor(expectedStreamId, expectedHeadSeq)
+        requireSafeInstalledFile(databaseFile)
+        validateCurrentAuthorityFileOrThrow(
+            databaseFile = databaseFile,
+            expectedStreamId = expectedStreamId,
+            expectedHeadSeq = expectedHeadSeq,
+        )
+    }
+
+    private fun validateCurrentAuthorityFileOrThrow(
+        databaseFile: File,
+        expectedStreamId: String,
+        expectedHeadSeq: Long,
+    ) {
+        SQLiteDatabase.openDatabase(
+            databaseFile.absolutePath,
+            null,
+            SQLiteDatabase.OPEN_READONLY,
+        ).use { db ->
+            val version = db.version
+            check(version == EXPECTED_VERSION) {
+                "Reconciled staged database is not at the current version"
+            }
+            check(readRoomIdentityHash(db) == EXPECTED_IDENTITY_HASH) {
+                "Staged current-version database identity was not reconciled"
+            }
+            db.rawQuery("PRAGMA quick_check(1)", null).use { cursor ->
+                check(cursor.moveToFirst() && cursor.getString(0) == "ok" && !cursor.moveToNext()) {
+                    "Staged database failed SQLite quick_check"
+                }
+            }
+            db.rawQuery("PRAGMA foreign_key_check", null).use { cursor ->
+                check(!cursor.moveToFirst()) { "Staged database failed foreign_key_check" }
+            }
+            requireHealthyLearningOutbox(db)
+            requireP1LearningAuthoritySchema(db)
+            db.rawQuery(
+                "SELECT `seq` FROM `learning_outbox` " +
+                    "WHERE `stream_id` = ? AND `event_type` = 'STREAM_INIT'",
+                arrayOf(expectedStreamId),
+            ).use { cursor ->
+                check(cursor.moveToFirst() && cursor.getLong(0) == 1L && !cursor.moveToNext()) {
+                    "Staged database authority stream does not start with its sentinel"
+                }
+            }
+            db.rawQuery(
+                "SELECT COUNT(*), MIN(`seq`), MAX(`seq`), COUNT(DISTINCT `seq`) " +
+                    "FROM `learning_outbox` WHERE `stream_id` = ?",
+                arrayOf(expectedStreamId),
+            ).use { cursor ->
+                check(cursor.moveToFirst()) { "Authority stream query returned no row" }
+                val count = cursor.getLong(0)
+                val minimum = cursor.getLong(1)
+                val maximum = cursor.getLong(2)
+                val distinct = cursor.getLong(3)
+                check(minimum == 1L && maximum == expectedHeadSeq &&
+                    count == expectedHeadSeq && distinct == count
+                ) {
+                    "Staged database authority stream does not match the manifest"
+                }
+            }
+        }
+    }
+
+    private fun requireAuthorityStreamDescriptor(
+        expectedStreamId: String,
+        expectedHeadSeq: Long,
+    ) {
+        require(UUID.fromString(expectedStreamId).toString() == expectedStreamId) {
+            "Expected authority stream ID is not canonical"
+        }
+        require(expectedHeadSeq > 0L) { "Expected authority stream head is invalid" }
+    }
+
+    private fun normalizeStagedToSingleFileOrThrow(databaseFile: File) {
+        requireSafeStagedFile(databaseFile)
+        SQLiteDatabase.openDatabase(
+            databaseFile.absolutePath,
+            null,
+            SQLiteDatabase.OPEN_READWRITE,
+        ).use { db ->
+            db.rawQuery("PRAGMA wal_checkpoint(TRUNCATE)", null).use { cursor ->
+                check(cursor.moveToFirst() && cursor.getInt(0) == 0) {
+                    "Staged database WAL checkpoint was busy"
+                }
+                val logFrames = cursor.getLong(1)
+                val checkpointedFrames = cursor.getLong(2)
+                check(logFrames == checkpointedFrames ||
+                    (logFrames == -1L && checkpointedFrames == -1L)
+                ) {
+                    "Staged database WAL checkpoint was incomplete"
+                }
+            }
+            db.rawQuery("PRAGMA journal_mode=DELETE", null).use { cursor ->
+                check(cursor.moveToFirst() && cursor.getString(0).equals("delete", true)) {
+                    "Staged database could not enter single-file journal mode"
+                }
+            }
+        }
+        val stagedPath = databaseFile.toPath().toAbsolutePath().normalize()
+        for (suffix in listOf("-wal", "-shm", "-journal")) {
+            val sidecar = stagedPath.resolveSibling("${stagedPath.fileName}$suffix")
+            if (!Files.exists(sidecar, LinkOption.NOFOLLOW_LINKS)) continue
+            check(!Files.isSymbolicLink(sidecar) &&
+                Files.isRegularFile(sidecar, LinkOption.NOFOLLOW_LINKS)
+            ) {
+                "Staged database sidecar is unsafe"
+            }
+            check(Files.deleteIfExists(sidecar)) { "Staged database sidecar cleanup failed" }
+        }
+    }
+
+    private fun reconcileFile(
+        dbFile: File,
+        swallowFailures: Boolean,
+    ) {
         try {
             SQLiteDatabase.openDatabase(
                 dbFile.absolutePath,
@@ -703,12 +1164,31 @@ object ImportedDatabaseReconciler {
                         }
                         return
                     }
-                    ReconcilePlan.CURRENT_V35_DELTA -> {
-                        reconcileCurrentV35Delta(db)
-                        Log.i(TAG, "reconcile: applied same-version v35 workspace-storage delta")
+                    ReconcilePlan.CURRENT_V46_P1_DELTA -> {
+                        reconcileCurrentV46LearningDelta(db, includeP0Delta = false)
+                        Log.i(TAG, "reconcile: applied exact pre-P1 v46 delta")
+                        return
+                    }
+                    ReconcilePlan.CURRENT_V46_P0_P1_DELTA -> {
+                        reconcileCurrentV46LearningDelta(db, includeP0Delta = true)
+                        Log.i(TAG, "reconcile: applied exact pre-Learning v46 P0+P1 delta")
+                        return
+                    }
+                    ReconcilePlan.REFUSE_UNKNOWN_CURRENT -> {
+                        Log.e(
+                            TAG,
+                            "reconcile: refusing unknown current-v46 identity; left untouched",
+                        )
                         return
                     }
                     ReconcilePlan.FULL_COMPATIBILITY -> Unit
+                }
+
+                // A lower-version import normally has no Learning table and reaches it through
+                // 45 -> 46. If a preview/foreign table is already present, verify it before any
+                // compatibility writes; never repair a missing sentinel or merge two streams.
+                if (tableExists(db, "learning_outbox")) {
+                    requireHealthyLearningOutbox(db)
                 }
 
                 db.beginTransaction()
@@ -748,6 +1228,9 @@ object ImportedDatabaseReconciler {
                     if (version >= 41) ensureToolShortcutV41Schema(db)
                     if (version >= 42) ensureOwnerHostV42Schema(db)
                     if (version >= 43) ensureMemoryV43Schema(db)
+                    if (version >= 44) ensureMemoryV44Schema(db)
+                    if (version >= 45) ensureMemoryV45Schema(db)
+                    if (version >= 46) ensureMemoryV46Schema(db)
 
                     // Older backups must keep their original user_version so Room can run
                     // every real migration (including 28→29). Precreating fork-only tables
@@ -755,11 +1238,10 @@ object ImportedDatabaseReconciler {
                     // would silently skip migrations and risk losing schema changes. Only a
                     // database already at the current Room version receives the fork identity
                     // hash, because Room will not run a migration in that case.
-                    if (version == EXPECTED_VERSION) {
-                        stampCurrentIdentity(db)
-                    } else {
-                        Log.i(TAG, "reconcile: kept older user_version=$version for Room migrations")
+                    check(version != EXPECTED_VERSION) {
+                        "Unknown current schema must never be compatibility-stamped"
                     }
+                    Log.i(TAG, "reconcile: kept older user_version=$version for Room migrations")
                     db.setTransactionSuccessful()
                 } finally {
                     db.endTransaction()
@@ -767,9 +1249,56 @@ object ImportedDatabaseReconciler {
                 Log.i(TAG, "reconcile: reconciled imported db (version=$version)")
             }
         } catch (t: Throwable) {
+            if (!swallowFailures) throw t
             // Never let reconciliation break the restore. Worst case is the pre-existing
             // behaviour (a crash on next open); the user's rows are still on disk.
             Log.w(TAG, "reconcile: failed to reconcile imported db", t)
         }
     }
+
+    private fun requireSafeStagedFile(databaseFile: File) {
+        val path = requireSafeDatabaseFile(databaseFile)
+        check(STAGED_DATABASE_FILE.matches(path.fileName.toString())) {
+            "Staged database file name is outside the cold-restore contract"
+        }
+    }
+
+    private fun requireSafeInstalledFile(databaseFile: File) {
+        val path = requireSafeDatabaseFile(databaseFile)
+        check(path.fileName.toString() == INSTALLED_DATABASE_FILE) {
+            "Installed database file name is outside the cold-restore contract"
+        }
+    }
+
+    private fun requireSafeDatabaseFile(databaseFile: File): java.nio.file.Path {
+        require(databaseFile.isAbsolute && databaseFile.path.isNotBlank()) {
+            "Database path must be absolute"
+        }
+        val path = databaseFile.toPath().toAbsolutePath().normalize()
+        check(!Files.isSymbolicLink(path)) { "Database must not be a symbolic link" }
+        check(Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
+            "Database must be a regular file"
+        }
+        check(Files.isReadable(path) && Files.isWritable(path)) {
+            "Database must be readable and writable"
+        }
+        check(databaseFile.canonicalFile.toPath().normalize() == path) {
+            "Database path must be canonical"
+        }
+        val parent = path.parent ?: error("Database has no parent")
+        check(parent.fileName.toString() == "databases") {
+            "Database is not in an app databases directory"
+        }
+        check(!Files.isSymbolicLink(parent) &&
+            Files.isDirectory(parent, LinkOption.NOFOLLOW_LINKS) &&
+            parent.toFile().canonicalFile.toPath().normalize() == parent
+        ) {
+            "Database parent is unsafe"
+        }
+        return path
+    }
+
+    private val STAGED_DATABASE_FILE =
+        Regex("\\.rikka_hub\\.restore_[0-9a-f]{32}\\.ready")
+    private const val INSTALLED_DATABASE_FILE = "rikka_hub"
 }

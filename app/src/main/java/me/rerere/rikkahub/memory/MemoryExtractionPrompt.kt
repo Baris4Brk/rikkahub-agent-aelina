@@ -66,7 +66,9 @@ Allowed actions are create, update, merge, and ignore. Never propose delete.
 For create, targetIds and expectedRevisions must be empty arrays.
 For update or merge, target only memory IDs present in existingMemories and copy their revisions.
 For update, use exactly one target ID. For merge, use at least two target IDs.
-Every proposal must cite evidenceMessageIds using evidenceRef values present in turns.
+Every proposal must cite evidenceMessageIds using evidenceRef values present in turns. Each
+evidenceRef represents one atomic local source group; cite it only when that complete turn supports
+the proposal. The host expands it to content-bound user/assistant source identities after parsing.
 title must contain 1 to 80 characters and content must contain 8 to 2000 characters.
 tags must contain at most eight strings, each no longer than 32 characters.
 importance and confidence must be JSON numbers between 0.0 and 1.0 inclusive.

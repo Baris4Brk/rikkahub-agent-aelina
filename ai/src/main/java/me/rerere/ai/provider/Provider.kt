@@ -64,6 +64,19 @@ interface Provider<T : ProviderSetting> {
 }
 
 /**
+ * Deliberate host capability marker for provider transports whose cancellation boundary has a
+ * versioned fence. Merely returning a cancellable [Flow] is not sufficient: background work may
+ * be pre-empted by foreground Chat, so late native/network callbacks must be unable to publish
+ * output into a later request.
+ *
+ * Implementations must only advertise an ABI after that fence has deterministic cancellation and
+ * late-callback tests. Background callers fail closed when this marker is absent or blank.
+ */
+interface FencedTextGenerationProvider {
+    val cancellationFenceAbi: String
+}
+
+/**
  * Opaque, privacy-safe namespace for provider/local prefix caches.
  *
  * The app must hash conversation, assistant, memory-scope, and final injected-memory identities

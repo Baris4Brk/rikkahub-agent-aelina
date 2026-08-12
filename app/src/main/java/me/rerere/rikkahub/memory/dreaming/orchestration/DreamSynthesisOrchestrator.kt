@@ -1,0 +1,443 @@
+package me.rerere.rikkahub.memory.dreaming.orchestration
+
+import java.util.concurrent.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.selects.select
+import me.rerere.rikkahub.memory.dreaming.input.DreamInputBuilder
+import me.rerere.rikkahub.memory.dreaming.input.DreamInputBundle
+import me.rerere.rikkahub.memory.dreaming.input.DreamModelInput
+import me.rerere.rikkahub.memory.dreaming.model.DREAM_AUTHORITY_PIN_ORDER
+import me.rerere.rikkahub.memory.dreaming.snapshot.DreamSnapshotCompileRequest
+import me.rerere.rikkahub.memory.dreaming.snapshot.DreamSnapshotCompiler
+import me.rerere.rikkahub.memory.dreaming.store.BeginDreamSynthesisRequest
+import me.rerere.rikkahub.memory.dreaming.store.BeginDreamSynthesisResult
+import me.rerere.rikkahub.memory.dreaming.store.DreamSynthesisCommitRejection
+import me.rerere.rikkahub.memory.dreaming.store.DreamSynthesisCommitRequest
+import me.rerere.rikkahub.memory.dreaming.store.DreamSynthesisCommitResult
+import me.rerere.rikkahub.memory.dreaming.store.DreamSynthesisFailure
+import me.rerere.rikkahub.memory.dreaming.store.DreamSynthesisStore
+import me.rerere.rikkahub.memory.dreaming.store.DreamSynthesisStoreRejection
+import me.rerere.rikkahub.memory.dreaming.store.DreamSynthesisStoreResult
+import me.rerere.rikkahub.memory.dreaming.store.ReadDreamInputSeedResult
+import me.rerere.rikkahub.memory.dreaming.synthesis.DreamProposalParseResult
+import me.rerere.rikkahub.memory.dreaming.synthesis.DreamProposalParser
+import me.rerere.rikkahub.memory.dreaming.synthesis.DreamProposalValidationRequest
+import me.rerere.rikkahub.memory.dreaming.synthesis.DreamProposalValidationResult
+import me.rerere.rikkahub.memory.dreaming.synthesis.DreamProposalValidator
+import me.rerere.rikkahub.memory.dreaming.synthesis.DreamSynthesizeRequest
+import me.rerere.rikkahub.memory.dreaming.synthesis.DreamSynthesizeResult
+import me.rerere.rikkahub.memory.dreaming.synthesis.DreamSynthesizer
+import me.rerere.rikkahub.memory.dreaming.synthesis.DREAM_PROMPT_CONTRACT_VERSION
+import me.rerere.rikkahub.memory.dreaming.synthesis.DREAM_VALIDATOR_VERSION
+import me.rerere.rikkahub.memory.dreaming.runtime.DreamBudgetAdmissionRequest
+import me.rerere.rikkahub.memory.dreaming.runtime.DreamBudgetDenialReason
+import me.rerere.rikkahub.memory.dreaming.runtime.DreamBudgetGate
+import me.rerere.rikkahub.memory.dreaming.runtime.DreamBudgetPermitResult
+
+data class DreamSynthesisOrchestratorConfig(
+    val compilerRevision: String,
+    val maxOutputTokens: Int,
+    val promptContractVersion: String = DREAM_PROMPT_CONTRACT_VERSION,
+    val validatorVersion: String = DREAM_VALIDATOR_VERSION,
+    val leaseDurationMs: Long,
+    val heartbeatIntervalMs: Long,
+) {
+    init {
+        require(compilerRevision.matches(Regex("^[A-Za-z0-9._-]{1,64}$")))
+        require(maxOutputTokens in 1..65_536)
+        require(promptContractVersion == DREAM_PROMPT_CONTRACT_VERSION)
+        require(validatorVersion == DREAM_VALIDATOR_VERSION)
+        require(leaseDurationMs in 3L..me.rerere.rikkahub.memory.dreaming.model.MAX_DREAM_RUN_LEASE_DURATION_MS)
+        require(heartbeatIntervalMs >= 1L && heartbeatIntervalMs <= leaseDurationMs / 3L)
+    }
+}
+
+fun interface DreamEpochClock {
+    fun nowEpochMs(): Long
+}
+
+sealed interface DreamSynthesisRunResult {
+    data class Completed(
+        val snapshotId: String,
+        val committedDreamRevision: Long,
+    ) : DreamSynthesisRunResult
+
+    data class AlreadyTerminal(val succeeded: Boolean) : DreamSynthesisRunResult
+    data object Disabled : DreamSynthesisRunResult
+    data class PolicyDeferred(
+        val reason: DreamBudgetDenialReason,
+        val retryAtEpochMs: Long?,
+    ) : DreamSynthesisRunResult
+    data class Retry(val reason: DreamSynthesisRetryReason) : DreamSynthesisRunResult
+    data class Failed(val reason: DreamSynthesisFailure) : DreamSynthesisRunResult
+}
+
+enum class DreamSynthesisRetryReason {
+    STORE_TEMPORARY_FAILURE,
+    MODEL_TEMPORARY_FAILURE,
+    COMMIT_CONFLICT,
+    LEASE_CONFLICT,
+}
+
+/**
+ * The call chain is deliberately split by store method returns:
+ * short begin/read transactions -> source reads + model + pure logic -> short dual-CAS commit.
+ */
+class DreamSynthesisOrchestrator(
+    private val store: DreamSynthesisStore,
+    private val inputBuilder: DreamInputBuilder,
+    private val synthesizer: DreamSynthesizer,
+    private val validator: DreamProposalValidator,
+    private val clock: DreamEpochClock,
+    private val config: DreamSynthesisOrchestratorConfig,
+    private val budgetGate: DreamBudgetGate? = null,
+) {
+    suspend fun run(
+        request: BeginDreamSynthesisRequest,
+        firstProviderAttempt: Boolean = true,
+    ): DreamSynthesisRunResult {
+        val begin = try {
+            store.begin(request)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            return DreamSynthesisRunResult.Retry(DreamSynthesisRetryReason.STORE_TEMPORARY_FAILURE)
+        }
+        val fence = when (begin) {
+            is BeginDreamSynthesisResult.Ready -> begin.fence
+            is BeginDreamSynthesisResult.Terminal -> return DreamSynthesisRunResult.AlreadyTerminal(begin.succeeded)
+            is BeginDreamSynthesisResult.Rejected -> {
+                if (begin.reason == DreamSynthesisStoreRejection.FEATURE_DISABLED) {
+                    return DreamSynthesisRunResult.Disabled
+                }
+                return DreamSynthesisRunResult.Retry(begin.reason.toRetryReason())
+            }
+        }
+        if (
+            fence.scopeId != request.scopeId || fence.runId != request.runId ||
+            fence.leaseOwner != request.leaseOwner || !fence.mode.isValidPromotionFrom(request.mode, fence.baseLastAppliedMemoryEpoch) ||
+            fence.frozenNowEpochMs > request.attemptNowEpochMs ||
+            fence.sourceTimezoneId != request.sourceTimezoneId
+        ) {
+            safeFail(fence, DreamSynthesisFailure.INPUT_REJECTED)
+            return DreamSynthesisRunResult.Failed(DreamSynthesisFailure.INPUT_REJECTED)
+        }
+
+        val seed = try {
+            store.readInputSeed(
+                fence = fence,
+                attemptNowEpochMs = maxOf(request.attemptNowEpochMs, requireClockAtLeast(fence.frozenNowEpochMs)),
+            )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            return DreamSynthesisRunResult.Retry(DreamSynthesisRetryReason.STORE_TEMPORARY_FAILURE)
+        }
+        val inputRequest = when (seed) {
+            is ReadDreamInputSeedResult.Ready -> seed.request
+            is ReadDreamInputSeedResult.Rejected -> return handleReadRejection(fence, seed.reason)
+        }
+        if (inputRequest.fence != fence) {
+            safeFail(fence, DreamSynthesisFailure.INPUT_REJECTED)
+            return DreamSynthesisRunResult.Failed(DreamSynthesisFailure.INPUT_REJECTED)
+        }
+
+        val input = try {
+            withLeaseHeartbeat(fence) { inputBuilder.build(inputRequest) }
+        } catch (_: LeaseLost) {
+            return DreamSynthesisRunResult.Retry(DreamSynthesisRetryReason.LEASE_CONFLICT)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            safeFail(fence, DreamSynthesisFailure.INPUT_REJECTED)
+            return DreamSynthesisRunResult.Failed(DreamSynthesisFailure.INPUT_REJECTED)
+        }
+        val gate = budgetGate ?: return synthesizeValidateAndCommit(fence, input)
+        val estimatedInputTokens = conservativeDreamModelInputTokens(input.modelInput)
+            ?: return DreamSynthesisRunResult.PolicyDeferred(
+                DreamBudgetDenialReason.TOKEN_ARITHMETIC_OVERFLOW,
+                retryAtEpochMs = null,
+            )
+        val permit = gate.withPermit(
+            request = DreamBudgetAdmissionRequest(
+                scopeId = fence.scopeId,
+                runId = fence.runId,
+                nowEpochMs = requireClockAtLeast(fence.frozenNowEpochMs),
+                firstProviderAttempt = firstProviderAttempt,
+                estimatedInputTokens = estimatedInputTokens,
+                maxOutputTokens = config.maxOutputTokens.toLong(),
+            ),
+        ) {
+            // The global permit remains held until commit has durably stored nullable provider
+            // usage. A failed/rolled-back call leaves NULL, so a capped retry fails closed.
+            synthesizeValidateAndCommit(fence, input)
+        }
+        return when (permit) {
+            is DreamBudgetPermitResult.Granted -> permit.value
+            is DreamBudgetPermitResult.Denied -> DreamSynthesisRunResult.PolicyDeferred(
+                reason = permit.denial.reason,
+                retryAtEpochMs = permit.denial.window?.endExclusiveEpochMs,
+            )
+        }
+    }
+
+    private suspend fun synthesizeValidateAndCommit(
+        fence: me.rerere.rikkahub.memory.dreaming.model.DreamSynthesisFence,
+        input: DreamInputBundle,
+    ): DreamSynthesisRunResult {
+        val synthesized = try {
+            withLeaseHeartbeat(fence) {
+                synthesizer.synthesize(
+                    DreamSynthesizeRequest(
+                        input = input.modelInput,
+                        maxOutputTokens = config.maxOutputTokens,
+                        promptContractVersion = config.promptContractVersion,
+                        validatorVersion = config.validatorVersion,
+                    ),
+                )
+            }
+        } catch (_: LeaseLost) {
+            return DreamSynthesisRunResult.Retry(DreamSynthesisRetryReason.LEASE_CONFLICT)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            return DreamSynthesisRunResult.Retry(DreamSynthesisRetryReason.MODEL_TEMPORARY_FAILURE)
+        }
+        val success = when (synthesized) {
+            is DreamSynthesizeResult.Success -> synthesized
+            is DreamSynthesizeResult.Failure -> {
+                if (synthesized.retryable) {
+                    return DreamSynthesisRunResult.Retry(DreamSynthesisRetryReason.MODEL_TEMPORARY_FAILURE)
+                }
+                safeFail(fence, DreamSynthesisFailure.MODEL_PERMANENT_FAILURE)
+                return DreamSynthesisRunResult.Failed(DreamSynthesisFailure.MODEL_PERMANENT_FAILURE)
+            }
+        }
+        if (
+            success.audit.promptContractVersion != config.promptContractVersion ||
+            success.audit.validatorVersion != config.validatorVersion
+        ) {
+            safeFail(fence, DreamSynthesisFailure.MODEL_AUDIT_MISMATCH)
+            return DreamSynthesisRunResult.Failed(DreamSynthesisFailure.MODEL_AUDIT_MISMATCH)
+        }
+        val parsed = when (val result = DreamProposalParser.parse(success.rawOutput)) {
+            is DreamProposalParseResult.Parsed -> result.proposal
+            is DreamProposalParseResult.Rejected -> {
+                safeFail(fence, DreamSynthesisFailure.MODEL_OUTPUT_PARSE_REJECTED)
+                return DreamSynthesisRunResult.Failed(DreamSynthesisFailure.MODEL_OUTPUT_PARSE_REJECTED)
+            }
+        }
+        val plan = when (
+            val result = validator.validate(DreamProposalValidationRequest(input, parsed))
+        ) {
+            is DreamProposalValidationResult.Valid -> result.plan
+            is DreamProposalValidationResult.Rejected -> {
+                safeFail(fence, DreamSynthesisFailure.MODEL_OUTPUT_VALIDATION_REJECTED)
+                return DreamSynthesisRunResult.Failed(DreamSynthesisFailure.MODEL_OUTPUT_VALIDATION_REJECTED)
+            }
+        }
+        val snapshot = try {
+            DreamSnapshotCompiler.compile(
+                DreamSnapshotCompileRequest(fence.scopeId, config.compilerRevision, plan.resultingClaims),
+            )
+        } catch (_: Exception) {
+            safeFail(fence, DreamSynthesisFailure.SNAPSHOT_COMPILATION_FAILED)
+            return DreamSynthesisRunResult.Failed(DreamSynthesisFailure.SNAPSHOT_COMPILATION_FAILED)
+        }
+        val liveAuthorityPins = (
+            plan.resultingClaims
+                .filter { it.state == me.rerere.rikkahub.memory.dreaming.model.DreamClaimState.ACTIVE_CONTEXTUAL }
+                .flatMap { it.sources.filter { source -> source.directAuthority }.map { source -> source.authority } } +
+                plan.modelEvidencePins
+            ).distinct()
+            .sortedWith(DREAM_AUTHORITY_PIN_ORDER)
+        val historicalTransitionPins = plan.transitions
+            .flatMap { transition ->
+                transition.nextVersion.sources
+                    .filter { source -> source.directAuthority }
+                    .map { source -> source.authority }
+            }
+            .distinct()
+            .filterNot(liveAuthorityPins.toSet()::contains)
+            .sortedWith(DREAM_AUTHORITY_PIN_ORDER)
+        val commitRequest = DreamSynthesisCommitRequest(
+            fence = fence,
+            plan = plan,
+            snapshot = snapshot,
+            liveAuthorityPins = liveAuthorityPins,
+            historicalTransitionPins = historicalTransitionPins,
+            inputManifestHash = input.inputManifestHash,
+            outputManifestHash = snapshot.manifestHash,
+            modelAudit = success.audit,
+            inputMemoryCount = input.allowedMemories.size,
+            outputOperationCount = parsed.operations.size,
+            committedAtEpochMs = maxOf(fence.frozenNowEpochMs, requireClock()),
+        )
+        val commitResult = try {
+            store.commit(commitRequest)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            // The store transaction has rolled back. A transport/DB exception is not evidence of a
+            // CAS conflict and must leave the durable run retryable rather than terminalizing it.
+            return DreamSynthesisRunResult.Retry(DreamSynthesisRetryReason.STORE_TEMPORARY_FAILURE)
+        }
+        return when (val result = commitResult) {
+            is DreamSynthesisCommitResult.Committed -> DreamSynthesisRunResult.Completed(
+                result.snapshotId,
+                result.committedDreamRevision,
+            )
+            is DreamSynthesisCommitResult.Rejected -> {
+                try {
+                    store.terminalizeConflict(fence, result.reason, requireClockAtLeast(fence.frozenNowEpochMs))
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    return DreamSynthesisRunResult.Retry(DreamSynthesisRetryReason.STORE_TEMPORARY_FAILURE)
+                }
+                DreamSynthesisRunResult.Retry(
+                    if (result.reason.isLeaseConflict) {
+                        DreamSynthesisRetryReason.LEASE_CONFLICT
+                    } else {
+                        DreamSynthesisRetryReason.COMMIT_CONFLICT
+                    },
+                )
+            }
+        }
+    }
+
+    private suspend fun handleReadRejection(
+        fence: me.rerere.rikkahub.memory.dreaming.model.DreamSynthesisFence,
+        reason: DreamSynthesisStoreRejection,
+    ): DreamSynthesisRunResult {
+        if (reason == DreamSynthesisStoreRejection.FEATURE_DISABLED) return DreamSynthesisRunResult.Disabled
+        if (reason == DreamSynthesisStoreRejection.FENCE_CONFLICT) {
+            try {
+                store.terminalizeConflict(
+                    fence,
+                    DreamSynthesisCommitRejection.FENCE_CONFLICT,
+                    requireClockAtLeast(fence.frozenNowEpochMs),
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                return DreamSynthesisRunResult.Retry(DreamSynthesisRetryReason.STORE_TEMPORARY_FAILURE)
+            }
+            return DreamSynthesisRunResult.Retry(DreamSynthesisRetryReason.COMMIT_CONFLICT)
+        }
+        return DreamSynthesisRunResult.Retry(reason.toRetryReason())
+    }
+
+    private suspend fun <T> withLeaseHeartbeat(
+        fence: me.rerere.rikkahub.memory.dreaming.model.DreamSynthesisFence,
+        operation: suspend () -> T,
+    ): T = coroutineScope {
+        val lost = CompletableDeferred<Unit>()
+        val work = async { operation() }
+        val heartbeat = launch {
+            while (isActive) {
+                delay(config.heartbeatIntervalMs)
+                val result = try {
+                    store.heartbeat(
+                        fence = fence,
+                        nowMs = requireClockAtLeast(fence.frozenNowEpochMs),
+                        leaseDurationMs = config.leaseDurationMs,
+                    )
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    DreamSynthesisStoreResult.Rejected(DreamSynthesisStoreRejection.STORE_CORRUPTION)
+                }
+                if (result is DreamSynthesisStoreResult.Rejected) {
+                    lost.complete(Unit)
+                    return@launch
+                }
+            }
+        }
+        try {
+            when (
+                val guarded = select<LeaseGuardResult<T>> {
+                    work.onAwait { LeaseGuardResult.Value(it) }
+                    lost.onAwait { LeaseGuardResult.Lost }
+                }
+            ) {
+                is LeaseGuardResult.Value -> guarded.value
+                LeaseGuardResult.Lost -> {
+                    work.cancelAndJoin()
+                    throw LeaseLost()
+                }
+            }
+        } finally {
+            heartbeat.cancelAndJoin()
+        }
+    }
+
+    private suspend fun safeFail(fence: me.rerere.rikkahub.memory.dreaming.model.DreamSynthesisFence, failure: DreamSynthesisFailure) {
+        try {
+            store.fail(fence, failure, requireClockAtLeast(fence.frozenNowEpochMs))
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            // A durable lease plus startup dirty scan remains the recovery path.
+        }
+    }
+
+    private fun requireClock(): Long = clock.nowEpochMs().also { require(it >= 0L) }
+
+    private fun requireClockAtLeast(floor: Long): Long = maxOf(floor, requireClock())
+}
+
+private sealed interface LeaseGuardResult<out T> {
+    data class Value<T>(val value: T) : LeaseGuardResult<T>
+    data object Lost : LeaseGuardResult<Nothing>
+}
+
+private class LeaseLost : RuntimeException()
+
+/**
+ * UTF-8 bytes are a provider-independent upper bound for byte-fallback tokenizers. The fixed
+ * framing allowance covers the two message roles without trusting a provider-advertised count.
+ */
+internal fun conservativeDreamModelInputTokens(input: DreamModelInput): Long? = try {
+    val systemBytes = input.systemContract.toByteArray(Charsets.UTF_8).size.toLong()
+    val payloadBytes = input.payloadJson.toByteArray(Charsets.UTF_8).size.toLong()
+    Math.addExact(Math.addExact(systemBytes, payloadBytes), DREAM_MODEL_INPUT_FRAMING_TOKENS)
+} catch (_: ArithmeticException) {
+    null
+}
+
+private const val DREAM_MODEL_INPUT_FRAMING_TOKENS = 64L
+
+private fun DreamSynthesisStoreRejection.toRetryReason(): DreamSynthesisRetryReason = when (this) {
+    DreamSynthesisStoreRejection.OWNER_MISMATCH,
+    DreamSynthesisStoreRejection.LEASE_EXPIRED,
+    -> DreamSynthesisRetryReason.LEASE_CONFLICT
+    else -> DreamSynthesisRetryReason.STORE_TEMPORARY_FAILURE
+}
+
+private val DreamSynthesisCommitRejection.isLeaseConflict: Boolean
+    get() = this in setOf(
+        DreamSynthesisCommitRejection.LEASE_MISSING,
+        DreamSynthesisCommitRejection.LEASE_OWNER_MISMATCH,
+        DreamSynthesisCommitRejection.LEASE_EXPIRED,
+        DreamSynthesisCommitRejection.RUN_NOT_RUNNING,
+    )
+
+private fun me.rerere.rikkahub.memory.dreaming.model.DreamSynthesisMode.isValidPromotionFrom(
+    requested: me.rerere.rikkahub.memory.dreaming.model.DreamSynthesisMode,
+    baseLastAppliedMemoryEpoch: Long,
+): Boolean = when {
+    baseLastAppliedMemoryEpoch == 0L ->
+        this == me.rerere.rikkahub.memory.dreaming.model.DreamSynthesisMode.FULL &&
+            requested in setOf(
+                me.rerere.rikkahub.memory.dreaming.model.DreamSynthesisMode.INCREMENTAL,
+                me.rerere.rikkahub.memory.dreaming.model.DreamSynthesisMode.FULL,
+            )
+    else -> this == requested
+}

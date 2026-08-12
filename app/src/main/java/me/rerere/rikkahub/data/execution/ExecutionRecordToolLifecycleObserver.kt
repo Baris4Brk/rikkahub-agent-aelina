@@ -1,12 +1,16 @@
 package me.rerere.rikkahub.data.execution
 
 import me.rerere.rikkahub.data.ai.execution.RedactedToolLifecycleEvent
+import me.rerere.rikkahub.data.ai.execution.RedactedToolCallContext
 import me.rerere.rikkahub.data.ai.execution.CriticalLifecyclePersistenceException
 import me.rerere.rikkahub.data.ai.execution.CriticalToolLifecycleSink
 import me.rerere.rikkahub.data.ai.tools.ToolTerminationState
 import me.rerere.rikkahub.data.capability.ResourceScope
 import me.rerere.rikkahub.data.capability.SubjectType
 import me.rerere.rikkahub.data.capability.ToolCapabilityResolver
+import me.rerere.rikkahub.learning.model.LearningCanonicalId
+import me.rerere.rikkahub.learning.model.LearningScope
+import kotlin.uuid.Uuid
 
 /**
  * Projects ToolRuntime lifecycle events into the authoritative execution table.
@@ -27,8 +31,12 @@ class ExecutionRecordCriticalToolLifecycleSink(
                     ExecutionRecordDraft(
                         id = recordId,
                         traceId = context.runId,
-                        commandId = context.runId,
+                        commandId = context.commandId,
                         conversationId = context.conversationId,
+                        toolCallId = context.toolCallId,
+                        toolName = context.toolName,
+                        toolSchemaFingerprint = context.toolSchemaFingerprint,
+                        learningScope = context.toLearningScope(),
                         subjectId = context.subjectId.ifBlank { context.assistantId },
                         subjectType = (context.subjectType ?: SubjectType.LOCAL_ASSISTANT).name,
                         origin = context.origin.name,
@@ -38,7 +46,10 @@ class ExecutionRecordCriticalToolLifecycleSink(
                             .joinToString(","),
                         resourceSummary = resolved.resource.toAuditSummary(),
                         runtime = runtimeFor(context.toolName, context.legacyExecution),
-                        idempotencyKey = "tool:${context.runId}:${context.toolCallId}".take(300),
+                        idempotencyKey = ExecutionRecordIds.toolIdempotency(
+                            context.runId,
+                            context.toolCallId,
+                        ),
                         initialStatus = ExecutionStatus.starting,
                     ),
                 )
@@ -188,15 +199,13 @@ class ExecutionRecordCriticalToolLifecycleSink(
         }
     }
 
-    private fun mutationId(event: RedactedToolLifecycleEvent): String = buildString {
-        append("tool-event:")
-        append(event.context.runId)
-        append(':')
-        append(event.context.toolCallId)
-        append(':')
-        append(event.phase.name)
-        event.executionId?.let { append(':').append(it) }
-    }.take(500)
+    private fun mutationId(event: RedactedToolLifecycleEvent): String =
+        ExecutionRecordIds.toolEvent(
+            runId = event.context.runId,
+            toolCallId = event.context.toolCallId,
+            phase = event.phase.name,
+            executionId = event.executionId,
+        )
 
     // Runtime arguments may contain commands, paths, hosts, or user text. The execution ledger
     // stores only the stable resource class; the executable payload remains in the message graph.
@@ -223,6 +232,13 @@ class ExecutionRecordCriticalToolLifecycleSink(
 
 }
 
+internal fun RedactedToolCallContext.toLearningScope(): LearningScope =
+    if (subjectType == SubjectType.LOCAL_SECOND_USER) {
+        LearningScope.AuthoritySubject(subjectId)
+    } else {
+        LearningScope.Assistant(Uuid.parse(assistantId))
+    }
+
 internal data class TimedOutExecutionDecision(
     val target: ExecutionStatus,
     val verification: VerificationState,
@@ -241,5 +257,78 @@ internal fun decideTimedOutExecution(
 }
 
 object ExecutionRecordIds {
-    fun tool(runId: String, toolCallId: String): String = "tool:$runId:$toolCallId".take(480)
+    /**
+     * Keeps the established readable ID for normal UUID runs, but hashes any non-canonical or
+     * oversized identity with a versioned, length-prefixed digest. No identity is ever truncated.
+     */
+    fun tool(runId: String, toolCallId: String): String {
+        validateIdentityField("runId", runId)
+        validateIdentityField("toolCallId", toolCallId)
+        val legacy = "tool:$runId:$toolCallId"
+        val canonicalRun = runCatching { Uuid.parse(runId).toString() == runId }.getOrDefault(false)
+        return if (canonicalRun && legacy.length <= MAX_EXECUTION_ID_CHARS) {
+            legacy
+        } else {
+            "tool-v2:" + LearningCanonicalId.digest(
+                domainVersion = "execution-tool-record-v2",
+                fields = listOf(runId, toolCallId),
+            )
+        }
+    }
+
+    fun toolIdempotency(runId: String, toolCallId: String): String {
+        validateIdentityField("runId", runId)
+        validateIdentityField("toolCallId", toolCallId)
+        val legacy = "tool:$runId:$toolCallId"
+        val canonicalRun = runCatching { Uuid.parse(runId).toString() == runId }.getOrDefault(false)
+        return if (canonicalRun && legacy.length <= MAX_IDEMPOTENCY_CHARS) {
+            legacy
+        } else {
+            "tool-idempotency-v2:" + LearningCanonicalId.digest(
+                domainVersion = "execution-tool-idempotency-v2",
+                fields = listOf(runId, toolCallId),
+            )
+        }
+    }
+
+    fun toolEvent(
+        runId: String,
+        toolCallId: String,
+        phase: String,
+        executionId: String?,
+    ): String {
+        validateIdentityField("runId", runId)
+        validateIdentityField("toolCallId", toolCallId)
+        validateIdentityField("phase", phase)
+        executionId?.let { validateIdentityField("executionId", it) }
+        val legacy = buildString {
+            append("tool-event:").append(runId).append(':').append(toolCallId).append(':').append(phase)
+            executionId?.let { append(':').append(it) }
+        }
+        val canonicalRun = runCatching { Uuid.parse(runId).toString() == runId }.getOrDefault(false)
+        val unambiguousToolCall = toolCallId.all {
+            it.isLetterOrDigit() || it == '-' || it == '_' || it == '.'
+        }
+        return if (canonicalRun && unambiguousToolCall && legacy.length <= MAX_MUTATION_ID_CHARS) {
+            legacy
+        } else {
+            "tool-event-v2:" + LearningCanonicalId.digest(
+                domainVersion = "execution-tool-event-v2",
+                fields = listOf(runId, toolCallId, phase, executionId),
+            )
+        }
+    }
+
+    private fun validateIdentityField(name: String, value: String) {
+        require(value.isNotBlank()) { "$name is empty" }
+        require(value.none(Char::isISOControl)) { "$name contains control characters" }
+        require(value.encodeToByteArray().size <= MAX_CANONICAL_FIELD_BYTES) {
+            "$name is too large"
+        }
+    }
+
+    private const val MAX_EXECUTION_ID_CHARS = 480
+    private const val MAX_IDEMPOTENCY_CHARS = 300
+    private const val MAX_MUTATION_ID_CHARS = 500
+    private const val MAX_CANONICAL_FIELD_BYTES = 4_096
 }

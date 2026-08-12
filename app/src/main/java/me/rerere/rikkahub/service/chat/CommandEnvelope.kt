@@ -1,6 +1,7 @@
 package me.rerere.rikkahub.service.chat
 
 import kotlinx.coroutines.CompletableDeferred
+import me.rerere.rikkahub.diagnostics.agenttiming.AgentTimingSubmissionToken
 import kotlin.time.Clock
 import kotlin.time.Instant
 import kotlin.uuid.Uuid
@@ -48,5 +49,9 @@ data class CommandEnvelope<C : ChatCommand>(
     val expiresAt: Instant? = null,
     val dedupeKey: String? = null,
     val dependencies: List<CommandDependency> = emptyList(),
+    /** Durable authority metadata. CommandCodec must never encode this into payloadJson. */
+    val lineage: CommandLineageContext? = null,
+    /** Process-only UI timing link. It is never encoded into the durable command row. */
+    val agentTimingSubmission: AgentTimingSubmissionToken? = null,
     val result: CompletableDeferred<CommandOutcome> = CompletableDeferred(),
 )

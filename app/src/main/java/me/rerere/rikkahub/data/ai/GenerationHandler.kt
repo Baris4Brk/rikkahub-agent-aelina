@@ -31,6 +31,7 @@ import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toInstant
 import kotlinx.datetime.toLocalDateTime
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -44,6 +45,8 @@ import me.rerere.ai.core.Tool
 import me.rerere.ai.core.TokenUsage
 import me.rerere.ai.core.accumulate
 import me.rerere.ai.core.merge
+import me.rerere.ai.context.ProviderContextOverflowException
+import me.rerere.ai.context.ProviderRequestTokenEstimator
 import me.rerere.ai.provider.CustomBody
 import me.rerere.ai.provider.Model
 import me.rerere.ai.provider.Provider
@@ -77,6 +80,8 @@ import me.rerere.rikkahub.data.files.FileFolders
 import me.rerere.rikkahub.diagnostics.RecentGenerationDiagnostics
 import me.rerere.rikkahub.diagnostics.GenerationDiagnosticHandle
 import me.rerere.rikkahub.diagnostics.RequestBreakdownDiagnostic
+import me.rerere.rikkahub.diagnostics.RequestContextGateStage
+import me.rerere.rikkahub.diagnostics.RequestContextGateStatus
 import java.io.File
 import java.security.MessageDigest
 import me.rerere.rikkahub.data.ai.transformers.onGenerationFinish
@@ -88,6 +93,7 @@ import me.rerere.rikkahub.data.ai.execution.ToolExecutionPlanRequest
 import me.rerere.rikkahub.data.ai.execution.ToolExecutionPlanResult
 import me.rerere.rikkahub.data.ai.execution.ToolPreExecutionDecision
 import me.rerere.rikkahub.data.ai.execution.ToolRuntime
+import me.rerere.rikkahub.data.ai.execution.notifyQueuedSafely
 import me.rerere.rikkahub.data.ai.execution.ToolStartableResolver
 import me.rerere.rikkahub.data.ai.execution.ToolBatchCandidate
 import me.rerere.rikkahub.data.ai.execution.ToolBatchExecutionOutcome
@@ -103,10 +109,23 @@ import me.rerere.rikkahub.data.model.AssistantMemory
 import me.rerere.rikkahub.data.repository.ConversationRepository
 import me.rerere.rikkahub.security.resolveProviderBinding
 import me.rerere.rikkahub.data.repository.MemoryRepository
+import me.rerere.rikkahub.memory.dreaming.model.DreamScopeId
+import me.rerere.rikkahub.memory.dreaming.runtime.DisabledDreamingFeatureFlagSource
+import me.rerere.rikkahub.memory.dreaming.runtime.DreamRuntimeClaimRef
+import me.rerere.rikkahub.memory.dreaming.runtime.DreamRuntimeCompileStatus
+import me.rerere.rikkahub.memory.dreaming.runtime.DreamRuntimeTokenEstimator
+import me.rerere.rikkahub.memory.dreaming.runtime.DreamSnapshotProjectionReader
+import me.rerere.rikkahub.memory.dreaming.runtime.DreamingFeatureFlagSource
 import me.rerere.rikkahub.toolcatalog.ToolDiscoverySession
 import me.rerere.rikkahub.toolcatalog.ToolDiscoveryMetrics
 import me.rerere.rikkahub.toolcatalog.ToolExperienceRecorder
 import me.rerere.rikkahub.toolcatalog.ToolSurfaceBuilder
+import me.rerere.rikkahub.toolcatalog.ToolCatalogSnapshot
+import me.rerere.rikkahub.diagnostics.agenttiming.AgentTimingEventKind
+import me.rerere.rikkahub.diagnostics.agenttiming.AgentTimingEventResult
+import me.rerere.rikkahub.diagnostics.agenttiming.AgentTimingHandle
+import me.rerere.rikkahub.diagnostics.agenttiming.AgentTimingRoundRef
+import me.rerere.rikkahub.diagnostics.agenttiming.AgentTimingToolRef
 import me.rerere.rikkahub.utils.applyPlaceholders
 import java.util.Locale
 import kotlin.time.Clock
@@ -115,6 +134,9 @@ import kotlin.uuid.Uuid
 private const val TAG = "GenerationHandler"
 private const val MAX_TOOL_OUTPUT_CHARS = 32 * 1024
 private const val TOOL_OUTPUT_PREVIEW_CHARS = 4 * 1024
+private const val MEMORY_TOOL_SCOPE_METADATA_KEY = "rikkahub_memory_scope_id"
+private const val MEMORY_TOOL_ASSISTANT_METADATA_KEY = "rikkahub_memory_assistant_id"
+private val SCOPE_BOUND_MEMORY_TOOL_NAMES = setOf("memory_tool", "memory_query")
 
 internal fun shouldSpillToolOutputToFile(
     toolName: String,
@@ -165,6 +187,76 @@ private data class BatchReadyTool(
     val args: JsonObject,
     val executionContext: ToolExecutionContext,
 )
+
+/**
+ * Binds only tool calls created by the current provider turn. Persisted calls from an older app
+ * version intentionally remain unbound and therefore fail closed at execution time; retroactively
+ * attaching the current scope would turn a configuration change into a confused-deputy bug.
+ */
+internal fun List<UIMessage>.bindNewMemoryToolScopes(
+    preexistingToolCallIds: Set<String>,
+    assistantId: String,
+    scopeId: String,
+): List<UIMessage> = map { message ->
+    val boundParts = message.parts.map { part ->
+        if (
+            part !is UIMessagePart.Tool ||
+            part.toolName !in SCOPE_BOUND_MEMORY_TOOL_NAMES ||
+            part.toolCallId in preexistingToolCallIds
+        ) {
+            part
+        } else {
+            part.copy(
+                metadata = buildJsonObject {
+                    part.metadata?.forEach { (key, value) -> put(key, value) }
+                    put(MEMORY_TOOL_SCOPE_METADATA_KEY, scopeId)
+                    put(MEMORY_TOOL_ASSISTANT_METADATA_KEY, assistantId)
+                },
+            )
+        }
+    }
+    if (boundParts == message.parts) message else message.copy(parts = boundParts)
+}
+
+/** Returns a stable, non-sensitive error code when a scope-bound memory tool cannot execute. */
+internal fun memoryToolScopeBindingFailure(
+    tool: UIMessagePart.Tool,
+    expectedAssistantId: String,
+    expectedScopeId: String,
+    memoryCapabilityEnabled: Boolean = true,
+): String? {
+    if (tool.toolName !in SCOPE_BOUND_MEMORY_TOOL_NAMES) return null
+    val boundScope = (tool.metadata?.get(MEMORY_TOOL_SCOPE_METADATA_KEY) as? JsonPrimitive)?.content
+    val boundAssistant =
+        (tool.metadata?.get(MEMORY_TOOL_ASSISTANT_METADATA_KEY) as? JsonPrimitive)?.content
+    return when {
+        !memoryCapabilityEnabled -> "memory_capability_disabled"
+        boundScope == null || boundAssistant == null -> "memory_scope_binding_missing"
+        boundScope != expectedScopeId || boundAssistant != expectedAssistantId ->
+            "memory_scope_changed"
+        else -> null
+    }
+}
+
+private fun UIMessagePart.Tool.withMemoryScopeBindingFailure(code: String): UIMessagePart.Tool =
+    copy(
+        output = listOf(
+            UIMessagePart.Text(
+                buildJsonObject {
+                    put("error", code)
+                    put(
+                        "detail",
+                        "The persisted memory tool call is not bound to the active assistant " +
+                            "memory scope and was not executed.",
+                    )
+                    put(
+                        "recovery",
+                        "Inspect the current memory scope and issue a new memory tool call.",
+                    )
+                }.toString(),
+            ),
+        ),
+    )
 
 internal fun generationFinalizationStep(
     stepIndex: Int,
@@ -474,6 +566,14 @@ class GenerationHandler(
     private val ephemeralToolResults: me.rerere.rikkahub.security.EphemeralToolResultStore? = null,
     private val runtimeSecretRedactor: me.rerere.rikkahub.security.RuntimeSecretRedactor? = null,
     private val toolExperienceRecorder: ToolExperienceRecorder? = null,
+    private val dreamingFeatureFlags: DreamingFeatureFlagSource =
+        DisabledDreamingFeatureFlagSource,
+    private val dreamSnapshotProjectionReader: DreamSnapshotProjectionReader =
+        UnavailableDreamSnapshotProjectionReader,
+    private val dreamRuntimeUsageRecorder: DreamRuntimeUsageRecorder =
+        NoOpDreamRuntimeUsageRecorder,
+    private val dreamRuntimeDiagnosticsSink: DreamRuntimeDiagnosticsSink =
+        NoOpDreamRuntimeDiagnosticsSink,
 ) {
     fun generateText(
         settings: Settings,
@@ -525,8 +625,12 @@ class GenerationHandler(
         commandOrigin: me.rerere.rikkahub.service.chat.CommandOrigin =
             me.rerere.rikkahub.service.chat.CommandOrigin.INTERNAL,
         conversationId: Uuid? = null,
+        /** Surface/run correlation used by invocation authorization and recovery. */
         commandId: Uuid? = null,
+        /** Durable admitted command only; never falls back to the generation run id. */
+        authoritativeCommandId: Uuid? = null,
         runControl: GenerationRunControl? = null,
+        agentTiming: AgentTimingHandle? = null,
         isHeadless: Boolean = false,
         isSubAgent: Boolean = false,
         invocationSurfaceContextProvider: InvocationSurfaceContextProvider? = null,
@@ -642,11 +746,16 @@ class GenerationHandler(
             .maxOfOrNull { it.attempt }
             ?: 0
         var modelCallIndex = 0
+        // Shared by every provider call in this tool loop. A retry/recovery request that injects
+        // the same memory at the same frozen instant must not issue another database write.
+        val touchedMemoryIds = mutableSetOf<Int>()
+        val touchedDreamClaimRefs = mutableSetOf<DreamRuntimeClaimRef>()
         // Flow-local by design: a cold Flow may have multiple collectors, and no continuation
         // boundary may leak across commands. Only history before the active user turn is frozen;
         // the live user/assistant/tool tail and all execution gates remain current.
         var continuationSnapshot: ToolLoopContinuationSnapshot? = null
         var continuationHistoryEpoch = 0
+        var currentTimingRound: AgentTimingRoundRef? = null
 
         // One extra index is reserved solely for a tool-free summary after a tool that completed
         // on the last planned step. [generationFinalizationStep] prevents that index from starting
@@ -731,6 +840,9 @@ class GenerationHandler(
                     hasResumableTools = pendingTools.isNotEmpty(),
                 )
             }.orEmpty()
+            if (steeringDeliveries.isNotEmpty()) {
+                agentTiming?.mark(AgentTimingEventKind.STEERING_APPLIED)
+            }
             val providerTailMessages = ProviderTailMessages.fromSteering(steeringDeliveries)
             val effectiveSystemAddendum = listOfNotNull(
                 systemAddendum,
@@ -762,15 +874,19 @@ class GenerationHandler(
 
             val completingAlreadyAcceptedTools = pendingTools.isNotEmpty() &&
                 !finalizationStep.skipResumableTools
-            val candidateTools = buildList {
-                if (assistant.enableMemory && memoryToolAllowed) {
+            val hostMemoryCapabilityEnabled = assistant.enableMemory && memoryToolAllowed
+            val candidateTools = agentTiming.timedAgentStage(
+                AgentTimingEventKind.TOOL_SURFACE_STARTED,
+                AgentTimingEventKind.TOOL_SURFACE_FINISHED,
+                currentTimingRound,
+            ) { buildList {
+                if (hostMemoryCapabilityEnabled) {
                     val memoryAssistantId = if (assistant.useGlobalMemory) {
                         MemoryRepository.GLOBAL_MEMORY_ID
                     } else {
                         assistant.id.toString()
                     }
                     buildMemoryTools(
-                        json = json,
                         onCreation = { input ->
                             memoryRepo.addMemory(
                                 scopeId = memoryAssistantId,
@@ -778,17 +894,19 @@ class GenerationHandler(
                                 originAssistantId = assistant.id.toString(),
                             )
                         },
-                        onUpdate = { id, input ->
+                        onUpdate = { id, expectedRevision, input ->
                             memoryRepo.updateMemory(
                                 scopeId = memoryAssistantId,
                                 id = id,
                                 input = input,
+                                expectedRevision = expectedRevision,
                             )
                         },
-                        onDelete = { id ->
+                        onDelete = { id, expectedRevision ->
                             memoryRepo.deleteMemory(
                                 scopeId = memoryAssistantId,
                                 id = id,
+                                expectedRevision = expectedRevision,
                             )
                         },
                         onQuery = { input ->
@@ -805,8 +923,11 @@ class GenerationHandler(
                         },
                     ).let(this::addAll)
                 }
-                addAll(tools)
-            }
+                // memory_tool and memory_query are host-reserved names. Allowing a plugin/runtime
+                // definition to shadow them could execute a persisted host call against a new
+                // implementation after memory is disabled or configuration changes.
+                addAll(tools.filterNot { tool -> tool.name in SCOPE_BOUND_MEMORY_TOOL_NAMES })
+            } }
             // Resolve each candidate schema once so the catalogue snapshot and any selected
             // provider definition describe the same capability bytes for this loop iteration.
             val candidateSurface = ToolSurfaceBuilder.build(
@@ -823,7 +944,12 @@ class GenerationHandler(
                     }
                 }
             }
-            val toolsInternal = (providerToolDefinitions + runtimeOnlyTools)
+            val toolsInternal = (
+                providerToolDefinitions +
+                    runtimeOnlyTools.filterNot { tool ->
+                        tool.name in SCOPE_BOUND_MEMORY_TOOL_NAMES
+                    }
+                )
                 .distinctBy { it.name }
 
             val toolsToProcess: List<UIMessagePart.Tool>
@@ -961,8 +1087,13 @@ class GenerationHandler(
                         },
                         conversationId = conversationId,
                         commandId = commandId,
+                        authoritativeCommandId = authoritativeCommandId,
                         toolDiscoveryMetrics = toolDiscoverySession?.metrics(),
                         usageBase = accumulatedUsage,
+                        touchedMemoryIds = touchedMemoryIds,
+                        touchedDreamClaimRefs = touchedDreamClaimRefs,
+                        agentTiming = agentTiming,
+                        onTimingRoundReady = { currentTimingRound = it },
                     )
                 } catch (t: Throwable) {
                     if (t is CancellationException &&
@@ -1158,7 +1289,12 @@ class GenerationHandler(
                                             callOrigin = callOrigin,
                                             conversationId = conversationId,
                                             commandId = commandId,
+                                            authoritativeCommandId = authoritativeCommandId,
                                             usageBase = accumulatedUsage,
+                                            touchedMemoryIds = touchedMemoryIds,
+                                            touchedDreamClaimRefs = touchedDreamClaimRefs,
+                                            agentTiming = agentTiming,
+                                            onTimingRoundReady = { currentTimingRound = it },
                                         )
                                     }
                                 } else {
@@ -1441,11 +1577,55 @@ class GenerationHandler(
 
             // Handle tools (execute approved tools, handle denied tools)
             val executedTools = arrayListOf<UIMessagePart.Tool>()
+            val toolTimingByIndex = if (agentTiming != null) {
+                mutableMapOf<Int, Pair<AgentTimingToolRef, AgentTimingToolHook>>()
+            } else {
+                null
+            }
+            fun timingForTool(index: Int, tool: UIMessagePart.Tool):
+                Pair<AgentTimingToolRef, AgentTimingToolHook>? {
+                val timingMap = toolTimingByIndex ?: return null
+                timingMap[index]?.let { return it }
+                val handle = agentTiming ?: return null
+                val ref = handle.registerTool(
+                    round = currentTimingRound,
+                    toolCallId = tool.toolCallId,
+                    assistantMessageId = messages.lastOrNull()?.id,
+                ) ?: return null
+                return (ref to AgentTimingToolHook(handle, currentTimingRound, ref)).also {
+                    timingMap[index] = it
+                }
+            }
+            fun finishSyntheticTool(
+                index: Int,
+                tool: UIMessagePart.Tool,
+                result: AgentTimingEventResult,
+            ) {
+                val binding = timingForTool(index, tool) ?: return
+                agentTiming?.mark(
+                    AgentTimingEventKind.TOOL_OUTPUT_NORMALIZE_STARTED,
+                    currentTimingRound,
+                    binding.first,
+                )
+                agentTiming?.mark(
+                    AgentTimingEventKind.TOOL_OUTPUT_NORMALIZE_FINISHED,
+                    currentTimingRound,
+                    binding.first,
+                )
+                agentTiming?.mark(
+                    AgentTimingEventKind.TOOL_TERMINAL,
+                    currentTimingRound,
+                    binding.first,
+                    result,
+                )
+            }
             val activityOverlayActive = conversationId?.let { id ->
                 invocationSurfaceContextProvider?.currentContext(callOrigin, id, commandId)
             }?.hostKind == SystemAssistantHostKind.ACTIVITY_OVERLAY
             if (activityOverlayActive) {
+            var overlayToolIndex = 0
             toolsToProcess.forEach { tool ->
+                val timingIndex = overlayToolIndex++
                 when (tool.approvalState) {
                     is ToolApprovalState.Denied -> {
                         // Tool was denied by user
@@ -1464,6 +1644,7 @@ class GenerationHandler(
                                 )
                             )
                         )
+                        finishSyntheticTool(timingIndex, tool, AgentTimingEventResult.DENIED)
                     }
 
                     is ToolApprovalState.Answered -> {
@@ -1474,6 +1655,7 @@ class GenerationHandler(
                                 UIMessagePart.Text(answer)
                             )
                         )
+                        finishSyntheticTool(timingIndex, tool, AgentTimingEventResult.ANSWERED)
                     }
 
                     is ToolApprovalState.Pending -> {
@@ -1481,6 +1663,25 @@ class GenerationHandler(
                     }
 
                     else -> {
+                        val scopeBindingFailure = memoryToolScopeBindingFailure(
+                            tool = tool,
+                            expectedAssistantId = assistant.id.toString(),
+                            expectedScopeId = if (assistant.useGlobalMemory) {
+                                MemoryRepository.GLOBAL_MEMORY_ID
+                            } else {
+                                assistant.id.toString()
+                            },
+                            memoryCapabilityEnabled = hostMemoryCapabilityEnabled,
+                        )
+                        if (scopeBindingFailure != null) {
+                            Log.w(
+                                TAG,
+                                "memory tool scope binding rejected ${tool.toolName}: " +
+                                    scopeBindingFailure,
+                            )
+                            executedTools += tool.withMemoryScopeBindingFailure(scopeBindingFailure)
+                            return@forEach
+                        }
                         // Auto or Approved - execute the tool.
                         //
                         // Defence-in-depth HARDLINE re-check: the primary check at line ~442
@@ -1689,6 +1890,7 @@ class GenerationHandler(
                                     conversationId = conversationId,
                                     assistantId = assistant.id.toString(),
                                     callOrigin = callOrigin,
+                                    commandId = authoritativeCommandId,
                                     toolCallId = tool.toolCallId,
                                     workspaceId = assistant.workspaceId?.toString(),
                                     workspaceCwd = workspaceCwd,
@@ -1702,10 +1904,16 @@ class GenerationHandler(
                                 startableTools[toolDef.name]
                                     ?: toolStartableResolver.resolve(toolDef, owner)
                             }
+                            val timingBinding = timingForTool(timingIndex, tool)
+                            timingBinding?.second.notifyQueuedSafely()
                             val runtimeResult = toolRuntime.execute(
                                 ToolExecutionPlanRequest(
                                     toolCallId = tool.toolCallId,
                                     toolName = toolDef.name,
+                                    toolSchemaFingerprint = ToolCatalogSnapshot
+                                        .fromDefinitions(listOf(toolDef))
+                                        .entry(toolDef.name)
+                                        ?.schemaFingerprint,
                                     args = args,
                                     executionContext = executionContext,
                                     startableTool = startable,
@@ -1714,6 +1922,7 @@ class GenerationHandler(
                                     },
                                     runControl = runControl,
                                     wallClockBudgetMs = remainingMs.coerceAtLeast(0L),
+                                    timingHook = timingBinding?.second,
                                     preExecutionGate = {
                                         when (val gate = toolExecutionGate.evaluate(
                                             toolName = tool.toolName,
@@ -1752,26 +1961,32 @@ class GenerationHandler(
                                         "wall-clock budget exhausted",
                                 )
                             }
-                            toolExperienceRecorder?.recordIfEligible(
-                                definition = toolDef,
-                                result = runtimeResult,
-                                context = executionContext,
-                            )
-                            val result = runtimeResult.output
-                            // Upstream tool-output truncation: when the workspace shell is
-                            // available, oversized text output is spilled to /tool_outputs/
-                            // and replaced with a preview + read/grep instructions so the
-                            // model can pull the full payload on demand instead of burning
-                            // the context window.
-                            val hasShellAccess = toolsInternal.any { it.name == "workspace_shell" }
-                            executedTools += markedTool.copy(
-                                output = maybeTruncateToolOutput(
-                                    tool.toolCallId,
-                                    tool.toolName,
-                                    result,
-                                    hasShellAccess,
+                            agentTiming.timedAgentStage(
+                                AgentTimingEventKind.TOOL_OUTPUT_NORMALIZE_STARTED,
+                                AgentTimingEventKind.TOOL_OUTPUT_NORMALIZE_FINISHED,
+                                currentTimingRound,
+                                timingBinding?.first,
+                            ) {
+                                toolExperienceRecorder?.recordIfEligible(
+                                    definition = toolDef,
+                                    result = runtimeResult,
+                                    context = executionContext,
                                 )
-                            )
+                                val result = runtimeResult.output
+                                // Oversized output may be spilled to a file by this projection.
+                                val hasShellAccess = toolsInternal.any { it.name == "workspace_shell" }
+                                executedTools += markedTool.copy(
+                                    output = maybeTruncateToolOutput(
+                                        tool.toolCallId,
+                                        tool.toolName,
+                                        result,
+                                        hasShellAccess,
+                                        agentTiming,
+                                        currentTimingRound,
+                                        timingBinding?.first,
+                                    )
+                                )
+                            }
                         }.also {
                             if (executionBoundaryStarted) {
                                 runControl?.finishToolExecution(tool.toolCallId)
@@ -1885,10 +2100,15 @@ class GenerationHandler(
                         ).coerceAtLeast(0L)
                     val startable = startableTools[ready.toolDef.name]
                         ?: toolStartableResolver.resolve(ready.toolDef, ready.executionContext)
+                    val timingBinding = timingForTool(ready.index, ready.tool)
                     val runtimeResult = toolRuntime.execute(
                         ToolExecutionPlanRequest(
                             toolCallId = ready.tool.toolCallId,
                             toolName = ready.toolDef.name,
+                            toolSchemaFingerprint = ToolCatalogSnapshot
+                                .fromDefinitions(listOf(ready.toolDef))
+                                .entry(ready.toolDef.name)
+                                ?.schemaFingerprint,
                             args = ready.args,
                             executionContext = ready.executionContext,
                             startableTool = startable,
@@ -1897,6 +2117,7 @@ class GenerationHandler(
                             },
                             runControl = runControl,
                             wallClockBudgetMs = remainingMs,
+                            timingHook = timingBinding?.second,
                             preExecutionGate = {
                                 when (val gate = toolExecutionGate.evaluate(
                                     toolName = ready.tool.toolName,
@@ -1935,19 +2156,29 @@ class GenerationHandler(
                                 "wall-clock budget exhausted",
                         )
                     }
-                    toolExperienceRecorder?.recordIfEligible(
-                        definition = ready.toolDef,
-                        result = runtimeResult,
-                        context = ready.executionContext,
-                    )
-                    markedTool.copy(
-                        output = maybeTruncateToolOutput(
-                            ready.tool.toolCallId,
-                            ready.tool.toolName,
-                            runtimeResult.output,
-                            hasShellAccess,
-                        ),
-                    )
+                    agentTiming.timedAgentStage(
+                        AgentTimingEventKind.TOOL_OUTPUT_NORMALIZE_STARTED,
+                        AgentTimingEventKind.TOOL_OUTPUT_NORMALIZE_FINISHED,
+                        currentTimingRound,
+                        timingBinding?.first,
+                    ) {
+                        toolExperienceRecorder?.recordIfEligible(
+                            definition = ready.toolDef,
+                            result = runtimeResult,
+                            context = ready.executionContext,
+                        )
+                        markedTool.copy(
+                            output = maybeTruncateToolOutput(
+                                ready.tool.toolCallId,
+                                ready.tool.toolName,
+                                runtimeResult.output,
+                                hasShellAccess,
+                                agentTiming,
+                                currentTimingRound,
+                                timingBinding?.first,
+                            ),
+                        )
+                    }
                 }.getOrElse { failure ->
                     if (failure is CancellationException) throw failure
                     toolFailure(ready.tool, failure)
@@ -1959,7 +2190,11 @@ class GenerationHandler(
                     val readyByCallId = readySegment.associateBy { it.tool.toolCallId }
                     val markedTools = mutableMapOf<String, UIMessagePart.Tool>()
                     var batchDeadlineMs = 0L
-                    val batchResults = toolExecutionBatchCoordinator.execute(
+                    val batchResults = agentTiming.timedAgentStageSuspend(
+                        AgentTimingEventKind.TOOL_BATCH_STARTED,
+                        AgentTimingEventKind.TOOL_BATCH_FINISHED,
+                        currentTimingRound,
+                    ) { toolExecutionBatchCoordinator.execute(
                         candidates = readySegment.map { ready ->
                             ToolBatchCandidate(
                                 index = ready.index,
@@ -2006,13 +2241,21 @@ class GenerationHandler(
                                 batchDeadlineMs = batchDeadlineMs,
                             )
                         },
-                    )
+                    ) }
                     batchResults.forEach { result ->
                         val ready = readyByCallId.getValue(result.candidate.toolCallId)
                         when (val outcome = result.outcome) {
                             is ToolBatchExecutionOutcome.Executed -> executedTools += outcome.value
                             ToolBatchExecutionOutcome.SkippedDueToSteering -> {
                                 executedTools += ready.tool.skippedDueToGuidance()
+                                toolTimingByIndex?.get(ready.index)?.let { (ref, _) ->
+                                    agentTiming?.mark(
+                                        AgentTimingEventKind.TOOL_TERMINAL,
+                                        currentTimingRound,
+                                        ref,
+                                        AgentTimingEventResult.CANCELLED,
+                                    )
+                                }
                             }
                         }
                     }
@@ -2041,12 +2284,14 @@ class GenerationHandler(
                                     ),
                                 ),
                             )
+                            finishSyntheticTool(index, tool, AgentTimingEventResult.DENIED)
                         }
 
                         is ToolApprovalState.Answered -> {
                             flushReadySegment()
                             val answer = (tool.approvalState as ToolApprovalState.Answered).answer
                             executedTools += tool.copy(output = listOf(UIMessagePart.Text(answer)))
+                            finishSyntheticTool(index, tool, AgentTimingEventResult.ANSWERED)
                         }
 
                         is ToolApprovalState.Pending -> {
@@ -2054,6 +2299,27 @@ class GenerationHandler(
                         }
 
                         else -> {
+                            val scopeBindingFailure = memoryToolScopeBindingFailure(
+                                tool = tool,
+                                expectedAssistantId = assistant.id.toString(),
+                                expectedScopeId = if (assistant.useGlobalMemory) {
+                                    MemoryRepository.GLOBAL_MEMORY_ID
+                                } else {
+                                    assistant.id.toString()
+                                },
+                                memoryCapabilityEnabled = hostMemoryCapabilityEnabled,
+                            )
+                            if (scopeBindingFailure != null) {
+                                flushReadySegment()
+                                Log.w(
+                                    TAG,
+                                    "memory tool scope binding rejected ${tool.toolName}: " +
+                                        scopeBindingFailure,
+                                )
+                                executedTools +=
+                                    tool.withMemoryScopeBindingFailure(scopeBindingFailure)
+                                continue
+                            }
                             val resumeHardlineReason = me.rerere.rikkahub.data.ai.tools
                                 .HardlineCommandGuard.checkTool(tool.toolName, tool.input)
                             if (resumeHardlineReason != null) {
@@ -2197,6 +2463,7 @@ class GenerationHandler(
                                     conversationId = conversationId,
                                     assistantId = assistant.id.toString(),
                                     callOrigin = callOrigin,
+                                    commandId = authoritativeCommandId,
                                     toolCallId = tool.toolCallId,
                                     workspaceId = assistant.workspaceId?.toString(),
                                     workspaceCwd = workspaceCwd,
@@ -2232,13 +2499,15 @@ class GenerationHandler(
                                 continue
                             }
 
-                            readySegment += BatchReadyTool(
+                            val readyTool = BatchReadyTool(
                                 index = index,
                                 tool = tool,
                                 toolDef = toolDef,
                                 args = args,
                                 executionContext = executionContext,
                             )
+                            timingForTool(index, tool)?.second.notifyQueuedSafely()
+                            readySegment += readyTool
                         }
                     }
                 }
@@ -2249,6 +2518,10 @@ class GenerationHandler(
                 // No results to add (all tools were pending)
                 break
             }
+            agentTiming?.checkpoint(
+                AgentTimingEventKind.MODEL_RESULTS_READY,
+                currentTimingRound,
+            )
 
             // Update last message with executed tools (NOT create TOOL message)
             val lastMessage = messages.last()
@@ -2268,6 +2541,12 @@ class GenerationHandler(
                         settings = settings
                     )
                 )
+            )
+            // This is only the producer-side Flow hand-off. ChatService records the separate
+            // collector/session milestone after it has applied the correlated message state.
+            agentTiming?.mark(
+                AgentTimingEventKind.TOOL_RESULTS_EMITTED,
+                currentTimingRound,
             )
         }
 
@@ -2397,15 +2676,24 @@ class GenerationHandler(
         onRawSensitiveToolInput: (UIMessagePart.Tool) -> Unit = {},
         conversationId: Uuid? = null,
         commandId: Uuid? = null,
+        authoritativeCommandId: Uuid? = null,
         toolDiscoveryMetrics: ToolDiscoveryMetrics? = null,
         usageBase: TokenUsage? = null,
+        touchedMemoryIds: MutableSet<Int>,
+        touchedDreamClaimRefs: MutableSet<DreamRuntimeClaimRef>,
+        agentTiming: AgentTimingHandle? = null,
+        onTimingRoundReady: (AgentTimingRoundRef) -> Unit = {},
     ): GenerationTerminal {
         val sourceContext = contextMessages ?: messages
         // Explicit projections are already selected at a stable boundary. Selecting them again
         // after the live tool tail grows can slide that boundary and invalidate the provider
         // prefix, even though no historical content changed.
-        val selectedContext = contextMessages
-            ?: messages.selectOrdinaryChatContext(assistant.contextMessageSize)
+        val selectedContext = agentTiming.timedAgentStage(
+            AgentTimingEventKind.CONTEXT_COMPRESSION_STARTED,
+            AgentTimingEventKind.CONTEXT_COMPRESSION_FINISHED,
+        ) {
+            contextMessages ?: messages.selectOrdinaryChatContext(assistant.contextMessageSize)
+        }
         if (selectedContext.size < sourceContext.size) {
             val boundaryHash = selectedContext.firstOrNull()?.id
                 ?.toString()
@@ -2463,24 +2751,37 @@ class GenerationHandler(
             } else {
                 assistant.systemPrompt
             }
-        val breakdownRecentChatsPrompt = if (
-            requestPurpose == GenerationRequestPurpose.NORMAL && assistant.enableRecentChatsReference
+        val breakdownRecentChatsPrompt = agentTiming.timedAgentStageSuspend(
+            AgentTimingEventKind.RECENT_CHATS_STARTED,
+            AgentTimingEventKind.RECENT_CHATS_FINISHED,
         ) {
-            buildRecentChatsPrompt(assistant, conversationRepo)
-        } else ""
-        val breakdownToolPrompts = tools.map { tool -> tool.systemPrompt(model, messages) }
+            if (requestPurpose == GenerationRequestPurpose.NORMAL && assistant.enableRecentChatsReference) {
+                buildRecentChatsPrompt(assistant, conversationRepo)
+            } else ""
+        }
+        val breakdownToolPrompts = agentTiming.timedAgentStage(
+            AgentTimingEventKind.TOOL_PROMPT_STARTED,
+            AgentTimingEventKind.TOOL_PROMPT_FINISHED,
+        ) {
+            tools.map { tool -> tool.systemPrompt(model, messages) }
+        }
         val breakdownUserIdentityPrompt = buildUserIdentityPrompt(
             settings.displaySetting.userNickname,
         )
 
-        fun createSystemPromptLayout(memoryPrompt: String): ProviderSystemPromptLayout {
+        fun createSystemPromptLayout(
+            memoryPrompt: String,
+            dreamPrompt: String = "",
+        ): ProviderSystemPromptLayout {
             // Split stable instructions from runtime data. Chat Completions anchor runtime data
             // to the current user turn (below); otherwise an ever-changing device/memory
             // addendum can cut the reusable prefix after only the system prompt.
             val (stableSystem, volatileSystem) = systemPromptBuilder.buildSections(
                 assistantPrompt = breakdownAssistantPrompt,
                 userIdentityPrompt = breakdownUserIdentityPrompt,
-                memoryPrompt = memoryPrompt,
+                memoryPrompt = listOf(memoryPrompt, dreamPrompt)
+                    .filter(String::isNotBlank)
+                    .joinToString("\n\n"),
                 recentChatsPrompt = breakdownRecentChatsPrompt,
                 toolPrompts = breakdownToolPrompts,
                 systemAddendum = providerSystemAddendum,
@@ -2493,23 +2794,128 @@ class GenerationHandler(
             )
         }
 
-        val layoutWithoutMemory = createSystemPromptLayout(memoryPrompt = "")
-        val memoryPromptBudget = contextPreparer.conservativeMemoryBudget(
+        val layoutWithoutMemory = agentTiming.timedAgentStage(
+            AgentTimingEventKind.SYSTEM_PROMPT_STARTED,
+            AgentTimingEventKind.SYSTEM_PROMPT_FINISHED,
+        ) { createSystemPromptLayout(memoryPrompt = "") }
+        val requestTokenEstimator = ProviderRequestTokenEstimator()
+        val memoryPromptBudget = agentTiming.timedAgentStage(
+            AgentTimingEventKind.TOKEN_COUNT_STARTED,
+            AgentTimingEventKind.TOKEN_COUNT_FINISHED,
+        ) {
+            contextPreparer.conservativeMemoryBudget(
+                resolvedWindow = resolvedContextWindow,
+                requestedOutputTokens = requestedMaxTokens,
+                tools = tools,
+                builtInTools = model.tools,
+                baseMessages = layoutWithoutMemory.applyVolatileContext(
+                    layoutWithoutMemory.initialMessages,
+                ),
+            )
+        }
+        val memoryCompileResult = agentTiming.timedAgentStage(
+            AgentTimingEventKind.MEMORY_PROMPT_STARTED,
+            AgentTimingEventKind.MEMORY_PROMPT_FINISHED,
+        ) {
+            compileMemoryPrompt(
+                memories = if (assistant.enableMemory) memories else emptyList(),
+                includeContextual = requestPurpose == GenerationRequestPurpose.NORMAL,
+                maxTokens = memoryPromptBudget,
+            )
+        }
+        val breakdownMemoryPrompt = memoryCompileResult.text
+        // Memory remains authoritative and receives its complete allocation first. Dream gets
+        // only the trusted hard-gate remainder after the atomic Memory section has been charged.
+        val layoutWithMemory = createSystemPromptLayout(breakdownMemoryPrompt)
+        val dreamPromptBudget = contextPreparer.conservativeMemoryBudget(
             resolvedWindow = resolvedContextWindow,
             requestedOutputTokens = requestedMaxTokens,
             tools = tools,
             builtInTools = model.tools,
-            baseMessages = layoutWithoutMemory.applyVolatileContext(
-                layoutWithoutMemory.initialMessages,
-            ),
+            baseMessages = layoutWithMemory.applyVolatileContext(layoutWithMemory.initialMessages),
         )
-        val memoryCompileResult = compileMemoryPrompt(
-            memories = if (assistant.enableMemory) memories else emptyList(),
-            includeContextual = requestPurpose == GenerationRequestPurpose.NORMAL,
-            maxTokens = memoryPromptBudget,
+        val memoryScopeId = if (assistant.useGlobalMemory) {
+            MemoryRepository.GLOBAL_MEMORY_ID
+        } else {
+            assistant.id.toString()
+        }
+        val dreamScopeId = DreamScopeId.requireCanonical(memoryScopeId)
+        val dreamContext = DreamGenerationContextPlanner(
+            featureFlags = dreamingFeatureFlags,
+            projectionReader = dreamSnapshotProjectionReader,
+        ).prepare(
+            scopeId = dreamScopeId,
+            frozenNowEpochMs = memoryFrozenNowMs,
+            trustedTokenBudget = dreamPromptBudget,
+            tokenEstimator = DreamRuntimeTokenEstimator { text ->
+                requestTokenEstimator.estimateMessage(UIMessage.system(text)).baseTokens
+            },
         )
-        val breakdownMemoryPrompt = memoryCompileResult.text
-        val systemPromptLayout = createSystemPromptLayout(breakdownMemoryPrompt)
+        val requestMode =
+            "${requestPurpose.name.lowercase()}:${if (stream) "stream" else "single"}"
+        // Allocate once before either hard gate. Overflow and success records for this attempted
+        // provider call must share one stable call index.
+        val providerCallIndex = diagnosticHandle.nextProviderCallIndex()
+        val memoryDropReasonCounts = memoryCompileResult.dropped
+            .groupingBy { drop -> drop.reason.name }
+            .eachCount()
+
+        fun buildRequestBreakdown(
+            finalMessages: List<UIMessage>,
+            callIndex: Int = providerCallIndex,
+            mode: String = requestMode,
+        ): RequestBreakdownDiagnostic = RequestBreakdownDiagnostic.create(
+            generationId = diagnosticHandle.generationId,
+            providerCallIndex = callIndex,
+            modelId = model.modelId,
+            providerType = provider::class.simpleName ?: "unknown",
+            requestMode = mode,
+            finalMessages = finalMessages,
+            tools = tools,
+            builtInTools = model.tools,
+            assistantPrompt = breakdownAssistantPrompt,
+            userIdentityPrompt = breakdownUserIdentityPrompt,
+            toolSystemPrompts = breakdownToolPrompts,
+            memoryPrompt = breakdownMemoryPrompt,
+            recentChatsPrompt = breakdownRecentChatsPrompt,
+            dynamicSystemAddendum = providerSystemAddendum,
+            memoryCount = memoryCompileResult.actualIncludedIds.size,
+            memoryRetrievalTraceId = memoryRetrievalTraceId,
+            enabledSkillNames = assistant.enabledSkills,
+            toolCatalogCandidateCount = toolDiscoveryMetrics?.candidateCount,
+            toolCatalogSelectedSchemaCount = toolDiscoveryMetrics?.selectedSchemaCount,
+            toolCatalogStage = toolDiscoveryMetrics?.stage,
+            toolFastLaneShortcutLibraryCount = toolDiscoveryMetrics?.fastLaneShortcutLibraryCount,
+            toolFastLaneInjectedSchemaCount = toolDiscoveryMetrics?.fastLaneInjectedSchemaCount,
+            toolFastLaneBundleId = toolDiscoveryMetrics?.fastLaneBundleId,
+            continuationHistoryEpoch = continuationHistoryEpoch,
+            continuationHistoryEpochReason = continuationHistoryEpochReason,
+            contextProjectionMode = contextProjectionMode,
+            frozenPrefixMessageCount = frozenPrefixMessageCount,
+            fingerprintKey = diagnosticHandle.fingerprintKey,
+        ).withMemoryCompiler(
+            actualStandingCount = memoryCompileResult.actualStandingIds.size,
+            actualContextualCount = memoryCompileResult.actualContextualIds.size,
+            memoryPromptEstimatedTokens = memoryCompileResult.estimatedTokens,
+            memoryCompilerRevision = memoryCompileResult.compilerRevision,
+            dropReasonCounts = memoryDropReasonCounts,
+        )
+
+        fun mediaTokens(candidate: List<UIMessage>): Int = requestTokenEstimator
+            // Media accounting does not need to re-materialize tool schemas. Besides wasting
+            // work, doing so would add another cancellation/error boundary after the gate.
+            .estimate(candidate)
+            .mediaTokens
+
+        val systemPromptLayout = agentTiming.timedAgentStage(
+            AgentTimingEventKind.SYSTEM_PROMPT_STARTED,
+            AgentTimingEventKind.SYSTEM_PROMPT_FINISHED,
+        ) {
+            createSystemPromptLayout(
+                memoryPrompt = breakdownMemoryPrompt,
+                dreamPrompt = dreamContext.renderedSection,
+            )
+        }
         val providerIdentityMessages = prepareSecondUserProviderMessages(systemPromptLayout.initialMessages)
         val providerEphemeralMessages = if (
             secretEgressBinding != null &&
@@ -2520,37 +2926,118 @@ class GenerationHandler(
         } else {
             providerIdentityMessages
         }
-        val initialContextPreparation = contextPreparer.prepareOrdinaryChat(
-            messages = providerEphemeralMessages,
-            configuredContextWindowTokens = model.userContextWindowTokens,
-            advertisedContextWindowTokens = model.contextLength,
-            trustedContextWindowTokens = trustedContextWindowTokens,
-            requestedOutputTokens = requestedMaxTokens,
-            tools = tools,
-            builtInTools = model.tools,
-        ).requireLosslessProviderContext(stage = "pre_transform")
+        val initialContextPreparation = try {
+            agentTiming.timedAgentStage(
+                AgentTimingEventKind.CONTEXT_GATE_INITIAL_STARTED,
+                AgentTimingEventKind.CONTEXT_GATE_INITIAL_FINISHED,
+            ) {
+                contextPreparer.prepareOrdinaryChat(
+                    messages = providerEphemeralMessages,
+                    configuredContextWindowTokens = model.userContextWindowTokens,
+                    advertisedContextWindowTokens = model.contextLength,
+                    trustedContextWindowTokens = trustedContextWindowTokens,
+                    requestedOutputTokens = requestedMaxTokens,
+                    tools = tools,
+                    builtInTools = model.tools,
+                ).applyProviderContextProjectionPolicy(
+                    policy = ORDINARY_GENERATION_CONTEXT_PROJECTION_POLICY,
+                    stage = "initial",
+                )
+            }
+        } catch (overflow: ProviderContextOverflowException) {
+            agentTiming?.mark(AgentTimingEventKind.REQUEST_BREAKDOWN_BUILD_STARTED)
+            val overflowBreakdown = buildRequestBreakdown(providerEphemeralMessages)
+                .withContextBudget(
+                    effectiveContextWindowTokens = resolvedContextWindow.effectiveTokens,
+                    requestedOutputTokens = requestedMaxTokens,
+                )
+                .withContextGate(
+                    stage = RequestContextGateStage.INITIAL,
+                    status = RequestContextGateStatus.OVERFLOW,
+                    trace = overflow.overflow.trace,
+                    originalMediaTokens = mediaTokens(providerEphemeralMessages),
+                )
+            agentTiming?.mark(AgentTimingEventKind.REQUEST_BREAKDOWN_BUILD_FINISHED)
+            agentTiming.timedAgentStage(
+                AgentTimingEventKind.REQUEST_BREAKDOWN_WRITE_STARTED,
+                AgentTimingEventKind.REQUEST_BREAKDOWN_WRITE_FINISHED,
+            ) { diagnosticHandle.recordRequestBreakdown(context.filesDir, overflowBreakdown) }
+            Log.w(TAG, "context hard cap rejected initial provider projection: ${overflow.overflow.kind}")
+            throw overflow
+        }
         val providerContext = initialContextPreparation.messages
-        val transformedMessages = providerContext.transforms(
-            transformers = transformers,
-            context = context,
-            model = model,
-            assistant = assistant,
-            settings = settings,
-            conversationModeInjectionIds = conversationModeInjectionIds,
-            conversationLorebookIds = conversationLorebookIds,
-            processingStatus = processingStatus,
-            workspaceCwd = workspaceCwd,
-        )
-        val contextPreparation = contextPreparer.prepareOrdinaryChat(
-            messages = systemPromptLayout.applyVolatileContext(transformedMessages),
-            configuredContextWindowTokens = model.userContextWindowTokens,
-            advertisedContextWindowTokens = model.contextLength,
-            trustedContextWindowTokens = trustedContextWindowTokens,
-            requestedOutputTokens = requestedMaxTokens,
-            tools = tools,
-            builtInTools = model.tools,
-        ).requireLosslessProviderContext(stage = "post_transform")
+        val transformedMessages = agentTiming.timedAgentStageSuspend(
+            AgentTimingEventKind.INPUT_TRANSFORM_STARTED,
+            AgentTimingEventKind.INPUT_TRANSFORM_FINISHED,
+        ) {
+            providerContext.transforms(
+                transformers = transformers,
+                context = context,
+                model = model,
+                assistant = assistant,
+                settings = settings,
+                conversationModeInjectionIds = conversationModeInjectionIds,
+                conversationLorebookIds = conversationLorebookIds,
+                processingStatus = processingStatus,
+                workspaceCwd = workspaceCwd,
+            )
+        }
+        val finalContextCandidateMessages =
+            systemPromptLayout.applyVolatileContext(transformedMessages)
+        val contextPreparation = try {
+            agentTiming.timedAgentStage(
+                AgentTimingEventKind.CONTEXT_GATE_FINAL_STARTED,
+                AgentTimingEventKind.CONTEXT_GATE_FINAL_FINISHED,
+            ) {
+                contextPreparer.prepareOrdinaryChat(
+                    messages = finalContextCandidateMessages,
+                    configuredContextWindowTokens = model.userContextWindowTokens,
+                    advertisedContextWindowTokens = model.contextLength,
+                    trustedContextWindowTokens = trustedContextWindowTokens,
+                    requestedOutputTokens = requestedMaxTokens,
+                    tools = tools,
+                    builtInTools = model.tools,
+                ).applyProviderContextProjectionPolicy(
+                    policy = ORDINARY_GENERATION_CONTEXT_PROJECTION_POLICY,
+                    stage = "final",
+                )
+            }
+        } catch (overflow: ProviderContextOverflowException) {
+            agentTiming?.mark(AgentTimingEventKind.REQUEST_BREAKDOWN_BUILD_STARTED)
+            val overflowBreakdown = buildRequestBreakdown(finalContextCandidateMessages)
+                .withContextBudget(
+                    effectiveContextWindowTokens = resolvedContextWindow.effectiveTokens,
+                    requestedOutputTokens = requestedMaxTokens,
+                )
+                .withContextGate(
+                    stage = RequestContextGateStage.INITIAL,
+                    status = RequestContextGateStatus.SUCCESS,
+                    trace = initialContextPreparation.trace,
+                    originalMediaTokens = mediaTokens(providerEphemeralMessages),
+                    finalMediaTokens = mediaTokens(initialContextPreparation.messages),
+                )
+                .withContextGate(
+                    stage = RequestContextGateStage.FINAL,
+                    status = RequestContextGateStatus.OVERFLOW,
+                    trace = overflow.overflow.trace,
+                    originalMediaTokens = mediaTokens(finalContextCandidateMessages),
+                )
+            agentTiming?.mark(AgentTimingEventKind.REQUEST_BREAKDOWN_BUILD_FINISHED)
+            agentTiming.timedAgentStage(
+                AgentTimingEventKind.REQUEST_BREAKDOWN_WRITE_STARTED,
+                AgentTimingEventKind.REQUEST_BREAKDOWN_WRITE_FINISHED,
+            ) { diagnosticHandle.recordRequestBreakdown(context.filesDir, overflowBreakdown) }
+            Log.w(TAG, "context hard cap rejected final provider projection: ${overflow.overflow.kind}")
+            throw overflow
+        }
         val internalMessages = contextPreparation.messages
+        val dreamPresentOnFinalWire = dreamContext.requirePresentOnFinalWire(internalMessages)
+        dreamRuntimeDiagnosticsSink.recordSafely(
+            dreamContext.diagnostic.copy(
+                presentOnFinalWire = dreamPresentOnFinalWire,
+                finalHardGatePassed = true,
+            ),
+        )
         Log.i(
             TAG,
             "contextPolicy: windowTokens=${contextPreparation.enforcedWindowTokens}, " +
@@ -2560,24 +3047,49 @@ class GenerationHandler(
                 "memoryBudgetTokens=$memoryPromptBudget, " +
                 "memoryInjected=${memoryCompileResult.actualIncludedIds.size}, " +
                 "memoryDropped=${memoryCompileResult.dropped.size}, " +
+                "dreamBudgetTokens=$dreamPromptBudget, " +
+                "dreamStatus=${dreamContext.status}, " +
+                "dreamInjected=${dreamContext.compileResult?.actualClaimCount ?: 0}, " +
                 "advertisedModelWindowTokens=${contextPreparation.advertisedContextWindowTokens ?: "none"}",
         )
 
+        val preexistingToolCallIds = messages.asSequence()
+            .flatMap { message -> message.parts.asSequence() }
+            .filterIsInstance<UIMessagePart.Tool>()
+            .mapTo(linkedSetOf()) { tool -> tool.toolCallId }
         var messages: List<UIMessage> = messages
         var terminalTracker = GenerationTerminalTracker()
-        val memoryScopeId = if (assistant.useGlobalMemory) {
-            MemoryRepository.GLOBAL_MEMORY_ID
-        } else {
-            assistant.id.toString()
+        val finalWireProjectionText = try {
+            json.encodeToString(internalMessages)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            // An incomplete namespace is more dangerous than a cold cache.
+            Log.w(TAG, "Unable to build final-wire cache identity; disabling warm reuse", error)
+            null
         }
-        val providerCacheIdentity = buildProviderCacheIdentity(
-            conversationId = conversationId?.toString(),
-            assistantId = assistant.id.toString(),
-            memoryScopeId = memoryScopeId,
-            actualMemoryIds = memoryCompileResult.actualIncludedIds,
-            compilerRevision = memoryCompileResult.compilerRevision,
-        )
-        val params = TextGenerationParams(
+        val providerCacheIdentity = finalWireProjectionText?.let { finalWire ->
+            buildProviderCacheIdentity(
+                conversationId = conversationId?.toString(),
+                assistantId = assistant.id.toString(),
+                memoryScopeId = memoryScopeId,
+                actualMemoryIds = memoryCompileResult.actualIncludedIds,
+                memoryProjectionText = memoryCompileResult.text,
+                compilerRevision = memoryCompileResult.compilerRevision,
+                finalWireProjectionText = finalWire,
+                dreamCacheProjectionCanonicalJson = dreamContext.compileResult
+                    ?.takeIf { it.status == DreamRuntimeCompileStatus.COMPILED }
+                    ?.cacheProjectionDigestInput
+                    ?.canonicalJson(),
+                dreamCompilerRevision = dreamContext.compileResult
+                    ?.takeIf { it.status == DreamRuntimeCompileStatus.COMPILED }
+                    ?.compilerRevision,
+            )
+        }
+        val params = agentTiming.timedAgentStage(
+            AgentTimingEventKind.REQUEST_BUILD_STARTED,
+            AgentTimingEventKind.REQUEST_BUILD_FINISHED,
+        ) { TextGenerationParams(
             model = model,
             temperature = assistant.temperature,
             topP = assistant.topP,
@@ -2604,26 +3116,67 @@ class GenerationHandler(
                     bodies
                 }
             },
-        )
+        ) }
         var providerStarted = false
-        var memoryAccessRecorded = false
         var providerCallUsage: TokenUsage? = null
         suspend fun recordActualMemoryAccess() {
-            if (memoryAccessRecorded || memoryCompileResult.actualIncludedIds.isEmpty()) return
-            memoryAccessRecorded = true
+            val newlyTouched = memoryCompileResult.actualIncludedIds
+                .asSequence()
+                .filterNot(touchedMemoryIds::contains)
+                .toSet()
+            if (newlyTouched.isEmpty()) return
+            agentTiming.timedAgentStageSuspend(
+                AgentTimingEventKind.MEMORY_LAST_ACCESS_STARTED,
+                AgentTimingEventKind.MEMORY_LAST_ACCESS_FINISHED,
+            ) {
+                try {
+                    memoryRepo.markLastAccessed(
+                        scopeId = memoryScopeId,
+                        memoryIds = newlyTouched,
+                        accessedAtMs = memoryFrozenNowMs,
+                        frozenNowMs = memoryFrozenNowMs,
+                    )
+                    touchedMemoryIds += newlyTouched
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Exception) {
+                    // Usage bookkeeping must not turn a valid, already-gated request into a chat
+                    // outage. The scoped DAO still fails closed and never touches foreign rows.
+                    Log.w(TAG, "Unable to update memory lastAccess", error)
+                }
+            }
+        }
+        suspend fun recordActualDreamUsage(isRetry: Boolean) {
+            if (!dreamPresentOnFinalWire) return
+            val compiled = dreamContext.compileResult
+                ?.takeIf { it.status == DreamRuntimeCompileStatus.COMPILED }
+                ?: return
+            // Provider retries are separate wire requests and must remain observable. Primary
+            // tool-loop turns still de-duplicate the same Claim refs within one generation so a
+            // future durable recorder cannot turn a shared frozen projection into write churn.
+            val newlyUsed = if (isRetry) {
+                compiled.actualClaimRefs
+            } else {
+                compiled.actualClaimRefs.filterNot(touchedDreamClaimRefs::contains)
+            }
+            if (newlyUsed.isEmpty()) return
             try {
-                memoryRepo.markLastAccessed(
-                    scopeId = memoryScopeId,
-                    memoryIds = memoryCompileResult.actualIncludedIds.toSet(),
-                    accessedAtMs = memoryFrozenNowMs,
-                    frozenNowMs = memoryFrozenNowMs,
+                dreamRuntimeUsageRecorder.record(
+                    DreamRuntimeUsageRequest(
+                        scopeId = dreamScopeId,
+                        frozenNowEpochMs = memoryFrozenNowMs,
+                        actualClaimRefs = newlyUsed,
+                        compilerRevision = compiled.compilerRevision,
+                        isProviderRetry = isRetry,
+                    ),
                 )
+                touchedDreamClaimRefs += newlyUsed
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Exception) {
-                // Usage bookkeeping must not turn a valid, already-gated request into a chat
-                // outage. The scoped DAO still fails closed and never touches foreign rows.
-                Log.w(TAG, "Unable to update memory lastAccess", error)
+                // Dedicated Dream usage is a sidecar. Never forge Memory lastAccess or fail an
+                // already-gated provider request when the sidecar is temporarily unavailable.
+                Log.w(TAG, "Unable to record Dream runtime usage", error)
             }
         }
         fun markProviderStarted() {
@@ -2642,51 +3195,54 @@ class GenerationHandler(
                 stream = stream,
             )
         )
-        val requestMode = "${requestPurpose.name.lowercase()}:${if (stream) "stream" else "single"}"
-        val breakdown = RequestBreakdownDiagnostic.create(
-            generationId = diagnosticHandle.generationId,
-            providerCallIndex = diagnosticHandle.nextProviderCallIndex(),
-            modelId = model.modelId,
-            providerType = provider::class.simpleName ?: "unknown",
-            requestMode = requestMode,
-            finalMessages = internalMessages,
-            tools = tools,
-            builtInTools = model.tools,
-            assistantPrompt = breakdownAssistantPrompt,
-            userIdentityPrompt = breakdownUserIdentityPrompt,
-            toolSystemPrompts = breakdownToolPrompts,
-            memoryPrompt = breakdownMemoryPrompt,
-            recentChatsPrompt = breakdownRecentChatsPrompt,
-            dynamicSystemAddendum = providerSystemAddendum,
-            memoryCount = memoryCompileResult.actualIncludedIds.size,
-            memoryRetrievalTraceId = memoryRetrievalTraceId,
-            enabledSkillNames = assistant.enabledSkills,
-            toolCatalogCandidateCount = toolDiscoveryMetrics?.candidateCount,
-            toolCatalogSelectedSchemaCount = toolDiscoveryMetrics?.selectedSchemaCount,
-            toolCatalogStage = toolDiscoveryMetrics?.stage,
-            toolFastLaneShortcutLibraryCount = toolDiscoveryMetrics?.fastLaneShortcutLibraryCount,
-            toolFastLaneInjectedSchemaCount = toolDiscoveryMetrics?.fastLaneInjectedSchemaCount,
-            toolFastLaneBundleId = toolDiscoveryMetrics?.fastLaneBundleId,
-            continuationHistoryEpoch = continuationHistoryEpoch,
-            continuationHistoryEpochReason = continuationHistoryEpochReason,
-            contextProjectionMode = contextProjectionMode,
-            frozenPrefixMessageCount = frozenPrefixMessageCount,
-            fingerprintKey = diagnosticHandle.fingerprintKey,
-        ).withContextBudget(
+        val breakdown = agentTiming.timedAgentStage(
+            AgentTimingEventKind.REQUEST_BREAKDOWN_BUILD_STARTED,
+            AgentTimingEventKind.REQUEST_BREAKDOWN_BUILD_FINISHED,
+        ) { buildRequestBreakdown(internalMessages)
+            .withContextBudget(
             effectiveContextWindowTokens = contextPreparation.enforcedWindowTokens,
             requestedOutputTokens = contextPreparation.effectiveMaxOutputTokens,
-        )
-        diagnosticHandle.recordRequestBreakdown(context.filesDir, breakdown)
+            )
+            .withContextGate(
+                stage = RequestContextGateStage.INITIAL,
+                status = RequestContextGateStatus.SUCCESS,
+                trace = initialContextPreparation.trace,
+                originalMediaTokens = mediaTokens(providerEphemeralMessages),
+                finalMediaTokens = mediaTokens(initialContextPreparation.messages),
+            )
+            .withContextGate(
+                stage = RequestContextGateStage.FINAL,
+                status = RequestContextGateStatus.SUCCESS,
+                trace = contextPreparation.trace,
+                originalMediaTokens = mediaTokens(finalContextCandidateMessages),
+                finalMediaTokens = mediaTokens(contextPreparation.messages),
+            ) }
+        agentTiming.timedAgentStage(
+            AgentTimingEventKind.REQUEST_BREAKDOWN_WRITE_STARTED,
+            AgentTimingEventKind.REQUEST_BREAKDOWN_WRITE_FINISHED,
+        ) { diagnosticHandle.recordRequestBreakdown(context.filesDir, breakdown) }
         val watchdogEnabled = stream &&
             provider is ProviderSetting.OpenAI &&
             !provider.useResponseApi
         val providerAttemptBaseMessages = messages
+        val providerTimingHook = agentTiming?.let { handle ->
+            AgentTimingProviderHook(
+                handle = handle,
+                providerCallIndex = providerCallIndex,
+                stream = stream,
+                runtimeRunId = runControl?.runId,
+                onRoundCreated = onTimingRoundReady,
+            )
+        }
         val providerOutcome = try {
             DefaultProviderTurnRunner(runControl).run(
                 ProviderTurnRequest(
                     stream = stream,
-                    streamCall = {
+                    beforeAttempt = { isRetry ->
                         recordActualMemoryAccess()
+                        recordActualDreamUsage(isRetry)
+                    },
+                    streamCall = {
                         providerImpl.streamText(
                             providerSetting = provider,
                             messages = internalMessages,
@@ -2695,7 +3251,6 @@ class GenerationHandler(
                     },
                     retryStreamCall = if (watchdogEnabled) {
                         {
-                            recordActualMemoryAccess()
                             providerImpl.streamText(
                                 providerSetting = provider,
                                 messages = internalMessages,
@@ -2706,7 +3261,6 @@ class GenerationHandler(
                         null
                     },
                     singleCall = {
-                        recordActualMemoryAccess()
                         providerImpl.generateText(
                             providerSetting = provider,
                             messages = internalMessages,
@@ -2717,6 +3271,11 @@ class GenerationHandler(
                         markProviderStarted()
                         terminalTracker.observe(chunk)
                         messages = messages.handleMessageChunk(chunk = chunk, model = model)
+                            .bindNewMemoryToolScopes(
+                                preexistingToolCallIds = preexistingToolCallIds,
+                                assistantId = assistant.id.toString(),
+                                scopeId = memoryScopeId,
+                            )
                         messages.lastOrNull()?.parts
                             ?.filterIsInstance<UIMessagePart.Tool>()
                             ?.filter { tool ->
@@ -2774,6 +3333,7 @@ class GenerationHandler(
                     } else {
                         null
                     },
+                    timingHook = providerTimingHook,
                 )
             )
         } catch (t: Throwable) {
@@ -2789,6 +3349,11 @@ class GenerationHandler(
         )
         if (dsmlRecovery?.detected == true) {
             messages = messages.replaceLastMessage(dsmlRecovery.message)
+                .bindNewMemoryToolScopes(
+                    preexistingToolCallIds = preexistingToolCallIds,
+                    assistantId = assistant.id.toString(),
+                    scopeId = memoryScopeId,
+                )
             dsmlRecovery.recoveredTools
                 .filter { tool ->
                     tool.toolName == "owner_secret_manage" &&
@@ -2822,14 +3387,24 @@ class GenerationHandler(
             modelId = model.modelId,
             providerType = provider::class.simpleName ?: "unknown",
             requestMode = requestMode,
-            contextOriginalTokens = maxOf(
-                initialContextPreparation.estimatedRequestTokens,
-                contextPreparation.estimatedRequestTokens,
-            ),
-            contextPlannedTokens = contextPreparation.estimatedRequestTokens,
+            contextOriginalTokens = (
+                initialContextPreparation.trace.originalMessageTokens.toLong() +
+                    initialContextPreparation.trace.toolSchemaTokens
+                ).coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
+            contextPlannedTokens = (
+                contextPreparation.trace.finalMessageTokens.toLong() +
+                    contextPreparation.trace.toolSchemaTokens
+                ).coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
             contextWindowTokens = contextPreparation.enforcedWindowTokens,
-            contextCompressed = contextPreparation.summaryUsed,
-            historicalReasoningRemoved = 0,
+            contextCompressed = initialContextPreparation.trace.droppedMessages > 0 ||
+                initialContextPreparation.trace.strippedHistoricalReasoningParts > 0 ||
+                initialContextPreparation.trace.outputClamped ||
+                contextPreparation.trace.droppedMessages > 0 ||
+                contextPreparation.trace.strippedHistoricalReasoningParts > 0 ||
+                contextPreparation.trace.outputClamped,
+            historicalReasoningRemoved =
+                initialContextPreparation.trace.strippedHistoricalReasoningParts +
+                    contextPreparation.trace.strippedHistoricalReasoningParts,
         )
         return terminal
     }
@@ -2839,6 +3414,9 @@ class GenerationHandler(
         toolName: String,
         output: List<UIMessagePart>,
         hasShellAccess: Boolean,
+        agentTiming: AgentTimingHandle? = null,
+        round: AgentTimingRoundRef? = null,
+        tool: AgentTimingToolRef? = null,
     ): List<UIMessagePart> {
         val textParts = output.filterIsInstance<UIMessagePart.Text>()
         val nonTextParts = output.filter { it !is UIMessagePart.Text }
@@ -2854,8 +3432,15 @@ class GenerationHandler(
         val preview = fullText.take(TOOL_OUTPUT_PREVIEW_CHARS)
 
         val fileName = "${toolCallId}.txt"
-        val outputDir = File(context.filesDir, FileFolders.TOOL_OUTPUTS).apply { mkdirs() }
-        File(outputDir, fileName).writeText(fullText)
+        agentTiming.timedAgentStage(
+            AgentTimingEventKind.TOOL_OUTPUT_SPILL_STARTED,
+            AgentTimingEventKind.TOOL_OUTPUT_SPILL_FINISHED,
+            round,
+            tool,
+        ) {
+            val outputDir = File(context.filesDir, FileFolders.TOOL_OUTPUTS).apply { mkdirs() }
+            File(outputDir, fileName).writeText(fullText)
+        }
 
         return listOf(
             UIMessagePart.Text(

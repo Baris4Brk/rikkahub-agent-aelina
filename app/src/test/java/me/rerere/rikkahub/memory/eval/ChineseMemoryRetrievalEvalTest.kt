@@ -76,9 +76,9 @@ class ChineseMemoryRetrievalEvalTest {
             )
         }
 
-        val hardCases = cases.filterNot { case ->
-            case.requiresRelationSchema || "paraphrase_observational" in case.categories
-        }
+        // V44 now has authoritative relation/lifecycle state and the lexical paraphrase slice is
+        // stable enough to be a real regression gate. No published case is silently deferred.
+        val hardCases = cases
         val recallAt = listOf(1, 3, 5, 8).associate { k ->
             "Recall@$k" to macroRecallAt(hardCases, runs, k)
         }
@@ -176,6 +176,7 @@ class ChineseMemoryRetrievalEvalTest {
         assertEquals(0, standingFalsePromotionCount)
         assertEquals(0, missingExpectedStandingCount)
         assertEquals(0, tokenBudgetViolationCount)
+        assertEquals(0, report.deferredRelationCaseCount)
         assertEquals(EnergyMeasurement.UNMEASURED, report.energyMeasurement)
         assertTrue(encodedReport.contains("\"energyMeasurement\":\"UNMEASURED\""))
         assertTrue(!encodedReport.contains("energyMilliJoules", ignoreCase = true))

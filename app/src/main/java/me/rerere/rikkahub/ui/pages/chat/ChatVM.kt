@@ -261,6 +261,7 @@ class ChatVM(
      */
     fun handleMessageSend(content: List<UIMessagePart>, answer: Boolean = true) {
         if (content.isEmptyInputMessage()) return
+        val agentTimingSubmission = chatService.beginAgentTimingSubmission(_conversationId)
 
         viewModelScope.launch {
             reportSubmitResult(
@@ -269,6 +270,7 @@ class ChatVM(
                     content = content,
                     answer = answer,
                     origin = CommandOrigin.APP_UI,
+                    agentTimingSubmission = agentTimingSubmission,
                 )
             )
         }
@@ -310,7 +312,16 @@ class ChatVM(
 
     fun handleInterrupt(content: List<UIMessagePart>, answer: Boolean = true) {
         if (content.isEmptyInputMessage()) return
-        reportSubmitResult(chatService.submitInterrupt(_conversationId, content, answer, CommandOrigin.APP_UI))
+        val agentTimingSubmission = chatService.beginAgentTimingSubmission(_conversationId)
+        reportSubmitResult(
+            chatService.submitInterrupt(
+                _conversationId,
+                content,
+                answer,
+                CommandOrigin.APP_UI,
+                agentTimingSubmission,
+            )
+        )
     }
 
     fun resumeQueue() {
@@ -427,7 +438,13 @@ class ChatVM(
         message: UIMessage,
         regenerateAssistantMsg: Boolean = true
     ) {
-        chatService.regenerateAtMessage(_conversationId, message, regenerateAssistantMsg)
+        val agentTimingSubmission = chatService.beginAgentTimingSubmission(_conversationId)
+        chatService.regenerateAtMessage(
+            _conversationId,
+            message,
+            regenerateAssistantMsg,
+            agentTimingSubmission,
+        )
     }
 
     fun handleToolApproval(

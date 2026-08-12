@@ -2,6 +2,9 @@ package me.rerere.rikkahub.data.execution
 
 import me.rerere.rikkahub.data.ai.tools.ToolExecutionContext
 import me.rerere.rikkahub.data.ai.execution.ExecutionTrackingHealth
+import me.rerere.rikkahub.data.capability.SubjectType
+import me.rerere.rikkahub.learning.model.LearningScope
+import kotlin.uuid.Uuid
 
 data class ManagedExecutionReservation(
     val executionId: String,
@@ -39,8 +42,13 @@ class ManagedExecutionRegistration(
                     id = reservation.executionId,
                     traceId = context.runId.toString(),
                     parentExecutionId = parentId,
-                    commandId = context.runId.toString(),
+                    commandId = context.commandId?.toString(),
                     conversationId = context.conversationId.toString(),
+                    learningScope = if (context.capabilitySubject?.type == SubjectType.LOCAL_SECOND_USER) {
+                        LearningScope.AuthoritySubject(context.capabilitySubject.id)
+                    } else {
+                        LearningScope.Assistant(Uuid.parse(context.assistantId))
+                    },
                     subjectId = context.capabilitySubject?.id ?: context.assistantId,
                     subjectType = context.capabilitySubject?.type?.name ?: "LOCAL_ASSISTANT",
                     origin = context.callOrigin.name,

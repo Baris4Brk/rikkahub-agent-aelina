@@ -108,7 +108,10 @@ class AICoreProvider(private val context: Context) : Provider<ProviderSetting.AI
             // overflows it, so we build a MINI version specifically for AICore: terse tool
             // descriptions, no skill prose, no examples. Cloud providers continue to use the
             // full agent-core via the assistant's enabledSkills.
-            val systemPrefix = buildAiCoreMiniSystemPrefix(params.tools)
+            val systemPrefix = buildAiCoreSystemPrefix(
+                messages = messages,
+                tools = params.tools,
+            )
             // The shared request gate has already pruned only complete historical turns. Never
             // perform a second hidden takeLast here: it used to discard every SYSTEM message and
             // could silently remove safety and memory trust boundaries.
@@ -418,6 +421,30 @@ private fun buildAiCoreMiniSystemPrefix(tools: List<Tool>): String = buildString
             append("- ").append(tool.name).append(": ").appendLine(desc.take(100))
         }
     }
+}.trim()
+
+/**
+ * Preserves the complete SYSTEM projection that passed the shared hard gate. The compact AICore
+ * prefix only describes the provider's tool protocol; it must never replace assistant/user
+ * instructions or the runtime memory trust boundary.
+ */
+internal fun buildAiCoreSystemPrefix(
+    messages: List<UIMessage>,
+    tools: List<Tool>,
+): String = buildString {
+    buildAiCoreMiniSystemPrefix(tools).takeIf(String::isNotBlank)?.let(::appendLine)
+    messages.asSequence()
+        .filter { message -> message.role == MessageRole.SYSTEM }
+        .map { message ->
+            message.parts.filterIsInstance<UIMessagePart.Text>()
+                .joinToString("\n") { part -> part.text }
+                .trim()
+        }
+        .filter(String::isNotBlank)
+        .forEach { systemText ->
+            if (isNotEmpty()) appendLine()
+            appendLine(systemText)
+        }
 }.trim()
 
 /**

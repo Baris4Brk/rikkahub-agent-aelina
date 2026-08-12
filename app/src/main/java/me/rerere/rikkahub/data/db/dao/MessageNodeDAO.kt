@@ -26,6 +26,17 @@ interface MessageNodeDAO {
     @Query("SELECT * FROM message_node WHERE conversation_id = :conversationId AND id IN (:nodeIds)")
     suspend fun getNodesByIds(conversationId: String, nodeIds: List<String>): List<MessageNodeEntity>
 
+    /** Bounded provenance lookup; message payload is decoded only after authority validation. */
+    @Query(
+        "SELECT * FROM message_node WHERE conversation_id = :conversationId " +
+            "AND EXISTS (SELECT 1 FROM json_each(message_node.messages) AS message " +
+            "WHERE json_extract(message.value, '$.id') = :messageId) LIMIT 2",
+    )
+    suspend fun findNodesContainingMessage(
+        conversationId: String,
+        messageId: String,
+    ): List<MessageNodeEntity>
+
     @Query(
         "SELECT EXISTS(SELECT 1 FROM message_node WHERE conversation_id = :conversationId " +
             "AND node_index < :beforeNodeIndex)"

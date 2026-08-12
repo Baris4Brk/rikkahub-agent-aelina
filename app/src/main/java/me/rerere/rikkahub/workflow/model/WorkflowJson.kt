@@ -1,6 +1,7 @@
 package me.rerere.rikkahub.workflow.model
 
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -13,6 +14,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.booleanOrNull
+import me.rerere.rikkahub.data.capability.CapabilityKey
 
 /**
  * Phase 12 — strict JSON schema validator + parser/serializer.
@@ -31,6 +33,27 @@ import kotlinx.serialization.json.booleanOrNull
  * pass straight back as their error envelopes.
  */
 object WorkflowJson {
+
+    private val strictRootKeys = setOf(
+        "id",
+        "name",
+        "description",
+        "enabled",
+        "trigger",
+        "conditions",
+        "actions",
+        "cooldown_seconds",
+        "max_runs_per_day",
+        "created_at_ms",
+        "updated_at_ms",
+        "authoring_assistant_id",
+        // Server-owned when workflow_create/workflow_update persist a definition. It remains a
+        // known key so canonical stored JSON can also pass through tooling without being
+        // mistaken for a schema extension; callers still overwrite it from reviewed actions.
+        "capability_snapshot",
+    )
+
+    private val strictActionKeys = setOf("tool", "args", "timeout_seconds")
 
     @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
     private val strict: Json = Json {
@@ -81,6 +104,14 @@ object WorkflowJson {
         val obj = element as? JsonObject
             ?: return ParseResult.Err("not_an_object", "definition must be a JSON object")
 
+        val unknownRootKeys = obj.keys - strictRootKeys
+        if (unknownRootKeys.isNotEmpty()) {
+            return ParseResult.Err(
+                "unknown_root_key",
+                "definition contains unknown key(s): ${unknownRootKeys.sorted().joinToString()}",
+            )
+        }
+
         val name = obj["name"]?.jsonPrimitive?.contentOrNull
             ?: return ParseResult.Err("missing_name", "name is required")
         if (name.isBlank()) return ParseResult.Err("invalid_name", "name must be non-blank")
@@ -125,7 +156,14 @@ object WorkflowJson {
         for ((idx, el) in actionsArr.withIndex()) {
             val ao = el as? JsonObject
                 ?: return ParseResult.Err("bad_action_shape", "action $idx is not an object")
-            val toolName = ao["tool"]?.jsonPrimitive?.contentOrNull
+            val unknownActionKeys = ao.keys - strictActionKeys
+            if (unknownActionKeys.isNotEmpty()) {
+                return ParseResult.Err(
+                    "unknown_action_key",
+                    "action $idx contains unknown key(s): ${unknownActionKeys.sorted().joinToString()}",
+                )
+            }
+            val toolName = (ao["tool"] as? JsonPrimitive)?.contentOrNull
                 ?: return ParseResult.Err("missing_tool", "action $idx missing 'tool'")
             // knownToolNames is the assistant's currently-registered tool surface. Empty set is
             // a sentinel meaning "skip the check" — used when reading stored definitions back
@@ -143,7 +181,14 @@ object WorkflowJson {
                 return ParseResult.Err("workflow_chaining_disabled",
                     "action $idx: workflow_run cannot be used as a workflow action (chaining is out-of-scope in v1)")
             }
-            val args = ao["args"] as? JsonObject ?: buildJsonObject { }
+            val args = when (val argsElement = ao["args"]) {
+                null -> buildJsonObject { }
+                is JsonObject -> argsElement
+                else -> return ParseResult.Err(
+                    "bad_action_args",
+                    "action $idx args must be a JSON object",
+                )
+            }
             val timeout = ao["timeout_seconds"]?.jsonPrimitive?.intOrNull ?: 60
             if (timeout < WorkflowConstants.MIN_ACTION_TIMEOUT_S
                 || timeout > WorkflowConstants.MAX_ACTION_TIMEOUT_S) {
@@ -221,16 +266,60 @@ object WorkflowJson {
             if (definition.authoringAssistantId != null) {
                 put("authoring_assistant_id", JsonPrimitive(definition.authoringAssistantId))
             }
+            // An empty in-memory snapshot still represents a legacy definition loaded before
+            // this field existed (for example when the user only toggles that row). Preserve
+            // that compatibility state by omitting the field. New learned artifacts must use
+            // encodeForLearned(), which rejects the same empty value instead of encoding it as
+            // legacy.
+            if (definition.capabilitySnapshot.isNotEmpty()) {
+                put("capability_snapshot", buildJsonArray {
+                    definition.capabilitySnapshot.toSortedSet().forEach { capability ->
+                        add(JsonPrimitive(capability))
+                    }
+                })
+            }
         }
         return obj.toString()
+    }
+
+    /** Canonical learned-artifact encoder. Null means the capability snapshot failed closed. */
+    fun encodeForLearned(definition: WorkflowDefinition): String? =
+        WorkflowCapabilitySnapshot.parsePersistedForLearnedExecution(
+            definition.capabilitySnapshot,
+        )?.let { encode(definition) }
+
+    /** Whether a stored row predates persisted workflow capability snapshots. */
+    enum class CapabilitySnapshotStorage {
+        PERSISTED,
+        LEGACY_MISSING,
+    }
+
+    /**
+     * Stored-read result with explicit compatibility metadata. This prevents callers from
+     * treating an old row with no field as equivalent to a new-format row that persisted an
+     * empty snapshot. Only the former is eligible for the narrowly-scoped legacy policy.
+     */
+    data class StoredDefinition(
+        val definition: WorkflowDefinition,
+        val capabilitySnapshotStorage: CapabilitySnapshotStorage,
+    ) {
+        fun learnedExecutionCapabilitiesOrNull(): Set<CapabilityKey>? =
+            if (capabilitySnapshotStorage == CapabilitySnapshotStorage.PERSISTED) {
+                WorkflowCapabilitySnapshot.parsePersistedForLearnedExecution(
+                    definition.capabilitySnapshot,
+                )
+            } else {
+                null
+            }
     }
 
     /**
      * Round-trip parse — used when reading [me.rerere.rikkahub.workflow.db.WorkflowEntity.definitionJson]
      * back into a domain object.
      *
-     * Permissive: only fails on truly unparseable JSON. Length / range / sanity checks are
-     * skipped on the read path because the stored blob was already validated at write time.
+     * Compatibility-oriented: length / range / sanity checks are skipped on the read path
+     * because the stored blob was already validated at write time. Structural corruption and
+     * invalid current-format capability snapshots still fail closed.
      * If we ever tighten constraints later (e.g. lower MAX_ACTIONS), existing rows must
      * still be loadable so the user can see them, edit them down, or delete them; rejecting
      * silently would hide them from the Settings page and tear down their triggers without
@@ -238,6 +327,22 @@ object WorkflowJson {
      * tool the user later disabled stays visible; the runner reports it at fire time.
      */
     fun parseStored(definitionJson: String): WorkflowDefinition? {
+        val stored = parseStoredWithCompatibility(definitionJson) ?: return null
+        // The canonical encoder writes capability_snapshot for every reviewed non-legacy
+        // definition. A present-but-empty or malformed snapshot is therefore a current-format
+        // integrity failure and must not
+        // reach WorkflowEngine, whose legacy fallback intentionally applies only to absent
+        // pre-snapshot fields.
+        if (
+            stored.capabilitySnapshotStorage == CapabilitySnapshotStorage.PERSISTED &&
+            stored.learnedExecutionCapabilitiesOrNull() == null
+        ) {
+            return null
+        }
+        return stored.definition
+    }
+
+    fun parseStoredWithCompatibility(definitionJson: String): StoredDefinition? {
         val element: JsonElement = runCatching { Json.parseToJsonElement(definitionJson) }.getOrNull() ?: return null
         val obj = element as? JsonObject ?: return null
         val name = obj["name"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() } ?: return null
@@ -258,8 +363,21 @@ object WorkflowJson {
         val maxRunsPerDay = obj["max_runs_per_day"]?.jsonPrimitive?.intOrNull
         val id = obj["id"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
             ?: kotlin.uuid.Uuid.random().toString()
+        val snapshotElement = obj["capability_snapshot"]
+        val snapshotStorage = if (snapshotElement == null) {
+            CapabilitySnapshotStorage.LEGACY_MISSING
+        } else {
+            CapabilitySnapshotStorage.PERSISTED
+        }
+        val capabilitySnapshot = when (snapshotElement) {
+            null -> emptySet()
+            is JsonArray -> snapshotElement.map { item ->
+                (item as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank) ?: return null
+            }.toSet()
+            else -> return null
+        }
         val now = System.currentTimeMillis()
-        return WorkflowDefinition(
+        val definition = WorkflowDefinition(
             id = id,
             name = name,
             description = obj["description"]?.jsonPrimitive?.contentOrNull,
@@ -273,6 +391,11 @@ object WorkflowJson {
             updatedAtMs = obj["updated_at_ms"]?.jsonPrimitive?.contentOrNull?.toLongOrNull() ?: now,
             authoringAssistantId = obj["authoring_assistant_id"]?.jsonPrimitive?.contentOrNull
                 ?.takeIf { it.isNotBlank() },
+            capabilitySnapshot = capabilitySnapshot,
+        )
+        return StoredDefinition(
+            definition = definition,
+            capabilitySnapshotStorage = snapshotStorage,
         )
     }
 

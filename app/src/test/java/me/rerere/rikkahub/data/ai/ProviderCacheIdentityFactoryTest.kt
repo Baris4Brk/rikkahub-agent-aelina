@@ -23,7 +23,13 @@ class ProviderCacheIdentityFactoryTest {
         assertNotEquals(baseline, identity(assistantId = "assistant-b"))
         assertNotEquals(baseline, identity(scopeId = "__global__"))
         assertNotEquals(baseline, identity(memoryIds = listOf(3, 9)))
+        assertNotEquals(baseline, identity(memoryProjectionText = "memory projection b"))
         assertNotEquals(baseline, identity(compilerRevision = "memory-prompt-v2"))
+        assertNotEquals(baseline, identity(finalWire = "final wire b"))
+        assertNotEquals(
+            identity(dreamProjection = "{\"claim_revision\":1}", dreamRevision = "dream-v1"),
+            identity(dreamProjection = "{\"claim_revision\":2}", dreamRevision = "dream-v1"),
+        )
     }
 
     @Test
@@ -34,6 +40,7 @@ class ProviderCacheIdentityFactoryTest {
                 assistantId = "assistant-secret",
                 memoryScopeId = "scope-secret",
                 actualMemoryIds = listOf(3, 8),
+                memoryProjectionText = "secret memory projection",
                 compilerRevision = "memory-prompt-v1",
             ),
         )
@@ -53,14 +60,22 @@ class ProviderCacheIdentityFactoryTest {
         assistantId: String = "assistant-a",
         scopeId: String = "scope-a",
         memoryIds: List<Int> = listOf(3, 8),
+        memoryProjectionText: String = "memory projection a",
         compilerRevision: String = "memory-prompt-v1",
+        finalWire: String = "final wire a",
+        dreamProjection: String? = null,
+        dreamRevision: String? = null,
     ) = requireNotNull(
         buildProviderCacheIdentity(
             conversationId = conversationId,
             assistantId = assistantId,
             memoryScopeId = scopeId,
             actualMemoryIds = memoryIds,
+            memoryProjectionText = memoryProjectionText,
             compilerRevision = compilerRevision,
+            finalWireProjectionText = finalWire,
+            dreamCacheProjectionCanonicalJson = dreamProjection,
+            dreamCompilerRevision = dreamRevision,
         ),
     )
 }

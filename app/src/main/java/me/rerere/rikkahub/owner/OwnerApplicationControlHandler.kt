@@ -31,6 +31,17 @@ import me.rerere.rikkahub.data.model.QuickMessage
 import me.rerere.rikkahub.data.model.Lorebook
 import me.rerere.rikkahub.data.model.PromptInjection
 import me.rerere.rikkahub.data.repository.MemoryRepository
+import me.rerere.rikkahub.data.repository.MemoryRelationReviewEndpoint
+import me.rerere.rikkahub.data.repository.MemoryRelationReviewRecord
+import me.rerere.rikkahub.memory.dreaming.model.DreamScopeId
+import me.rerere.rikkahub.memory.dreaming.model.requireDreamStableId
+import me.rerere.rikkahub.memory.dreaming.review.DreamClaimDetail
+import me.rerere.rikkahub.memory.dreaming.review.DreamClaimMutationTarget
+import me.rerere.rikkahub.memory.dreaming.review.DreamDerivedStatus
+import me.rerere.rikkahub.memory.dreaming.review.DreamEvidenceValidity
+import me.rerere.rikkahub.memory.dreaming.review.DreamReviewProjection
+import me.rerere.rikkahub.memory.dreaming.review.DreamReviewReadResult
+import me.rerere.rikkahub.memory.dreaming.review.DreamReviewRepository
 import me.rerere.rikkahub.owner.db.HostOperationDao
 import me.rerere.rikkahub.pet.PetDialogueRepository
 import me.rerere.rikkahub.pet.PetOverlaySelection
@@ -61,6 +72,7 @@ class OwnerApplicationControlHandler(
     private val vault: SecondUserSecretVault,
     private val petDialogues: PetDialogueRepository,
     private val reverseGeocodeTester: ReverseGeocodeProviderTestGateway? = null,
+    private val dreamReviews: DreamReviewRepository? = null,
 ) : OwnerOperationHandler {
     override fun supports(request: OwnerOperationRequest, action: OwnerAction): Boolean =
         action.type in ACTION_FIELDS && OwnerActionRegistry.action(request.family, action.type) != null
@@ -134,6 +146,9 @@ class OwnerApplicationControlHandler(
             "plugin_bind" -> pluginBind(index, action)
             "plugin_install_managed", "plugin_uninstall" -> needsUserAction(index, action, "The package file must be resolved and verified by the private package installer.")
             "memory_list" -> memoryList(index, request, action)
+            "memory_review_list" -> memoryReviewList(index, request, action)
+            "dream_status" -> dreamStatus(index, request, action)
+            "dream_claim_explain" -> dreamClaimExplain(index, request, action)
             "memory_configure_assistant" -> memoryConfigure(index, action)
             "memory_delete" -> memoryDelete(index, request, action)
             "prompt_library_list", "lorebook_list" -> promptLibraryList(index, action)
@@ -345,20 +360,194 @@ class OwnerApplicationControlHandler(
         val id = action.arguments.uuid("assistant_id")
             ?: runCatching { Uuid.parse(request.assistantId) }.getOrNull()
             ?: return failure(index, action, "ASSISTANT_ID_INVALID", "Owner assistant ID is invalid.")
-        val assistants = settings.assistants.filter { it.id == id }
-        if (assistants.isEmpty()) return failure(index, action, "ASSISTANT_NOT_FOUND", "Assistant does not exist.")
+        val assistant = settings.assistants.firstOrNull { it.id == id }
+            ?: return failure(index, action, "ASSISTANT_NOT_FOUND", "Assistant does not exist.")
+        val scope = OwnerMemoryScopeBinding.effective(
+            assistantId = assistant.id.toString(),
+            useGlobalMemory = assistant.useGlobalMemory,
+        )
         val limit = (action.arguments.int("limit") ?: 20).coerceIn(1, 100)
-        val records = memories.getMemoriesOfAssistant(id.toString()).take(limit)
+        val records = memories.getMemoriesOfAssistant(scope.repositoryScopeId).take(limit)
         return success(index, action, "MEMORY_SETTINGS_LISTED", "Assistant memory settings read.", buildJsonObject {
-            put("assistant", buildJsonArray { assistants.forEach { assistant ->
+            put("memory_scope", scope.wireValue)
+            put("assistant", buildJsonArray {
                 add(buildJsonObject { put("assistant_id", assistant.id.toString()); put("enabled", assistant.enableMemory)
                     put("use_global", assistant.useGlobalMemory); put("recent_chats_reference", assistant.enableRecentChatsReference) })
-            } })
+            })
             put("items", buildJsonArray { records.forEach { memory -> add(buildJsonObject {
-                put("memory_id", memory.id); put("title", memory.title?.take(240).orEmpty())
+                put("memory_id", memory.id); put("memory_scope", scope.wireValue)
+                memory.revision?.let { put("memory_revision", it) }
+                put("title", memory.title?.take(240).orEmpty())
                 put("content", memory.content.take(1_200)); put("kind", memory.kind.name)
             }) } })
         })
+    }
+
+    private suspend fun memoryReviewList(
+        index: Int,
+        request: OwnerOperationRequest,
+        action: OwnerAction,
+    ): OwnerAppliedAction {
+        val settings = settingsStore.settingsFlow.value
+        val id = action.arguments.uuid("assistant_id")
+            ?: runCatching { Uuid.parse(request.assistantId) }.getOrNull()
+            ?: return failure(index, action, "ASSISTANT_ID_INVALID", "Owner assistant ID is invalid.")
+        val assistant = settings.assistants.firstOrNull { it.id == id }
+            ?: return failure(index, action, "ASSISTANT_NOT_FOUND", "Assistant does not exist.")
+        // The model never supplies a repository scope. Resolve the mutually-exclusive effective
+        // scope from the host's current assistant settings and keep its raw UUID out of results.
+        val scope = OwnerMemoryScopeBinding.effective(
+            assistantId = assistant.id.toString(),
+            useGlobalMemory = assistant.useGlobalMemory,
+        )
+        val limit = (action.arguments.int("limit") ?: 20).coerceIn(1, 50)
+        val records = memories.getPendingRelationReviews(
+            scopeId = scope.repositoryScopeId,
+            limit = limit,
+        )
+        return success(
+            index,
+            action,
+            "MEMORY_RELATION_REVIEWS_LISTED",
+            "Pending relation reviews read from the effective Memory scope.",
+            ownerMemoryRelationReviewsPayload(scope, records),
+        )
+    }
+
+    private suspend fun dreamStatus(
+        index: Int,
+        request: OwnerOperationRequest,
+        action: OwnerAction,
+    ): OwnerAppliedAction {
+        val repository = dreamReviews
+            ?: return failure(index, action, "DREAM_REVIEW_UNAVAILABLE", "Dreaming review storage is unavailable.")
+        // Freeze the host-owned Assistant and its mutually-exclusive effective scope before any
+        // repository read. The model can select an Assistant, but never a repository scope ID.
+        val settings = settingsStore.settingsFlow.value
+        val assistantId = if (action.arguments.containsKey("assistant_id")) {
+            action.arguments.uuid("assistant_id")
+                ?: return failure(index, action, "ASSISTANT_ID_INVALID", "assistant_id must be a UUID string.")
+        } else {
+            runCatching { Uuid.parse(request.assistantId) }.getOrNull()
+                ?: return failure(index, action, "ASSISTANT_ID_INVALID", "Owner assistant ID is invalid.")
+        }
+        val assistant = settings.assistants.firstOrNull { it.id == assistantId }
+            ?: return failure(index, action, "ASSISTANT_NOT_FOUND", "Assistant does not exist.")
+        val scope = OwnerMemoryScopeBinding.effective(
+            assistantId = assistant.id.toString(),
+            useGlobalMemory = assistant.useGlobalMemory,
+        )
+        val dreamScope = DreamScopeId.parseOrNull(scope.repositoryScopeId)
+            ?: return failure(index, action, "DREAM_SCOPE_INVALID", "The effective host Memory scope is invalid.")
+        val limit = if (action.arguments.containsKey("limit")) {
+            action.arguments.strictInt("limit")
+                ?.takeIf { it in 1..OWNER_DREAM_STATUS_MAX_CLAIMS }
+                ?: return failure(index, action, "DREAM_LIMIT_INVALID", "limit must be a JSON integer from 1 through 20.")
+        } else {
+            OWNER_DREAM_STATUS_DEFAULT_LIMIT
+        }
+        val projection = repository.observeScope(dreamScope).first()
+        if (projection.fence.scopeId != dreamScope) {
+            return failure(index, action, "DREAM_SCOPE_MISMATCH", "Dreaming returned a projection for another scope.")
+        }
+        return success(
+            index,
+            action,
+            "DREAM_STATUS_READ",
+            "Bounded Dreaming status read from the effective Memory scope.",
+            ownerDreamStatusPayload(scope, projection, limit),
+        )
+    }
+
+    private suspend fun dreamClaimExplain(
+        index: Int,
+        request: OwnerOperationRequest,
+        action: OwnerAction,
+    ): OwnerAppliedAction {
+        val repository = dreamReviews
+            ?: return failure(index, action, "DREAM_REVIEW_UNAVAILABLE", "Dreaming review storage is unavailable.")
+        val settings = settingsStore.settingsFlow.value
+        val assistantId = if (action.arguments.containsKey("assistant_id")) {
+            action.arguments.uuid("assistant_id")
+                ?: return failure(index, action, "ASSISTANT_ID_INVALID", "assistant_id must be a UUID string.")
+        } else {
+            runCatching { Uuid.parse(request.assistantId) }.getOrNull()
+                ?: return failure(index, action, "ASSISTANT_ID_INVALID", "Owner assistant ID is invalid.")
+        }
+        val assistant = settings.assistants.firstOrNull { it.id == assistantId }
+            ?: return failure(index, action, "ASSISTANT_NOT_FOUND", "Assistant does not exist.")
+        val requestedScope = action.arguments.string("dream_scope")
+            ?: return failure(
+                index,
+                action,
+                "DREAM_SCOPE_REQUIRED",
+                "dream_scope is required; use the exact assistant/global value returned by dream_status.",
+            )
+        if (requestedScope !in OwnerMemoryScopeBinding.WIRE_VALUES) {
+            return failure(index, action, "DREAM_SCOPE_INVALID", "dream_scope must be exactly assistant or global.")
+        }
+        val scope = OwnerMemoryScopeBinding.effective(
+            assistantId = assistant.id.toString(),
+            useGlobalMemory = assistant.useGlobalMemory,
+        )
+        if (!scope.matchesClaim(requestedScope)) {
+            return failure(
+                index,
+                action,
+                "DREAM_SCOPE_CHANGED",
+                "Assistant Dreaming scope changed since dream_status; refresh status before explaining a claim.",
+            )
+        }
+        val dreamScope = DreamScopeId.parseOrNull(scope.repositoryScopeId)
+            ?: return failure(index, action, "DREAM_SCOPE_INVALID", "The effective host Memory scope is invalid.")
+        val claimId = action.arguments.string("claim_id")
+            ?: return failure(index, action, "DREAM_CLAIM_ID_REQUIRED", "claim_id is required.")
+        if (runCatching { requireDreamStableId(claimId) }.isFailure) {
+            return failure(index, action, "DREAM_CLAIM_ID_INVALID", "claim_id must be a canonical lower-case UUID.")
+        }
+        val expectedRevision = action.arguments.long("expected_revision")
+            ?.takeIf { it > 0L }
+            ?: return failure(
+                index,
+                action,
+                "DREAM_CLAIM_REVISION_REQUIRED",
+                "expected_revision must be a positive JSON integer returned by dream_status.",
+            )
+        // Build the read target only from the repository's current five-part projection fence.
+        // readClaim revalidates that entire fence plus the model-supplied Claim head revision.
+        val projection = repository.observeScope(dreamScope).first()
+        if (projection.fence.scopeId != dreamScope) {
+            return failure(index, action, "DREAM_SCOPE_MISMATCH", "Dreaming returned a projection for another scope.")
+        }
+        val target = DreamClaimMutationTarget(
+            fence = projection.fence,
+            claimId = claimId,
+            expectedClaimRevision = expectedRevision,
+        )
+        return when (val result = repository.readClaim(target)) {
+            is DreamReviewReadResult.Found -> {
+                if (result.value.target != target) {
+                    failure(index, action, "DREAM_CLAIM_CORRUPT", "Dreaming returned an inconsistent Claim projection.")
+                } else {
+                    success(
+                        index,
+                        action,
+                        "DREAM_CLAIM_EXPLAINED",
+                        "Bounded derived Claim metadata read without raw evidence.",
+                        ownerDreamClaimExplainPayload(scope, result.value),
+                    )
+                }
+            }
+            is DreamReviewReadResult.Conflict -> failure(
+                index,
+                action,
+                "DREAM_CLAIM_CHANGED",
+                "Dreaming Claim or scope state changed (${result.conflict.name}); refresh dream_status.",
+            )
+            DreamReviewReadResult.NotFound -> failure(index, action, "DREAM_CLAIM_NOT_FOUND", "Dreaming Claim does not exist.")
+            DreamReviewReadResult.InvalidState -> failure(index, action, "DREAM_CLAIM_INVALID_STATE", "Dreaming Claim is not readable in its current state.")
+            DreamReviewReadResult.Corrupt -> failure(index, action, "DREAM_CLAIM_CORRUPT", "Dreaming Claim metadata failed integrity validation.")
+        }
     }
 
     private suspend fun memoryDelete(
@@ -368,25 +557,64 @@ class OwnerApplicationControlHandler(
     ): OwnerAppliedAction {
         val id = action.arguments.int("memory_id")
             ?: return failure(index, action, "MEMORY_ID_REQUIRED", "memory_id is required.")
+        val expectedRevision = action.arguments.int("expected_revision")
+            ?: return failure(
+                index,
+                action,
+                "MEMORY_REVISION_REQUIRED",
+                "expected_revision is required; use memory_revision returned by memory_list.",
+            )
         val assistantId = action.arguments.uuid("assistant_id")
             ?: runCatching { Uuid.parse(request.assistantId) }.getOrNull()
             ?: return failure(index, action, "ASSISTANT_ID_INVALID", "Owner assistant ID is invalid.")
         val assistant = settingsStore.settingsFlow.value.assistants
             .firstOrNull { it.id == assistantId }
             ?: return failure(index, action, "ASSISTANT_NOT_FOUND", "Assistant does not exist.")
-        val scopeId = if (assistant.useGlobalMemory) {
-            MemoryRepository.GLOBAL_MEMORY_ID
-        } else {
-            assistant.id.toString()
+        val requestedScope = action.arguments.string("memory_scope")
+            ?: return failure(
+                index,
+                action,
+                "MEMORY_SCOPE_REQUIRED",
+                "memory_scope is required; use the exact assistant/global value returned by memory_list.",
+            )
+        if (requestedScope !in OwnerMemoryScopeBinding.WIRE_VALUES) {
+            return failure(
+                index,
+                action,
+                "MEMORY_SCOPE_INVALID",
+                "memory_scope must be exactly assistant or global.",
+            )
         }
-        val before = memories.getMemoryEntity(scopeId, id)
+        val scope = OwnerMemoryScopeBinding.effective(
+            assistantId = assistant.id.toString(),
+            useGlobalMemory = assistant.useGlobalMemory,
+        )
+        if (!scope.matchesClaim(requestedScope)) {
+            return failure(
+                index,
+                action,
+                "MEMORY_SCOPE_CHANGED",
+                "Assistant memory scope changed since memory_list; refresh the list before archiving.",
+            )
+        }
+        val before = memories.getMemoryEntity(scope.repositoryScopeId, id)
             ?: return failure(index, action, "MEMORY_NOT_FOUND", "Memory record does not exist.")
+        if (before.revision != expectedRevision) {
+            return failure(
+                index,
+                action,
+                "MEMORY_REVISION_CHANGED",
+                "Memory changed since memory_list; refresh the list before archiving.",
+            )
+        }
         if (before.lifecycleStatus == "ARCHIVED") {
             return success(index, action, "MEMORY_ALREADY_ARCHIVED", "Memory is already archived.")
         }
-        memories.deleteMemory(scopeId = scopeId, id = id, expectedRevision = before.revision)
-        val archivedRevision = memories.getMemoryEntity(scopeId, id)?.revision
-            ?: return failure(index, action, "OWNER_VERIFY_FAILED", "Archived memory disappeared.")
+        val archivedRevision = memories.deleteMemory(
+            scopeId = scope.repositoryScopeId,
+            id = id,
+            expectedRevision = expectedRevision,
+        )
         return success(
             index,
             action,
@@ -394,7 +622,7 @@ class OwnerApplicationControlHandler(
             "Memory was revision-safely archived.",
             receipt = ControlReceipt.MemoryArchived(
                 memoryId = id,
-                scopeId = scopeId,
+                scopeId = scope.repositoryScopeId,
                 archivedRevision = archivedRevision,
             ),
         )
@@ -1248,7 +1476,7 @@ class OwnerApplicationControlHandler(
             "run_list" to setOf("limit"), "run_get" to setOf("request_id"), "run_cancel" to setOf("conversation_id", "command_id"), "run_retry" to setOf("conversation_id"),
             "quick_capture_get" to emptySet(), "quick_capture_update" to setOf("enabled", "target_mode", "fixed_assistant_id", "prompt", "auto_send", "backend", "area_mode", "bubble_size_dp", "bubble_opacity", "bubble_edge", "bubble_y_fraction"), "quick_capture_trigger" to emptySet(),
             "plugin_list" to emptySet(), "plugin_runtime_set" to setOf("enabled"), "plugin_install_managed" to setOf("managed_file_id"), "plugin_approve" to setOf("plugin_id"), "plugin_set_enabled" to setOf("plugin_id", "enabled"), "plugin_bind" to setOf("plugin_id", "assistant_id", "enabled"), "plugin_uninstall" to setOf("plugin_id"),
-            "memory_list" to setOf("assistant_id", "limit"), "memory_configure_assistant" to setOf("assistant_id", "enabled", "use_global", "recent_chats_reference"), "memory_delete" to setOf("memory_id", "assistant_id"),
+            "memory_list" to setOf("assistant_id", "limit"), "memory_review_list" to setOf("assistant_id", "limit"), "dream_status" to setOf("assistant_id", "limit"), "dream_claim_explain" to setOf("assistant_id", "dream_scope", "claim_id", "expected_revision"), "memory_configure_assistant" to setOf("assistant_id", "enabled", "use_global", "recent_chats_reference"), "memory_delete" to setOf("memory_id", "memory_scope", "expected_revision", "assistant_id"),
             "prompt_library_list" to emptySet(), "prompt_injection_upsert" to setOf("definition"), "prompt_injection_delete" to setOf("injection_id"), "quick_message_create" to setOf("message_id", "title", "content"), "quick_message_update" to setOf("message_id", "title", "content"), "quick_message_delete" to setOf("message_id"), "lorebook_list" to emptySet(), "lorebook_upsert" to setOf("definition"), "lorebook_delete" to setOf("lorebook_id"),
             "asr_list" to emptySet(), "asr_create" to setOf("asr_id", "type", "name", "websocket_url", "model", "language", "sample_rate", "vault_slot_id"), "asr_update" to setOf("asr_id", "name", "websocket_url", "model", "language", "sample_rate", "vault_slot_id"), "asr_delete" to setOf("asr_id"), "asr_set_default" to setOf("asr_id"),
             "channel_get" to emptySet(), "web_channel_update" to setOf("enabled", "port", "jwt_enabled", "localhost_only"), "telegram_channel_update" to setOf("enabled", "vault_slot_id", "default_chat_id", "whitelist", "assistant_id", "stream_screenshots"),
@@ -1266,6 +1494,210 @@ class OwnerApplicationControlHandler(
             "pet_list" to emptySet(), "pet_import_managed" to setOf("managed_file_id", "replace"), "pet_select" to setOf("package_id", "profile_id", "enabled"), "pet_configure" to setOf("enabled", "scale", "fps", "x", "y", "idle_pool_enabled"), "pet_delete" to setOf("package_id", "replacement_package_id"), "pet_dialogue_state" to emptySet(),
         )
     }
+}
+
+/**
+ * Host-owned binding between the model-facing scope claim and the repository's exclusive scope.
+ * The claim is intentionally small and stable; the repository ID is never accepted from the model.
+ */
+internal data class OwnerMemoryScopeBinding(
+    val wireValue: String,
+    val repositoryScopeId: String,
+) {
+    fun matchesClaim(claim: String?): Boolean = claim == wireValue
+
+    companion object {
+        const val ASSISTANT_WIRE_VALUE = "assistant"
+        const val GLOBAL_WIRE_VALUE = "global"
+        val WIRE_VALUES = setOf(ASSISTANT_WIRE_VALUE, GLOBAL_WIRE_VALUE)
+
+        fun effective(assistantId: String, useGlobalMemory: Boolean): OwnerMemoryScopeBinding =
+            if (useGlobalMemory) {
+                OwnerMemoryScopeBinding(
+                    wireValue = GLOBAL_WIRE_VALUE,
+                    repositoryScopeId = MemoryRepository.GLOBAL_MEMORY_ID,
+                )
+            } else {
+                OwnerMemoryScopeBinding(
+                    wireValue = ASSISTANT_WIRE_VALUE,
+                    repositoryScopeId = assistantId,
+                )
+            }
+    }
+}
+
+internal fun ownerMemoryRelationReviewsPayload(
+    scope: OwnerMemoryScopeBinding,
+    records: List<MemoryRelationReviewRecord>,
+): JsonObject {
+    val boundedRecords = records.take(OWNER_RELATION_REVIEW_LIMIT)
+    return buildJsonObject {
+        put("memory_scope", scope.wireValue)
+        put("review_kind", "relation")
+        put("count", boundedRecords.size)
+        put("items", buildJsonArray {
+            boundedRecords.forEach { record ->
+                add(buildJsonObject {
+                    put("relation_candidate_id", record.relationCandidateId)
+                    put("relation_type", record.relationType)
+                    put("description", record.description)
+                    put("description_trust", "untrusted_derived")
+                    put("evidence_count", record.evidenceCount)
+                    put("status", record.status)
+                    put("created_at_ms", record.createdAtMs)
+                    put("source", record.source.toOwnerJson())
+                    put("target", record.target.toOwnerJson())
+                })
+            }
+        })
+    }
+}
+
+/**
+ * Model-facing Dream status projection. It deliberately omits the repository scope ID, snapshot
+ * IDs/hashes, run IDs, statements and every evidence/source identity.
+ */
+internal fun ownerDreamStatusPayload(
+    scope: OwnerMemoryScopeBinding,
+    projection: DreamReviewProjection,
+    requestedLimit: Int,
+): JsonObject {
+    require(projection.fence.scopeId.value == scope.repositoryScopeId) {
+        "Dream projection does not belong to the frozen Owner scope"
+    }
+    val limit = requestedLimit.coerceIn(1, OWNER_DREAM_STATUS_MAX_CLAIMS)
+    val claims = projection.claims.take(limit)
+    val inputTokens = projection.recentRuns.mapNotNull { it.inputTokens }
+    val outputTokens = projection.recentRuns.mapNotNull { it.outputTokens }
+    val titleWasTruncated = claims.any { it.title.length > OWNER_DREAM_TITLE_MAX_CHARS }
+    return buildJsonObject {
+        put("dream_scope", scope.wireValue)
+        put("status", projection.derivedStatus.name)
+        put("usage_mode", projection.usageMode.name)
+        put("epochs", buildJsonObject {
+            put("memory_epoch", projection.fence.expectedMemoryEpoch)
+            put("last_applied_memory_epoch", projection.fence.expectedLastAppliedMemoryEpoch)
+            put("dream_revision", projection.fence.expectedDreamRevision)
+        })
+        put("flags", buildJsonObject {
+            put("dirty", projection.fence.expectedLastAppliedMemoryEpoch < projection.fence.expectedMemoryEpoch)
+            put("running", projection.derivedStatus == DreamDerivedStatus.RUNNING)
+            put("has_active_snapshot", projection.activeSnapshot != null)
+            put(
+                "snapshot_usable",
+                projection.activeSnapshot != null && projection.derivedStatus == DreamDerivedStatus.READY,
+            )
+        })
+        projection.activeSnapshot?.let { snapshot ->
+            put("active_snapshot", buildJsonObject {
+                put("source_memory_epoch", snapshot.sourceMemoryEpoch)
+                put("committed_dream_revision", snapshot.committedDreamRevision)
+                put("claim_count", snapshot.claimCount)
+                put("estimated_tokens", snapshot.estimatedTokens)
+                put("created_at_ms", snapshot.createdAtEpochMs)
+            })
+        }
+        put("claim_count", projection.claims.size)
+        put("returned_claim_count", claims.size)
+        put("claims", buildJsonArray {
+            claims.forEach { claim ->
+                add(buildJsonObject {
+                    put("claim_id", claim.claimId)
+                    put("expected_revision", claim.revision)
+                    put("title", claim.title.take(OWNER_DREAM_TITLE_MAX_CHARS))
+                    put("state", claim.state.name)
+                    put("section", claim.section.name)
+                    put("title_truncated", claim.title.length > OWNER_DREAM_TITLE_MAX_CHARS)
+                })
+            }
+        })
+        put("token_usage", buildJsonObject {
+            put("run_count", projection.recentRuns.size)
+            put("input_measured_runs", inputTokens.size)
+            put("input_unmeasured_runs", projection.recentRuns.size - inputTokens.size)
+            put("output_measured_runs", outputTokens.size)
+            put("output_unmeasured_runs", projection.recentRuns.size - outputTokens.size)
+            if (inputTokens.isNotEmpty()) put("measured_input_tokens", inputTokens.ownerSaturatingSum())
+            if (outputTokens.isNotEmpty()) put("measured_output_tokens", outputTokens.ownerSaturatingSum())
+        })
+        put("truncated", projection.claims.size > claims.size || titleWasTruncated)
+    }
+}
+
+/**
+ * Explain payload for one revision-fenced Claim. Evidence is reduced to non-identifying validity
+ * metadata; this path never calls revealEvidence and cannot return source text.
+ */
+internal fun ownerDreamClaimExplainPayload(
+    scope: OwnerMemoryScopeBinding,
+    detail: DreamClaimDetail,
+): JsonObject {
+    require(detail.target.fence.scopeId.value == scope.repositoryScopeId) {
+        "Dream Claim does not belong to the frozen Owner scope"
+    }
+    val boundedEvidence = detail.evidence.take(OWNER_DREAM_EXPLAIN_MAX_SOURCES)
+    val titleTruncated = detail.summary.title.length > OWNER_DREAM_TITLE_MAX_CHARS
+    val statementTruncated = detail.summary.statement.length > OWNER_DREAM_STATEMENT_MAX_CHARS
+    return buildJsonObject {
+        put("dream_scope", scope.wireValue)
+        put("claim_id", detail.summary.claimId)
+        put("revision", detail.summary.revision)
+        put("title", detail.summary.title.take(OWNER_DREAM_TITLE_MAX_CHARS))
+        put("statement", detail.summary.statement.take(OWNER_DREAM_STATEMENT_MAX_CHARS))
+        put("content_trust", "untrusted_derived")
+        put("metadata", buildJsonObject {
+            put("section", detail.summary.section.name)
+            put("state", detail.summary.state.name)
+            put("storage_class", detail.storageClass.name)
+            put("epistemic_type", detail.epistemicType.name)
+            put("confidence_permille", detail.summary.confidencePermille)
+            put("temporal_state", detail.summary.temporalState.name)
+            detail.summary.validFromEpochMs?.let { put("valid_from_epoch_ms", it) }
+            detail.summary.validToEpochMs?.let { put("valid_to_epoch_ms", it) }
+            put("version_count", detail.versions.size)
+            put("source_count", detail.evidence.size)
+        })
+        put("sources", buildJsonArray {
+            boundedEvidence.forEach { evidence ->
+                add(buildJsonObject {
+                    put("validity", evidence.validity.name)
+                    put("support_type", evidence.reference.supportType.name)
+                    put("excerpt_available", evidence.validity == DreamEvidenceValidity.VALID)
+                })
+            }
+        })
+        put("sources_truncated", detail.evidence.size > boundedEvidence.size)
+        put(
+            "truncated",
+            titleTruncated || statementTruncated || detail.evidence.size > boundedEvidence.size,
+        )
+    }
+}
+
+private fun MemoryRelationReviewEndpoint.toOwnerJson(): JsonObject = buildJsonObject {
+    when {
+        memoryId != null -> {
+            put("kind", "memory")
+            put("memory_id", memoryId)
+        }
+        candidateId != null -> {
+            put("kind", "candidate")
+            put("candidate_id", candidateId)
+        }
+        else -> put("kind", "unresolved")
+    }
+    expectedRevision?.let { put("expected_revision", it) }
+}
+
+private const val OWNER_RELATION_REVIEW_LIMIT = 50
+private const val OWNER_DREAM_STATUS_DEFAULT_LIMIT = 10
+private const val OWNER_DREAM_STATUS_MAX_CLAIMS = 20
+private const val OWNER_DREAM_EXPLAIN_MAX_SOURCES = 50
+private const val OWNER_DREAM_TITLE_MAX_CHARS = 240
+private const val OWNER_DREAM_STATEMENT_MAX_CHARS = 1_600
+
+private fun List<Long>.ownerSaturatingSum(): Long = fold(0L) { total, value ->
+    if (value > Long.MAX_VALUE - total) Long.MAX_VALUE else total + value
 }
 
 private fun JsonObject.string(name: String): String? = this[name]?.jsonPrimitive?.contentOrNull

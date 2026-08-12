@@ -32,6 +32,22 @@ class ApprovalResolutionPolicyTest {
     }
 
     @Test
+    fun `legacy positive decision without an exact version fails closed`() {
+        val result = evaluateApprovalResolution(
+            currentStatus = ApprovalStatus.PENDING,
+            currentVersion = 3,
+            decision = PersistedApprovalDecision.APPROVED,
+            expectedVersion = null,
+            trustedAppApproval = true,
+        )
+
+        assertEquals(
+            ApprovalResolutionPrecondition.Conflict("approval_version_required"),
+            result,
+        )
+    }
+
+    @Test
     fun `same resolved outcome is idempotent and never executes twice`() {
         val result = evaluateApprovalResolution(
             currentStatus = ApprovalStatus.APPROVED,

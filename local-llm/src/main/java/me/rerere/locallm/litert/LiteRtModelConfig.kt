@@ -8,7 +8,10 @@ data class LiteRtModelConfig(
     val topK: Int = 64,
     val topP: Double = 0.95,
     val temperature: Double = 1.0,
-    val maxTokens: Int = 4096,        // OUTPUT cap → EngineConfig.maxNumTokens
+    // Legacy Gallery allowlist field. When maxContextLength is absent it is the conservative
+    // fallback for EngineConfig.maxNumTokens (the total input + output KV capacity), never the
+    // provider request's output-only limit.
+    val maxTokens: Int = 4096,
     val maxContextLength: Int? = null,
     val preferredAccelerators: List<String> = listOf("gpu", "cpu"),  // first available wins
     val visionAccelerator: String? = null,                            // null when no image support

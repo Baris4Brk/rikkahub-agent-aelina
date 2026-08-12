@@ -16,14 +16,18 @@ import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.res.stringResource
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
+import androidx.lifecycle.Lifecycle
 import androidx.paging.compose.collectAsLazyPagingItems
 import kotlinx.coroutines.launch
 import me.rerere.rikkahub.R
@@ -45,9 +49,18 @@ fun MemoryCenterPage(id: String) {
     val modelOptions by vm.modelOptions.collectAsStateWithLifecycle()
     val recallState by vm.recallTestState.collectAsStateWithLifecycle()
     val actionMessage by vm.lastActionMessage.collectAsStateWithLifecycle()
+    val developerMode by vm.developerMode.collectAsStateWithLifecycle()
+    val observerDiagnostic by vm.observerDiagnostic.collectAsStateWithLifecycle()
+    val dreamProjection by vm.dreamProjection.collectAsStateWithLifecycle()
+    val dreamDetailState by vm.dreamDetailState.collectAsStateWithLifecycle()
+    val dreamingScopePreferences by vm.dreamingScopePreferences.collectAsStateWithLifecycle()
+    val dreamingCostPolicy by vm.dreamingCostPolicy.collectAsStateWithLifecycle()
     val memories = vm.library.collectAsLazyPagingItems()
     val candidates = vm.candidates.collectAsLazyPagingItems()
-    val pagerState = rememberPagerState { MemoryCenterTab.entries.size }
+    val relationCandidates by vm.relationCandidates.collectAsStateWithLifecycle()
+    val tabs = remember(developerMode) { memoryCenterTabs(developerMode) }
+    val pageCount by rememberUpdatedState(tabs.size)
+    val pagerState = rememberPagerState { pageCount }
     val coroutineScope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
@@ -75,15 +88,28 @@ fun MemoryCenterPage(id: String) {
     val appliedMessage = stringResource(R.string.memory_v2_action_completed)
     val conflictMessage = stringResource(R.string.memory_v2_action_conflict)
     val failedMessage = stringResource(R.string.memory_v2_action_failed)
+    val dreamAuthorityPendingMessage = stringResource(R.string.memory_dream_authority_applied_rebuild_pending)
     LaunchedEffect(actionMessage) {
         val message = when (actionMessage) {
             null -> return@LaunchedEffect
             "conflict" -> conflictMessage
             "failed", "not_found" -> failedMessage
+            "dream_authority_applied_rebuild_pending" -> dreamAuthorityPendingMessage
             else -> appliedMessage
         }
         snackbarHostState.showSnackbar(message)
         vm.lastActionMessage.value = null
+    }
+    LaunchedEffect(developerMode, tabs.size) {
+        if (pagerState.currentPage >= tabs.size) {
+            pagerState.scrollToPage((tabs.size - 1).coerceAtLeast(0))
+        }
+    }
+    LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
+        vm.onDreamUiHidden()
+    }
+    DisposableEffect(vm) {
+        onDispose(vm::onDreamUiHidden)
     }
 
     Scaffold(
@@ -119,7 +145,7 @@ fun MemoryCenterPage(id: String) {
                 onViewGlobalChange = vm::setViewGlobal,
             )
             SecondaryTabRow(selectedTabIndex = pagerState.currentPage) {
-                MemoryCenterTab.entries.forEachIndexed { index, tab ->
+                tabs.forEachIndexed { index, tab ->
                     Tab(
                         selected = pagerState.currentPage == index,
                         onClick = { coroutineScope.launch { pagerState.animateScrollToPage(index) } },
@@ -141,7 +167,7 @@ fun MemoryCenterPage(id: String) {
                     .fillMaxSize()
                     .weight(1f),
             ) { page ->
-                when (MemoryCenterTab.entries[page]) {
+                when (tabs.getOrElse(page) { MemoryCenterTab.SETTINGS }) {
                     MemoryCenterTab.LIBRARY -> MemoryLibraryTab(
                         memories = memories,
                         narrativeNamesForOrigin = narrativeNamesForOrigin,
@@ -157,6 +183,7 @@ fun MemoryCenterPage(id: String) {
 
                     MemoryCenterTab.REVIEW -> MemoryReviewTab(
                         candidates = candidates,
+                        relationCandidates = relationCandidates,
                         narrativeNamesForOrigin = narrativeNamesForOrigin,
                         onLoadMemories = vm::loadMemories,
                         onResolveSource = vm::resolveSource,
@@ -164,6 +191,19 @@ fun MemoryCenterPage(id: String) {
                         onReject = vm::rejectCandidate,
                         onAcceptSafeNew = vm::acceptSafeNewCandidates,
                         onRejectAllPending = vm::rejectAllPendingCandidates,
+                        onAcceptRelation = vm::acceptRelationCandidate,
+                        onRejectRelation = vm::rejectRelationCandidate,
+                    )
+
+                    MemoryCenterTab.DREAM -> MemoryDreamTab(
+                        projection = dreamProjection,
+                        detailState = dreamDetailState,
+                        onOpenClaim = vm::openDreamClaim,
+                        onCloseClaim = vm::closeDreamClaim,
+                        onRevealEvidence = vm::revealDreamEvidence,
+                        onRejectClaim = vm::rejectDreamClaim,
+                        onCorrectClaim = vm::correctDreamClaim,
+                        onClearDerived = vm::clearDreamDerived,
                     )
 
                     MemoryCenterTab.SETTINGS -> MemorySettingsTab(
@@ -173,6 +213,8 @@ fun MemoryCenterPage(id: String) {
                         extractionModel = extractionModel,
                         modelOptions = modelOptions,
                         recallState = recallState,
+                        dreamingScopePreferences = dreamingScopePreferences,
+                        dreamingCostPolicy = dreamingCostPolicy,
                         narrativeNamesForOrigin = narrativeNamesForOrigin,
                         onUpdateAssistant = vm::updateAssistant,
                         onAutoSaveModeChange = vm::setAutoSaveMode,
@@ -183,6 +225,13 @@ fun MemoryCenterPage(id: String) {
                         onProcessNow = { vm.processNow(false) },
                         onRetryFailed = { vm.processNow(true) },
                         onRecallTest = vm::runRecallTest,
+                        onDreamingScopePreferenceChange = vm::updateDreamingScopePreference,
+                        onDreamingCostPolicyChange = vm::updateDreamingCostPolicy,
+                    )
+
+                    MemoryCenterTab.OBSERVER -> MemoryObserverDiagnosticsTab(
+                        diagnostic = observerDiagnostic,
+                        onRefresh = vm::refreshObserverDiagnostics,
                     )
                 }
             }
@@ -193,6 +242,8 @@ fun MemoryCenterPage(id: String) {
 @Composable
 private fun MemoryCenterTab.title(): String = when (this) {
     MemoryCenterTab.LIBRARY -> stringResource(R.string.memory_v2_library_tab)
+    MemoryCenterTab.DREAM -> stringResource(R.string.memory_dream_tab)
     MemoryCenterTab.REVIEW -> stringResource(R.string.memory_v2_review_tab)
     MemoryCenterTab.SETTINGS -> stringResource(R.string.memory_v2_settings_tab)
+    MemoryCenterTab.OBSERVER -> stringResource(R.string.memory_v2_observer_tab)
 }

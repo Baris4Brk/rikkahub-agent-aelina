@@ -1,7 +1,11 @@
 package me.rerere.rikkahub.data.ai.execution
 
-import kotlinx.coroutines.runBlocking
+import java.util.Collections
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.buildJsonObject
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.rikkahub.data.ai.GenerationRunControl
@@ -41,7 +45,7 @@ class ToolRuntimeTest {
                 context: ToolExecutionContext,
             ): ToolExecutionHandle {
                 startCalled = true
-                assertEquals(expectedContext, context)
+                assertEquals(expectedContext.copy(toolCallId = "call-1"), context)
                 return ImmediateHandle("real-handle", listOf(UIMessagePart.Text("real result")))
             }
         }
@@ -70,9 +74,377 @@ class ToolRuntimeTest {
     }
 
     @Test
+    fun `host request binds tool call identity before any side effect`() = runBlocking {
+        var startedContext: ToolExecutionContext? = null
+        var persistedContext: RedactedToolCallContext? = null
+        val commandId = Uuid.random()
+        val supplied = executionContext().copy(commandId = commandId)
+        val runtime = DefaultToolRuntime(
+            policyResolver = resolver,
+            criticalSink = CriticalToolLifecycleSink { event ->
+                if (event.phase == RedactedToolLifecycleEvent.Phase.STARTING) {
+                    persistedContext = event.context
+                }
+            },
+        )
+
+        val result = runtime.execute(
+            ToolExecutionPlanRequest(
+                toolCallId = "host-call",
+                toolName = "privileged_run_command",
+                args = buildJsonObject {},
+                executionContext = supplied,
+                startableTool = object : StartableTool {
+                    override suspend fun start(
+                        args: kotlinx.serialization.json.JsonElement,
+                        context: ToolExecutionContext,
+                    ): ToolExecutionHandle {
+                        startedContext = context
+                        return ImmediateHandle("host-bound", listOf(UIMessagePart.Text("ok")))
+                    }
+                },
+                legacyExecute = { error("legacy must not run") },
+                runControl = null,
+                wallClockBudgetMs = 5_000,
+            ),
+        )
+
+        assertTrue(result is ToolExecutionPlanResult.Completed)
+        assertEquals("host-call", startedContext?.toolCallId)
+        assertEquals(commandId, startedContext?.commandId)
+        assertEquals("host-call", persistedContext?.toolCallId)
+        assertEquals(commandId.toString(), persistedContext?.commandId)
+    }
+
+    @Test
+    fun `conflicting tool call identity is rejected before side effect`() = runBlocking {
+        var started = false
+        val runtime = DefaultToolRuntime(policyResolver = resolver)
+
+        val result = runtime.execute(
+            ToolExecutionPlanRequest(
+                toolCallId = "host-call",
+                toolName = "privileged_run_command",
+                args = buildJsonObject {},
+                executionContext = executionContext().copy(toolCallId = "stale-call"),
+                startableTool = object : StartableTool {
+                    override suspend fun start(
+                        args: kotlinx.serialization.json.JsonElement,
+                        context: ToolExecutionContext,
+                    ): ToolExecutionHandle {
+                        started = true
+                        return ImmediateHandle("should-not-start", emptyList())
+                    }
+                },
+                legacyExecute = { error("legacy must not run") },
+                runControl = null,
+                wallClockBudgetMs = 5_000,
+            ),
+        )
+
+        assertFalse(started)
+        assertEquals(
+            "tool_call_identity_mismatch",
+            (result as ToolExecutionPlanResult.Rejected).errorCode,
+        )
+    }
+
+    @Test
+    fun `invalid tool call identity is rejected before gate ledger or side effect`() = runBlocking {
+        var gateCalled = false
+        var startCalled = false
+        var lifecycleWrites = 0
+        val runtime = DefaultToolRuntime(
+            policyResolver = resolver,
+            criticalSink = CriticalToolLifecycleSink { lifecycleWrites++ },
+        )
+
+        val result = runtime.execute(
+            ToolExecutionPlanRequest(
+                toolCallId = " ",
+                toolName = "privileged_run_command",
+                args = buildJsonObject {},
+                executionContext = executionContext(),
+                startableTool = object : StartableTool {
+                    override suspend fun start(
+                        args: kotlinx.serialization.json.JsonElement,
+                        context: ToolExecutionContext,
+                    ): ToolExecutionHandle {
+                        startCalled = true
+                        return ImmediateHandle("should-not-start", emptyList())
+                    }
+                },
+                legacyExecute = { error("legacy must not run") },
+                runControl = null,
+                wallClockBudgetMs = 5_000,
+                preExecutionGate = {
+                    gateCalled = true
+                    ToolPreExecutionDecision.Allow
+                },
+            ),
+        )
+
+        assertFalse(gateCalled)
+        assertFalse(startCalled)
+        assertEquals(0, lifecycleWrites)
+        assertEquals(
+            "tool_call_identity_invalid",
+            (result as ToolExecutionPlanResult.Rejected).errorCode,
+        )
+    }
+
+    @Test
+    fun `host tool call identity has an absolute safe boundary`() {
+        assertTrue(isValidHostToolCallId("x".repeat(256)))
+        assertFalse(isValidHostToolCallId("x".repeat(257)))
+        assertFalse(isValidHostToolCallId("call\u0000unsafe"))
+    }
+
+    @Test
+    fun `foreign run control is rejected before gate ledger or side effect`() = runBlocking {
+        var gateCalled = false
+        var startCalled = false
+        var lifecycleWrites = 0
+        val context = executionContext().copy(
+            runId = Uuid.parse("00000000-0000-0000-0000-000000000001"),
+        )
+        val foreignControl = GenerationRunControl(
+            Uuid.parse("00000000-0000-0000-0000-000000000002"),
+        )
+        val runtime = DefaultToolRuntime(
+            policyResolver = resolver,
+            criticalSink = CriticalToolLifecycleSink { lifecycleWrites++ },
+        )
+
+        val result = runtime.execute(
+            ToolExecutionPlanRequest(
+                toolCallId = "host-call",
+                toolName = "privileged_run_command",
+                args = buildJsonObject {},
+                executionContext = context,
+                startableTool = object : StartableTool {
+                    override suspend fun start(
+                        args: kotlinx.serialization.json.JsonElement,
+                        context: ToolExecutionContext,
+                    ): ToolExecutionHandle {
+                        startCalled = true
+                        return ImmediateHandle("should-not-start", emptyList())
+                    }
+                },
+                legacyExecute = { error("legacy must not run") },
+                runControl = foreignControl,
+                wallClockBudgetMs = 5_000,
+                preExecutionGate = {
+                    gateCalled = true
+                    ToolPreExecutionDecision.Allow
+                },
+            ),
+        )
+
+        assertFalse(gateCalled)
+        assertFalse(startCalled)
+        assertEquals(0, lifecycleWrites)
+        assertTrue(foreignControl.activeToolCallIds().isEmpty())
+        assertEquals(
+            "tool_run_identity_mismatch",
+            (result as ToolExecutionPlanResult.Rejected).errorCode,
+        )
+    }
+
+    @Test
+    fun `raw result is recorded before a blocked completion ledger`() = runBlocking {
+        val events = Collections.synchronizedList(mutableListOf<String>())
+        val ledgerEntered = CompletableDeferred<Unit>()
+        val releaseLedger = CompletableDeferred<Unit>()
+        val timing = recordingTiming(events)
+        val runtime = DefaultToolRuntime(
+            policyResolver = resolver,
+            criticalSink = CriticalToolLifecycleSink { event ->
+                when (event.phase) {
+                    RedactedToolLifecycleEvent.Phase.STARTING -> events += "starting-ledger"
+                    RedactedToolLifecycleEvent.Phase.COMPLETED -> {
+                        events += "ledger-entered"
+                        ledgerEntered.complete(Unit)
+                        releaseLedger.await()
+                        events += "ledger-returned"
+                    }
+                    else -> Unit
+                }
+            },
+        )
+
+        timing.notifyQueuedSafely()
+        val execution = async {
+            runtime.execute(
+                request(
+                    startableTool = object : StartableTool {
+                        override suspend fun start(
+                            args: kotlinx.serialization.json.JsonElement,
+                            context: ToolExecutionContext,
+                        ) = ImmediateHandle("ordered", listOf(UIMessagePart.Text("done")))
+                    },
+                    timingHook = timing,
+                ),
+            )
+        }
+
+        ledgerEntered.await()
+        assertFalse(execution.isCompleted)
+        assertEquals(
+            listOf(
+                "queued",
+                "preflight",
+                "preflight-finished",
+                "starting-ledger",
+                "execution",
+                "raw",
+                "ledger-entered",
+            ),
+            events.toList(),
+        )
+        releaseLedger.complete(Unit)
+        assertTrue(execution.await() is ToolExecutionPlanResult.Completed)
+        assertEquals(
+            listOf(
+                "queued",
+                "preflight",
+                "preflight-finished",
+                "starting-ledger",
+                "execution",
+                "raw",
+                "ledger-entered",
+                "ledger-returned",
+                "ledger-finished",
+                "terminal-COMPLETED",
+            ),
+            events.toList(),
+        )
+    }
+
+    @Test
+    fun `cancelled tool reports one terminal after execution starts`() = runBlocking {
+        val events = Collections.synchronizedList(mutableListOf<String>())
+        val executionStarted = CompletableDeferred<Unit>()
+        val timing = object : ToolExecutionTimingHook {
+            override fun onPreflightStarted() {
+                events += "preflight"
+            }
+
+            override fun onPreflightFinished() {
+                events += "preflight-finished"
+            }
+
+            override fun onExecutionStarted() {
+                events += "execution"
+                executionStarted.complete(Unit)
+            }
+
+            override fun onTerminal(outcome: ToolExecutionTimingOutcome) {
+                events += "terminal-$outcome"
+            }
+        }
+        val runtime = DefaultToolRuntime(policyResolver = resolver)
+        val blocking = object : ToolExecutionHandle {
+            override val executionId: String = "cancelled-handle"
+            override suspend fun awaitResult(): List<UIMessagePart> = awaitCancellation()
+            override fun requestCancel(reason: ToolCancelReason) = CancelRequestResult.Requested
+            override suspend fun awaitTermination(gracePeriod: Duration) =
+                ToolTerminationState.StoppedConfirmed
+        }
+        val execution = async {
+            runtime.execute(
+                request(
+                    startableTool = object : StartableTool {
+                        override suspend fun start(
+                            args: kotlinx.serialization.json.JsonElement,
+                            context: ToolExecutionContext,
+                        ): ToolExecutionHandle = blocking
+                    },
+                    timingHook = timing,
+                ),
+            )
+        }
+
+        executionStarted.await()
+        execution.cancelAndJoin()
+
+        assertEquals(
+            listOf(
+                "preflight",
+                "preflight-finished",
+                "execution",
+                "terminal-CANCELLED",
+            ),
+            events.toList(),
+        )
+    }
+
+    @Test
+    fun `timing callback failures never alter tool execution`() = runBlocking {
+        val timing = object : ToolExecutionTimingHook {
+            override fun onQueued() = error("queue diagnostics failed")
+            override fun onPreflightStarted() = error("preflight diagnostics failed")
+            override fun onPreflightFinished() = error("preflight diagnostics failed")
+            override fun onExecutionStarted() = error("execution diagnostics failed")
+            override fun onRawResultReady() = error("result diagnostics failed")
+            override fun onCompletionLedgerFinished() = error("ledger diagnostics failed")
+            override fun onTerminal(outcome: ToolExecutionTimingOutcome) =
+                error("terminal diagnostics failed")
+        }
+        val runtime = DefaultToolRuntime(policyResolver = resolver)
+
+        timing.notifyQueuedSafely()
+        val result = runtime.execute(
+            request(
+                startableTool = object : StartableTool {
+                    override suspend fun start(
+                        args: kotlinx.serialization.json.JsonElement,
+                        context: ToolExecutionContext,
+                    ) = ImmediateHandle("safe", listOf(UIMessagePart.Text("done")))
+                },
+                timingHook = timing,
+            ),
+        )
+
+        assertTrue(result is ToolExecutionPlanResult.Completed)
+    }
+
+    @Test
+    fun `tool startup failure reports failed terminal once`() = runBlocking {
+        val timingEvents = mutableListOf<String>()
+        val runtime = DefaultToolRuntime(policyResolver = resolver)
+
+        val failure = runCatching {
+            runtime.execute(
+                request(
+                    startableTool = object : StartableTool {
+                        override suspend fun start(
+                            args: kotlinx.serialization.json.JsonElement,
+                            context: ToolExecutionContext,
+                        ): ToolExecutionHandle = error("startup failed")
+                    },
+                    timingHook = recordingTiming(timingEvents),
+                ),
+            )
+        }.exceptionOrNull()
+
+        assertTrue(failure is IllegalStateException)
+        assertEquals(
+            listOf(
+                "preflight",
+                "preflight-finished",
+                "execution",
+                "terminal-FAILED",
+            ),
+            timingEvents,
+        )
+    }
+
+    @Test
     fun `missing identity for a startable tool fails without legacy fallback`() = runBlocking {
         var startCalled = false
         var legacyCalled = false
+        val timingEvents = mutableListOf<String>()
         val runtime = DefaultToolRuntime(policyResolver = resolver)
 
         val result = runtime.execute(
@@ -96,6 +468,7 @@ class ToolRuntimeTest {
                 },
                 runControl = null,
                 wallClockBudgetMs = 5_000,
+                timingHook = recordingTiming(timingEvents),
             )
         )
 
@@ -106,6 +479,10 @@ class ToolRuntimeTest {
         )
         assertFalse(startCalled)
         assertFalse(legacyCalled)
+        assertEquals(
+            listOf("preflight", "preflight-finished", "terminal-REJECTED"),
+            timingEvents,
+        )
     }
 
     @Test
@@ -176,6 +553,7 @@ class ToolRuntimeTest {
     fun `wall clock timeout requests real handle cancellation with timeout reason`() = runBlocking {
         var cancelReason: ToolCancelReason? = null
         var terminationAwaited = false
+        val timingEvents = mutableListOf<String>()
         val runtime = DefaultToolRuntime(policyResolver = resolver)
         val blocking = object : ToolExecutionHandle {
             override val executionId: String = "blocking-real-handle"
@@ -205,12 +583,22 @@ class ToolRuntimeTest {
                 legacyExecute = { error("legacy must not run") },
                 runControl = null,
                 wallClockBudgetMs = 25,
+                timingHook = recordingTiming(timingEvents),
             )
         )
 
         assertTrue(result is ToolExecutionPlanResult.TimedOut)
         assertEquals(ToolCancelReason.TIMEOUT, cancelReason)
         assertTrue(terminationAwaited)
+        assertEquals(
+            listOf(
+                "preflight",
+                "preflight-finished",
+                "execution",
+                "terminal-TIMED_OUT",
+            ),
+            timingEvents,
+        )
     }
 
     @Test
@@ -341,8 +729,9 @@ class ToolRuntimeTest {
             ),
         )
 
-        assertTrue(result is ToolExecutionPlanResult.Completed)
-        assertEquals("done", (result.output.single() as UIMessagePart.Text).text)
+        val completed = result as ToolExecutionPlanResult.Completed
+        assertEquals("done", (completed.output.single() as UIMessagePart.Text).text)
+        assertEquals(ToolTrackingState.UNTRACKED, completed.trackingState)
         assertTrue(health.state.value.degraded)
         assertEquals(42L, health.state.value.degradedSinceMs)
     }
@@ -353,6 +742,7 @@ class ToolRuntimeTest {
         legacyExecute: suspend (kotlinx.serialization.json.JsonElement) -> List<UIMessagePart> = {
             error("legacy must not run")
         },
+        timingHook: ToolExecutionTimingHook? = null,
     ) = ToolExecutionPlanRequest(
         toolCallId = "tracked-call",
         toolName = toolName,
@@ -362,7 +752,39 @@ class ToolRuntimeTest {
         legacyExecute = legacyExecute,
         runControl = null,
         wallClockBudgetMs = 5_000,
+        timingHook = timingHook,
     )
+
+    private fun recordingTiming(events: MutableList<String>) =
+        object : ToolExecutionTimingHook {
+            override fun onQueued() {
+                events += "queued"
+            }
+
+            override fun onPreflightStarted() {
+                events += "preflight"
+            }
+
+            override fun onPreflightFinished() {
+                events += "preflight-finished"
+            }
+
+            override fun onExecutionStarted() {
+                events += "execution"
+            }
+
+            override fun onRawResultReady() {
+                events += "raw"
+            }
+
+            override fun onCompletionLedgerFinished() {
+                events += "ledger-finished"
+            }
+
+            override fun onTerminal(outcome: ToolExecutionTimingOutcome) {
+                events += "terminal-$outcome"
+            }
+        }
 
     private fun descriptorResolver() = ToolSecurityDescriptorResolver { toolName, _ ->
         ToolSecurityDescriptor(

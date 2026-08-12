@@ -57,6 +57,37 @@ class MemoryRetrieverTest {
         }
 
     @Test
+    fun `retrieval preserves authoritative revision for prompt and cache identity`() =
+        runBlocking {
+            val retriever = MemoryRetriever(
+                index = MemorySearchIndex { _, _, _ ->
+                    listOf(
+                        MemorySearchCandidate(
+                            id = 7,
+                            title = "profile",
+                            content = "same visible text",
+                            updatedAtMs = 1L,
+                            importance = 1f,
+                            ftsRank = -1.0,
+                            revision = 12,
+                        ),
+                    )
+                },
+                nowMs = { 2L },
+            )
+
+            val matches = retriever.queryRelevant(
+                assistantId = Uuid.parse("00000000-0000-0000-0000-000000000001"),
+                query = "profile",
+                includeGlobal = false,
+                limit = 1,
+                maxChars = 1_000,
+            )
+
+            assertEquals(12, matches.single().memory.revision)
+        }
+
+    @Test
     fun `explicit retrieval forwards one frozen clock and returns a fail closed trace`() =
         runBlocking {
             val assistantId = Uuid.random()

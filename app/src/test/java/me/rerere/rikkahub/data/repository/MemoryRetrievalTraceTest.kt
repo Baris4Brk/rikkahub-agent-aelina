@@ -132,16 +132,27 @@ class MemoryRetrievalTraceTest {
             nowMs = { 123L },
         )
 
-        repeat(40) { store.record(trace) }
+        val handles = List(40) { store.record(trace) }
 
         assertEquals(MAX_MEMORY_RETRIEVAL_DIAGNOSTIC_ENTRIES, store.entries.value.size)
+        assertEquals(40, handles.distinct().size)
+        assertTrue(handles.all(::isValidMemoryRetrievalTraceHandle))
+        assertTrue(handles.all { handle -> handle.startsWith("mrt_") })
+        val invalidUuid = Uuid.random().toString()
+        val invalidEntryFailure = runCatching {
+            store.entries.value.first().copy(opaqueTraceId = invalidUuid)
+        }.exceptionOrNull()
+        assertTrue(invalidEntryFailure is IllegalArgumentException)
         val destination = MemoryRetrievalDiagnosticsStore.outputFile(temporaryFolder.root)
         val payload = destination.readText()
         assertTrue(destination.isFile)
+        assertTrue(payload.contains("\"schema_version\": 2"))
         assertTrue(payload.contains("\"max_entries\": 32"))
         assertFalse(payload.contains(secretQuery))
         assertFalse(payload.contains(secretMemory))
         assertFalse(payload.contains("772299"))
+        assertFalse(payload.contains(invalidUuid))
+        assertTrue(payload.contains("mrt_"))
         assertTrue(
             destination.parentFile.listFiles().orEmpty().none { file -> file.extension == "tmp" },
         )

@@ -423,6 +423,10 @@ class WorkflowActionRunner(
                     ToolExecutionPlanRequest(
                         toolCallId = "workflow-${invocation.executionContext.runId}-$idx",
                         toolName = tool.name,
+                        toolSchemaFingerprint = me.rerere.rikkahub.toolcatalog.ToolCatalogSnapshot
+                            .fromDefinitions(listOf(tool))
+                            .entry(tool.name)
+                            ?.schemaFingerprint,
                         args = action.args,
                         executionContext = invocation.executionContext,
                         startableTool = toolStartableResolver.resolve(

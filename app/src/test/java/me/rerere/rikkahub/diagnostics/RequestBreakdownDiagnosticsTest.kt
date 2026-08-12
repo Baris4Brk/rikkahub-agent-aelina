@@ -1,11 +1,14 @@
 package me.rerere.rikkahub.diagnostics
 
+import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import me.rerere.ai.context.ProviderContextGateTrace
+import me.rerere.ai.context.ProviderContextOverflowKind
 import me.rerere.ai.core.InputSchema
 import me.rerere.ai.core.MessageRole
 import me.rerere.ai.core.Tool
@@ -13,6 +16,7 @@ import me.rerere.ai.provider.BuiltInTools
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.ai.ui.UIMessageState
+import me.rerere.rikkahub.data.repository.newMemoryRetrievalTraceHandle
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -129,6 +133,235 @@ class RequestBreakdownDiagnosticsTest {
         assertEquals(7_975, updated.providerCachedPromptBasisPoints)
         assertEquals(18, updated.providerCompletionTokens)
         assertEquals(base.wireSections, updated.wireSections)
+    }
+
+    @Test
+    fun `memory compiler diagnostics persist only counts and fixed reason labels`() {
+        val forbiddenReason = "private-memory-id-42-query-fragment"
+        val enriched = breakdown(callIndex = 1).withMemoryCompiler(
+            actualStandingCount = 2,
+            actualContextualCount = 3,
+            memoryPromptEstimatedTokens = 417,
+            memoryCompilerRevision = "memory-prompt-atomic-v1",
+            dropReasonCounts = mapOf(
+                "BUDGET_EXCEEDED" to 4,
+                "duplicate_id" to 1,
+                forbiddenReason to 7,
+                "CONTEXTUAL_DISABLED" to -5,
+            ),
+        )
+        RequestBreakdownDiagnosticsStore.write(temporaryFolder.root, enriched)
+
+        val output = RequestBreakdownDiagnosticsStore.outputFile(temporaryFolder.root).readText()
+        val root = Json.parseToJsonElement(output).jsonObject
+        val dropCounts = root.getValue("memory_drop_reason_counts").jsonObject
+        assertEquals(2, root.getValue("actual_standing_count").jsonPrimitive.content.toInt())
+        assertEquals(3, root.getValue("actual_contextual_count").jsonPrimitive.content.toInt())
+        assertEquals(417, root.getValue("memory_prompt_estimated_tokens").jsonPrimitive.content.toInt())
+        assertEquals(
+            "memory-prompt-atomic-v1",
+            root.getValue("memory_compiler_revision").jsonPrimitive.content,
+        )
+        assertEquals(4, dropCounts.getValue("budget_exceeded").jsonPrimitive.content.toInt())
+        assertEquals(1, dropCounts.getValue("duplicate_id").jsonPrimitive.content.toInt())
+        assertEquals(7, dropCounts.getValue("other").jsonPrimitive.content.toInt())
+        assertFalse(output.contains(forbiddenReason))
+        assertFalse(output.contains("memory_id"))
+        assertFalse(output.contains("query_fragment"))
+
+        val history = RequestBreakdownDiagnosticsStore.historyOutputFile(temporaryFolder.root)
+            .readText()
+        assertTrue(history.contains("memory_prompt_estimated_tokens"))
+        assertTrue(history.contains("budget_exceeded"))
+        assertFalse(history.contains(forbiddenReason))
+    }
+
+    @Test
+    fun `unsafe memory compiler labels are redacted even when directly copied`() {
+        val secretRevision = "private prompt text / conversation UUID"
+        val output = breakdown(callIndex = 1).copy(
+            memoryCompilerRevision = secretRevision,
+            memoryDropReasonCounts = mapOf("memory-913-secret" to 2),
+        ).toJson().toString()
+
+        assertFalse(output.contains(secretRevision))
+        assertFalse(output.contains("memory-913-secret"))
+        assertFalse(output.contains("memory_compiler_revision"))
+        assertTrue(output.contains("other"))
+    }
+
+    @Test
+    fun `initial success and final overflow context gates persist aggregate trace only`() {
+        val initialTrace = contextGateTrace(
+            originalMessageTokens = 90_000,
+            finalMessageTokens = 80_000,
+            strippedReasoning = 3,
+            droppedOldGroups = 2,
+            droppedMessages = 5,
+            outputClamped = false,
+        )
+        val overflowTrace = contextGateTrace(
+            originalMessageTokens = 82_000,
+            finalMessageTokens = 79_000,
+            strippedReasoning = 1,
+            droppedOldGroups = 1,
+            droppedMessages = 2,
+            outputClamped = true,
+            overflowKind = ProviderContextOverflowKind.CURRENT_TURN_TOO_LARGE,
+        )
+        val enriched = breakdown(callIndex = 1)
+            .withContextGate(
+                stage = RequestContextGateStage.INITIAL,
+                status = RequestContextGateStatus.SUCCESS,
+                trace = initialTrace,
+                originalMediaTokens = 8_192,
+                finalMediaTokens = 4_096,
+            )
+            .withContextGate(
+                stage = RequestContextGateStage.FINAL,
+                status = RequestContextGateStatus.OVERFLOW,
+                trace = overflowTrace,
+                originalMediaTokens = 4_096,
+                finalMediaTokens = 4_096,
+            )
+        RequestBreakdownDiagnosticsStore.write(temporaryFolder.root, enriched)
+
+        val root = Json.parseToJsonElement(
+            RequestBreakdownDiagnosticsStore.outputFile(temporaryFolder.root).readText(),
+        ).jsonObject
+        val attempts = root.getValue("context_gate_attempts").jsonArray
+        assertEquals(2, attempts.size)
+        val initial = attempts[0].jsonObject
+        assertEquals("initial", initial.getValue("stage").jsonPrimitive.content)
+        assertEquals("success", initial.getValue("status").jsonPrimitive.content)
+        assertEquals(90_700, initial.getValue("original_input_tokens").jsonPrimitive.content.toInt())
+        assertEquals(80_700, initial.getValue("final_input_tokens").jsonPrimitive.content.toInt())
+        assertEquals(8_192, initial.getValue("original_media_tokens").jsonPrimitive.content.toInt())
+        assertEquals(3, initial.getValue("stripped_historical_reasoning_parts").jsonPrimitive.content.toInt())
+        assertEquals(2, initial.getValue("dropped_old_groups").jsonPrimitive.content.toInt())
+
+        val final = attempts[1].jsonObject
+        assertEquals("final", final.getValue("stage").jsonPrimitive.content)
+        assertEquals("overflow", final.getValue("status").jsonPrimitive.content)
+        assertEquals(true, final.getValue("output_clamped").jsonPrimitive.content.toBoolean())
+        assertEquals(
+            "CURRENT_TURN_TOO_LARGE",
+            final.getValue("overflow_kind").jsonPrimitive.content,
+        )
+    }
+
+    @Test
+    fun `context gate helper upserts one record per fixed stage`() {
+        val first = contextGateTrace(finalMessageTokens = 10_000)
+        val replacement = contextGateTrace(finalMessageTokens = 9_000)
+        val updated = breakdown(callIndex = 1)
+            .withContextGate(
+                RequestContextGateStage.FINAL,
+                RequestContextGateStatus.SUCCESS,
+                first,
+            )
+            .withContextGate(
+                RequestContextGateStage.FINAL,
+                RequestContextGateStatus.SUCCESS,
+                replacement,
+            )
+
+        assertEquals(1, updated.contextGateAttempts.size)
+        assertEquals(9_000, updated.contextGateAttempts.single().finalMessageTokens)
+    }
+
+    @Test
+    fun `rejected pre-provider gates enter bounded history without provider usage`() {
+        val overflow = breakdown(callIndex = 1)
+            .withContextGate(
+                stage = RequestContextGateStage.INITIAL,
+                status = RequestContextGateStatus.OVERFLOW,
+                trace = contextGateTrace(
+                    overflowKind = ProviderContextOverflowKind.FIXED_PREFIX_TOO_LARGE,
+                ),
+            )
+        RequestBreakdownDiagnosticsStore.write(
+            temporaryFolder.root,
+            overflow,
+            includeHistory = false,
+        )
+        val adjustmentRequired = breakdown(callIndex = 2)
+            .withContextGate(
+                stage = RequestContextGateStage.FINAL,
+                status = RequestContextGateStatus.ADJUSTMENT_REQUIRED,
+                trace = contextGateTrace(outputClamped = true),
+            )
+        RequestBreakdownDiagnosticsStore.write(
+            temporaryFolder.root,
+            adjustmentRequired,
+            includeHistory = false,
+        )
+
+        val history = Json.parseToJsonElement(
+            RequestBreakdownDiagnosticsStore.historyOutputFile(temporaryFolder.root).readText(),
+        ).jsonObject.getValue("entries").jsonArray
+        assertEquals(2, history.size)
+        assertEquals(
+            "overflow",
+            history[0].jsonObject.getValue("context_gate_attempts").jsonArray
+                .single().jsonObject.getValue("status").jsonPrimitive.content,
+        )
+        assertEquals(
+            "adjustment_required",
+            history[1].jsonObject.getValue("context_gate_attempts").jsonArray
+                .single().jsonObject.getValue("status").jsonPrimitive.content,
+        )
+        assertFalse(history[0].jsonObject.containsKey("provider_prompt_tokens"))
+        assertFalse(history[1].jsonObject.containsKey("provider_prompt_tokens"))
+    }
+
+    @Test
+    fun `retrieval correlation handle accepts only strict mrt format`() {
+        val handle = newMemoryRetrievalTraceHandle()
+        val valid = breakdown(callIndex = 1, memoryRetrievalTraceId = handle)
+        val rawApplicationUuid = "123e4567-e89b-12d3-a456-426614174000"
+        val invalidAtCreation = breakdown(
+            callIndex = 2,
+            memoryRetrievalTraceId = rawApplicationUuid,
+        )
+        val invalidDirectCopy = valid.copy(memoryRetrievalTraceId = "private-query-fragment")
+
+        assertEquals(handle, valid.toJson().getValue("memory_retrieval_trace_id").jsonPrimitive.content)
+        assertEquals(null, invalidAtCreation.memoryRetrievalTraceId)
+        assertFalse(invalidAtCreation.toJson().containsKey("memory_retrieval_trace_id"))
+        assertFalse(invalidDirectCopy.toJson().containsKey("memory_retrieval_trace_id"))
+        assertFalse(valid.toJson().toString().contains(rawApplicationUuid))
+    }
+
+    @Test(expected = CancellationException::class)
+    fun `diagnostic schema inspection propagates cancellation`() {
+        breakdown(
+            callIndex = 1,
+            tools = listOf(
+                Tool(
+                    name = "cancelled_schema",
+                    description = "",
+                    parameters = { throw CancellationException("cancel schema") },
+                    execute = { emptyList() },
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun `new aggregate diagnostics remain absent for legacy call sites`() {
+        val legacy = breakdown(callIndex = 1)
+        val json = legacy.toJson()
+
+        assertEquals(null, legacy.actualStandingCount)
+        assertEquals(null, legacy.actualContextualCount)
+        assertEquals(null, legacy.memoryPromptEstimatedTokens)
+        assertEquals(null, legacy.memoryCompilerRevision)
+        assertTrue(legacy.memoryDropReasonCounts.isEmpty())
+        assertTrue(legacy.contextGateAttempts.isEmpty())
+        assertFalse(json.containsKey("actual_standing_count"))
+        assertFalse(json.containsKey("memory_drop_reason_counts"))
+        assertFalse(json.containsKey("context_gate_attempts"))
     }
 
     @Test
@@ -333,6 +566,7 @@ class RequestBreakdownDiagnosticsTest {
         messages: List<UIMessage> = listOf(UIMessage.user("hello")),
         tools: List<Tool> = emptyList(),
         builtInTools: Set<BuiltInTools> = emptySet(),
+        memoryRetrievalTraceId: String? = null,
     ): RequestBreakdownDiagnostic = RequestBreakdownDiagnostic.create(
         generationId = "generation",
         providerCallIndex = callIndex,
@@ -349,8 +583,33 @@ class RequestBreakdownDiagnosticsTest {
         recentChatsPrompt = "",
         dynamicSystemAddendum = null,
         memoryCount = 0,
+        memoryRetrievalTraceId = memoryRetrievalTraceId,
         enabledSkillNames = emptyList(),
         fingerprintKey = fingerprintKey,
+    )
+
+    private fun contextGateTrace(
+        originalMessageTokens: Int = 11_000,
+        finalMessageTokens: Int = 10_000,
+        strippedReasoning: Int = 0,
+        droppedOldGroups: Int = 0,
+        droppedMessages: Int = 0,
+        outputClamped: Boolean = false,
+        overflowKind: ProviderContextOverflowKind? = null,
+    ): ProviderContextGateTrace = ProviderContextGateTrace(
+        contextWindowTokens = 128_000,
+        requestedOutputTokens = 4_096,
+        effectiveOutputTokens = if (outputClamped) 2_048 else 4_096,
+        safetyMarginTokens = 2_560,
+        toolSchemaTokens = 700,
+        originalMessageTokens = originalMessageTokens,
+        finalMessageTokens = finalMessageTokens,
+        maximumMessageTokens = 120_644,
+        strippedHistoricalReasoningParts = strippedReasoning,
+        droppedCompletedTurns = droppedOldGroups,
+        droppedMessages = droppedMessages,
+        outputClamped = outputClamped,
+        overflowKind = overflowKind,
     )
 
     private fun executedTool(index: Int): UIMessagePart.Tool = UIMessagePart.Tool(

@@ -12,7 +12,7 @@ import java.io.File
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
-import kotlin.uuid.Uuid
+import java.security.SecureRandom
 
 /**
  * Privacy-safe, deterministic account of one memory retrieval attempt.
@@ -113,6 +113,22 @@ data class MemoryRetrievalTimings(
 
 const val MEMORY_RETRIEVAL_TRACE_SCHEMA_VERSION = 1
 
+private const val MEMORY_RETRIEVAL_TRACE_HANDLE_PREFIX = "mrt_"
+private val MEMORY_RETRIEVAL_TRACE_HANDLE_PATTERN = Regex("^mrt_[0-9a-f]{32}$")
+private val memoryRetrievalTraceSecureRandom = SecureRandom()
+
+/** A random correlation handle that cannot be confused with an application UUID. */
+internal fun newMemoryRetrievalTraceHandle(): String = buildString {
+    append(MEMORY_RETRIEVAL_TRACE_HANDLE_PREFIX)
+    val bytes = ByteArray(16).also(memoryRetrievalTraceSecureRandom::nextBytes)
+    bytes.forEach { byte ->
+        append((byte.toInt() and 0xff).toString(16).padStart(2, '0'))
+    }
+}
+
+internal fun isValidMemoryRetrievalTraceHandle(value: String): Boolean =
+    MEMORY_RETRIEVAL_TRACE_HANDLE_PATTERN.matches(value)
+
 @Serializable
 data class MemoryRetrievalDiagnosticEntry(
     /** Random per-trace id; it is deliberately unrelated to conversation, scope, or memory ids. */
@@ -121,12 +137,18 @@ data class MemoryRetrievalDiagnosticEntry(
     @SerialName("recorded_at_ms")
     val recordedAtMs: Long,
     val trace: MemoryRetrievalTrace,
-)
+) {
+    init {
+        require(isValidMemoryRetrievalTraceHandle(opaqueTraceId)) {
+            "opaqueTraceId must be an mrt_ correlation handle, never an application UUID"
+        }
+    }
+}
 
 @Serializable
 private data class MemoryRetrievalDiagnosticsSnapshot(
     @SerialName("schema_version")
-    val schemaVersion: Int = 1,
+    val schemaVersion: Int = MEMORY_RETRIEVAL_DIAGNOSTICS_SNAPSHOT_SCHEMA_VERSION,
     @SerialName("max_entries")
     val maxEntries: Int,
     val entries: List<MemoryRetrievalDiagnosticEntry>,
@@ -161,7 +183,7 @@ class MemoryRetrievalDiagnosticsStore(
         recordedAtMs: Long = nowMs(),
     ): String {
         val entry = MemoryRetrievalDiagnosticEntry(
-            opaqueTraceId = Uuid.random().toString(),
+            opaqueTraceId = newMemoryRetrievalTraceHandle(),
             recordedAtMs = recordedAtMs,
             trace = trace,
         )
@@ -227,6 +249,8 @@ class MemoryRetrievalDiagnosticsStore(
 }
 
 const val MAX_MEMORY_RETRIEVAL_DIAGNOSTIC_ENTRIES = 32
+private const val MEMORY_RETRIEVAL_DIAGNOSTICS_SNAPSHOT_SCHEMA_VERSION = 2
 
 private const val MEMORY_RETRIEVAL_PRIVACY_NOTE =
-    "Policy counts, ranks, scores, and timings only; no query, memory text/id, or scope id."
+    "Policy counts, ranks, scores, timings, and a random mrt_ correlation handle only; " +
+        "no query, memory text/id, or application/scope UUID."

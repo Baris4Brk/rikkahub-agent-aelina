@@ -18,13 +18,54 @@ import java.util.concurrent.atomic.AtomicReference
 
 data class ProviderTurnRequest(
     val stream: Boolean,
+    /** Per-attempt preparation that must finish before app-provider dispatch (for example lastAccess). */
+    val beforeAttempt: (suspend (isRetry: Boolean) -> Unit)? = null,
     val streamCall: suspend () -> Flow<MessageChunk>,
     val retryStreamCall: (suspend () -> Flow<MessageChunk>)? = null,
     val singleCall: suspend () -> MessageChunk,
     val onChunk: suspend (MessageChunk) -> Unit,
     val onBeforeRetry: suspend (ProviderStreamStall) -> Unit = {},
     val watchdogConfig: ProviderStreamWatchdogConfig? = null,
+    /**
+     * Optional in-process observer for Agent Timing. It is deliberately independent from the
+     * timing store so the provider path remains allocation-free when diagnostics are disabled.
+     */
+    val timingHook: ProviderTurnTimingHook? = null,
 )
+
+enum class ProviderProgressKind {
+    STREAM_PROGRESS,
+    /** A non-streaming provider returned a complete, meaningful response. Not a true first token. */
+    FULL_RESPONSE,
+}
+
+enum class ProviderAttemptTimingOutcome {
+    COMPLETED,
+    STALLED,
+    STEERING_CANCELLED,
+    CANCELLED,
+    FAILED,
+}
+
+/**
+ * Lightweight provider timing seams. Implementations must not block. Every callback is isolated
+ * from provider execution, so a diagnostics failure can never fail or cancel a generation.
+ *
+ * [onAppDispatch] means the app is about to invoke the provider adapter. It intentionally does not
+ * claim that an HTTP request has reached the wire.
+ */
+interface ProviderTurnTimingHook {
+    fun onBeforeAttempt(attemptIndex: Int, isRetry: Boolean) = Unit
+    fun onAppDispatch(attemptIndex: Int, stream: Boolean) = Unit
+    fun onFirstMeaningfulProgress(attemptIndex: Int, kind: ProviderProgressKind) = Unit
+    fun onProviderResponseFinished(attemptIndex: Int) = Unit
+    fun onAttemptTerminal(attemptIndex: Int, outcome: ProviderAttemptTimingOutcome) = Unit
+    fun onRetryScheduled(
+        completedAttemptIndex: Int,
+        nextAttemptIndex: Int,
+        reason: ProviderStreamStallReason,
+    ) = Unit
+}
 
 data class ProviderStreamWatchdogConfig(
     val firstProgressTimeoutMillis: Long = 180_000L,
@@ -72,25 +113,64 @@ interface ProviderTurnRunner {
 class DefaultProviderTurnRunner(
     private val runControl: GenerationRunControl?,
     private val nowMillis: () -> Long = { System.nanoTime() / 1_000_000L },
+    private val progressUnits: (MessageChunk) -> Long = { it.estimatedProgressUnits() },
 ) : ProviderTurnRunner {
     override suspend fun run(request: ProviderTurnRequest): ProviderTurnOutcome {
         if (!request.stream) {
-            return runAttempt(request, streamCall = null, watchdogConfig = null).toPublicOutcome()
+            request.timingHook.safeCall { onBeforeAttempt(attemptIndex = 0, isRetry = false) }
+            return runAttemptSafely(
+                request = request,
+                streamCall = null,
+                watchdogConfig = null,
+                attemptIndex = 0,
+                isRetry = false,
+            ).toPublicOutcome(request.timingHook, attemptIndex = 0)
         }
 
         var retry = false
+        var attemptIndex = 0
         while (true) {
             val streamCall = if (retry) request.retryStreamCall else request.streamCall
             checkNotNull(streamCall) { "A watchdog retry requires retryStreamCall" }
-            when (val outcome = runAttempt(request, streamCall, request.watchdogConfig)) {
-                ProviderAttemptOutcome.Completed -> return ProviderTurnOutcome.Completed
-                ProviderAttemptOutcome.CancelledForSteering ->
+            request.timingHook.safeCall { onBeforeAttempt(attemptIndex, retry) }
+            when (val outcome = runAttemptSafely(
+                request = request,
+                streamCall = streamCall,
+                watchdogConfig = request.watchdogConfig,
+                attemptIndex = attemptIndex,
+                isRetry = retry,
+            )) {
+                ProviderAttemptOutcome.Completed -> {
+                    request.timingHook.safeCall {
+                        onAttemptTerminal(attemptIndex, ProviderAttemptTimingOutcome.COMPLETED)
+                    }
+                    return ProviderTurnOutcome.Completed
+                }
+                ProviderAttemptOutcome.CancelledForSteering -> {
+                    request.timingHook.safeCall {
+                        onAttemptTerminal(
+                            attemptIndex,
+                            ProviderAttemptTimingOutcome.STEERING_CANCELLED,
+                        )
+                    }
                     return ProviderTurnOutcome.CancelledForSteering
+                }
 
                 is ProviderAttemptOutcome.Stalled -> {
+                    request.timingHook.safeCall {
+                        onAttemptTerminal(attemptIndex, ProviderAttemptTimingOutcome.STALLED)
+                    }
                     if (!retry && request.retryStreamCall != null) {
                         request.onBeforeRetry(outcome.stall)
+                        request.timingHook.safeCall {
+                            onRetryScheduled(
+                                completedAttemptIndex = attemptIndex,
+                                nextAttemptIndex = attemptIndex + 1,
+                                reason = outcome.stall.reason,
+                            )
+                        }
                         retry = true
+                        attemptIndex += 1
                         continue
                     }
                     throw ProviderStreamStalledException(outcome.stall)
@@ -99,10 +179,32 @@ class DefaultProviderTurnRunner(
         }
     }
 
+    private suspend fun runAttemptSafely(
+        request: ProviderTurnRequest,
+        streamCall: (suspend () -> Flow<MessageChunk>)?,
+        watchdogConfig: ProviderStreamWatchdogConfig?,
+        attemptIndex: Int,
+        isRetry: Boolean,
+    ): ProviderAttemptOutcome = try {
+        runAttempt(request, streamCall, watchdogConfig, attemptIndex, isRetry)
+    } catch (cancelled: CancellationException) {
+        request.timingHook.safeCall {
+            onAttemptTerminal(attemptIndex, ProviderAttemptTimingOutcome.CANCELLED)
+        }
+        throw cancelled
+    } catch (failure: Throwable) {
+        request.timingHook.safeCall {
+            onAttemptTerminal(attemptIndex, ProviderAttemptTimingOutcome.FAILED)
+        }
+        throw failure
+    }
+
     private suspend fun runAttempt(
         request: ProviderTurnRequest,
         streamCall: (suspend () -> Flow<MessageChunk>)?,
         watchdogConfig: ProviderStreamWatchdogConfig?,
+        attemptIndex: Int,
+        isRetry: Boolean,
     ): ProviderAttemptOutcome = supervisorScope {
         val steeringCancellationRequested = AtomicBoolean(false)
         val cancellationOrigin = AtomicReference<ProviderCancellationOrigin?>(null)
@@ -119,16 +221,45 @@ class DefaultProviderTurnRunner(
         val chunks = Channel<MessageChunk>(capacity = Channel.UNLIMITED)
         val providerChild = async {
             try {
+                request.beforeAttempt?.invoke(isRetry)
+                request.timingHook.safeCall {
+                    onAppDispatch(attemptIndex, stream = request.stream)
+                }
+                var firstMeaningfulProgressReported = false
                 if (request.stream) {
                     checkNotNull(streamCall).invoke().collect { chunk ->
                         // Record at the provider boundary, before UI/database work. A slow
                         // collector must never be mistaken for a slow upstream stream.
-                        progress?.record(chunk)
+                        if (progress != null ||
+                            (request.timingHook != null && !firstMeaningfulProgressReported)
+                        ) {
+                            val units = progressUnits(chunk)
+                            progress?.record(units)
+                            if (units > 0L && !firstMeaningfulProgressReported) {
+                                firstMeaningfulProgressReported = true
+                                request.timingHook.safeCall {
+                                    onFirstMeaningfulProgress(
+                                        attemptIndex,
+                                        ProviderProgressKind.STREAM_PROGRESS,
+                                    )
+                                }
+                            }
+                        }
                         chunks.send(chunk)
                     }
                 } else {
-                    chunks.send(request.singleCall())
+                    val chunk = request.singleCall()
+                    if (request.timingHook != null && progressUnits(chunk) > 0L) {
+                        request.timingHook.safeCall {
+                            onFirstMeaningfulProgress(
+                                attemptIndex,
+                                ProviderProgressKind.FULL_RESPONSE,
+                            )
+                        }
+                    }
+                    chunks.send(chunk)
                 }
+                request.timingHook.safeCall { onProviderResponseFinished(attemptIndex) }
             } catch (error: Throwable) {
                 chunks.close(error)
                 throw error
@@ -203,10 +334,35 @@ class DefaultProviderTurnRunner(
         }
     }
 
-    private fun ProviderAttemptOutcome.toPublicOutcome(): ProviderTurnOutcome = when (this) {
-        ProviderAttemptOutcome.Completed -> ProviderTurnOutcome.Completed
-        ProviderAttemptOutcome.CancelledForSteering -> ProviderTurnOutcome.CancelledForSteering
+    private fun ProviderAttemptOutcome.toPublicOutcome(
+        timingHook: ProviderTurnTimingHook?,
+        attemptIndex: Int,
+    ): ProviderTurnOutcome = when (this) {
+        ProviderAttemptOutcome.Completed -> {
+            timingHook.safeCall {
+                onAttemptTerminal(attemptIndex, ProviderAttemptTimingOutcome.COMPLETED)
+            }
+            ProviderTurnOutcome.Completed
+        }
+        ProviderAttemptOutcome.CancelledForSteering -> {
+            timingHook.safeCall {
+                onAttemptTerminal(
+                    attemptIndex,
+                    ProviderAttemptTimingOutcome.STEERING_CANCELLED,
+                )
+            }
+            ProviderTurnOutcome.CancelledForSteering
+        }
         is ProviderAttemptOutcome.Stalled -> throw ProviderStreamStalledException(stall)
+    }
+}
+
+private inline fun ProviderTurnTimingHook?.safeCall(block: ProviderTurnTimingHook.() -> Unit) {
+    val hook = this ?: return
+    try {
+        hook.block()
+    } catch (_: Throwable) {
+        // Timing is an optional sidecar and must never alter provider behavior.
     }
 }
 
@@ -229,8 +385,7 @@ private class ProviderStreamProgressTracker(
     private val samples = ArrayDeque<ProviderProgressSample>()
 
     @Synchronized
-    fun record(chunk: MessageChunk) {
-        val units = chunk.estimatedProgressUnits()
+    fun record(units: Long) {
         if (units <= 0L) return
         val now = nowMillis()
         if (firstProgressAtMillis == null) firstProgressAtMillis = now

@@ -81,6 +81,22 @@ object WorkflowCapabilitySnapshot {
     fun parse(snapshot: Set<String>): Set<CapabilityKey> = snapshot.mapNotNull { raw ->
         runCatching { CapabilityKey.of(raw) }.getOrNull()
     }.toSet()
+
+    /**
+     * Learned workflows must never fall back to resolving their actions again. A persisted
+     * snapshot is usable only when it is non-empty and every value is already in canonical
+     * form. Returning null gives future learned-workflow callers a simple fail-closed API.
+     */
+    fun parsePersistedForLearnedExecution(snapshot: Set<String>): Set<CapabilityKey>? {
+        if (snapshot.isEmpty()) return null
+        val parsed = snapshot.map { raw ->
+            runCatching { CapabilityKey.of(raw) }.getOrNull() ?: return null
+        }.toSet()
+        if (parsed.size != snapshot.size || parsed.map(CapabilityKey::value).toSet() != snapshot) {
+            return null
+        }
+        return parsed
+    }
 }
 
 /**

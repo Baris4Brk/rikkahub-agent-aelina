@@ -41,6 +41,15 @@ import androidx.room.PrimaryKey
             name = "idx_execution_records_heartbeat_status",
             value = ["heartbeat_at_ms", "status"],
         ),
+        Index(name = "idx_execution_records_tool_call", value = ["tool_call_id"]),
+        Index(
+            name = "idx_execution_records_tool_schema",
+            value = ["tool_name", "tool_schema_fingerprint"],
+        ),
+        Index(
+            name = "idx_execution_records_owning_message",
+            value = ["owning_assistant_message_id", "owning_assistant_message_revision"],
+        ),
     ],
 )
 data class ExecutionRecord(
@@ -55,6 +64,23 @@ data class ExecutionRecord(
     val commandId: String? = null,
     @ColumnInfo(name = "conversation_id")
     val conversationId: String? = null,
+    /** Frozen Learning authorization boundary at execution admission; null is legacy/ineligible. */
+    @ColumnInfo(name = "learning_scope_kind")
+    val learningScopeKind: String? = null,
+    @ColumnInfo(name = "learning_scope_id")
+    val learningScopeId: String? = null,
+    /** Provider/tool-call identity frozen at admission. Never derived from tool arguments. */
+    @ColumnInfo(name = "tool_call_id")
+    val toolCallId: String? = null,
+    @ColumnInfo(name = "tool_name")
+    val toolName: String? = null,
+    @ColumnInfo(name = "tool_schema_fingerprint")
+    val toolSchemaFingerprint: String? = null,
+    /** Exact assistant source which owns this call; null marks legacy/unrecoverable ownership. */
+    @ColumnInfo(name = "owning_assistant_message_id")
+    val owningAssistantMessageId: String? = null,
+    @ColumnInfo(name = "owning_assistant_message_revision")
+    val owningAssistantMessageRevision: Long? = null,
     @ColumnInfo(name = "subject_id")
     val subjectId: String,
     @ColumnInfo(name = "subject_type")
@@ -112,7 +138,47 @@ data class ExecutionRecord(
     /** Persisted intent used to choose the honest terminal state after an independent probe. */
     @ColumnInfo(name = "requested_terminal_outcome", defaultValue = "'NONE'")
     val requestedTerminalOutcome: String = RequestedTerminalOutcome.NONE.name,
-)
+) {
+    init {
+        val toolIdentity = listOf(toolCallId, toolName, toolSchemaFingerprint)
+        require(toolIdentity.all { it == null } || toolIdentity.all { it != null }) {
+            "Execution tool admission identity must be complete"
+        }
+        require(toolCallId == null || toolCallId.isSafeExecutionAuthorityId()) {
+            "Invalid execution tool-call ID"
+        }
+        require(toolName == null || toolName.isSafeExecutionAuthorityId()) {
+            "Invalid execution tool name"
+        }
+        require(toolSchemaFingerprint == null || toolSchemaFingerprint.isLowerExecutionSha256()) {
+            "Invalid execution tool schema fingerprint"
+        }
+        require(
+            (owningAssistantMessageId == null) == (owningAssistantMessageRevision == null),
+        ) { "Execution message ownership requires an exact ID/revision pair" }
+        require(
+            owningAssistantMessageId == null || owningAssistantMessageId.isSafeExecutionAuthorityId(),
+        ) { "Invalid execution owning message ID" }
+        require(owningAssistantMessageRevision == null || owningAssistantMessageRevision > 0L) {
+            "Invalid execution owning message revision"
+        }
+    }
+}
+
+private fun String.isSafeExecutionAuthorityId(): Boolean =
+    length in 1..256 && all { char ->
+        char in 'a'..'z' ||
+            char in 'A'..'Z' ||
+            char in '0'..'9' ||
+            char == '-' ||
+            char == '_' ||
+            char == '.' ||
+            char == ':' ||
+            char == '@'
+    }
+
+private fun String.isLowerExecutionSha256(): Boolean =
+    length == 64 && all { it in '0'..'9' || it in 'a'..'f' }
 
 enum class ExecutionKind {
     TOOL_CALL,

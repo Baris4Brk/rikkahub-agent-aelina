@@ -2,6 +2,7 @@ package me.rerere.ai.context
 
 import kotlin.math.ceil
 import kotlin.math.min
+import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import me.rerere.ai.core.InputSchema
@@ -131,9 +132,11 @@ class ProviderRequestTokenEstimator(
         )
 
     fun estimateToolSchemaTokens(tools: List<Tool>): Int = tools.safeSumOf { tool ->
-        val schema = runCatching {
+        val schema = try {
             tool.parameters()?.let { schemaJson.encodeToString(InputSchema.serializer(), it) }.orEmpty()
-        }.getOrElse {
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
             // A schema that cannot be inspected must not receive a zero-token reservation.
             return@safeSumOf 256
         }

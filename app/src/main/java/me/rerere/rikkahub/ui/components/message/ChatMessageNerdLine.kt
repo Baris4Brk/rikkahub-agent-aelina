@@ -1,19 +1,32 @@
 package me.rerere.rikkahub.ui.components.message
 
 import androidx.annotation.VisibleForTesting
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.ProvideTextStyle
+import androidx.compose.material3.SheetValue
 import androidx.compose.material3.Text
+import androidx.compose.material3.rememberBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -31,6 +44,7 @@ import me.rerere.hugeicons.stroke.Download04
 import me.rerere.hugeicons.stroke.Upload02
 import me.rerere.hugeicons.stroke.Zap
 import me.rerere.rikkahub.R
+import me.rerere.rikkahub.diagnostics.agenttiming.AgentTimingTraceSnapshot
 import me.rerere.rikkahub.ui.context.LocalSettings
 import me.rerere.rikkahub.utils.formatNumber
 import me.rerere.rikkahub.utils.toFixed
@@ -42,6 +56,7 @@ import java.time.Duration
 @Composable
 fun ChatMessageNerdLine(
     message: UIMessage,
+    agentTiming: AgentTimingTraceSnapshot? = null,
     modifier: Modifier = Modifier,
     color: Color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.5f),
 ) {
@@ -154,8 +169,284 @@ fun ChatMessageNerdLine(
                         }
                     }
                 }
+                if (settings.showAgentTiming && agentTiming != null) {
+                    AgentTimingSummaryLine(trace = agentTiming)
+                }
             }
         }
+    }
+}
+
+@Composable
+private fun AgentTimingSummaryLine(trace: AgentTimingTraceSnapshot) {
+    val summary = remember(trace) { buildAgentTimingSummary(trace) }
+    var showDetails by remember(trace.traceSequence) { mutableStateOf(false) }
+    val responseLabel = when (summary.firstResponseKind) {
+        AgentTimingFirstResponseKind.FIRST_PROGRESS -> stringResource(R.string.agent_timing_first_progress)
+        AgentTimingFirstResponseKind.FULL_RESPONSE -> stringResource(R.string.agent_timing_full_response)
+    }
+    val text = stringResource(
+        R.string.agent_timing_summary,
+        formatAgentTimingDuration(summary.totalNs),
+        formatAgentTimingDuration(summary.excludingHumanWaitNs),
+        responseLabel,
+        formatAgentTimingDuration(summary.firstResponseNs),
+        summary.roundCount,
+        summary.toolCount,
+    )
+    StatsItem(
+        icon = {
+            Icon(
+                imageVector = HugeIcons.Clock02,
+                contentDescription = null,
+                modifier = Modifier.size(12.dp),
+            )
+        },
+        content = {
+            Text(
+                text = text,
+                modifier = Modifier.clickable(onClick = { showDetails = true }),
+            )
+        },
+    )
+
+    if (showDetails) {
+        AgentTimingDetailSheet(
+            trace = trace,
+            onDismiss = { showDetails = false },
+        )
+    }
+}
+
+@Composable
+internal fun AgentTimingToolExtra(presentation: AgentToolTimingPresentation) {
+    val parts = buildList {
+        presentation.executionNs?.let {
+            add(stringResource(R.string.agent_timing_tool_execution, formatAgentTimingDuration(it)))
+        }
+        presentation.postProcessingNs?.let {
+            add(stringResource(R.string.agent_timing_tool_post_processing, formatAgentTimingDuration(it)))
+        }
+        presentation.batchReadyNs?.let {
+            add(stringResource(R.string.agent_timing_tool_batch_wait, formatAgentTimingDuration(it)))
+        }
+        presentation.handoffNs?.let {
+            add(stringResource(R.string.agent_timing_tool_handoff, formatAgentTimingDuration(it)))
+        }
+        presentation.nextResponseNs?.let {
+            add(stringResource(R.string.agent_timing_tool_next_response, formatAgentTimingDuration(it)))
+        }
+    }
+    if (parts.isEmpty()) return
+    Text(
+        text = parts.joinToString(" \u00b7 "),
+        style = MaterialTheme.typography.labelSmall,
+        color = if (presentation.hasLongMetric) {
+            MaterialTheme.colorScheme.tertiary
+        } else {
+            MaterialTheme.colorScheme.onSurfaceVariant
+        },
+        maxLines = 2,
+    )
+}
+
+@Composable
+private fun AgentTimingDetailSheet(
+    trace: AgentTimingTraceSnapshot,
+    onDismiss: () -> Unit,
+) {
+    val detail = remember(trace) { buildAgentTimingDetail(trace) }
+    ModalBottomSheet(
+        sheetState = rememberBottomSheetState(
+            initialValue = SheetValue.Hidden,
+            enabledValues = setOf(SheetValue.Hidden, SheetValue.Expanded),
+        ),
+        onDismissRequest = onDismiss,
+    ) {
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding(),
+            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            item(key = "title") {
+                Text(
+                    text = stringResource(R.string.agent_timing_details_title),
+                    style = MaterialTheme.typography.titleLarge,
+                )
+            }
+            items(detail.overview, key = { "overview-${it.kind}" }) { section ->
+                AgentTimingSection(section)
+            }
+            item(key = "response-layers") {
+                AgentTimingResponseLayers(detail.responseLayers)
+            }
+            items(
+                detail.rounds,
+                key = { "round-${it.snapshotOrdinal}-${it.logicalRoundNumber}-${it.attemptIndex}" },
+            ) { round ->
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = stringResource(
+                            R.string.agent_timing_round_title,
+                            round.logicalRoundNumber,
+                            round.attemptIndex + 1,
+                        ),
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                    round.sections.forEach { section ->
+                        AgentTimingSection(section)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AgentTimingResponseLayers(layers: AgentTimingResponseLayersPresentation) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(
+            text = stringResource(R.string.agent_timing_section_response_layers),
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.primary,
+        )
+        layers.sessionContentFromDispatchNs?.let { duration ->
+            AgentTimingValueRow(
+                label = stringResource(R.string.agent_timing_metric_session_content),
+                value = formatAgentTimingDuration(duration),
+                isLong = duration > AGENT_TIMING_LONG_STAGE_NS,
+            )
+        }
+        val drawValue = when (layers.visibleDrawState) {
+            AgentTimingVisibleDrawState.OBSERVED ->
+                formatAgentTimingDuration(layers.visibleDrawFromSessionContentNs)
+            AgentTimingVisibleDrawState.NOT_OBSERVED ->
+                stringResource(R.string.agent_timing_visible_not_observed)
+            AgentTimingVisibleDrawState.PENDING ->
+                stringResource(R.string.agent_timing_visible_pending)
+        }
+        AgentTimingValueRow(
+            label = stringResource(R.string.agent_timing_metric_first_visible_draw),
+            value = drawValue,
+            isLong = layers.visibleDrawFromSessionContentNs?.let {
+                it > AGENT_TIMING_LONG_STAGE_NS
+            } == true,
+        )
+    }
+}
+
+@Composable
+private fun AgentTimingValueRow(
+    label: String,
+    value: String,
+    isLong: Boolean,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.weight(1f),
+        )
+        if (isLong) {
+            Text(
+                text = stringResource(R.string.agent_timing_long_stage),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.tertiary,
+            )
+        }
+        Text(
+            text = value,
+            style = MaterialTheme.typography.labelMedium,
+            color = if (isLong) {
+                MaterialTheme.colorScheme.tertiary
+            } else {
+                MaterialTheme.colorScheme.onSurfaceVariant
+            },
+        )
+    }
+}
+
+@Composable
+private fun AgentTimingSection(section: AgentTimingSectionPresentation) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(
+            text = section.kind.label(),
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.primary,
+        )
+        section.metrics.forEach { metric ->
+            AgentTimingValueRow(
+                label = metric.label(),
+                value = formatAgentTimingDuration(metric.durationNs),
+                isLong = metric.isLong,
+            )
+        }
+    }
+}
+
+@Composable
+private fun AgentTimingSectionKind.label(): String = stringResource(
+    when (this) {
+        AgentTimingSectionKind.OVERVIEW -> R.string.agent_timing_section_overview
+        AgentTimingSectionKind.CONTEXT -> R.string.agent_timing_section_context
+        AgentTimingSectionKind.DIAGNOSTICS -> R.string.agent_timing_section_diagnostics
+        AgentTimingSectionKind.PROVIDER -> R.string.agent_timing_section_provider
+        AgentTimingSectionKind.TOOLS -> R.string.agent_timing_section_tools
+        AgentTimingSectionKind.HANDOFF -> R.string.agent_timing_section_handoff
+        AgentTimingSectionKind.APPROVAL -> R.string.agent_timing_section_approval
+    }
+)
+
+@Composable
+private fun AgentTimingMetricPresentation.label(): String {
+    val resource = when (kind) {
+        AgentTimingMetricKind.ADMISSION -> R.string.agent_timing_metric_admission
+        AgentTimingMetricKind.MEMORY_RETRIEVAL -> R.string.agent_timing_metric_memory_retrieval
+        AgentTimingMetricKind.TOOL_SURFACE -> R.string.agent_timing_metric_tool_surface
+        AgentTimingMetricKind.MCP_DISCOVERY -> R.string.agent_timing_metric_mcp_discovery
+        AgentTimingMetricKind.CONTEXT -> R.string.agent_timing_metric_context
+        AgentTimingMetricKind.RECENT_CHATS -> R.string.agent_timing_metric_recent_chats
+        AgentTimingMetricKind.MEMORY_PROMPT -> R.string.agent_timing_metric_memory_prompt
+        AgentTimingMetricKind.TOOL_PROMPT -> R.string.agent_timing_metric_tool_prompt
+        AgentTimingMetricKind.SYSTEM_PROMPT -> R.string.agent_timing_metric_system_prompt
+        AgentTimingMetricKind.CONTEXT_GATE_INITIAL -> R.string.agent_timing_metric_context_gate_initial
+        AgentTimingMetricKind.INPUT_TRANSFORM -> R.string.agent_timing_metric_input_transform
+        AgentTimingMetricKind.CONTEXT_GATE_FINAL -> R.string.agent_timing_metric_context_gate_final
+        AgentTimingMetricKind.CONTEXT_COMPRESSION -> R.string.agent_timing_metric_context_compression
+        AgentTimingMetricKind.TOKEN_COUNT -> R.string.agent_timing_metric_token_count
+        AgentTimingMetricKind.REQUEST_BUILD -> R.string.agent_timing_metric_request_build
+        AgentTimingMetricKind.DIAGNOSTICS -> R.string.agent_timing_metric_diagnostics
+        AgentTimingMetricKind.REQUEST_BREAKDOWN_BUILD -> R.string.agent_timing_metric_request_breakdown_build
+        AgentTimingMetricKind.REQUEST_BREAKDOWN_WRITE -> R.string.agent_timing_metric_request_breakdown_write
+        AgentTimingMetricKind.MEMORY_LAST_ACCESS -> R.string.agent_timing_metric_memory_last_access
+        AgentTimingMetricKind.PROVIDER_PREPARE -> R.string.agent_timing_metric_provider_prepare
+        AgentTimingMetricKind.FIRST_PROGRESS -> R.string.agent_timing_first_progress
+        AgentTimingMetricKind.FULL_RESPONSE -> R.string.agent_timing_full_response
+        AgentTimingMetricKind.PROVIDER_TOTAL -> R.string.agent_timing_metric_provider_total
+        AgentTimingMetricKind.TOOL_BATCH -> R.string.agent_timing_metric_tool_batch
+        AgentTimingMetricKind.TOOL_EXECUTION -> R.string.agent_timing_metric_tool_execution
+        AgentTimingMetricKind.TOOL_POST_PROCESSING -> R.string.agent_timing_metric_tool_post_processing
+        AgentTimingMetricKind.TOOL_BATCH_WAIT -> R.string.agent_timing_metric_tool_batch_wait
+        AgentTimingMetricKind.HANDOFF -> R.string.agent_timing_metric_handoff
+        AgentTimingMetricKind.HUMAN_WAIT -> R.string.agent_timing_metric_human_wait
+        AgentTimingMetricKind.APPROVAL_RESOLUTION -> R.string.agent_timing_metric_approval_resolution
+        AgentTimingMetricKind.FINAL_SAVE -> R.string.agent_timing_metric_final_save
+    }
+    return if (ordinal != null && (
+            kind == AgentTimingMetricKind.TOOL_EXECUTION ||
+                kind == AgentTimingMetricKind.TOOL_POST_PROCESSING ||
+                kind == AgentTimingMetricKind.TOOL_BATCH_WAIT
+            )
+    ) {
+        stringResource(R.string.agent_timing_metric_tool_numbered, ordinal + 1, stringResource(resource))
+    } else {
+        stringResource(resource)
     }
 }
 

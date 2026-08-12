@@ -38,6 +38,7 @@ import androidx.paging.compose.itemKey
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.data.db.entity.MemoryCandidateEntity
 import me.rerere.rikkahub.data.db.entity.MemoryEntity
+import me.rerere.rikkahub.data.db.entity.MemoryRelationCandidateEntity
 import me.rerere.rikkahub.ui.context.LocalNavController
 import me.rerere.rikkahub.utils.JsonInstant
 import me.rerere.rikkahub.utils.navigateToChatPage
@@ -45,6 +46,7 @@ import me.rerere.rikkahub.utils.navigateToChatPage
 @Composable
 fun MemoryReviewTab(
     candidates: LazyPagingItems<MemoryCandidateEntity>,
+    relationCandidates: List<MemoryRelationCandidateEntity>,
     narrativeNamesForOrigin: (String?) -> MemoryNarrativeNames,
     onLoadMemories: suspend (MemoryCandidateEntity, List<Int>) -> List<MemoryEntity>,
     onResolveSource: suspend (MemoryCandidateEntity) -> MemorySourceLocation?,
@@ -52,6 +54,8 @@ fun MemoryReviewTab(
     onReject: (MemoryCandidateEntity) -> Unit,
     onAcceptSafeNew: () -> Unit,
     onRejectAllPending: () -> Unit,
+    onAcceptRelation: (MemoryRelationCandidateEntity) -> Unit,
+    onRejectRelation: (MemoryRelationCandidateEntity) -> Unit,
 ) {
     var editing by remember { mutableStateOf<MemoryCandidateEntity?>(null) }
     when {
@@ -80,7 +84,7 @@ fun MemoryReviewTab(
             }
         }
 
-        candidates.itemCount == 0 -> {
+        candidates.itemCount == 0 && relationCandidates.isEmpty() -> {
             Column(
                 modifier = Modifier
                     .fillMaxSize()
@@ -100,20 +104,40 @@ fun MemoryReviewTab(
             contentPadding = PaddingValues(12.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            item {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(
-                        onClick = onAcceptSafeNew,
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Text(stringResource(R.string.memory_v2_accept_safe_new))
+            if (candidates.itemCount > 0) {
+                item {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = onAcceptSafeNew,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text(stringResource(R.string.memory_v2_accept_safe_new))
+                        }
+                        OutlinedButton(
+                            onClick = onRejectAllPending,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text(stringResource(R.string.memory_v2_reject_all_pending))
+                        }
                     }
-                    OutlinedButton(
-                        onClick = onRejectAllPending,
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Text(stringResource(R.string.memory_v2_reject_all_pending))
-                    }
+                }
+            }
+            if (relationCandidates.isNotEmpty()) {
+                item(key = "relation-review-heading") {
+                    Text(
+                        text = stringResource(R.string.memory_v2_relation_review_section),
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                }
+                items(
+                    items = relationCandidates,
+                    key = { candidate -> "relation:${candidate.id}" },
+                ) { candidate ->
+                    MemoryRelationCandidateCard(
+                        candidate = candidate,
+                        onAccept = { onAcceptRelation(candidate) },
+                        onReject = { onRejectRelation(candidate) },
+                    )
                 }
             }
             items(
@@ -147,6 +171,77 @@ fun MemoryReviewTab(
             },
         )
     }
+}
+
+@Composable
+private fun MemoryRelationCandidateCard(
+    candidate: MemoryRelationCandidateEntity,
+    onAccept: () -> Unit,
+    onReject: () -> Unit,
+) {
+    val source = remember(candidate) { candidate.sourceEndpointUi() }
+    val target = remember(candidate) { candidate.targetEndpointUi() }
+    val evidenceCount = remember(candidate.evidenceMessageIdsJson) { candidate.evidenceCount() }
+    val pending = candidate.status == "PENDING"
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                text = candidate.relationType,
+                style = MaterialTheme.typography.titleSmall,
+            )
+            Text(text = candidate.description)
+            Text(
+                text = stringResource(
+                    R.string.memory_v2_relation_endpoints,
+                    source.label(),
+                    target.label(),
+                ),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text(
+                    text = stringResource(
+                        R.string.memory_v2_relation_evidence_count,
+                        evidenceCount,
+                    ),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Text(
+                    text = stringResource(R.string.memory_v2_relation_status, candidate.status),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Button(onClick = onAccept, enabled = pending) {
+                    Text(stringResource(R.string.memory_v2_accept))
+                }
+                TextButton(onClick = onReject, enabled = pending) {
+                    Text(stringResource(R.string.memory_v2_reject))
+                }
+            }
+        }
+    }
+}
+
+private fun MemoryRelationEndpointUi.label(): String = when (kind) {
+    MemoryRelationEndpointKind.MEMORY -> "#$reference"
+    MemoryRelationEndpointKind.PROPOSAL,
+    MemoryRelationEndpointKind.CANDIDATE,
+    -> reference
+    MemoryRelationEndpointKind.UNKNOWN -> "—"
 }
 
 @Composable

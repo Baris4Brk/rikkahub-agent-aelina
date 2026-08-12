@@ -80,6 +80,24 @@ class GroupMessagePartsTest {
     }
 
     @Test
+    fun `tool occurrence stays stable across collapsed or separated thinking blocks`() {
+        val result = listOf(
+            tool("duplicate"),
+            tool("duplicate"),
+            text("middle"),
+            tool(""),
+        ).groupMessageParts()
+
+        val ordinals = result
+            .filterIsInstance<MessagePartBlock.ThinkingBlock>()
+            .flatMap { it.steps }
+            .filterIsInstance<ThinkingStep.ToolStep>()
+            .map { it.messageToolOrdinal }
+
+        assertEquals(listOf(0, 1, 2), ordinals)
+    }
+
+    @Test
     fun `content block indices reflect original positions across mixed parts`() {
         val result = listOf(
             text("a"),       // index 0

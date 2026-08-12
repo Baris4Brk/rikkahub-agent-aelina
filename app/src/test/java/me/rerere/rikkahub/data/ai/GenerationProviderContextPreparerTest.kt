@@ -4,8 +4,10 @@ import me.rerere.ai.context.ContextTokenEstimator
 import me.rerere.ai.context.ProviderContextOverflowException
 import me.rerere.ai.context.ProviderContextOverflowKind
 import me.rerere.ai.context.ResolvedContextWindowSource
+import me.rerere.ai.core.MessageRole
 import me.rerere.ai.core.Tool
 import me.rerere.ai.ui.UIMessage
+import me.rerere.ai.ui.UIMessagePart
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -87,7 +89,7 @@ class GenerationProviderContextPreparerTest {
     }
 
     @Test
-    fun `overflow drops an old completed turn atomically and preserves current user`() {
+    fun `observable policy drops an old completed turn atomically and preserves current user`() {
         val oldUser = UIMessage.user("old-user")
         val oldAssistant = UIMessage.assistant("old-assistant")
         val currentUser = UIMessage.user("current")
@@ -101,8 +103,15 @@ class GenerationProviderContextPreparerTest {
             configuredContextWindowTokens = 10_000,
             advertisedContextWindowTokens = null,
             requestedOutputTokens = 2_000,
+        ).applyProviderContextProjectionPolicy(
+            policy = ORDINARY_GENERATION_CONTEXT_PROJECTION_POLICY,
+            stage = "test",
         )
 
+        assertEquals(
+            ProviderContextProjectionPolicy.OBSERVABLE_PRUNING,
+            ORDINARY_GENERATION_CONTEXT_PROJECTION_POLICY,
+        )
         assertEquals(listOf(currentUser), prepared.messages)
         assertEquals(1, prepared.trace.droppedCompletedTurns)
         assertEquals(2, prepared.trace.droppedMessages)
@@ -110,7 +119,62 @@ class GenerationProviderContextPreparerTest {
     }
 
     @Test
-    fun `ordinary generation rejects implicit history loss`() {
+    fun `observable projection strips reasoning and whole old turns without mutating stored messages`() {
+        val droppedUser = UIMessage.user("drop-user")
+        val droppedAssistant = UIMessage.assistant("drop-assistant")
+        val retainedUser = UIMessage.user("retained-user")
+        val retainedAssistant = UIMessage(
+            role = MessageRole.ASSISTANT,
+            parts = listOf(
+                UIMessagePart.Reasoning("provider-private-reasoning"),
+                UIMessagePart.Text("retained-answer"),
+            ),
+        )
+        val currentUser = UIMessage.user("current")
+        val storedMessages = listOf(
+            droppedUser,
+            droppedAssistant,
+            retainedUser,
+            retainedAssistant,
+            currentUser,
+        )
+        val storedSnapshot = storedMessages.map { message -> message.copy(parts = message.parts.toList()) }
+        val prepared = GenerationProviderContextPreparer(
+            tokenEstimator = ContextTokenEstimator { message ->
+                when (message.id) {
+                    droppedUser.id, droppedAssistant.id -> 2_500
+                    retainedUser.id, currentUser.id -> 1_000
+                    retainedAssistant.id -> if (
+                        message.parts.any { it is UIMessagePart.Reasoning }
+                    ) 4_000 else 1_000
+                    else -> error("unexpected message")
+                }
+            },
+        ).prepareOrdinaryChat(
+            messages = storedMessages,
+            configuredContextWindowTokens = 10_000,
+            advertisedContextWindowTokens = null,
+            requestedOutputTokens = 2_000,
+        ).applyProviderContextProjectionPolicy(
+            policy = ProviderContextProjectionPolicy.OBSERVABLE_PRUNING,
+            stage = "test",
+        )
+
+        assertEquals(storedSnapshot, storedMessages)
+        assertTrue(retainedAssistant.parts.first() is UIMessagePart.Reasoning)
+        assertFalse(prepared.messages.contains(droppedUser))
+        assertFalse(prepared.messages.contains(droppedAssistant))
+        assertTrue(prepared.messages.contains(retainedUser))
+        assertTrue(prepared.messages.contains(currentUser))
+        val projectedAssistant = prepared.messages.single { it.id == retainedAssistant.id }
+        assertFalse(projectedAssistant.parts.any { it is UIMessagePart.Reasoning })
+        assertEquals(1, prepared.trace.strippedHistoricalReasoningParts)
+        assertEquals(1, prepared.trace.droppedCompletedTurns)
+        assertEquals(2, prepared.trace.droppedMessages)
+    }
+
+    @Test
+    fun `strict lossless policy rejects implicit history loss`() {
         val oldUser = UIMessage.user("old-user")
         val oldAssistant = UIMessage.assistant("old-assistant")
         val currentUser = UIMessage.user("current")
@@ -125,7 +189,10 @@ class GenerationProviderContextPreparerTest {
         )
 
         val failure = runCatching {
-            prepared.requireLosslessProviderContext(stage = "test")
+            prepared.applyProviderContextProjectionPolicy(
+                policy = ProviderContextProjectionPolicy.STRICT_LOSSLESS,
+                stage = "test",
+            )
         }.exceptionOrNull()
 
         assertTrue(failure is ProviderContextRequiresExplicitAdjustmentException)
@@ -138,6 +205,8 @@ class GenerationProviderContextPreparerTest {
         val preparer = GenerationProviderContextPreparer(
             tokenEstimator = ContextTokenEstimator { 9_500 },
         )
+        var providerCalls = 0
+        var lastAccessWrites = 0
 
         val failure = runCatching {
             preparer.prepareOrdinaryChat(
@@ -145,7 +214,12 @@ class GenerationProviderContextPreparerTest {
                 configuredContextWindowTokens = 10_000,
                 advertisedContextWindowTokens = null,
                 requestedOutputTokens = 2_000,
+            ).applyProviderContextProjectionPolicy(
+                policy = ORDINARY_GENERATION_CONTEXT_PROJECTION_POLICY,
+                stage = "test",
             )
+            lastAccessWrites++
+            providerCalls++
         }.exceptionOrNull()
 
         assertTrue(failure is ProviderContextOverflowException)
@@ -153,6 +227,40 @@ class GenerationProviderContextPreparerTest {
             ProviderContextOverflowKind.CURRENT_TURN_TOO_LARGE,
             (failure as ProviderContextOverflowException).overflow.kind,
         )
+        assertEquals(0, providerCalls)
+        assertEquals(0, lastAccessWrites)
+    }
+
+    @Test
+    fun `fixed prefix overflow fails before provider call or last access`() {
+        val fixedSystem = UIMessage.system("oversized fixed prefix")
+        val preparer = GenerationProviderContextPreparer(
+            tokenEstimator = ContextTokenEstimator { 9_500 },
+        )
+        var providerCalls = 0
+        var lastAccessWrites = 0
+
+        val failure = runCatching {
+            preparer.prepareOrdinaryChat(
+                messages = listOf(fixedSystem),
+                configuredContextWindowTokens = 10_000,
+                advertisedContextWindowTokens = null,
+                requestedOutputTokens = 2_000,
+            ).applyProviderContextProjectionPolicy(
+                policy = ORDINARY_GENERATION_CONTEXT_PROJECTION_POLICY,
+                stage = "test",
+            )
+            lastAccessWrites++
+            providerCalls++
+        }.exceptionOrNull()
+
+        assertTrue(failure is ProviderContextOverflowException)
+        assertEquals(
+            ProviderContextOverflowKind.FIXED_PREFIX_TOO_LARGE,
+            (failure as ProviderContextOverflowException).overflow.kind,
+        )
+        assertEquals(0, providerCalls)
+        assertEquals(0, lastAccessWrites)
     }
 
     @Test
@@ -179,7 +287,10 @@ class GenerationProviderContextPreparerTest {
         )
         assertTrue(
             runCatching {
-                prepared.requireLosslessProviderContext(stage = "test")
+                prepared.applyProviderContextProjectionPolicy(
+                    policy = ProviderContextProjectionPolicy.STRICT_LOSSLESS,
+                    stage = "test",
+                )
             }.exceptionOrNull() is ProviderContextRequiresExplicitAdjustmentException,
         )
     }

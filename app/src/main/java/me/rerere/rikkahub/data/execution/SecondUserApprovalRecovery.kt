@@ -124,11 +124,19 @@ class SecondUserApprovalRecovery(
         for (tool in pendingTools) {
             val parsed = runCatching { Json.parseToJsonElement(tool.input) as? JsonObject }.getOrNull()
             val existing = pendingByTool[tool.toolCallId]
+            val fingerprint = MessageDigest.getInstance("SHA-256")
+                .digest("recovery-unknown-schema\u0000${tool.toolName}".encodeToByteArray())
+                .joinToString("") { "%02x".format(it) }
             if (parsed == null) {
                 val projection = existing ?: lifecycle.persistPendingBarrier(
                     conversation = conversation,
                     owner = owner,
-                    tools = listOf(PendingApprovalTool(tool.toolCallId, tool.toolName, JsonObject(emptyMap()))),
+                    tools = listOf(PendingApprovalTool(
+                        tool.toolCallId,
+                        tool.toolName,
+                        JsonObject(emptyMap()),
+                        fingerprint,
+                    )),
                 ).single()
                 conversation = lifecycle.invalidateProjection(
                     projection = projection,
@@ -142,7 +150,12 @@ class SecondUserApprovalRecovery(
                 lifecycle.persistPendingBarrier(
                     conversation = conversation,
                     owner = owner,
-                    tools = listOf(PendingApprovalTool(tool.toolCallId, tool.toolName, parsed)),
+                    tools = listOf(PendingApprovalTool(
+                        tool.toolCallId,
+                        tool.toolName,
+                        parsed,
+                        fingerprint,
+                    )),
                 )
                 restored++
             } else {

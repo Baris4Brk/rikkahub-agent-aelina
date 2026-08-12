@@ -22,6 +22,7 @@ import me.rerere.rikkahub.data.ai.tools.ToolTerminationState
 import me.rerere.rikkahub.data.model.Conversation
 import me.rerere.rikkahub.service.withSteeringAuditMessage
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import kotlin.time.Clock
@@ -49,6 +50,252 @@ class ConversationRuntimeTest {
 
     private fun messageCommand(text: String): SendMessageCommand =
         SendMessageCommand(RawUserContent(listOf(UIMessagePart.Text(text))))
+
+    private fun <C : ChatCommand> CommandEnvelope<C>.withRootLineage(
+        assistantId: Uuid = Uuid.random(),
+        branchAnchorMessageId: Uuid = Uuid.random(),
+    ): CommandEnvelope<C> = copy(
+        lineage = CommandLineageContext(
+            assistantIdSnapshot = assistantId,
+            lineageId = id,
+            parentCommandId = null,
+            branchAnchorMessageId = branchAnchorMessageId,
+        ),
+    )
+
+    @Test
+    fun `waiting checkpoint keeps terminal deferred open and gates ordinary FIFO`() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val dao = FakePendingChatCommandDao()
+        val queue = DurableCommandQueue(
+            dao = dao,
+            commandStateTransaction = CommandStateTransaction(dao),
+        )
+        val conversationId = Uuid.random()
+        val assistantId = Uuid.random()
+        val firstId = Uuid.random()
+        val secondId = Uuid.random()
+        val firstResumeId = Uuid.random()
+        val executions = java.util.concurrent.atomic.AtomicInteger(0)
+        val runtime = ConversationRuntime(
+            appScope = scope,
+            conversationId = conversationId,
+            durableQueue = queue,
+            executor = RuntimeCommandExecutor { envelope, _ ->
+                executions.incrementAndGet()
+                if (envelope.id == firstId || envelope.id == firstResumeId) {
+                    RunOutcome.WaitingApproval(setOf("tool-1"))
+                } else {
+                    RunOutcome.Completed()
+                }
+            },
+        )
+        fun rootEnvelope(id: Uuid, sequence: Long) = CommandEnvelope(
+            id = id,
+            conversationId = conversationId,
+            command = messageCommand("message-$sequence"),
+            origin = CommandOrigin.APP_UI,
+            sequence = sequence,
+            lineage = CommandLineageContext(
+                assistantIdSnapshot = assistantId,
+                lineageId = id,
+                parentCommandId = null,
+                branchAnchorMessageId = Uuid.random(),
+            ),
+        )
+        val first = rootEnvelope(firstId, 1L)
+        val second = rootEnvelope(secondId, 2L)
+
+        assertEquals(SubmitResult.Accepted(firstId), runtime.enqueueEnvelope(first))
+        withTimeout(5_000) {
+            while (dao.row(firstId)?.state != DurableCommandState.WAITING_APPROVAL.name) {
+                kotlinx.coroutines.delay(10)
+            }
+        }
+        assertFalse(first.result.isCompleted)
+        assertEquals(RuntimeState.WaitingApproval, runtime.runtimeState.value)
+
+        assertEquals(SubmitResult.Accepted(secondId), runtime.enqueueEnvelope(second))
+        kotlinx.coroutines.delay(200)
+        assertEquals(1, executions.get())
+        assertFalse(second.result.isCompleted)
+
+        val firstLineage = checkNotNull(first.lineage)
+        val resume = CommandEnvelope(
+            id = firstResumeId,
+            conversationId = conversationId,
+            command = ResumeAfterApprovalCommand,
+            origin = CommandOrigin.INTERNAL,
+            sequence = 3L,
+            lineage = firstLineage.copy(parentCommandId = firstId),
+        )
+        assertEquals(SubmitResult.Accepted(firstResumeId), runtime.enqueueEnvelope(resume))
+        withTimeout(5_000) {
+            while (
+                dao.row(firstResumeId)?.state != DurableCommandState.WAITING_APPROVAL.name ||
+                runtime.queueStatus.value.activeCommandId != null
+            ) {
+                kotlinx.coroutines.delay(10)
+            }
+        }
+        assertFalse(first.result.isCompleted)
+        assertFalse(resume.result.isCompleted)
+        assertFalse(second.result.isCompleted)
+        assertEquals(DurableCommandState.WAITING_APPROVAL.name, dao.row(firstId)?.state)
+
+        val finalResumeId = Uuid.random()
+        val finalResume = CommandEnvelope(
+            id = finalResumeId,
+            conversationId = conversationId,
+            command = ResumeAfterApprovalCommand,
+            origin = CommandOrigin.INTERNAL,
+            sequence = 4L,
+            lineage = firstLineage.copy(parentCommandId = firstResumeId),
+        )
+        assertEquals(SubmitResult.Accepted(finalResumeId), runtime.enqueueEnvelope(finalResume))
+        withTimeout(5_000) {
+            assertEquals(CommandOutcome.Completed, first.result.await())
+            assertEquals(CommandOutcome.Completed, resume.result.await())
+            assertEquals(CommandOutcome.Completed, finalResume.result.await())
+            assertEquals(CommandOutcome.Completed, second.result.await())
+        }
+        assertEquals(DurableCommandState.COMPLETED.name, dao.row(firstId)?.state)
+        assertEquals(DurableCommandState.COMPLETED.name, dao.row(firstResumeId)?.state)
+        assertEquals(DurableCommandState.COMPLETED.name, dao.row(finalResumeId)?.state)
+        assertEquals(4, executions.get())
+        withTimeout(5_000) {
+            while (runtime.runtimeState.value != RuntimeState.Idle) {
+                kotlinx.coroutines.delay(10)
+            }
+        }
+
+        runtime.close()
+        scope.cancel()
+    }
+
+    @Test
+    fun `interrupt with no active run cancels waiting authority and fails closed`() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val dao = FakePendingChatCommandDao()
+        val queue = DurableCommandQueue(
+            dao = dao,
+            commandStateTransaction = CommandStateTransaction(dao),
+        )
+        val conversationId = Uuid.random()
+        val rootId = Uuid.random()
+        val executions = java.util.concurrent.atomic.AtomicInteger(0)
+        val runtime = ConversationRuntime(
+            appScope = scope,
+            conversationId = conversationId,
+            durableQueue = queue,
+            executor = RuntimeCommandExecutor { _, _ ->
+                executions.incrementAndGet()
+                RunOutcome.WaitingApproval(setOf("tool-1"))
+            },
+        )
+        val root = CommandEnvelope(
+            id = rootId,
+            conversationId = conversationId,
+            command = messageCommand("root"),
+            origin = CommandOrigin.APP_UI,
+            sequence = 1L,
+        ).withRootLineage()
+        assertEquals(SubmitResult.Accepted(rootId), runtime.enqueueEnvelope(root))
+        withTimeout(5_000) {
+            while (
+                dao.row(rootId)?.state != DurableCommandState.WAITING_APPROVAL.name ||
+                runtime.queueStatus.value.activeCommandId != null
+            ) {
+                kotlinx.coroutines.delay(10)
+            }
+        }
+
+        val interrupt = CommandEnvelope(
+            conversationId = conversationId,
+            command = InterruptCommand(messageCommand("replacement")),
+            origin = CommandOrigin.APP_UI,
+            sequence = 2L,
+        )
+        assertEquals(
+            SubmitResult.Accepted(interrupt.id),
+            runtime.replaceEmergencyEnvelope(interrupt),
+        )
+        withTimeout(5_000) {
+            assertEquals(CommandOutcome.Cancelled, root.result.await())
+            assertTrue(interrupt.result.await() is CommandOutcome.Failed)
+        }
+        assertEquals(DurableCommandState.CANCELLED.name, dao.row(rootId)?.state)
+        assertEquals(1, executions.get())
+        assertEquals(RuntimeState.Paused, runtime.runtimeState.value)
+
+        runtime.close()
+        scope.cancel()
+    }
+
+    @Test
+    fun `stop with no active run commits waiting cancellation before deferreds`() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val dao = FakePendingChatCommandDao()
+        val queue = DurableCommandQueue(
+            dao = dao,
+            commandStateTransaction = CommandStateTransaction(dao),
+        )
+        val conversationId = Uuid.random()
+        val rootId = Uuid.random()
+        val runtime = ConversationRuntime(
+            appScope = scope,
+            conversationId = conversationId,
+            durableQueue = queue,
+            executor = RuntimeCommandExecutor { _, _ ->
+                RunOutcome.WaitingApproval(setOf("tool-1"))
+            },
+        )
+        val root = CommandEnvelope(
+            id = rootId,
+            conversationId = conversationId,
+            command = messageCommand("root"),
+            origin = CommandOrigin.APP_UI,
+            sequence = 1L,
+        ).withRootLineage()
+        runtime.enqueueEnvelope(root)
+        withTimeout(5_000) {
+            while (
+                dao.row(rootId)?.state != DurableCommandState.WAITING_APPROVAL.name ||
+                runtime.queueStatus.value.activeCommandId != null
+            ) {
+                kotlinx.coroutines.delay(10)
+            }
+        }
+
+        val stop = CommandEnvelope(
+            conversationId = conversationId,
+            command = StopCommand(pauseQueue = false),
+            origin = CommandOrigin.APP_UI,
+            sequence = 2L,
+        )
+        runtime.replaceEmergencyEnvelope(stop)
+        withTimeout(5_000) {
+            assertEquals(CommandOutcome.Cancelled, root.result.await())
+            assertEquals(CommandOutcome.Completed, stop.result.await())
+        }
+        assertEquals(DurableCommandState.CANCELLED.name, dao.row(rootId)?.state)
+        assertEquals(RuntimeState.Paused, runtime.runtimeState.value)
+
+        val resumeQueue = CommandEnvelope(
+            conversationId = conversationId,
+            command = ResumeQueueCommand(),
+            origin = CommandOrigin.APP_UI,
+            sequence = 3L,
+        )
+        assertEquals(SubmitResult.Accepted(resumeQueue.id), runtime.enqueueEnvelope(resumeQueue))
+        withTimeout(5_000) {
+            assertTrue(resumeQueue.result.await() is CommandOutcome.Conflict)
+        }
+        assertEquals(RuntimeState.Paused, runtime.runtimeState.value)
+
+        runtime.close()
+        scope.cancel()
+    }
 
     @Test
     fun `steering audit stores yellow and purple history cards exactly once`() {
@@ -1155,14 +1402,17 @@ class ConversationRuntimeTest {
     }
 
     @Test
-    fun `interrupt regenerate skips durable claim when no row was persisted`() = runBlocking {
-        // Regression: INTERRUPT_CURRENT rewrites RegenerateCommand into InterruptRegenerateCommand
-        // (Emergency, never persistDurable). startRun must not claim a non-existent durable row,
-        // or regenerate fails before the executor runs (UI: confirm does nothing).
+    fun `interrupt regenerate claims and finalizes its persisted durable row`() = runBlocking {
+        // INTERRUPT_CURRENT is persisted before it is rewritten into the emergency envelope.
+        // The rewritten envelope must retain lineage, claim that exact row, and fence completion.
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val regenerateStarted = CompletableDeferred<Unit>()
         val dao = FakePendingChatCommandDao()
-        val durableQueue = DurableCommandQueue(dao, workerId = "regenerate-claim-worker")
+        val durableQueue = DurableCommandQueue(
+            dao,
+            workerId = "regenerate-claim-worker",
+            commandStateTransaction = CommandStateTransaction(dao),
+        )
         val runtime = ConversationRuntime(
             appScope = scope,
             conversationId = Uuid.random(),
@@ -1186,11 +1436,14 @@ class ConversationRuntimeTest {
             ),
             origin = CommandOrigin.APP_UI,
             sequence = 1,
-        )
+        ).withRootLineage()
         assertTrue(runtime.enqueueEnvelope(regenerate) is SubmitResult.Accepted)
         withTimeout(5_000) { regenerateStarted.await() }
         assertEquals(CommandOutcome.Completed, withTimeout(5_000) { regenerate.result.await() })
-        assertTrue(dao.allRows().isEmpty())
+        val durableRow = checkNotNull(dao.row(regenerate.id))
+        assertEquals(DurableCommandState.COMPLETED.name, durableRow.state)
+        assertEquals(1, durableRow.attempt)
+        assertTrue(durableRow.stateVersion >= 3L)
 
         runtime.close()
         scope.cancel()
@@ -1512,7 +1765,11 @@ class ConversationRuntimeTest {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val terminalGate = CompletableDeferred<Unit>()
         val dao = FakePendingChatCommandDao(resolvePendingGate = terminalGate)
-        val durableQueue = DurableCommandQueue(dao, workerId = "stop-steering-worker")
+        val durableQueue = DurableCommandQueue(
+            dao,
+            workerId = "stop-steering-worker",
+            commandStateTransaction = CommandStateTransaction(dao),
+        )
         val runStarted = CompletableDeferred<Unit>()
         val neverRelease = CompletableDeferred<Unit>()
         val executions = java.util.concurrent.atomic.AtomicInteger(0)
@@ -1532,13 +1789,13 @@ class ConversationRuntimeTest {
             command = messageCommand("active"),
             origin = CommandOrigin.APP_UI,
             sequence = 1,
-        )
+        ).withRootLineage()
         val steer = CommandEnvelope(
             conversationId = runtime.conversationId,
             command = SteerCommand("obsolete after stop"),
             origin = CommandOrigin.APP_UI,
             sequence = 2,
-        )
+        ).withRootLineage()
         val stop = CommandEnvelope(
             conversationId = runtime.conversationId,
             command = StopCommand(),
@@ -1554,20 +1811,20 @@ class ConversationRuntimeTest {
 
         assertEquals(CommandOutcome.Cancelled, withTimeout(5_000) { message.result.await() })
         assertEquals(CommandOutcome.Completed, withTimeout(5_000) { stop.result.await() })
-        assertTrue(withTimeout(5_000) { steer.result.await() } is CommandOutcome.NotApplied)
-        assertEquals(
-            me.rerere.rikkahub.data.ai.SteeringState.NOT_APPLIED_RUN_FINISHED,
-            runtime.steeringEntries.value.getValue(steer.id).state,
-        )
-        // The command outcome may be visible before the asynchronous Room terminal
-        // update completes. While that update is deliberately blocked, a durable scan
-        // must not recover the same steer as a normal send_message command.
+        // In-memory completion is deliberately held behind the durable terminal CAS. While
+        // that transition is blocked, a scan must not recover the steer as send_message work.
         kotlinx.coroutines.delay(150)
+        assertFalse(steer.result.isCompleted)
         assertEquals("steer", dao.row(steer.id)?.type)
         assertEquals(DurableCommandState.PENDING.name, dao.row(steer.id)?.state)
         assertEquals(1, executions.get())
 
         terminalGate.complete(Unit)
+        assertTrue(withTimeout(5_000) { steer.result.await() } is CommandOutcome.NotApplied)
+        assertEquals(
+            me.rerere.rikkahub.data.ai.SteeringState.NOT_APPLIED_RUN_FINISHED,
+            runtime.steeringEntries.value.getValue(steer.id).state,
+        )
         withTimeout(5_000) {
             while (dao.row(steer.id)?.state != DurableCommandState.COMPLETED.name) {
                 kotlinx.coroutines.delay(10)
@@ -1772,9 +2029,15 @@ class ConversationRuntimeTest {
     fun `restored soft steering rewrites the same durable row into FIFO`() = runBlocking {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val dao = FakePendingChatCommandDao()
-        val durableQueue = DurableCommandQueue(dao, workerId = "restore-steering-worker")
+        val durableQueue = DurableCommandQueue(
+            dao,
+            workerId = "restore-steering-worker",
+            commandStateTransaction = CommandStateTransaction(dao),
+        )
         val conversationId = Uuid.random()
         val commandId = Uuid.random()
+        val assistantId = Uuid.random()
+        val branchAnchorMessageId = Uuid.random()
         val restoredText = "continue with this after restart"
         val encoded = CommandCodec.encode(
             SteerCommand(
@@ -1806,6 +2069,11 @@ class ConversationRuntimeTest {
             expiresAt = null,
             lastErrorCode = null,
             lastErrorMessage = null,
+            assistantIdSnapshot = assistantId.toString(),
+            lineageId = commandId.toString(),
+            parentCommandId = null,
+            branchAnchorMessageId = branchAnchorMessageId.toString(),
+            stateVersion = 0L,
         )
         assertEquals(DurableSubmitResult.Inserted(commandId), durableQueue.submitDurable(restoredRow))
 
@@ -1849,7 +2117,11 @@ class ConversationRuntimeTest {
         val release = CompletableDeferred<Unit>()
         val executed = java.util.Collections.synchronizedList(mutableListOf<String>())
         val dao = FakePendingChatCommandDao()
-        val durableQueue = DurableCommandQueue(dao, workerId = "fallback-worker")
+        val durableQueue = DurableCommandQueue(
+            dao,
+            workerId = "fallback-worker",
+            commandStateTransaction = CommandStateTransaction(dao),
+        )
         val conversationId = Uuid.random()
         val runtime = ConversationRuntime(
             appScope = scope,
@@ -1873,13 +2145,13 @@ class ConversationRuntimeTest {
             command = messageCommand("active"),
             origin = CommandOrigin.APP_UI,
             sequence = 1,
-        )
+        ).withRootLineage()
         val steer = CommandEnvelope(
             conversationId = conversationId,
             command = SteerCommand("too late"),
             origin = CommandOrigin.APP_UI,
             sequence = 2,
-        )
+        ).withRootLineage()
         assertTrue(runtime.enqueueEnvelope(message) is SubmitResult.Accepted)
         withTimeout(5_000) { started.await() }
         assertTrue(runtime.enqueueEnvelope(steer) is SubmitResult.Accepted)
@@ -1930,7 +2202,11 @@ class ConversationRuntimeTest {
         val dao = FakePendingChatCommandDao(
             rewriteFailure = IllegalStateException("rewrite unavailable"),
         )
-        val durableQueue = DurableCommandQueue(dao, workerId = "fallback-failure-worker")
+        val durableQueue = DurableCommandQueue(
+            dao,
+            workerId = "fallback-failure-worker",
+            commandStateTransaction = CommandStateTransaction(dao),
+        )
         val conversationId = Uuid.random()
         val runtime = ConversationRuntime(
             appScope = scope,
@@ -1949,13 +2225,13 @@ class ConversationRuntimeTest {
             command = messageCommand("active"),
             origin = CommandOrigin.APP_UI,
             sequence = 1,
-        )
+        ).withRootLineage()
         val steer = CommandEnvelope(
             conversationId = conversationId,
             command = SteerCommand("keep this recoverable"),
             origin = CommandOrigin.APP_UI,
             sequence = 2,
-        )
+        ).withRootLineage()
 
         assertTrue(runtime.enqueueEnvelope(message) is SubmitResult.Accepted)
         withTimeout(5_000) { started.await() }
@@ -1982,10 +2258,154 @@ class ConversationRuntimeTest {
     }
 
     @Test
+    fun `fallback rewrite conflict pauses without publishing a false terminal result`() = runBlocking {
+        assertRewriteFailureTerminalizationIsFenced(
+            finishUnclaimedResultOverride = 0,
+        )
+    }
+
+    @Test
+    fun `fallback rewrite terminal exception pauses without publishing a false terminal result`() = runBlocking {
+        assertRewriteFailureTerminalizationIsFenced(
+            finishUnclaimedFailure = IllegalStateException("terminal unavailable"),
+        )
+    }
+
+    private suspend fun assertRewriteFailureTerminalizationIsFenced(
+        finishUnclaimedFailure: Throwable? = null,
+        finishUnclaimedResultOverride: Int? = null,
+    ) {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val started = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val executions = java.util.concurrent.atomic.AtomicInteger(0)
+        val dao = FakePendingChatCommandDao(
+            rewriteFailure = IllegalStateException("rewrite unavailable"),
+            finishUnclaimedFailure = finishUnclaimedFailure,
+            finishUnclaimedResultOverride = finishUnclaimedResultOverride,
+        )
+        val transaction = CommandStateTransaction(dao)
+        val durableQueue = DurableCommandQueue(
+            dao,
+            workerId = "fallback-terminal-fence-worker",
+            commandStateTransaction = transaction,
+        )
+        val conversationId = Uuid.random()
+        val runtime = ConversationRuntime(
+            appScope = scope,
+            conversationId = conversationId,
+            durableQueue = durableQueue,
+            executor = RuntimeCommandExecutor { envelope, _ ->
+                executions.incrementAndGet()
+                if (envelope.command is SendMessageCommand) {
+                    started.complete(Unit)
+                    release.await()
+                }
+                RunOutcome.Completed()
+            },
+        )
+        val message = CommandEnvelope(
+            conversationId = conversationId,
+            command = messageCommand("active"),
+            origin = CommandOrigin.APP_UI,
+            sequence = 1,
+        ).withRootLineage()
+        val steer = CommandEnvelope(
+            conversationId = conversationId,
+            command = SteerCommand("keep the durable authority"),
+            origin = CommandOrigin.APP_UI,
+            sequence = 2,
+        ).withRootLineage()
+
+        assertTrue(runtime.enqueueEnvelope(message) is SubmitResult.Accepted)
+        withTimeout(5_000) { started.await() }
+        assertTrue(runtime.enqueueEnvelope(steer) is SubmitResult.Accepted)
+        release.complete(Unit)
+        assertEquals(CommandOutcome.Completed, withTimeout(5_000) { message.result.await() })
+        withTimeout(5_000) {
+            while (runtime.runtimeState.value != RuntimeState.Paused) {
+                kotlinx.coroutines.delay(10)
+            }
+        }
+
+        assertEquals(DurableCommandState.PENDING.name, dao.row(steer.id)?.state)
+        assertFalse(steer.result.isCompleted)
+        assertEquals(1, executions.get())
+
+        runtime.close()
+        scope.cancel()
+    }
+
+    @Test
+    fun `fallback rewrite exact manual confirmation duplicate completes idempotently`() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val started = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val dao = FakePendingChatCommandDao(
+            rewriteFailure = IllegalStateException("rewrite unavailable"),
+        )
+        val transaction = CommandStateTransaction(dao)
+        val durableQueue = DurableCommandQueue(
+            dao,
+            workerId = "fallback-terminal-duplicate-worker",
+            commandStateTransaction = transaction,
+        )
+        val conversationId = Uuid.random()
+        val runtime = ConversationRuntime(
+            appScope = scope,
+            conversationId = conversationId,
+            durableQueue = durableQueue,
+            executor = RuntimeCommandExecutor { envelope, _ ->
+                if (envelope.command is SendMessageCommand) {
+                    started.complete(Unit)
+                    release.await()
+                }
+                RunOutcome.Completed()
+            },
+        )
+        val message = CommandEnvelope(
+            conversationId = conversationId,
+            command = messageCommand("active"),
+            origin = CommandOrigin.APP_UI,
+            sequence = 1,
+        ).withRootLineage()
+        val steer = CommandEnvelope(
+            conversationId = conversationId,
+            command = SteerCommand("already parked"),
+            origin = CommandOrigin.APP_UI,
+            sequence = 2,
+        ).withRootLineage()
+
+        assertTrue(runtime.enqueueEnvelope(message) is SubmitResult.Accepted)
+        withTimeout(5_000) { started.await() }
+        assertTrue(runtime.enqueueEnvelope(steer) is SubmitResult.Accepted)
+        assertTrue(
+            transaction.finishUnclaimed(
+                id = steer.id,
+                terminal = DurableCommandState.MANUAL_CONFIRMATION,
+                errorCode = "STEERING_REWRITE_FAILED",
+            ) is CommandTransitionResult.Applied,
+        )
+        release.complete(Unit)
+
+        assertEquals(CommandOutcome.Completed, withTimeout(5_000) { message.result.await() })
+        assertTrue(withTimeout(5_000) { steer.result.await() } is CommandOutcome.Failed)
+        assertEquals(DurableCommandState.MANUAL_CONFIRMATION.name, dao.row(steer.id)?.state)
+        assertTrue(runtime.runtimeState.value !is RuntimeState.Fatal)
+
+        runtime.close()
+        scope.cancel()
+    }
+
+    @Test
     fun `applied steering durable row is terminal and is not restored`() = runBlocking {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val dao = FakePendingChatCommandDao()
-        val durableQueue = DurableCommandQueue(dao, workerId = "applied-steering-worker")
+        val durableQueue = DurableCommandQueue(
+            dao,
+            workerId = "applied-steering-worker",
+            commandStateTransaction = CommandStateTransaction(dao),
+        )
         val conversationId = Uuid.random()
         val runStarted = CompletableDeferred<Unit>()
         val applyCheckpoint = CompletableDeferred<Unit>()
@@ -2009,13 +2429,13 @@ class ConversationRuntimeTest {
             command = messageCommand("active"),
             origin = CommandOrigin.APP_UI,
             sequence = 1,
-        )
+        ).withRootLineage()
         val steer = CommandEnvelope(
             conversationId = conversationId,
             command = SteerCommand("apply exactly once"),
             origin = CommandOrigin.APP_UI,
             sequence = 2,
-        )
+        ).withRootLineage()
 
         assertTrue(runtime.enqueueEnvelope(message) is SubmitResult.Accepted)
         withTimeout(5_000) { runStarted.await() }

@@ -25,10 +25,12 @@ internal class MemoryExtractionInputComposer(
 
         val budgetPerTurn = (MAX_MEMORY_EXTRACTION_CONTEXT_CHARS / sources.size)
             .coerceAtLeast(MIN_MEMORY_EXTRACTION_TURN_CHARS)
-        val aliases = linkedMapOf<String, String>()
+        val aliases = linkedMapOf<String, List<MemorySourceIdentity>>()
         val turns = sources.mapIndexed { index, source ->
             val reference = "T${index + 1}"
-            aliases[reference] = source.capture.userMessageId
+            val identities = effectiveMemorySourceIdentities(source.capture)
+            if (identities.isEmpty()) return@mapIndexed null
+            aliases[reference] = identities
             val compacted = compactTurn(
                 userText = source.userText,
                 assistantText = source.assistantText,
@@ -41,10 +43,10 @@ internal class MemoryExtractionInputComposer(
                 assistantText = compacted.second,
                 evidenceRef = reference,
             )
-        }
+        }.filterNotNull()
         return MemoryPreparedExtractionInput(
             turns = turns,
-            evidenceRefToMessageId = aliases,
+            evidenceRefToSourceIdentities = aliases,
             isConversationContextCompacted = sources.size > 3 || sources.any { source ->
                 source.userText.length + source.assistantText.length > budgetPerTurn
             },
@@ -67,7 +69,7 @@ internal class MemoryExtractionInputComposer(
 
 internal data class MemoryPreparedExtractionInput(
     val turns: List<MemoryExtractionTurn>,
-    val evidenceRefToMessageId: Map<String, String>,
+    val evidenceRefToSourceIdentities: Map<String, List<MemorySourceIdentity>>,
     val isConversationContextCompacted: Boolean,
 ) {
     companion object {

@@ -31,6 +31,8 @@ data class MemoryRevisionEntity(
     val sourceConversationId: String? = null,
     @ColumnInfo(name = "source_message_ids_json", defaultValue = "'[]'")
     val sourceMessageIdsJson: String = "[]",
+    @ColumnInfo(name = "source_identities_json", defaultValue = "'[]'")
+    val sourceIdentitiesJson: String = "[]",
     @ColumnInfo("created_at_ms")
     val createdAtMs: Long,
     @ColumnInfo("reason_code")

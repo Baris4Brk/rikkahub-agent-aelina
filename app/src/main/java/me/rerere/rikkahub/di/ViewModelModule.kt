@@ -78,6 +78,9 @@ val viewModelModule = module {
             coordinator = get(),
             scheduler = get(),
             conversationRepository = get(),
+            dreamObserverDiagnostics = get(),
+            dreamReviewRepository = get(),
+            dreamSynthesisCoordinator = get(),
         )
     }
     viewModelOf(::TranslatorVM)

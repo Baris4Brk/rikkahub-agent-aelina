@@ -1,6 +1,5 @@
 package me.rerere.rikkahub.data.ai.tools
 
-import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
@@ -31,10 +30,9 @@ data class MemoryQueryInput(
 )
 
 fun buildMemoryTools(
-    json: Json,
     onCreation: suspend (MemoryWriteInput) -> AssistantMemory,
-    onUpdate: suspend (Int, MemoryWriteInput) -> AssistantMemory,
-    onDelete: suspend (Int) -> Unit,
+    onUpdate: suspend (Int, Int, MemoryWriteInput) -> AssistantMemory,
+    onDelete: suspend (Int, Int) -> Unit,
     onQuery: suspend (MemoryQueryInput) -> List<MemoryQueryRecord>,
 ): List<Tool> = listOf(
     Tool(
@@ -45,6 +43,8 @@ fun buildMemoryTools(
             Existing calls that only provide `content` remain valid. Optional metadata:
             title, kind, tags, importance, expiresAtMs. Never store secrets or sensitive traits.
             Similar memories should be merged by editing an existing record.
+            For edit/delete, `expected_revision` is mandatory and must be copied from the
+            injected memory or memory_query result. If it changed, query again instead of retrying.
             Today is ${LocalDate.now().toLocalString(true)}.
         """.trimIndent(),
         parameters = {
@@ -57,6 +57,9 @@ fun buildMemoryTools(
                         })
                     })
                     put("id", buildJsonObject { put("type", "integer") })
+                    put("expected_revision", buildJsonObject {
+                        put("type", "integer"); put("minimum", 0)
+                    })
                     put("content", buildJsonObject { put("type", "string") })
                     put("title", buildJsonObject { put("type", "string") })
                     put("kind", memoryKindSchema())
@@ -77,25 +80,24 @@ fun buildMemoryTools(
             val action = params["action"]?.jsonPrimitive?.contentOrNull
                 ?: error("action is required")
             val payload = when (action) {
-                "create" -> json.encodeToJsonElement(
-                    AssistantMemory.serializer(),
-                    onCreation(params.toWriteInput()),
-                )
+                "create" -> onCreation(params.toWriteInput()).toMemoryToolPayload()
 
                 "edit" -> {
                     val id = params["id"]?.jsonPrimitive?.intOrNull ?: error("id is required")
-                    json.encodeToJsonElement(
-                        AssistantMemory.serializer(),
-                        onUpdate(id, params.toWriteInput()),
-                    )
+                    val expectedRevision = params["expected_revision"]?.jsonPrimitive?.intOrNull
+                        ?: error("expected_revision is required for edit")
+                    onUpdate(id, expectedRevision, params.toWriteInput()).toMemoryToolPayload()
                 }
 
                 "delete" -> {
                     val id = params["id"]?.jsonPrimitive?.intOrNull ?: error("id is required")
-                    onDelete(id)
+                    val expectedRevision = params["expected_revision"]?.jsonPrimitive?.intOrNull
+                        ?: error("expected_revision is required for delete")
+                    onDelete(id, expectedRevision)
                     buildJsonObject {
                         put("success", true)
                         put("id", id)
+                        put("previous_revision", expectedRevision)
                         put("status", "archived")
                     }
                 }
@@ -143,6 +145,7 @@ fun buildMemoryTools(
                 onQuery(request).forEach { record ->
                     add(buildJsonObject {
                         put("id", record.id)
+                        put("revision", record.revision)
                         record.title?.let { put("title", it) }
                         put("content", record.content)
                         put("kind", record.kind.name.lowercase())
@@ -183,3 +186,11 @@ private fun memoryKindSchema() = buildJsonObject {
 
 private fun String.toMemoryKindOrNull(): MemoryKind? =
     MemoryKind.entries.firstOrNull { it.name.equals(this, ignoreCase = true) }
+
+private fun AssistantMemory.toMemoryToolPayload() = buildJsonObject {
+    put("id", id)
+    revision?.let { put("revision", it) }
+    title?.let { put("title", it) }
+    put("content", content)
+    put("kind", kind.name.lowercase())
+}

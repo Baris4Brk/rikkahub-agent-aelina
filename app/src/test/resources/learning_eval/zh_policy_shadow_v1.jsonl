@@ -1,0 +1,10 @@
+{"schemaVersion":1,"caseId":"submit_check","scopeKind":"ASSISTANT","scopeId":"00000000-0000-0000-0000-00000000000a","query":"提交以前先检查文件是否有效。","goldPolicyIds":["policy-check-before-submit"]}
+{"schemaVersion":1,"caseId":"save_draft_paraphrase","scopeKind":"ASSISTANT","scopeId":"00000000-0000-0000-0000-00000000000a","query":"提交以前要把草稿存好。","goldPolicyIds":["policy-save-before-submit"]}
+{"schemaVersion":1,"caseId":"offline_local_paraphrase","scopeKind":"ASSISTANT","scopeId":"00000000-0000-0000-0000-00000000000a","query":"离线以后不要丢掉设备上的结果。","goldPolicyIds":["policy-local-on-offline"]}
+{"schemaVersion":1,"caseId":"delete_negation","scopeKind":"ASSISTANT","scopeId":"00000000-0000-0000-0000-00000000000a","query":"没有明确同意就不能执行删除。","goldPolicyIds":["policy-confirm-before-delete"]}
+{"schemaVersion":1,"caseId":"retry_exception","scopeKind":"ASSISTANT","scopeId":"00000000-0000-0000-0000-00000000000a","query":"不要自动重试，只有网络超时可以重试一次。","goldPolicyIds":["policy-retry-network-timeout-once"]}
+{"schemaVersion":1,"caseId":"assistant_a","scopeKind":"ASSISTANT","scopeId":"00000000-0000-0000-0000-00000000000a","query":"助手甲需要遵守的步骤。","goldPolicyIds":["policy-a"]}
+{"schemaVersion":1,"caseId":"assistant_b","scopeKind":"ASSISTANT","scopeId":"00000000-0000-0000-0000-00000000000b","query":"助手乙需要遵守的步骤。","goldPolicyIds":["policy-b"]}
+{"schemaVersion":1,"caseId":"authority_subject","scopeKind":"AUTHORITY_SUBJECT","scopeId":"authority-test-s","query":"同一授权主体的经验。","goldPolicyIds":["policy-auth-s"]}
+{"schemaVersion":1,"caseId":"verify_failure","scopeKind":"ASSISTANT","scopeId":"00000000-0000-0000-0000-00000000000a","query":"验证失败以后必须停止并报告。","goldPolicyIds":["policy-stop-on-verification-failure"]}
+{"schemaVersion":1,"caseId":"token_budget_boundary","scopeKind":"ASSISTANT","scopeId":"00000000-0000-0000-0000-00000000000a","query":"否定条件与例外必须完整保留。","goldPolicyIds":["policy-preserve-negation-exception"]}

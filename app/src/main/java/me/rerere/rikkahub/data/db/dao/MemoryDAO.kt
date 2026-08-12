@@ -24,6 +24,19 @@ interface MemoryDAO {
     )
     suspend fun getMemoriesOfAssistant(assistantId: String, nowMs: Long): List<MemoryEntity>
 
+    /** Bounded deterministic authority projection used by Dream FULL bootstrap. */
+    @Query(
+        "SELECT * FROM memoryentity WHERE assistant_id = :scopeId " +
+            "AND lifecycle_status = 'ACTIVE' AND truth_status = 'CONFIRMED' " +
+            "AND (expires_at_ms IS NULL OR expires_at_ms > :nowMs) " +
+            "ORDER BY id ASC LIMIT CASE WHEN :limit < 0 THEN 0 ELSE :limit END",
+    )
+    suspend fun getActiveConfirmedMemoriesForDream(
+        scopeId: String,
+        nowMs: Long,
+        limit: Int,
+    ): List<MemoryEntity>
+
     @Query(
         "SELECT * FROM memoryentity WHERE assistant_id = :scopeId " +
             "AND lifecycle_status = 'ACTIVE' AND (expires_at_ms IS NULL OR expires_at_ms > :nowMs) " +
@@ -44,6 +57,16 @@ interface MemoryDAO {
     @Query("SELECT * FROM memoryentity")
     suspend fun getAllMemories(): List<MemoryEntity>
 
+    /** Bounded authority read for privacy erasure; includes archived/stale/expired rows. */
+    @Query(
+        "SELECT * FROM memoryentity WHERE assistant_id = :scopeId " +
+            "ORDER BY id ASC LIMIT CASE WHEN :limit < 0 THEN 0 ELSE :limit END",
+    )
+    suspend fun getMemoriesOfScopeIncludingInactive(
+        scopeId: String,
+        limit: Int,
+    ): List<MemoryEntity>
+
     @Query("SELECT * FROM memoryentity WHERE id = :id AND assistant_id = :scopeId LIMIT 1")
     suspend fun getMemoryById(id: Int, scopeId: String): MemoryEntity?
 
@@ -63,7 +86,8 @@ interface MemoryDAO {
 
     @Query(
         "SELECT * FROM memoryentity WHERE assistant_id = :scopeId AND content_hash = :contentHash " +
-            "AND lifecycle_status = 'ACTIVE' AND (expires_at_ms IS NULL OR expires_at_ms > :nowMs) " +
+            "AND lifecycle_status = 'ACTIVE' AND truth_status = 'CONFIRMED' " +
+            "AND (expires_at_ms IS NULL OR expires_at_ms > :nowMs) " +
             "LIMIT 1",
     )
     suspend fun findActiveByContentHash(
@@ -128,7 +152,8 @@ interface MemoryDAO {
 
     @Query(
         "SELECT COUNT(*) FROM memoryentity WHERE assistant_id = :scopeId " +
-            "AND lifecycle_status = 'ACTIVE' AND (expires_at_ms IS NULL OR expires_at_ms > :nowMs)",
+            "AND lifecycle_status = 'ACTIVE' AND truth_status = 'CONFIRMED' " +
+            "AND (expires_at_ms IS NULL OR expires_at_ms > :nowMs)",
     )
     fun observeActiveCount(scopeId: String, nowMs: Long): Flow<Int>
 
@@ -161,8 +186,10 @@ interface MemoryDAO {
     ): Int
 
     @Query(
-        "SELECT * FROM memoryentity WHERE assistant_id = :scopeId " +
-            "AND source_conversation_id = :conversationId ORDER BY id ASC",
+        "SELECT DISTINCT m.* FROM memoryentity m LEFT JOIN memory_evidence e " +
+            "ON e.memory_id = m.id WHERE m.assistant_id = :scopeId AND (" +
+            "m.source_conversation_id = :conversationId OR e.conversation_id = :conversationId) " +
+            "ORDER BY m.id ASC",
     )
     suspend fun getMemoriesBySourceConversation(
         scopeId: String,

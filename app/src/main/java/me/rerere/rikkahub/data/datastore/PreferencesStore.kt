@@ -50,6 +50,14 @@ import me.rerere.rikkahub.data.model.PromptInjection
 import me.rerere.rikkahub.data.model.QuickMessage
 import me.rerere.rikkahub.data.model.Tag
 import me.rerere.rikkahub.data.sync.s3.S3Config
+import me.rerere.rikkahub.memory.dreaming.model.DreamScopeId
+import me.rerere.rikkahub.memory.dreaming.runtime.DreamingCostPolicy
+import me.rerere.rikkahub.memory.dreaming.runtime.DreamingPreferencesV1
+import me.rerere.rikkahub.memory.dreaming.runtime.DreamingScopePreferenceMutation
+import me.rerere.rikkahub.memory.dreaming.runtime.DreamingScopePreferences
+import me.rerere.rikkahub.memory.dreaming.runtime.decodeDreamingPreferencesOrDefault
+import me.rerere.rikkahub.memory.dreaming.runtime.encodeDreamingPreferencesFailClosed
+import me.rerere.rikkahub.learning.model.LearningPreferencesV1
 import me.rerere.rikkahub.ui.theme.CustomTheme
 import me.rerere.rikkahub.ui.theme.PresetThemes
 import me.rerere.rikkahub.utils.JsonInstant
@@ -132,6 +140,8 @@ class SettingsStore(
         val SELECT_MODEL = stringPreferencesKey("chat_model")
         val FAST_MODEL = stringPreferencesKey("fast_model")
         val MEMORY_EXTRACTION_MODEL = stringPreferencesKey("memory_extraction_model")
+        val DREAMING_PREFERENCES_V1 = stringPreferencesKey("dreaming_preferences_v1")
+        val LEARNING_PREFERENCES_V1 = stringPreferencesKey("agent_learning_preferences_v1")
         val TITLE_MODEL = stringPreferencesKey("title_model")
         val TRANSLATE_MODEL = stringPreferencesKey("translate_model")
         val ENABLE_SUGGESTION = booleanPreferencesKey("enable_suggestion")
@@ -232,6 +242,14 @@ class SettingsStore(
                     ?: DEFAULT_AUTO_MODEL_ID,
                 memoryExtractionModelId = preferences[MEMORY_EXTRACTION_MODEL]
                     ?.let { value -> runCatching { Uuid.parse(value) }.getOrNull() },
+                dreamingPreferences = decodeDreamingPreferencesOrDefault(
+                    preferences[DREAMING_PREFERENCES_V1],
+                ),
+                learningPreferences = preferences[LEARNING_PREFERENCES_V1]?.let { raw ->
+                    runCatching { JsonInstant.decodeFromString<LearningPreferencesV1>(raw) }
+                        .getOrNull()
+                        ?.failClosed()
+                } ?: LearningPreferencesV1(),
                 titleModelId = preferences[TITLE_MODEL]?.let { Uuid.parse(it) },
                 translateModeId = preferences[TRANSLATE_MODEL]?.let { Uuid.parse(it) }
                     ?: DEFAULT_AUTO_MODEL_ID,
@@ -524,6 +542,12 @@ class SettingsStore(
             settings.memoryExtractionModelId?.let { modelId ->
                 preferences[MEMORY_EXTRACTION_MODEL] = modelId.toString()
             } ?: preferences.remove(MEMORY_EXTRACTION_MODEL)
+            preferences[DREAMING_PREFERENCES_V1] = encodeDreamingPreferencesFailClosed(
+                settings.dreamingPreferences,
+            )
+            preferences[LEARNING_PREFERENCES_V1] = JsonInstant.encodeToString(
+                settings.learningPreferences.failClosed(),
+            )
             settings.titleModelId?.let {
                 preferences[TITLE_MODEL] = it.toString()
             } ?: preferences.remove(TITLE_MODEL)
@@ -613,6 +637,54 @@ class SettingsStore(
         transformLock.withLock {
             update(fn(settingsFlow.value))
         }
+    }
+
+    /**
+     * Applies one typed scope toggle under the same transform lock as every other Settings write.
+     * Missing scopes start all-off; the mutation helpers always preserve the legal switch matrix.
+     */
+    suspend fun updateDreamingScopePreferences(
+        scopeId: DreamScopeId,
+        mutation: DreamingScopePreferenceMutation,
+    ): me.rerere.rikkahub.memory.dreaming.runtime.DreamingPreferenceChange<DreamingScopePreferences> {
+        var persisted: me.rerere.rikkahub.memory.dreaming.runtime.DreamingPreferenceChange<
+            DreamingScopePreferences,
+        >? = null
+        update { settings ->
+            val root = settings.dreamingPreferences.failClosed()
+            val previous = root.forScope(scopeId)
+            val nextRoot = root
+                .withScopeMutation(scopeId, mutation)
+            persisted = me.rerere.rikkahub.memory.dreaming.runtime.DreamingPreferenceChange(
+                previous = previous,
+                current = nextRoot.forScope(scopeId),
+            )
+            settings.copy(dreamingPreferences = nextRoot)
+        }
+        return checkNotNull(persisted)
+    }
+
+    /** Replaces only the app-global policy; every scope flag is retained atomically. */
+    suspend fun updateDreamingCostPolicy(
+        policy: DreamingCostPolicy,
+    ): me.rerere.rikkahub.memory.dreaming.runtime.DreamingPreferenceChange<DreamingCostPolicy> {
+        val validated = requireNotNull(policy.validatedOrNull()) {
+            "Dreaming cost policy is outside its supported bounds"
+        }
+        var persisted: me.rerere.rikkahub.memory.dreaming.runtime.DreamingPreferenceChange<
+            DreamingCostPolicy,
+        >? = null
+        update { settings ->
+            val root = settings.dreamingPreferences.failClosed()
+            persisted = me.rerere.rikkahub.memory.dreaming.runtime.DreamingPreferenceChange(
+                previous = root.costPolicy,
+                current = validated,
+            )
+            settings.copy(
+                dreamingPreferences = root.withCostPolicy(validated),
+            )
+        }
+        return checkNotNull(persisted)
     }
 
     suspend fun updateAssistant(assistantId: Uuid) {
@@ -735,6 +807,8 @@ data class Settings(
     val chatModelId: Uuid = Uuid.random(),
     val fastModelId: Uuid = Uuid.random(),
     val memoryExtractionModelId: Uuid? = null,
+    val dreamingPreferences: DreamingPreferencesV1 = DreamingPreferencesV1(),
+    val learningPreferences: LearningPreferencesV1 = LearningPreferencesV1(),
     val titleModelId: Uuid? = null,
     val imageGenerationModelId: Uuid = Uuid.random(),
     val titlePrompt: String = DEFAULT_TITLE_PROMPT,
@@ -843,6 +917,7 @@ data class DisplaySetting(
     val showModelName: Boolean = true,
     val showDateTimeInMessage: Boolean = false,
     val showTokenUsage: Boolean = true,
+    val showAgentTiming: Boolean = false,
     val showThinkingContent: Boolean = true,
     val autoCloseThinking: Boolean = true,
     val showUpdates: Boolean = true,

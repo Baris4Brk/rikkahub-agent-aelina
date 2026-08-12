@@ -13,6 +13,8 @@ sealed interface ThinkingStep {
 
     data class ToolStep(
         val tool: UIMessagePart.Tool,
+        /** Stable occurrence within the owning message; toolCallId is allowed to repeat/be blank. */
+        val messageToolOrdinal: Int,
     ) : ThinkingStep
 }
 
@@ -31,6 +33,7 @@ sealed interface MessagePartBlock {
 fun List<UIMessagePart>.groupMessageParts(): List<MessagePartBlock> {
     val result = mutableListOf<MessagePartBlock>()
     var currentThinkingSteps = mutableListOf<ThinkingStep>()
+    var nextToolOrdinal = 0
 
     fun flushThinkingSteps() {
         if (currentThinkingSteps.isNotEmpty()) {
@@ -46,7 +49,12 @@ fun List<UIMessagePart>.groupMessageParts(): List<MessagePartBlock> {
             }
 
             is UIMessagePart.Tool -> {
-                currentThinkingSteps.add(ThinkingStep.ToolStep(part))
+                currentThinkingSteps.add(
+                    ThinkingStep.ToolStep(
+                        tool = part,
+                        messageToolOrdinal = nextToolOrdinal++,
+                    )
+                )
             }
 
             else -> {

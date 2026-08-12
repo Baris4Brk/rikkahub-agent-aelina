@@ -13,6 +13,7 @@ import me.rerere.ai.core.MessageRole
 import me.rerere.ai.provider.ImageGenerationParams
 import me.rerere.ai.provider.Model
 import me.rerere.ai.provider.Provider
+import me.rerere.ai.provider.FencedTextGenerationProvider
 import me.rerere.ai.provider.ProviderSetting
 import me.rerere.ai.provider.TextGenerationParams
 import me.rerere.ai.ui.ImageGenerationItem
@@ -104,7 +105,13 @@ class LiteRtProvider(
     private val runtime: LiteRtRuntime,
     private val prefs: LocalRuntimePreferences,
     private val settingsUpdater: suspend (transform: (List<ProviderSetting>) -> List<ProviderSetting>) -> Unit,
-) : Provider<ProviderSetting.LiteRtLocal> {
+) : Provider<ProviderSetting.LiteRtLocal>, FencedTextGenerationProvider {
+
+    /**
+     * [LiteRtRuntime]'s monotonic inference epoch is revoked before `cancelProcess()`. Every
+     * callback is guarded by that epoch, so a late native callback cannot publish after cancel.
+     */
+    override val cancellationFenceAbi: String = "litert-inference-epoch-v1"
 
     /** Singleton bridge — one ToolSet for the lifetime of this provider. Its @Tool
      *  method reads the per-request tool list from [LiteRtToolBridgeRegistry]. */

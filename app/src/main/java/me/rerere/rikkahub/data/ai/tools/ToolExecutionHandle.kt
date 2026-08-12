@@ -40,6 +40,13 @@ data class ToolExecutionContext(
     val conversationId: Uuid,
     val assistantId: String,
     val callOrigin: ToolCallOrigin,
+    /**
+     * Durable chat-command identity, when this invocation is owned by an admitted command.
+     *
+     * This is deliberately distinct from [runId]. Cron, workflow, owner and recovery paths may
+     * have a run correlation without having a durable command. Those paths must leave this null.
+     */
+    val commandId: Uuid? = null,
     /** Stable model tool-call id used to link managed child records to their tool parent. */
     val toolCallId: String = "",
     val workspaceId: String? = null,

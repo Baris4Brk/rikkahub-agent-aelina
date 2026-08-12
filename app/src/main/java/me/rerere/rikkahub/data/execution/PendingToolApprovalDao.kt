@@ -14,6 +14,19 @@ interface PendingToolApprovalDao {
     @Query("SELECT * FROM pending_tool_approvals WHERE approval_id = :approvalId LIMIT 1")
     suspend fun getById(approvalId: String): PendingToolApprovalRecord?
 
+    /** Exact authority lookup; no newest-row or tool-call fallback is permitted. */
+    @Query(
+        "SELECT * FROM pending_tool_approvals WHERE approval_id = :approvalId " +
+            "AND execution_id = :executionId AND conversation_id = :conversationId " +
+            "AND tool_call_id = :toolCallId LIMIT 1",
+    )
+    suspend fun getExact(
+        approvalId: String,
+        executionId: String,
+        conversationId: String,
+        toolCallId: String,
+    ): PendingToolApprovalRecord?
+
     @Query("SELECT * FROM pending_tool_approvals WHERE execution_id = :executionId LIMIT 1")
     suspend fun getByExecutionId(executionId: String): PendingToolApprovalRecord?
 

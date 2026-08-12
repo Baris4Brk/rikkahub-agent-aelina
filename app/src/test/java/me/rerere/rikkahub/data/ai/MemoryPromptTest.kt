@@ -143,6 +143,16 @@ class MemoryPromptTest {
     }
 
     @Test
+    fun `prompt exposes the optimistic revision required by memory tool mutations`() {
+        val prompt = buildMemoryPrompt(
+            memories = listOf(AssistantMemory(id = 7, content = "fact", revision = 12)),
+        )
+
+        assertTrue(prompt.contains("\"id\": 7"))
+        assertTrue(prompt.contains("\"revision\": 12"))
+    }
+
+    @Test
     fun `compiler drops an oversized record atomically and reports actual included ids`() {
         val oversized = "必须保留这句否定：不要发送。" + "很长".repeat(500)
 

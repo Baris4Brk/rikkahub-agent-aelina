@@ -10,6 +10,12 @@ interface MemoryV2Coordinator {
     suspend fun process(request: MemoryProcessRequest): MemoryProcessResult
 
     suspend fun review(command: MemoryReviewCommand): MemoryReviewResult
+
+    suspend fun reviewRelation(
+        command: MemoryRelationReviewCommand,
+    ): MemoryRelationReviewResult = MemoryRelationReviewResult.Failed(
+        "memory_relation_review_unavailable",
+    )
 }
 
 interface MemoryCaptureStore {
@@ -17,6 +23,25 @@ interface MemoryCaptureStore {
 
     suspend fun pendingCount(scopeId: String): Int
 }
+
+/**
+ * One scope's contribution to a source invalidation transaction.
+ *
+ * [invalidateWholeConversation] dominates the selected message/version sets for that scope. The
+ * Room adapter coalesces duplicate scope entries before touching authority, so one physical
+ * transaction can advance each affected scope at most once.
+ */
+data class MemoryScopeSourceInvalidation(
+    val scopeId: String,
+    val invalidateWholeConversation: Boolean = false,
+    val removedMessageIds: Set<String> = emptySet(),
+    val removedSourceVersions: Set<MemorySourceVersion> = emptySet(),
+)
+
+data class MemorySourceInvalidationBatch(
+    val conversationId: String,
+    val scopes: List<MemoryScopeSourceInvalidation>,
+)
 
 fun interface MemoryWorkScheduler {
     suspend fun schedule(request: MemoryWorkRequest)
@@ -67,6 +92,35 @@ interface MemoryProcessingStore {
         nowMs: Long,
     ): MemoryRelationReviewResult = MemoryRelationReviewResult.Failed("memory_relation_review_unavailable")
 
+    /**
+     * Applies every scope/source removal in one physical authority transaction when supported.
+     * Legacy adapters keep a conservative sequential default; the Room store overrides this.
+     */
+    suspend fun invalidateSources(
+        batch: MemorySourceInvalidationBatch,
+        nowMs: Long,
+    ): Int {
+        var affected = 0
+        batch.scopes.forEach { request ->
+            affected += if (request.invalidateWholeConversation) {
+                invalidateSourceConversation(request.scopeId, batch.conversationId, nowMs)
+            } else {
+                invalidateSourceMessages(
+                    request.scopeId,
+                    batch.conversationId,
+                    request.removedMessageIds,
+                    nowMs,
+                ) + invalidateSourceVersions(
+                    request.scopeId,
+                    batch.conversationId,
+                    request.removedSourceVersions,
+                    nowMs,
+                )
+            }
+        }
+        return affected
+    }
+
     suspend fun invalidateSourceConversation(
         scopeId: String,
         conversationId: String,
@@ -79,6 +133,19 @@ interface MemoryProcessingStore {
         messageIds: Set<String>,
         nowMs: Long,
     ): Int = 0
+
+    /** Invalidates only the named historical content versions, not future edits with the same ID. */
+    suspend fun invalidateSourceVersions(
+        scopeId: String,
+        conversationId: String,
+        sourceVersions: Set<MemorySourceVersion>,
+        nowMs: Long,
+    ): Int = invalidateSourceMessages(
+        scopeId = scopeId,
+        conversationId = conversationId,
+        messageIds = sourceVersions.mapTo(mutableSetOf(), MemorySourceVersion::messageId),
+        nowMs = nowMs,
+    )
 
     suspend fun runRetention(nowMs: Long): Int = 0
 
@@ -122,6 +189,31 @@ class DefaultMemoryV2Coordinator(
         captureSkipReason(turn)?.let { return MemoryCaptureResult.Skipped(it) }
 
         val captureId = idGenerator()
+        val sourceInputs = turn.sourceMessages.ifEmpty {
+            buildList {
+                if (turn.userText.isNotBlank()) {
+                    add(MemoryCaptureSourceInput(
+                        messageId = turn.userMessageId.toString(),
+                        role = MemorySourceRole.USER,
+                        text = turn.userText,
+                    ))
+                }
+                if (turn.assistantText.isNotBlank()) {
+                    add(MemoryCaptureSourceInput(
+                        messageId = turn.assistantMessageId.toString(),
+                        role = MemorySourceRole.ASSISTANT,
+                        text = turn.assistantText,
+                    ))
+                }
+            }
+        }
+        val sourceIdentities = buildMemorySourceIdentities(
+            captureId = captureId,
+            conversationId = turn.conversationId.toString(),
+            sources = sourceInputs,
+        ) ?: return MemoryCaptureResult.Skipped(
+            MemoryCaptureSkipReason.INVALID_SOURCE_IDENTITY,
+        )
         val record = MemoryCaptureRecord(
             id = captureId,
             assistantId = turn.assistantId.toString(),
@@ -134,6 +226,7 @@ class DefaultMemoryV2Coordinator(
             autoSaveMode = turn.autoSaveMode,
             userText = turn.userText,
             assistantText = turn.assistantText,
+            sourceIdentities = sourceIdentities,
             createdAtMs = nowMs(),
             conversationContextTurns = turn.conversationContextTurns.coerceIn(
                 MIN_MEMORY_CONVERSATION_CONTEXT_TURNS,
@@ -242,6 +335,14 @@ class DefaultMemoryV2Coordinator(
         return store.review(command, nowMs())
     }
 
+    override suspend fun reviewRelation(
+        command: MemoryRelationReviewCommand,
+    ): MemoryRelationReviewResult {
+        val store = processingStore
+            ?: return MemoryRelationReviewResult.Failed("memory_store_missing")
+        return store.reviewRelation(command, nowMs())
+    }
+
     private suspend fun processGroup(
         store: MemoryProcessingStore,
         memoryExtractor: MemoryExtractor,
@@ -263,7 +364,7 @@ class DefaultMemoryV2Coordinator(
                 "memory_extraction_empty",
                 null,
                 retryPolicy = MemoryFailureRetryPolicy.NONE,
-                nowMs = now,
+                nowMs = nowMs(),
             )
             return ProcessGroupOutcome(failedCaptures = bounded.size)
         }
@@ -295,7 +396,8 @@ class DefaultMemoryV2Coordinator(
                     existingMemories = existingForExtraction,
                     narrativeEventsEnabled = bounded.any(MemoryCaptureRecord::narrativeEventsEnabled),
                     insightsTheoriesEnabled = bounded.any(MemoryCaptureRecord::insightsTheoriesEnabled),
-                    evidenceRefToMessageId = preparedInput.evidenceRefToMessageId,
+                    evidenceRefToSourceIdentities =
+                        preparedInput.evidenceRefToSourceIdentities,
                     isConversationContextCompacted = preparedInput.isConversationContextCompacted,
                     narrativeIdentity = narrativeIdentity,
                 ),
@@ -317,7 +419,7 @@ class DefaultMemoryV2Coordinator(
                 extraction.code,
                 extraction.message,
                 extraction.retryPolicy,
-                now,
+                nowMs(),
             )
             return ProcessGroupOutcome(
                 failedCaptures = bounded.size,
@@ -335,21 +437,21 @@ class DefaultMemoryV2Coordinator(
                 parsed.message,
                 null,
                 retryPolicy = MemoryFailureRetryPolicy.AUTOMATIC,
-                nowMs = now,
+                nowMs = nowMs(),
             )
             return ProcessGroupOutcome(
                 failedCaptures = bounded.size,
                 automaticRetryFailedCaptures = bounded.size,
             )
         }
-        val allowedEvidence = preparedInput.evidenceRefToMessageId.values.toMutableSet().apply {
-            turns.forEach { turn ->
-                add(turn.userMessageId)
-                add(turn.assistantMessageId)
-            }
-        }
+        val allowedEvidence = preparedInput.evidenceRefToSourceIdentities.values
+            .asSequence()
+            .flatten()
+            .mapTo(mutableSetOf(), MemorySourceIdentity::messageId)
         val parsedEnvelope = (parsed as MemoryExtractionParseResult.Success).envelope
-        val resolvedEnvelope = parsedEnvelope.resolveEvidenceReferences(preparedInput.evidenceRefToMessageId)
+        val resolvedEnvelope = parsedEnvelope.resolveEvidenceReferences(
+            preparedInput.evidenceRefToSourceIdentities,
+        )
         val normalizedEnvelope = resolvedEnvelope.copy(
             proposals = resolvedEnvelope.proposals.map { proposal ->
                 narrativePolicy.normalize(proposal, narrativeIdentity)
@@ -412,6 +514,7 @@ class DefaultMemoryV2Coordinator(
                     candidates = decisions,
                     relations = relationDecisions,
                     nowMs = now,
+                    leaseNowMs = nowMs(),
                 ),
             )
         } catch (cancelled: CancellationException) {
@@ -424,7 +527,7 @@ class DefaultMemoryV2Coordinator(
                 "memory_commit_failed",
                 error.message,
                 retryPolicy = MemoryFailureRetryPolicy.AUTOMATIC,
-                nowMs = now,
+                nowMs = nowMs(),
             )
             return ProcessGroupOutcome(
                 failedCaptures = bounded.size,
@@ -454,11 +557,13 @@ private data class ProcessGroupOutcome(
 
 /** Converts compact payload citation tokens back to durable local message ids before validation. */
 private fun MemoryExtractionEnvelope.resolveEvidenceReferences(
-    evidenceRefToMessageId: Map<String, String>,
+    evidenceRefToSourceIdentities: Map<String, List<MemorySourceIdentity>>,
 ): MemoryExtractionEnvelope {
-    if (evidenceRefToMessageId.isEmpty()) return this
-    fun resolve(ids: List<String>): List<String> = ids.map { reference ->
-        evidenceRefToMessageId[reference] ?: reference
+    if (evidenceRefToSourceIdentities.isEmpty()) return this
+    fun resolve(ids: List<String>): List<String> = ids.flatMap { reference ->
+        evidenceRefToSourceIdentities[reference]
+            ?.map(MemorySourceIdentity::messageId)
+            ?: listOf(reference)
     }.distinct()
     return copy(
         proposals = proposals.map { proposal ->
@@ -488,6 +593,10 @@ private fun captureSkipReason(turn: CompletedMemoryTurn): MemoryCaptureSkipReaso
         MemoryCaptureSkipReason.ORIGIN_NOT_ALLOWED
     turn.isHeadless -> MemoryCaptureSkipReason.HEADLESS
     turn.needsFinalAnswer -> MemoryCaptureSkipReason.NEEDS_FINAL_ANSWER
+    !isValidMemoryScopeBinding(turn.scopeId, turn.assistantId.toString()) ->
+        MemoryCaptureSkipReason.INVALID_SCOPE
+    turn.sourceMessages.size > MAX_MEMORY_CAPTURE_SOURCE_IDENTITIES ->
+        MemoryCaptureSkipReason.INVALID_SOURCE_IDENTITY
     turn.userText.isBlank() ||
         (turn.captureSource != MemoryCaptureSource.MANUAL_SELECTION && turn.assistantText.isBlank()) ->
         MemoryCaptureSkipReason.EMPTY_TURN

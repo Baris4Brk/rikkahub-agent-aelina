@@ -226,6 +226,87 @@ class LiteRtRuntimeTest {
         )
     }
 
+    // ---- inference epoch cancellation fence --------------------------------------
+
+    @Test
+    fun `inference epochs are monotonic and only current callbacks are accepted`() {
+        val fence = InferenceEpochFence<String>()
+        val first = fence.begin("first")
+        var callbacks = 0
+
+        assertTrue(fence.guard(first) { callbacks++ })
+        assertEquals("first", fence.cancel(first))
+        assertFalse("late callback must be fenced", fence.guard(first) { callbacks++ })
+
+        val second = fence.begin("second")
+        assertTrue(second.value > first.value)
+        assertTrue(fence.guard(second) { callbacks++ })
+        assertEquals(2, callbacks)
+    }
+
+    @Test
+    fun `cancel payload invokes native cancellation exactly once`() {
+        var nativeCancelCalls = 0
+        val fence = InferenceEpochFence<() -> Unit>()
+        val epoch = fence.begin { nativeCancelCalls++ }
+
+        fence.cancel(epoch)?.invoke()
+        fence.cancel(epoch)?.invoke()
+
+        assertEquals(1, nativeCancelCalls)
+    }
+
+    @Test
+    fun `late terminal callback cannot overwrite the next run`() {
+        val fence = InferenceEpochFence<String>()
+        val first = fence.begin("first")
+        assertEquals("first", fence.cancelCurrent())
+
+        val second = fence.begin("second")
+        var published = "none"
+        assertFalse(fence.finish(first) { published = "stale" })
+        assertTrue(fence.finish(second) { published = "current" })
+
+        assertEquals("current", published)
+    }
+
+    @Test
+    fun `cancellation invalidates warm prefix so next run is cold`() {
+        val fence = InferenceEpochFence<MutableList<String>>()
+        val processed = mutableListOf(u1, a1)
+        val epoch = fence.begin(processed)
+
+        fence.cancel(epoch)?.clear()
+
+        assertEquals(
+            TurnPlan.Cold,
+            LiteRtRuntime.planTurns(
+                processed = processed,
+                historySignatures = listOf(u1, a1, u2),
+                hasMedia = false,
+            ),
+        )
+    }
+
+    @Test
+    fun `idle stop action runs before a new epoch can begin`() {
+        val fence = InferenceEpochFence<String>()
+        val processed = mutableListOf(u1, a1)
+
+        assertTrue(fence.cancelCurrent { processed.clear() } == null)
+        val next = fence.begin("next")
+
+        assertTrue(processed.isEmpty())
+        assertTrue(fence.guard(next) { /* next run owns the fence */ })
+    }
+
+    @Test(expected = IllegalStateException::class)
+    fun `second inference cannot start before prior epoch is terminal`() {
+        val fence = InferenceEpochFence<String>()
+        fence.begin("first")
+        fence.begin("overlap")
+    }
+
     // ---- isVisionExecutorError -----------------------------------------------------
 
     @Test

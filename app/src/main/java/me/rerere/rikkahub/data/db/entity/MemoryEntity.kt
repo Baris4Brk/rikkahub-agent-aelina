@@ -52,6 +52,9 @@ data class MemoryEntity(
     @ColumnInfo(name = "source_message_ids_json", defaultValue = "'[]'")
     val sourceMessageIdsJson: String = "[]",
 
+    @ColumnInfo(name = "source_identities_json", defaultValue = "'[]'")
+    val sourceIdentitiesJson: String = "[]",
+
     @ColumnInfo(name = "lifecycle_status", defaultValue = "'ACTIVE'")
     val lifecycleStatus: String = "ACTIVE",
 

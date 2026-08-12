@@ -71,15 +71,21 @@ private fun JsonElement?.getStringContent(key: String): String? =
 private const val ASK_USER_TOOL_NAME = "ask_user"
 
 @Composable
-fun ChainOfThoughtScope.ChatMessageToolStep(
+internal fun ChainOfThoughtScope.ChatMessageToolStep(
     tool: UIMessagePart.Tool,
     loading: Boolean = false,
     onToolApproval: ((toolCallId: String, approved: Boolean, reason: String, scope: me.rerere.rikkahub.service.ChatService.ApprovalScope, toolName: String) -> Unit)? = null,
     onToolAnswer: ((toolCallId: String, answer: String) -> Unit)? = null,
+    agentTiming: AgentToolTimingPresentation? = null,
 ) {
     // ask_user 是交互式问答流程, 不走注册式渲染框架
     if (tool.toolName == ASK_USER_TOOL_NAME) {
-        AskUserToolStep(tool = tool, loading = loading, onToolAnswer = onToolAnswer)
+        AskUserToolStep(
+            tool = tool,
+            loading = loading,
+            onToolAnswer = onToolAnswer,
+            agentTiming = agentTiming,
+        )
         return
     }
 
@@ -139,15 +145,17 @@ fun ChainOfThoughtScope.ChatMessageToolStep(
                 overflow = TextOverflow.Ellipsis,
             )
         },
-        extra = if (isPending && onToolApproval != null) {
+        extra = if (agentTiming != null || (isPending && onToolApproval != null)) {
             {
                 // Per-row in-flight flag to debounce double-taps. Without this, two rapid
                 // clicks on Approve fire handleToolApproval twice — the second cancel()s
                 // the first's resume coroutine mid-flight, wastes the in-flight gen step,
                 // and can race the persisted state mutation. Keyed on toolCallId so a
                 // recomposition for a different tool doesn't carry the flag.
-                var inFlight by remember(tool.toolCallId) { mutableStateOf(false) }
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    agentTiming?.let { AgentTimingToolExtra(it) }
+                    if (isPending && onToolApproval != null) {
+                        var inFlight by remember(tool.toolCallId) { mutableStateOf(false) }
                     // schedule_job is the one approval that AUTHORISES future autonomous
                     // execution, not just one tool. Surface the consequence here so the
                     // user knows what they're approving — every tool the cron prompt
@@ -303,6 +311,7 @@ fun ChainOfThoughtScope.ChatMessageToolStep(
                             )
                         }
                     }
+                    }
                 }
             }
         } else {
@@ -386,6 +395,7 @@ private fun ChainOfThoughtScope.AskUserToolStep(
     tool: UIMessagePart.Tool,
     loading: Boolean,
     onToolAnswer: ((toolCallId: String, answer: String) -> Unit)?,
+    agentTiming: AgentToolTimingPresentation?,
 ) {
     val isPending = tool.approvalState is ToolApprovalState.Pending
     val isAnswered = tool.approvalState is ToolApprovalState.Answered
@@ -442,6 +452,9 @@ private fun ChainOfThoughtScope.AskUserToolStep(
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
+        },
+        extra = agentTiming?.let { timing ->
+            { AgentTimingToolExtra(timing) }
         },
         content = {
             Column(

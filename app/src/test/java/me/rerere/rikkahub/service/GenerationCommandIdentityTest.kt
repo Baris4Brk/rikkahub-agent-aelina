@@ -12,6 +12,7 @@ class GenerationCommandIdentityTest {
         val runId = Uuid.random()
 
         assertEquals(commandId, resolveGenerationCommandId(commandId, runId))
+        assertEquals(commandId, resolveAuthoritativeCommandId(commandId))
     }
 
     @Test
@@ -19,6 +20,7 @@ class GenerationCommandIdentityTest {
         val runId = Uuid.random()
 
         assertEquals(runId, resolveGenerationCommandId(null, runId))
+        assertNull(resolveAuthoritativeCommandId(null))
     }
 
     @Test

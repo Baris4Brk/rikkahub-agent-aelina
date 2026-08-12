@@ -58,6 +58,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -65,6 +66,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -74,6 +76,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalScrollCaptureInProgress
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
@@ -87,6 +90,7 @@ import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeSource
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import me.rerere.ai.ui.UIMessage
 import me.rerere.rikkahub.R
@@ -94,8 +98,14 @@ import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.datastore.getAssistantById
 import me.rerere.rikkahub.data.model.Conversation
 import me.rerere.rikkahub.data.model.MessageNode
+import me.rerere.rikkahub.diagnostics.agenttiming.AgentTimingConversationSnapshot
+import me.rerere.rikkahub.diagnostics.agenttiming.AgentTimingEventKind
+import me.rerere.rikkahub.diagnostics.agenttiming.AgentTimingStore
+import me.rerere.rikkahub.diagnostics.agenttiming.AgentTimingTraceSnapshot
+import me.rerere.rikkahub.diagnostics.agenttiming.hasAgentTimingRenderableContent
 import me.rerere.rikkahub.service.ChatError
 import me.rerere.rikkahub.ui.components.message.ChatMessage
+import me.rerere.rikkahub.ui.components.message.readyBeforeUiObservationTraceSequences
 import me.rerere.rikkahub.ui.components.ui.ErrorCardsDisplay
 import me.rerere.rikkahub.ui.components.ui.ListSelectableItem
 import me.rerere.rikkahub.ui.components.ui.RabbitLoadingIndicator
@@ -103,6 +113,10 @@ import me.rerere.rikkahub.ui.components.ui.Tooltip
 import me.rerere.rikkahub.ui.hooks.ImeLazyListAutoScroller
 import me.rerere.rikkahub.ui.theme.ChatFontProvider
 import me.rerere.rikkahub.utils.plus
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import org.koin.compose.koinInject
 import kotlin.math.roundToInt
 import kotlin.uuid.Uuid
 
@@ -213,6 +227,13 @@ private fun ChatListNormal(
     onAddSelectionToMemory: (Set<Uuid>) -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
+    // Keep the entire subscription branch absent while disabled. This avoids creating a timing
+    // flow, installing lifecycle/draw observers, or touching the process sidecar in normal use.
+    val agentTimingUiState = if (settings.displaySetting.showAgentTiming) {
+        rememberAgentTimingUiState(conversation = conversation, listState = state)
+    } else {
+        null
+    }
     val loadingState by rememberUpdatedState(loading)
     var isRecentScroll by remember { mutableStateOf(false) }
     val conversationUpdated by rememberUpdatedState(conversation)
@@ -320,6 +341,31 @@ private fun ChatListNormal(
                 items = conversation.messageNodes,
                 key = { index, item -> item.id },
             ) { index, node ->
+                val timingUiState = agentTimingUiState
+                val messageTiming = timingUiState
+                    ?.snapshot
+                    ?.traceForMessage(node.currentMessage.id)
+                val timingDrawMarker = if (
+                    timingUiState != null &&
+                    messageTiming?.needsFirstVisibleOutcomeFor(node.currentMessage.id) == true &&
+                    timingUiState.viewportEligibility[messageTiming.traceSequence] == true &&
+                    node.currentMessage.hasAgentTimingRenderableContent() &&
+                    state.layoutInfo.visibleItemsInfo.any { it.key == node.id }
+                ) {
+                    remember(
+                        timingUiState.store,
+                        conversation.id,
+                        node.currentMessage.id,
+                        messageTiming.traceSequence,
+                    ) {
+                        timingUiState.store.firstVisibleDrawMarker(
+                            conversationId = conversation.id,
+                            messageId = node.currentMessage.id,
+                        )
+                    }
+                } else {
+                    null
+                }
                 Column {
                     ListSelectableItem(
                         key = node.id,
@@ -368,6 +414,8 @@ private fun ChatListNormal(
                             onToolApproval = onToolApproval,
                             onToolAnswer = onToolAnswer,
                             lastMessage = index == lastMessageIndex,
+                            agentTiming = messageTiming,
+                            agentTimingDrawMarker = timingDrawMarker,
                         )
                     }
                 }
@@ -548,6 +596,183 @@ private fun ChatListNormal(
         }
     }
 }
+
+private data class AgentTimingUiState(
+    val store: AgentTimingStore,
+    val snapshot: AgentTimingConversationSnapshot,
+    /** Frozen exactly when SESSION_CONTENT_READY first reaches this UI observer. */
+    val viewportEligibility: Map<Long, Boolean>,
+)
+
+/** Installed only by the enabled branch in [ChatListNormal]. */
+@Composable
+private fun rememberAgentTimingUiState(
+    conversation: Conversation,
+    listState: LazyListState,
+): AgentTimingUiState {
+    val store: AgentTimingStore = koinInject()
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val view = LocalView.current
+    val latestConversation by rememberUpdatedState(conversation)
+    val initialSnapshot = remember(store, conversation.id) {
+        store.conversationFlow(conversation.id).value
+    }
+    val readyBeforeObservation = remember(initialSnapshot) {
+        initialSnapshot.readyBeforeUiObservationTraceSequences()
+    }
+    val viewportEligibility = remember(store, conversation.id) {
+        mutableStateMapOf<Long, Boolean>().apply {
+            readyBeforeObservation.forEach { traceSequence -> put(traceSequence, false) }
+        }
+    }
+    var snapshot by remember(store, conversation.id) {
+        mutableStateOf(initialSnapshot)
+    }
+
+    // A trace that was already content-ready before this chat UI existed must never capture a
+    // later return-to-screen draw. Gate its marker synchronously and publish NOT_OBSERVED shortly
+    // after composition, outside the composition pass.
+    LaunchedEffect(store, conversation.id, readyBeforeObservation) {
+        initialSnapshot.traces
+            .filter { it.traceSequence in readyBeforeObservation }
+            .forEach { trace ->
+                trace.assistantMessageIds.lastOrNull()?.let { messageId ->
+                    store.markFirstVisibleNotObserved(conversation.id, messageId)
+                }
+            }
+    }
+    val latestSnapshot by rememberUpdatedState(snapshot)
+
+    val markUnobservable: (AgentTimingConversationSnapshot, Boolean) -> Unit = { current, force ->
+        current.traces.forEach { trace ->
+            val targetMessageId = trace.assistantMessageIds.lastOrNull()
+                ?: return@forEach
+            if (!trace.needsFirstVisibleOutcomeFor(targetMessageId)) return@forEach
+            if (force) {
+                store.markFirstVisibleNotObserved(current.conversationId, targetMessageId)
+                return@forEach
+            }
+
+            val node = latestConversation.messageNodes.firstOrNull { candidate ->
+                candidate.messages.any { it.id == targetMessageId }
+            } ?: return@forEach // Session state can arrive one frame after the timing checkpoint.
+            if (node.currentMessage.id != targetMessageId) {
+                store.markFirstVisibleNotObserved(current.conversationId, targetMessageId)
+                return@forEach
+            }
+            // The timing checkpoint may lead the Conversation StateFlow by a composition. Do not
+            // let the empty assistant placeholder capture a draw or an off-screen classification.
+            if (!node.currentMessage.hasAgentTimingRenderableContent()) return@forEach
+            if (listState.layoutInfo.visibleItemsInfo.none { it.key == node.id }) {
+                store.markFirstVisibleNotObserved(current.conversationId, targetMessageId)
+            }
+        }
+    }
+
+    LaunchedEffect(store, conversation.id) {
+        store.conversationFlow(conversation.id).collect { current ->
+            val foreground = lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) &&
+                view.isShown && view.hasWindowFocus()
+            current.traces.forEach { trace ->
+                val targetMessageId = trace.assistantMessageIds.lastOrNull()
+                    ?: return@forEach
+                if (!trace.needsFirstVisibleOutcomeFor(targetMessageId)) return@forEach
+                if (trace.traceSequence !in viewportEligibility) {
+                    val nodeAtContentReady = latestConversation.messageNodes.firstOrNull { node ->
+                        node.messages.any { it.id == targetMessageId }
+                    }
+                    val eligible = freezeAgentTimingViewportEligibility(
+                        existing = null,
+                        isForeground = foreground,
+                        isTargetSelected = nodeAtContentReady?.currentMessage?.id == targetMessageId,
+                        isTargetNodeVisible = nodeAtContentReady != null &&
+                            listState.layoutInfo.visibleItemsInfo.any { it.key == nodeAtContentReady.id },
+                    )
+                    viewportEligibility[trace.traceSequence] = eligible
+                    if (!eligible) {
+                        store.markFirstVisibleNotObserved(current.conversationId, targetMessageId)
+                    }
+                }
+            }
+            // Publish the trace to composition only after its one-shot viewport verdict exists.
+            snapshot = current
+            if (!foreground) markUnobservable(current, true)
+        }
+    }
+
+    // A timing checkpoint can beat the Conversation StateFlow by one frame. Reclassify only while
+    // a trace is awaiting its first-visible outcome when the selected message graph catches up.
+    val pendingMessageSelection = snapshot.traces.mapNotNull { trace ->
+        trace.assistantMessageIds.lastOrNull()
+            ?.takeIf(trace::needsFirstVisibleOutcomeFor)
+            ?.let { target ->
+                target to conversation.messageNodes.firstOrNull { node ->
+                    node.messages.any { it.id == target }
+                }?.currentMessage?.let { selected ->
+                    selected.id to selected.hasAgentTimingRenderableContent()
+                }
+            }
+    }
+    LaunchedEffect(pendingMessageSelection) {
+        val foreground = lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) &&
+            view.isShown && view.hasWindowFocus()
+        if (!foreground) {
+            markUnobservable(latestSnapshot, true)
+        } else {
+            // Two frame callbacks leave one complete compose/layout/draw opportunity between
+            // content catch-up and the off-screen verdict. This is a one-shot, not a ticker.
+            withFrameNanos { }
+            withFrameNanos { }
+            markUnobservable(latestSnapshot, false)
+        }
+    }
+
+    // If the app loses visibility between SESSION_CONTENT_READY and the next draw, close the
+    // observation as "not observed". A later scroll/focus must never inflate render latency.
+    DisposableEffect(lifecycleOwner, view, store, conversation.id) {
+        val lifecycleObserver = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) {
+                markUnobservable(latestSnapshot, true)
+            }
+        }
+        val focusObserver = android.view.ViewTreeObserver.OnWindowFocusChangeListener { hasFocus ->
+            if (!hasFocus) {
+                markUnobservable(latestSnapshot, true)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(lifecycleObserver)
+        view.viewTreeObserver.addOnWindowFocusChangeListener(focusObserver)
+        onDispose {
+            // Close every content-ready outcome visible to this observer before it disappears.
+            // Traces becoming ready later are classified from the next observer's initial snapshot.
+            markUnobservable(latestSnapshot, true)
+            lifecycleOwner.lifecycle.removeObserver(lifecycleObserver)
+            if (view.viewTreeObserver.isAlive) {
+                view.viewTreeObserver.removeOnWindowFocusChangeListener(focusObserver)
+            }
+        }
+    }
+
+    return AgentTimingUiState(
+        store = store,
+        snapshot = snapshot,
+        viewportEligibility = viewportEligibility,
+    )
+}
+
+/** Once classified, later auto-scroll/layout changes cannot grant or revoke initial eligibility. */
+internal fun freezeAgentTimingViewportEligibility(
+    existing: Boolean?,
+    isForeground: Boolean,
+    isTargetSelected: Boolean,
+    isTargetNodeVisible: Boolean,
+): Boolean = existing ?: (isForeground && isTargetSelected && isTargetNodeVisible)
+
+private fun AgentTimingTraceSnapshot.needsFirstVisibleOutcomeFor(messageId: Uuid): Boolean =
+    firstSessionContentReadyAtNs != null &&
+        assistantMessageIds.lastOrNull() == messageId &&
+        at(AgentTimingEventKind.FIRST_VISIBLE_DRAW) == null &&
+        at(AgentTimingEventKind.FIRST_VISIBLE_NOT_OBSERVED) == null
 
 /**
  * 提取包含搜索词的文本片段，确保匹配词在开头可见
