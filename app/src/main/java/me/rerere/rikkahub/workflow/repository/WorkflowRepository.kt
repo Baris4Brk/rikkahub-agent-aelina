@@ -2,6 +2,8 @@ package me.rerere.rikkahub.workflow.repository
 
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonPrimitive
 import me.rerere.rikkahub.workflow.db.WorkflowDao
 import me.rerere.rikkahub.workflow.db.WorkflowEntity
 import me.rerere.rikkahub.workflow.db.WorkflowRunDao
@@ -9,8 +11,11 @@ import me.rerere.rikkahub.workflow.db.WorkflowRunEntity
 import me.rerere.rikkahub.workflow.model.WorkflowConstants
 import me.rerere.rikkahub.workflow.model.WorkflowDefinition
 import me.rerere.rikkahub.workflow.model.WorkflowJson
+import me.rerere.rikkahub.workflow.model.WorkflowOrigin
 import me.rerere.rikkahub.workflow.model.WorkflowRun
 import me.rerere.rikkahub.workflow.model.WorkflowRunStatus
+import me.rerere.rikkahub.workflow.model.WorkflowToolSchemaSnapshot
+import me.rerere.rikkahub.workflow.execution.WorkflowFailureCode
 import java.time.LocalDate
 import java.time.ZoneId
 
@@ -32,16 +37,25 @@ class WorkflowRepository(
     private val workflowRunDao: WorkflowRunDao,
 ) {
 
+    enum class LearnedPromotionWrite { INSERTED, ALREADY_EXACT, CONFLICT }
+
     data class Loaded(val entity: WorkflowEntity, val definition: WorkflowDefinition)
 
     /** (id, updatedAtMs) → parsed definition. */
-    private val parseCache = androidx.collection.LruCache<String, Pair<Long, WorkflowDefinition>>(200)
+    private val parseCache = androidx.collection.LruCache<String, Pair<String, WorkflowDefinition>>(200)
 
     private fun parseCached(row: WorkflowEntity): WorkflowDefinition? {
+        val stamp = "${row.updatedAtMs}:${row.stateVersion}"
         val cached = parseCache.get(row.id)
-        if (cached != null && cached.first == row.updatedAtMs) return cached.second
-        val parsed = WorkflowJson.parseStored(row.definitionJson) ?: return null
-        parseCache.put(row.id, row.updatedAtMs to parsed)
+        if (cached != null && cached.first == stamp) return cached.second
+        val parsedRaw = WorkflowJson.parseStored(row.definitionJson) ?: return null
+        val parsed = if (row.origin == WorkflowOrigin.USER.name) {
+            parsedRaw.copy(enabled = row.enabled)
+        } else {
+            parsedRaw
+        }
+        if (!projectionMatches(row, parsed)) return null
+        parseCache.put(row.id, stamp to parsed)
         return parsed
     }
 
@@ -67,34 +81,209 @@ class WorkflowRepository(
         parseCached(row)?.let { Loaded(row, it) }
     }
 
-    /** Insert or replace a workflow. Updates [definitionJson] from the canonical encoder. */
+    /** Insert or optimistic-CAS update. Generic updates preserve enabled. */
     suspend fun upsert(definition: WorkflowDefinition) {
-        val entity = WorkflowEntity(
-            id = definition.id,
-            name = definition.name,
-            description = definition.description,
-            enabled = definition.enabled,
-            definitionJson = WorkflowJson.encode(definition),
-            createdAtMs = definition.createdAtMs,
-            updatedAtMs = definition.updatedAtMs,
-            // Preserve last-run state across upsert by reading the current row first; a fresh
-            // create will simply find null and use defaults below.
-        )
         val existing = workflowDao.getById(definition.id)
-        val merged = if (existing != null) entity.copy(
-            createdAtMs = existing.createdAtMs,    // creation time is immutable
-            lastRunAtMs = existing.lastRunAtMs,
-            lastRunStatus = existing.lastRunStatus,
-            lastRunError = existing.lastRunError,
-            runsTodayCount = existing.runsTodayCount,
-            runsTodayDate = existing.runsTodayDate,
-        ) else entity
-        workflowDao.upsert(merged)
+        if (existing == null) {
+            require(definition.origin == WorkflowOrigin.USER) {
+                "learned_workflow_requires_insertLearnedDisabled"
+            }
+            workflowDao.insert(entityFor(definition.copy(
+                origin = WorkflowOrigin.USER,
+                sourceCandidateId = null,
+                sourceArtifactHash = null,
+                grantDigest = null,
+            )))
+            return
+        }
+        check(existing.origin != WorkflowOrigin.LEARNED.name) {
+            "learned_workflow_generic_update_denied"
+        }
+        val current = parseCached(existing) ?: error("workflow_definition_corrupt")
+        val updated = definition.copy(
+            id = existing.id,
+            enabled = existing.enabled,
+            createdAtMs = existing.createdAtMs,
+            origin = current.origin,
+            sourceCandidateId = current.sourceCandidateId,
+            sourceArtifactHash = current.sourceArtifactHash,
+            grantDigest = current.grantDigest,
+        )
+        val count = workflowDao.updateDefinitionCas(
+            id = existing.id,
+            expectedStateVersion = existing.stateVersion,
+            name = updated.name,
+            description = updated.description,
+            definitionJson = WorkflowJson.encode(updated),
+            updatedAtMs = updated.updatedAtMs,
+            origin = updated.origin.name,
+            sourceCandidateId = updated.sourceCandidateId,
+            sourceArtifactHash = updated.sourceArtifactHash,
+            grantDigest = updated.grantDigest,
+            authoringAssistantId = updated.authoringAssistantId,
+            capabilitySnapshotJson = capabilityProjection(updated),
+            toolSchemaFingerprintsJson = WorkflowToolSchemaSnapshot.canonicalProjection(updated.actions),
+        )
+        check(count == 1) { "workflow_update_conflict" }
+        parseCache.remove(existing.id)
     }
 
-    suspend fun setEnabled(id: String, enabled: Boolean) {
-        workflowDao.setEnabled(id, enabled, System.currentTimeMillis())
+    /** Promotion-only INSERT ABORT with exact duplicate recognition for saga replay. */
+    suspend fun ensureExactLearnedPromotionDisabled(
+        definition: WorkflowDefinition,
+    ): LearnedPromotionWrite {
+        require(definition.origin == WorkflowOrigin.LEARNED && !definition.enabled)
+        require(definition.id == "learned:${definition.sourceCandidateId}")
+        val encoded = WorkflowJson.encodeForLearned(definition)
+            ?: return LearnedPromotionWrite.CONFLICT
+        fun exact(row: WorkflowEntity): Boolean =
+            !row.enabled && row.origin == WorkflowOrigin.LEARNED.name &&
+                row.sourceCandidateId == definition.sourceCandidateId &&
+                row.sourceArtifactHash == definition.sourceArtifactHash &&
+                row.grantDigest == definition.grantDigest &&
+                row.authoringAssistantId == definition.authoringAssistantId &&
+                row.capabilitySnapshotJson == capabilityProjection(definition) &&
+                row.toolSchemaFingerprintsJson ==
+                    WorkflowToolSchemaSnapshot.canonicalProjection(definition.actions) &&
+                row.definitionJson == encoded
+        workflowDao.getById(definition.id)?.let { existing ->
+            return if (exact(existing)) LearnedPromotionWrite.ALREADY_EXACT
+            else LearnedPromotionWrite.CONFLICT
+        }
+        return try {
+            workflowDao.insert(entityFor(definition).copy(definitionJson = encoded))
+            parseCache.remove(definition.id)
+            LearnedPromotionWrite.INSERTED
+        } catch (cancellation: kotlinx.coroutines.CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            if (workflowDao.getById(definition.id)?.let(::exact) == true) {
+                LearnedPromotionWrite.ALREADY_EXACT
+            } else LearnedPromotionWrite.CONFLICT
+        }
     }
+
+    /** The only enable path for a promoted learned workflow; all provenance is re-fenced. */
+    suspend fun enableExactLearnedPromotion(
+        id: String,
+        candidateId: String,
+        artifactSha256: String,
+        grantDigest: String,
+        expectedStateVersion: Long,
+        nowMs: Long,
+    ): Boolean {
+        if (expectedStateVersion <= 0L || nowMs < 0L) return false
+        val row = workflowDao.getById(id) ?: return false
+        if (row.stateVersion != expectedStateVersion || row.enabled ||
+            row.origin != WorkflowOrigin.LEARNED.name || row.sourceCandidateId != candidateId ||
+            row.sourceArtifactHash != artifactSha256 || row.grantDigest != grantDigest ||
+            row.staleReason != null
+        ) return false
+        val current = parseCached(row) ?: return false
+        // Enablement is operational state, not an artifact edit. Preserve the candidate-frozen
+        // definition timestamp so execution attestation can compare every artifact field exactly.
+        val enabled = current.copy(enabled = true)
+        val encoded = WorkflowJson.encodeForLearned(enabled) ?: return false
+        val updated = workflowDao.setEnabledCas(
+            id, expectedStateVersion, true, encoded, enabled.updatedAtMs,
+        ) == 1
+        if (updated) parseCache.remove(id)
+        return updated
+    }
+
+    /** Generic toggle may disable LEARNED state but can never enable it. */
+    suspend fun setEnabled(id: String, enabled: Boolean): Boolean {
+        val row = workflowDao.getById(id) ?: return false
+        if (row.origin == WorkflowOrigin.LEARNED.name && enabled) return false
+        val current = parseCached(row) ?: return false
+        val now = System.currentTimeMillis()
+        val definition = current.copy(
+            enabled = enabled,
+            updatedAtMs = if (current.origin == WorkflowOrigin.LEARNED) {
+                current.updatedAtMs
+            } else {
+                now
+            },
+        )
+        val encoded = if (definition.origin == WorkflowOrigin.LEARNED) {
+            WorkflowJson.encodeForLearned(definition) ?: return false
+        } else {
+            WorkflowJson.encode(definition)
+        }
+        val updated = workflowDao.setEnabledCas(
+            id = id,
+            expectedStateVersion = row.stateVersion,
+            enabled = enabled,
+            definitionJson = encoded,
+            updatedAtMs = now,
+        ) == 1
+        if (updated) parseCache.remove(id)
+        return updated
+    }
+
+    suspend fun disableLearnedAsStale(loaded: Loaded, reason: String): Boolean {
+        if (loaded.entity.origin != WorkflowOrigin.LEARNED.name) return false
+        val now = System.currentTimeMillis()
+        val disabled = loaded.definition.copy(enabled = false, updatedAtMs = now)
+        val encoded = WorkflowJson.encodeForLearned(disabled) ?: return false
+        val updated = workflowDao.disableLearnedAsStaleCas(
+            id = loaded.entity.id,
+            expectedStateVersion = loaded.entity.stateVersion,
+            definitionJson = encoded,
+            reason = WorkflowFailureCode.durableOrGeneric(reason)
+                ?: WorkflowFailureCode.ACTION_RUNTIME_FAILURE,
+            updatedAtMs = now,
+        ) == 1
+        if (updated) parseCache.remove(loaded.entity.id)
+        return updated
+    }
+
+    suspend fun disableInvalidLearnedById(id: String, reason: String): Boolean {
+        val row = workflowDao.getById(id) ?: return false
+        if (row.origin != WorkflowOrigin.LEARNED.name) return false
+        val updated = workflowDao.disableInvalidLearnedCas(
+            id = id,
+            expectedStateVersion = row.stateVersion,
+            reason = WorkflowFailureCode.durableOrGeneric(reason)
+                ?: WorkflowFailureCode.ACTION_RUNTIME_FAILURE,
+            updatedAtMs = System.currentTimeMillis(),
+        ) == 1
+        if (updated) parseCache.remove(id)
+        return updated
+    }
+
+    private fun entityFor(definition: WorkflowDefinition): WorkflowEntity = WorkflowEntity(
+        id = definition.id,
+        name = definition.name,
+        description = definition.description,
+        enabled = definition.enabled,
+        definitionJson = WorkflowJson.encode(definition),
+        createdAtMs = definition.createdAtMs,
+        updatedAtMs = definition.updatedAtMs,
+        stateVersion = 1L,
+        origin = definition.origin.name,
+        sourceCandidateId = definition.sourceCandidateId,
+        sourceArtifactHash = definition.sourceArtifactHash,
+        grantDigest = definition.grantDigest,
+        authoringAssistantId = definition.authoringAssistantId,
+        capabilitySnapshotJson = capabilityProjection(definition),
+        toolSchemaFingerprintsJson = WorkflowToolSchemaSnapshot.canonicalProjection(definition.actions),
+    )
+
+    private fun projectionMatches(row: WorkflowEntity, definition: WorkflowDefinition): Boolean =
+        row.origin == definition.origin.name &&
+            row.sourceCandidateId == definition.sourceCandidateId &&
+            row.sourceArtifactHash == definition.sourceArtifactHash &&
+            row.grantDigest == definition.grantDigest &&
+            row.authoringAssistantId == definition.authoringAssistantId &&
+            row.capabilitySnapshotJson == capabilityProjection(definition) &&
+            row.toolSchemaFingerprintsJson ==
+                WorkflowToolSchemaSnapshot.canonicalProjection(definition.actions) &&
+            (definition.origin != WorkflowOrigin.LEARNED || row.enabled == definition.enabled)
+
+    private fun capabilityProjection(definition: WorkflowDefinition): String = JsonArray(
+        definition.capabilitySnapshot.toSortedSet().map(::JsonPrimitive),
+    ).toString()
 
     /** Delete the workflow row and its run history. */
     suspend fun deleteCascading(id: String): Boolean {
@@ -133,7 +322,7 @@ class WorkflowRepository(
         errorMessage: String?,
         zoneId: ZoneId = ZoneId.systemDefault(),
     ) {
-        val truncatedErr = errorMessage?.take(WorkflowConstants.MAX_ERROR_LENGTH)
+        val truncatedErr = WorkflowFailureCode.durableOrGeneric(errorMessage)
         workflowRunDao.insert(WorkflowRunEntity(
             workflowId = workflowId,
             firedAtMs = firedAtMs,

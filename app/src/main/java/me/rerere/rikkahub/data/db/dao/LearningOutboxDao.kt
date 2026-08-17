@@ -40,4 +40,24 @@ interface LearningOutboxDao {
     /** Two values are enough to prove that the append-only log has mixed database lineages. */
     @Query("SELECT DISTINCT stream_id FROM learning_outbox LIMIT 2")
     suspend fun listDistinctStreamIds(): List<String>
+
+    /**
+     * P5 bounded three-gate pruning. The caller supplies the minimum contiguous position across
+     * every registered durable consumer, an age cutoff and a head-relative safety floor. Keeping
+     * the STREAM_INIT sentinel is also enforced in SQL so a faulty caller cannot remove lineage.
+     */
+    @Query(
+        "DELETE FROM learning_outbox WHERE seq IN (" +
+            "SELECT seq FROM learning_outbox WHERE stream_id = :streamId " +
+            "AND event_type != 'STREAM_INIT' AND seq <= :throughMinConsumerSeq " +
+            "AND seq < :keepFromSeq AND created_at_ms < :createdBeforeMs " +
+            "ORDER BY seq ASC LIMIT :limit)",
+    )
+    suspend fun deletePrunablePage(
+        streamId: String,
+        throughMinConsumerSeq: Long,
+        createdBeforeMs: Long,
+        keepFromSeq: Long,
+        limit: Int,
+    ): Int
 }

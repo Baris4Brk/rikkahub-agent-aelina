@@ -16,6 +16,8 @@ data class LearningModelCandidate(
     val providerIdentityDigest: String,
     val modelIdentityDigest: String,
     val configurationDigest: String,
+    /** Exact local runtime attestation; null for remote providers. */
+    val runtimeAttestationDigest: String? = null,
     val userExplicitlyAuthorizedForBackground: Boolean,
 ) {
     override fun toString(): String =
@@ -41,6 +43,8 @@ data class ResolvedLearningModel(
     val modelIdentityDigest: String,
     val configurationDigest: String,
     val route: LearningRouteCapabilities,
+    /** Standalone frozen local runtime identity for durable provider-input manifests. */
+    val runtimeAttestationDigest: String? = null,
 ) {
     override fun toString(): String =
         "ResolvedLearningModel(providerKind=$providerKind, route=$route, identity=<redacted>)"
@@ -92,7 +96,12 @@ object LearningModelResolver {
         if (
             !candidate.providerIdentityDigest.isSha256() ||
             !candidate.modelIdentityDigest.isSha256() ||
-            !candidate.configurationDigest.isSha256()
+            !candidate.configurationDigest.isSha256() ||
+            candidate.runtimeAttestationDigest?.isSha256() == false ||
+            (candidate.providerKind == LearningProviderKind.LOCAL_LITERT &&
+                candidate.runtimeAttestationDigest == null) ||
+            (candidate.providerKind != LearningProviderKind.LOCAL_LITERT &&
+                candidate.runtimeAttestationDigest != null)
         ) {
             return LearningModelResolution.Unavailable(LearningModelResolutionFailure.INVALID_IDENTITY)
         }
@@ -120,6 +129,7 @@ object LearningModelResolver {
                     requiresNetwork = remote,
                     cancellation = LearningCancellationCapability.PROVEN_RELIABLE,
                 ),
+                runtimeAttestationDigest = candidate.runtimeAttestationDigest,
             ),
         )
     }

@@ -69,25 +69,57 @@ class LearningArchitectureBoundaryTest {
     }
 
     @Test
-    fun p0ProviderRequestPathHasNoLearningContributor() {
-        val requestPathFiles = listOf(
+    fun featureOffProviderPathKeepsLearningBehindExplicitStageDEGates() {
+        val genericRequestPathFiles = listOf(
             "app/src/main/java/me/rerere/rikkahub/data/ai/GenerationPrompts.kt",
             "app/src/main/java/me/rerere/rikkahub/data/ai/GenerationProviderContextPreparer.kt",
             "app/src/main/java/me/rerere/rikkahub/data/ai/ProviderCacheIdentityFactory.kt",
             "app/src/main/java/me/rerere/rikkahub/data/ai/ProviderTurnRunner.kt",
-            "app/src/main/java/me/rerere/rikkahub/data/ai/GenerationHandler.kt",
         ).map { relative -> locateProjectFile(relative, relative.removePrefix("app/")) }
 
-        val violations = requestPathFiles.filter { file ->
+        val violations = genericRequestPathFiles.filter { file ->
             file.readText(Charsets.UTF_8).lineSequence().any { line ->
                 line.trimStart().startsWith("import me.rerere.rikkahub.learning.")
             }
         }.map(File::getName)
 
         assertTrue(
-            "P0 feature-off path must have no Learning request contributor: $violations",
+            "Generic provider projection must not acquire a Learning contributor: $violations",
             violations.isEmpty(),
         )
+
+        // P2 deliberately installs Stage-D observation and Stage-E reviewed-policy projection at
+        // the orchestration boundary.  Its nullable ports and exact assistant opt-in are the
+        // feature-off fence; neither ProviderTurnRunner nor the generic prompt/cache compilers
+        // know about Learning.
+        val handler = locateProjectFile(
+            "app/src/main/java/me/rerere/rikkahub/data/ai/GenerationHandler.kt",
+            "src/main/java/me/rerere/rikkahub/data/ai/GenerationHandler.kt",
+        ).readText(Charsets.UTF_8)
+        val facade = locateProjectFile(
+            "app/src/main/java/me/rerere/rikkahub/learning/runtime/LearningRuntimeFacade.kt",
+            "src/main/java/me/rerere/rikkahub/learning/runtime/LearningRuntimeFacade.kt",
+        ).readText(Charsets.UTF_8)
+        assertTrue("Stage D must remain observation-only", "Stage D is content-free observation only" in handler)
+        assertTrue("Stage E must require assistant opt-in", "assistantPolicyOptIn = assistant.reviewedPolicyInjectionEnabled" in handler)
+        assertTrue(
+            "Feature-off Stage E must return an empty projection before database access",
+            "if (!flagsSource.policyInjectionEnabledFailClosed()) return empty()" in facade,
+        )
+        val shadowGateIndex = facade.indexOf(
+            "val shadowGate = policyShadowFeatureGate ?: return PolicyShadowRuntimeResult.Disabled",
+        )
+        val shadowDatabaseIndex = facade.indexOf(
+            "val access = withDatabase",
+            shadowGateIndex.coerceAtLeast(0),
+        )
+        assertTrue(
+            "Feature-off Stage D must return Disabled before database access",
+            shadowGateIndex >= 0 &&
+                "request.admissionGateIdentity != shadowGate.gateIdentity" in facade &&
+                shadowDatabaseIndex > shadowGateIndex,
+        )
+        assertTrue("Provider dispatch must fail closed to a prepared baseline", "else baselinePrepared" in handler)
     }
 
     @Test

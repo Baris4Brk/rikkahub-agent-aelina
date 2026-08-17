@@ -8,6 +8,7 @@ import me.rerere.rikkahub.data.authority.source.SourceAuthorityObjectKind
 import me.rerere.rikkahub.data.authority.source.SourceInvalidationAuthorityEvent
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import kotlin.uuid.Uuid
 
@@ -42,6 +43,18 @@ class LearningSourceInvalidationAuthorityEventWriterTest {
         assertEquals(11L, row.conversationSourceRevision)
         assertNull(row.messageId)
         assertNull(row.messageRevision)
+    }
+
+    @Test
+    fun `active edit remains an invalidation after capture consent is withdrawn`() {
+        val activeEdit = event(SourceAuthorityObjectKind.MESSAGE, MESSAGE_ID).copy(
+            sourceState = ConversationSourceState.ACTIVE,
+            changeKind = ConversationSourceChangeKind.UPDATED,
+        )
+
+        // SourceInvalidationAuthorityEvent can never represent initial capture. Every instance
+        // is an adjacent transition, so per-scope capture consent must not suppress it.
+        assertTrue(shouldProjectSourceInvalidationAuthorityTransition(activeEdit))
     }
 
     private fun event(

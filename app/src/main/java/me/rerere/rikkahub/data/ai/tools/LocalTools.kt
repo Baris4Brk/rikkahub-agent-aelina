@@ -1089,14 +1089,14 @@ class LocalTools(
             // with the Workflows toggle on", which is non-deterministic across UI reorder).
             tools.add(me.rerere.rikkahub.workflow.tools.workflowCreateTool(
                 workflowRepository,
-                knownToolNamesProvider = { tools.map { it.name } },
+                knownToolsProvider = { tools.toList() },
                 callerContext = invocationContext,
             ))
             tools.add(me.rerere.rikkahub.workflow.tools.workflowListTool(workflowRepository))
             tools.add(me.rerere.rikkahub.workflow.tools.workflowGetTool(workflowRepository))
             tools.add(me.rerere.rikkahub.workflow.tools.workflowUpdateTool(
                 workflowRepository,
-                knownToolNamesProvider = { tools.map { it.name } },
+                knownToolsProvider = { tools.toList() },
                 callerContext = invocationContext,
             ))
             tools.add(me.rerere.rikkahub.workflow.tools.workflowDeleteTool(workflowRepository))

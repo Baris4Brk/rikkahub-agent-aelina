@@ -1,5 +1,6 @@
 package me.rerere.rikkahub.learning.handoff
 
+import java.io.File
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import me.rerere.rikkahub.data.db.dao.LearningOutboxDao
@@ -161,6 +162,33 @@ class LearningOutboxProtocolTest {
         }
     }
 
+    @Test
+    fun `derived reset requires both privacy ports and cannot bypass their fences`() {
+        val resetter = projectFile(
+            "app/src/main/java/me/rerere/rikkahub/learning/handoff/LearningInboxBatchStore.kt",
+            "src/main/java/me/rerere/rikkahub/learning/handoff/LearningInboxBatchStore.kt",
+        ).readText().substringAfter("class LearningDerivedStateResetter(")
+            .substringBefore("private fun LearningInboxEventEntity.toInitialJob")
+        val constructor = resetter.substringBefore(") {")
+        assertTrue(constructor.contains("ExactScopeLearnedWorkflowErasePort,"))
+        assertTrue(constructor.contains("DurableLearnedWorkflowPrivacyPort,"))
+        assertTrue(!constructor.contains("?"))
+        assertTrue(!constructor.contains("= null"))
+        assertTrue(!resetter.contains("learnedWorkflowErasePort == null"))
+        assertTrue(!resetter.contains("durableLearnedWorkflowPrivacyPort == null"))
+        assertTrue(resetter.contains(
+            "durableLearnedWorkflowPrivacyPort.redactAllForDerivedReset(frozenNowMs)",
+        ))
+        assertTrue(resetter.contains("check(durableReceipt.complete)"))
+        assertTrue(resetter.contains(
+            "learnedWorkflowErasePort.redactAndFence(ids, frozenNowMs)",
+        ))
+        assertTrue(
+            resetter.indexOf("fenceLearnedWorkflowsBeforeCandidateDelete(frozenNowMs)") in
+                0 until resetter.indexOf("return database.withTransaction"),
+        )
+    }
+
     private fun sentinel(): LearningOutboxEntity = LearningOutboxDraft(
         streamId = STREAM,
         eventCode = LearningEventCode(LearningEventType.STREAM_INIT.name, 1),
@@ -224,6 +252,14 @@ class LearningOutboxProtocolTest {
         }
 
         override suspend fun listDistinctStreamIds(): List<String> = streams
+
+        override suspend fun deletePrunablePage(
+            streamId: String,
+            throughMinConsumerSeq: Long,
+            createdBeforeMs: Long,
+            keepFromSeq: Long,
+            limit: Int,
+        ): Int = 0
     }
 
     private inline fun <reified T : Throwable> expectFailure(block: () -> Unit): T {
@@ -249,6 +285,11 @@ class LearningOutboxProtocolTest {
         assertTrue("Expected ${T::class.java.simpleName}, got $thrown", thrown is T)
         return thrown as T
     }
+
+    private fun projectFile(vararg candidates: String): File =
+        requireNotNull(candidates.asSequence().map(::File).firstOrNull(File::isFile)) {
+            "Cannot locate ${candidates.joinToString()} from ${File(".").absolutePath}"
+        }
 
     private companion object {
         val STREAM: Uuid = Uuid.parse("00000000-0000-0000-0000-000000000101")

@@ -109,6 +109,35 @@ import me.rerere.rikkahub.data.model.AssistantMemory
 import me.rerere.rikkahub.data.repository.ConversationRepository
 import me.rerere.rikkahub.security.resolveProviderBinding
 import me.rerere.rikkahub.data.repository.MemoryRepository
+import me.rerere.rikkahub.learning.exposure.PolicyExposureAttemptObserver
+import me.rerere.rikkahub.learning.exposure.PolicyExposureDropObservation
+import me.rerere.rikkahub.learning.exposure.PolicyExposureBundle
+import me.rerere.rikkahub.learning.exposure.PolicyExposureMetadata
+import me.rerere.rikkahub.learning.exposure.PolicyExposurePolicyRef
+import me.rerere.rikkahub.learning.exposure.PolicyExposureReservation
+import me.rerere.rikkahub.learning.exposure.PolicyExposureReservationKey
+import me.rerere.rikkahub.learning.exposure.PolicyExposureRuntimeAnchor
+import me.rerere.rikkahub.learning.exposure.PolicyExposureRuntimeAnchorRequest
+import me.rerere.rikkahub.learning.exposure.PolicyExposureRuntimeAnchorSource
+import me.rerere.rikkahub.learning.exposure.PolicyExposureStore
+import me.rerere.rikkahub.learning.policy.ObservedUtilityArm
+import me.rerere.rikkahub.learning.policy.runtime.ObservedUtilityLedgerWriteResult
+import me.rerere.rikkahub.learning.policy.runtime.ObservedUtilityMatchedAssignmentIntentPort
+import me.rerere.rikkahub.learning.policy.runtime.ProductionMatchedObservedUtilityAssignmentPlanner
+import me.rerere.rikkahub.data.ai.background.BackgroundGenerationHostIdentityFactory
+import me.rerere.rikkahub.learning.exposure.recordDropObservation
+import me.rerere.rikkahub.learning.exposure.PolicyLearningCommandContext
+import me.rerere.rikkahub.learning.retrieval.LearnedPolicyCandidatePacket
+import me.rerere.rikkahub.learning.retrieval.applicabilityCohortDigest
+import me.rerere.rikkahub.learning.retrieval.LearnedPolicyGrantReceipt
+import me.rerere.rikkahub.learning.retrieval.LearnedPolicyQuery
+import me.rerere.rikkahub.learning.retrieval.LearnedPolicySource
+import me.rerere.rikkahub.learning.retrieval.PolicyDispatchSurfaceObservationResult
+import me.rerere.rikkahub.learning.retrieval.MAX_POLICY_RAW_QUERY_CHARS
+import me.rerere.rikkahub.learning.retrieval.PolicyShadowRuntimePort
+import me.rerere.rikkahub.learning.retrieval.PolicyShadowRuntimeRequest
+import me.rerere.rikkahub.learning.task.RuntimeTaskSignatureClassifier
+import me.rerere.rikkahub.learning.task.TaskSignatureV1
 import me.rerere.rikkahub.memory.dreaming.model.DreamScopeId
 import me.rerere.rikkahub.memory.dreaming.runtime.DisabledDreamingFeatureFlagSource
 import me.rerere.rikkahub.memory.dreaming.runtime.DreamRuntimeClaimRef
@@ -169,6 +198,16 @@ private val FINAL_ANSWER_RESERVED_CUSTOM_BODY_KEYS = setOf(
     "max_output_tokens",
     "response_format",
 )
+
+/** Exact provider projection prepared before any attempt is dispatched. */
+private data class PreparedPolicyProviderProjection(
+    val initialInputMessages: List<UIMessage>,
+    val initialPreparation: GenerationProviderContextPreparation,
+    val finalInputMessages: List<UIMessage>,
+    val finalPreparation: GenerationProviderContextPreparation,
+)
+
+private const val POLICY_INJECTION_TREATMENT_ARM = "LEARNED_POLICY"
 
 private enum class GenerationRequestPurpose {
     NORMAL,
@@ -574,6 +613,12 @@ class GenerationHandler(
         NoOpDreamRuntimeUsageRecorder,
     private val dreamRuntimeDiagnosticsSink: DreamRuntimeDiagnosticsSink =
         NoOpDreamRuntimeDiagnosticsSink,
+    private val learnedPolicySource: LearnedPolicySource? = null,
+    private val policyShadowRuntime: PolicyShadowRuntimePort? = null,
+    private val policyExposureAnchorSource: PolicyExposureRuntimeAnchorSource? = null,
+    private val policyExposureStore: PolicyExposureStore? = null,
+    private val observedUtilityAssignments: ObservedUtilityMatchedAssignmentIntentPort? = null,
+    private val policyApplicabilityIdentityFactory: BackgroundGenerationHostIdentityFactory? = null,
 ) {
     fun generateText(
         settings: Settings,
@@ -708,8 +753,9 @@ class GenerationHandler(
                 } else {
                     sensitive.use { chars ->
                         runCatching { json.parseToJsonElement(chars.concatToString().ifBlank { "{}" }) }
-                    }
-                }
+    }
+}
+
             } finally {
                 sensitive?.close()
             }
@@ -1079,6 +1125,8 @@ class GenerationHandler(
                         steeringDeliveries = steeringDeliveries,
                         invocationSurfaceContextProvider = invocationSurfaceContextProvider,
                         callOrigin = callOrigin,
+                        isHeadless = isHeadless,
+                        isSubAgent = isSubAgent,
                         secretEgressBinding = secretEgressBinding,
                         onRawSensitiveToolInput = { tool ->
                             sensitiveOwnerToolInputs.remove(tool.toolCallId)?.close()
@@ -1191,7 +1239,6 @@ class GenerationHandler(
                 val tools = messages.last().getTools().filter { !it.isExecuted }
                 if (tools.isEmpty()) {
                     val terminal = stepTerminal
-                        ?: GenerationTerminal.missingTransportTerminal("No provider terminal was captured.")
                     val outcome = GenerationCompletionPolicy.evaluate(
                         message = messages.last(),
                         terminal = terminal,
@@ -1287,6 +1334,8 @@ class GenerationHandler(
                                             steeringDeliveries = recoverySteeringDeliveries,
                                             invocationSurfaceContextProvider = invocationSurfaceContextProvider,
                                             callOrigin = callOrigin,
+                                            isHeadless = isHeadless,
+                                            isSubAgent = isSubAgent,
                                             conversationId = conversationId,
                                             commandId = commandId,
                                             authoritativeCommandId = authoritativeCommandId,
@@ -1834,7 +1883,7 @@ class GenerationHandler(
                                 ToolStartDecision.Proceed -> executionBoundaryStarted = true
                                 null -> Unit
                             }
-                            val liveSurface = conversationId?.let { id ->
+                            val liveSurface = conversationId.let { id ->
                                 invocationSurfaceContextProvider?.currentContext(
                                     callOrigin,
                                     id,
@@ -1884,7 +1933,7 @@ class GenerationHandler(
                             // wall-clock envelope instead of even attempting.
                             val remainingMs = turnBudgetMs -
                                 (android.os.SystemClock.elapsedRealtime() - turnStartMs)
-                            val executionContext = if (conversationId != null && runControl != null) {
+                            val executionContext = if (runControl != null) {
                                 ToolExecutionContext(
                                     runId = runControl.runId,
                                     conversationId = conversationId,
@@ -2672,6 +2721,8 @@ class GenerationHandler(
         steeringDeliveries: List<SteeringDelivery> = emptyList(),
         invocationSurfaceContextProvider: InvocationSurfaceContextProvider? = null,
         callOrigin: ToolCallOrigin = ToolCallOrigin.LocalChat,
+        isHeadless: Boolean = false,
+        isSubAgent: Boolean = false,
         secretEgressBinding: me.rerere.rikkahub.security.SecretPlaintextSessionBinding? = null,
         onRawSensitiveToolInput: (UIMessagePart.Tool) -> Unit = {},
         conversationId: Uuid? = null,
@@ -2770,8 +2821,11 @@ class GenerationHandler(
         )
 
         fun createSystemPromptLayout(
-            memoryPrompt: String,
-            dreamPrompt: String = "",
+            recallPrompt: String,
+            // This is invariant across ALR off/shadow/injection. A learned branch can therefore
+            // add volatile Recall without changing the stable transformer input, while a baseline
+            // fallback remains byte-identical to the feature-off baseline produced by this build.
+            reserveRuntimeContextEnvelope: Boolean = true,
         ): ProviderSystemPromptLayout {
             // Split stable instructions from runtime data. Chat Completions anchor runtime data
             // to the current user turn (below); otherwise an ever-changing device/memory
@@ -2779,9 +2833,7 @@ class GenerationHandler(
             val (stableSystem, volatileSystem) = systemPromptBuilder.buildSections(
                 assistantPrompt = breakdownAssistantPrompt,
                 userIdentityPrompt = breakdownUserIdentityPrompt,
-                memoryPrompt = listOf(memoryPrompt, dreamPrompt)
-                    .filter(String::isNotBlank)
-                    .joinToString("\n\n"),
+                memoryPrompt = recallPrompt,
                 recentChatsPrompt = breakdownRecentChatsPrompt,
                 toolPrompts = breakdownToolPrompts,
                 systemAddendum = providerSystemAddendum,
@@ -2791,15 +2843,16 @@ class GenerationHandler(
                 volatileSystem = volatileSystem,
                 conversationMessages = providerTailMessages.appendTo(persistentSteeringContext.messages),
                 useAnchoredVolatileContext = useAnchoredVolatileContext,
+                reserveRuntimeContextEnvelope = reserveRuntimeContextEnvelope,
             )
         }
 
-        val layoutWithoutMemory = agentTiming.timedAgentStage(
+        val layoutWithoutRecall = agentTiming.timedAgentStage(
             AgentTimingEventKind.SYSTEM_PROMPT_STARTED,
             AgentTimingEventKind.SYSTEM_PROMPT_FINISHED,
-        ) { createSystemPromptLayout(memoryPrompt = "") }
+        ) { createSystemPromptLayout(recallPrompt = "") }
         val requestTokenEstimator = ProviderRequestTokenEstimator()
-        val memoryPromptBudget = agentTiming.timedAgentStage(
+        val recallPromptBudget = agentTiming.timedAgentStage(
             AgentTimingEventKind.TOKEN_COUNT_STARTED,
             AgentTimingEventKind.TOKEN_COUNT_FINISHED,
         ) {
@@ -2808,32 +2861,11 @@ class GenerationHandler(
                 requestedOutputTokens = requestedMaxTokens,
                 tools = tools,
                 builtInTools = model.tools,
-                baseMessages = layoutWithoutMemory.applyVolatileContext(
-                    layoutWithoutMemory.initialMessages,
+                baseMessages = layoutWithoutRecall.applyVolatileContext(
+                    layoutWithoutRecall.initialMessages,
                 ),
             )
         }
-        val memoryCompileResult = agentTiming.timedAgentStage(
-            AgentTimingEventKind.MEMORY_PROMPT_STARTED,
-            AgentTimingEventKind.MEMORY_PROMPT_FINISHED,
-        ) {
-            compileMemoryPrompt(
-                memories = if (assistant.enableMemory) memories else emptyList(),
-                includeContextual = requestPurpose == GenerationRequestPurpose.NORMAL,
-                maxTokens = memoryPromptBudget,
-            )
-        }
-        val breakdownMemoryPrompt = memoryCompileResult.text
-        // Memory remains authoritative and receives its complete allocation first. Dream gets
-        // only the trusted hard-gate remainder after the atomic Memory section has been charged.
-        val layoutWithMemory = createSystemPromptLayout(breakdownMemoryPrompt)
-        val dreamPromptBudget = contextPreparer.conservativeMemoryBudget(
-            resolvedWindow = resolvedContextWindow,
-            requestedOutputTokens = requestedMaxTokens,
-            tools = tools,
-            builtInTools = model.tools,
-            baseMessages = layoutWithMemory.applyVolatileContext(layoutWithMemory.initialMessages),
-        )
         val memoryScopeId = if (assistant.useGlobalMemory) {
             MemoryRepository.GLOBAL_MEMORY_ID
         } else {
@@ -2846,11 +2878,211 @@ class GenerationHandler(
         ).prepare(
             scopeId = dreamScopeId,
             frozenNowEpochMs = memoryFrozenNowMs,
-            trustedTokenBudget = dreamPromptBudget,
+            trustedTokenBudget = recallPromptBudget,
             tokenEstimator = DreamRuntimeTokenEstimator { text ->
                 requestTokenEstimator.estimateMessage(UIMessage.system(text)).baseTokens
             },
         )
+        val recallDreamItems = dreamContext.toRecallDreamItems(dreamScopeId)
+        val policyCommandContext = runControl?.policyLearningContext()?.takeIf { command ->
+            requestPurpose == GenerationRequestPurpose.NORMAL && !isHeadless && !isSubAgent &&
+                callOrigin == ToolCallOrigin.LocalChat && command.logicalRunId == runControl.runId &&
+                command.consumingAssistantId == assistant.id
+        }
+        val policyLearningContext = policyCommandContext?.takeIf { command ->
+            isPolicyInjectionDispatchEligible(
+                requestIsNormal = requestPurpose == GenerationRequestPurpose.NORMAL,
+                isHeadless = isHeadless,
+                isSubAgent = isSubAgent,
+                assistantPolicyOptIn = assistant.reviewedPolicyInjectionEnabled,
+                callOrigin = callOrigin,
+                command = command,
+                expectedRunId = runControl.runId,
+                expectedAssistantId = assistant.id,
+                hasPriorExposure = runControl.policyExposureReservationIds().isNotEmpty(),
+            )
+        }
+        val policyTaskSignature = policyCommandContext?.let {
+            RuntimeTaskSignatureClassifier.classify(selectedContext, tools)
+        }
+        if (
+            policyCommandContext != null && policyTaskSignature != null &&
+            policyShadowRuntime != null && runControl.tryMarkPolicyShadowObserved()
+        ) {
+            try {
+                // Stage D is content-free observation only. The result never enters Recall or
+                // provider request selection and the Facade owns its bounded latency/diagnostic.
+                policyShadowRuntime.retrieveShadow(
+                    PolicyShadowRuntimeRequest.forCommand(
+                        command = policyCommandContext,
+                        taskSignature = policyTaskSignature,
+                        query = selectedContext.toBoundedPolicyRetrievalQuery(),
+                        maxCandidates = DEFAULT_POLICY_RECALL_MAX_ITEMS,
+                        maxEstimatedTokens = DEFAULT_POLICY_RECALL_MAX_TOKENS,
+                    ),
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+            }
+        }
+        val policyRetrieval = if (
+            policyLearningContext != null && policyTaskSignature != null &&
+            learnedPolicySource != null
+        ) {
+            try {
+                learnedPolicySource.retrieve(
+                    LearnedPolicyQuery(
+                        scope = policyLearningContext.scope,
+                        consumingAssistantId = policyLearningContext.consumingAssistantId,
+                        taskSignature = policyTaskSignature,
+                        query = selectedContext.toBoundedPolicyRetrievalQuery(),
+                        maxCandidates = DEFAULT_POLICY_RECALL_MAX_ITEMS,
+                        maxEstimatedTokens = DEFAULT_POLICY_RECALL_MAX_TOKENS,
+                    ),
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                null
+            }
+        } else {
+            null
+        }
+        val finalPublicIdentity = policyApplicabilityIdentityFactory?.let { factory ->
+            runCatching { factory.publicIdentity(provider, model) }.getOrNull()
+        }
+        val finalProviderIdentity = finalPublicIdentity?.providerIdentityDigest
+            ?: generationProviderIdentity(provider)
+        val finalModelIdentity = finalPublicIdentity?.modelIdentityDigest
+            ?: generationModelIdentity(model)
+        val finalApplicableConfigurationIdentity =
+            me.rerere.rikkahub.learning.policy.policyApplicableConfigurationIdentity(
+                finalProviderIdentity,
+                finalModelIdentity,
+            )
+        val finalApplicableConfigurationGeneration =
+            me.rerere.rikkahub.learning.policy.policyApplicableConfigurationGeneration(
+                finalApplicableConfigurationIdentity,
+            )
+        val finalApplicableTemplateIdentity =
+            me.rerere.rikkahub.learning.policy.policyApplicableTemplateIdentity(
+                me.rerere.rikkahub.learning.policy.PolicyDistillationPrompt.TEMPLATE_VERSION,
+            )
+        val finalToolSchemas = ToolCatalogSnapshot.fromDefinitions(tools).entries
+            .mapTo(linkedSetOf()) { it.schemaFingerprint }
+        val dispatchSurfaceObservation = if (
+            policyRetrieval != null && learnedPolicySource != null && policyLearningContext != null
+        ) {
+            try {
+                learnedPolicySource.observeFinalDispatchSurface(
+                    receipts = policyRetrieval.grantReceipts,
+                    consumingAssistantId = policyLearningContext.consumingAssistantId,
+                    availableToolSchemaFingerprints = finalToolSchemas,
+                    frozenNowMs = System.currentTimeMillis().coerceAtLeast(memoryFrozenNowMs),
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                PolicyDispatchSurfaceObservationResult.Unavailable
+            }
+        } else {
+            PolicyDispatchSurfaceObservationResult.Unavailable
+        }
+        val dispatchSurfaceEligibleIds =
+            (dispatchSurfaceObservation as? PolicyDispatchSurfaceObservationResult.Ready)
+                ?.eligiblePolicyIds
+                .orEmpty()
+        val policyPacket = policyRetrieval?.packet?.filterFinalApplicability(
+            providerIdentity = finalProviderIdentity,
+            modelIdentity = finalModelIdentity,
+            templateIdentity = finalApplicableTemplateIdentity,
+            configurationIdentity = finalApplicableConfigurationIdentity,
+            configurationGeneration = finalApplicableConfigurationGeneration,
+            availableToolSchemas = finalToolSchemas,
+            capabilityDigest =
+                me.rerere.rikkahub.learning.policy.policyApplicableCapabilityDigest(emptySet()),
+        )?.let { packet ->
+            packet.copy(
+                candidates = packet.candidates.filter { policy ->
+                    policy.policyId in dispatchSurfaceEligibleIds
+                },
+            )
+        }
+        val applicablePolicyRetrieval = policyPacket?.let { packet ->
+            policyRetrieval.select(packet.candidates.mapTo(linkedSetOf()) { it.policyId })
+        }
+        val policyAnchor = if (
+            policyLearningContext != null && policyTaskSignature != null &&
+            policyRetrieval?.packet?.candidates?.isNotEmpty() == true &&
+            policyExposureAnchorSource != null
+        ) {
+            try {
+                policyExposureAnchorSource.resolve(
+                    PolicyExposureRuntimeAnchorRequest(
+                        command = policyLearningContext,
+                        taskSignature = policyTaskSignature,
+                    ),
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                null
+            }
+        } else {
+            null
+        }
+        val recallBudget = RecallPromptBudget(
+            maxTokens = recallPromptBudget,
+            maxPolicyTokens = minOf(DEFAULT_POLICY_RECALL_MAX_TOKENS, recallPromptBudget),
+            maxPolicyItems = DEFAULT_POLICY_RECALL_MAX_ITEMS,
+        )
+        val baselineRecall = agentTiming.timedAgentStage(
+            AgentTimingEventKind.MEMORY_PROMPT_STARTED,
+            AgentTimingEventKind.MEMORY_PROMPT_FINISHED,
+        ) {
+            compileRecallPrompt(
+                memory = if (assistant.enableMemory) memories else emptyList(),
+                dreams = recallDreamItems,
+                policies = emptyList(),
+                budget = recallBudget,
+                requestPurpose = if (requestPurpose == GenerationRequestPurpose.NORMAL) {
+                    RecallRequestPurpose.NORMAL
+                } else {
+                    RecallRequestPurpose.FINAL_ANSWER_RECOVERY
+                },
+                includeContextualMemory = requestPurpose == GenerationRequestPurpose.NORMAL,
+                tokenEstimator = { text ->
+                    requestTokenEstimator.estimateMessage(UIMessage.system(text)).baseTokens
+                },
+            )
+        }
+        val learnedRecallCompilation = if (policyAnchor != null && policyPacket != null) {
+            compileRecallPrompt(
+                memory = if (assistant.enableMemory) memories else emptyList(),
+                dreams = recallDreamItems,
+                policies = policyPacket.candidates,
+                budget = recallBudget,
+                requestPurpose = RecallRequestPurpose.NORMAL,
+                includeContextualMemory = true,
+                tokenEstimator = { text ->
+                    requestTokenEstimator.estimateMessage(UIMessage.system(text)).baseTokens
+                },
+            )
+        } else {
+            null
+        }
+        val learnedRecall = learnedRecallCompilation
+            ?.takeIf { it.manifest.actualPolicyItems.isNotEmpty() }
+        val memoryCompileResult = compileMemoryPrompt(
+            memories = if (assistant.enableMemory) memories else emptyList(),
+            includeContextual = requestPurpose == GenerationRequestPurpose.NORMAL,
+            maxTokens = recallPromptBudget,
+            tokenEstimator = { text ->
+                requestTokenEstimator.estimateMessage(UIMessage.system(text)).baseTokens
+            },
+        )
+        val breakdownMemoryPrompt = memoryCompileResult.text
         val requestMode =
             "${requestPurpose.name.lowercase()}:${if (stream) "stream" else "single"}"
         // Allocate once before either hard gate. Overflow and success records for this attempted
@@ -2864,6 +3096,7 @@ class GenerationHandler(
             finalMessages: List<UIMessage>,
             callIndex: Int = providerCallIndex,
             mode: String = requestMode,
+            recallPrompt: String = breakdownMemoryPrompt,
         ): RequestBreakdownDiagnostic = RequestBreakdownDiagnostic.create(
             generationId = diagnosticHandle.generationId,
             providerCallIndex = callIndex,
@@ -2876,7 +3109,7 @@ class GenerationHandler(
             assistantPrompt = breakdownAssistantPrompt,
             userIdentityPrompt = breakdownUserIdentityPrompt,
             toolSystemPrompts = breakdownToolPrompts,
-            memoryPrompt = breakdownMemoryPrompt,
+            memoryPrompt = recallPrompt,
             recentChatsPrompt = breakdownRecentChatsPrompt,
             dynamicSystemAddendum = providerSystemAddendum,
             memoryCount = memoryCompileResult.actualIncludedIds.size,
@@ -2912,8 +3145,8 @@ class GenerationHandler(
             AgentTimingEventKind.SYSTEM_PROMPT_FINISHED,
         ) {
             createSystemPromptLayout(
-                memoryPrompt = breakdownMemoryPrompt,
-                dreamPrompt = dreamContext.renderedSection,
+                recallPrompt = baselineRecall.text,
+                reserveRuntimeContextEnvelope = true,
             )
         }
         val providerIdentityMessages = prepareSecondUserProviderMessages(systemPromptLayout.initialMessages)
@@ -2984,7 +3217,7 @@ class GenerationHandler(
         }
         val finalContextCandidateMessages =
             systemPromptLayout.applyVolatileContext(transformedMessages)
-        val contextPreparation = try {
+        val baselineContextPreparation = try {
             agentTiming.timedAgentStage(
                 AgentTimingEventKind.CONTEXT_GATE_FINAL_STARTED,
                 AgentTimingEventKind.CONTEXT_GATE_FINAL_FINISHED,
@@ -3030,8 +3263,254 @@ class GenerationHandler(
             Log.w(TAG, "context hard cap rejected final provider projection: ${overflow.overflow.kind}")
             throw overflow
         }
+        val baselinePrepared = PreparedPolicyProviderProjection(
+            initialInputMessages = providerEphemeralMessages,
+            initialPreparation = initialContextPreparation,
+            finalInputMessages = finalContextCandidateMessages,
+            finalPreparation = baselineContextPreparation,
+        )
+        val learnedPrepared = learnedRecall?.let { recall ->
+            try {
+                val layout = createSystemPromptLayout(
+                    recallPrompt = recall.text,
+                    reserveRuntimeContextEnvelope = true,
+                )
+                val identityMessages = prepareSecondUserProviderMessages(layout.initialMessages)
+                // Recall is applied only after the single input-transform pass. If adding Policy
+                // would alter the stable pre-transform projection, fail closed to baseline rather
+                // than executing arbitrary transformers twice.
+                check(identityMessages == providerIdentityMessages) {
+                    "Learned Recall changed the stable transformer input"
+                }
+                val finalInput = layout.applyVolatileContext(transformedMessages)
+                val final = contextPreparer.prepareOrdinaryChat(
+                    messages = finalInput,
+                    configuredContextWindowTokens = model.userContextWindowTokens,
+                    advertisedContextWindowTokens = model.contextLength,
+                    trustedContextWindowTokens = trustedContextWindowTokens,
+                    requestedOutputTokens = requestedMaxTokens,
+                    tools = tools,
+                    builtInTools = model.tools,
+                ).applyProviderContextProjectionPolicy(
+                    policy = ORDINARY_GENERATION_CONTEXT_PROJECTION_POLICY,
+                    stage = "policy_final",
+                )
+                recall.requirePresentOnFinalWire(final.messages)
+                PreparedPolicyProviderProjection(
+                    initialInputMessages = providerEphemeralMessages,
+                    initialPreparation = initialContextPreparation,
+                    finalInputMessages = finalInput,
+                    finalPreparation = final,
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                // Retrieval/compilation/gating is a pre-dispatch branch. A local failure chooses
+                // the already-prepared baseline; it never sends a learned request and then falls
+                // back with a second provider call.
+                null
+            }
+        }
+        val exposureReservation = if (
+            learnedRecall != null && policyAnchor != null && policyPacket != null
+        ) {
+            learnedRecall.toPolicyExposureReservation(
+                anchor = policyAnchor,
+                packet = policyPacket,
+            )
+        } else {
+            null
+        }
+        val selectedGrantReceipts: List<LearnedPolicyGrantReceipt> = if (
+            exposureReservation != null && learnedRecall != null && applicablePolicyRetrieval != null
+        ) {
+            val actualIds = learnedRecall.manifest.actualPolicyItems.map { it.id }.toSet()
+            applicablePolicyRetrieval.grantReceipts.filter { it.policyId in actualIds }
+                .takeIf { receipts -> receipts.size == actualIds.size }
+                .orEmpty()
+        } else {
+            emptyList()
+        }
+        val grantsStillExactBeforeReservation = if (
+            exposureReservation != null && selectedGrantReceipts.isNotEmpty() &&
+            learnedPolicySource != null && policyLearningContext != null
+        ) {
+            try {
+                learnedPolicySource.revalidateForDispatch(
+                    selectedGrantReceipts,
+                    policyLearningContext.consumingAssistantId,
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                false
+            }
+        } else {
+            false
+        }
+        val exposureMetadata = if (
+            policyAnchor != null && policyPacket != null && policyLearningContext != null &&
+            policyTaskSignature != null
+        ) {
+            PolicyExposureMetadata(
+                replayGeneration = checkNotNull(policyAnchor).replayGeneration,
+                scope = policyLearningContext.scope,
+                taskSignature = policyTaskSignature.value,
+                treatmentArm = POLICY_INJECTION_TREATMENT_ARM,
+                modelIdentity = finalModelIdentity,
+                providerIdentity = finalProviderIdentity,
+                providerGeneration = generationProviderGeneration(
+                    finalProviderIdentity,
+                    finalModelIdentity,
+                ),
+                toolsetFingerprint = generationToolsetFingerprint(tools),
+                contextCompilerAbi = RECALL_PROMPT_COMPILER_REVISION,
+            )
+        } else {
+            null
+        }
+        if (
+            policyExposureStore != null && exposureMetadata != null && policyAnchor != null &&
+            policyPacket != null
+        ) {
+            val applicableIds = policyPacket.candidates.mapTo(linkedSetOf()) { it.policyId }
+            val applicabilityDrops = policyRetrieval.packet.candidates
+                .filter { it.policyId !in applicableIds }
+                .associate { it.policyId to "FINAL_APPLICABILITY_MISMATCH" }
+            policyRetrieval.packet.toPolicyDropObservationReservation(
+                anchor = policyAnchor,
+                policyIds = applicabilityDrops.keys,
+            )?.let { droppedReservation ->
+                policyExposureStore.recordDropObservation(
+                    observation = PolicyExposureDropObservation(
+                        reservation = droppedReservation,
+                        reasonByPolicyId = applicabilityDrops,
+                        compiledBeforeDrop = false,
+                    ),
+                    metadata = exposureMetadata,
+                    frozenNowEpochMs = memoryFrozenNowMs,
+                )
+            }
+            val compilerDrops = learnedRecallCompilation?.dropped.orEmpty()
+                .filter { it.source == RecallPromptSource.POLICY }
+                .associate { it.id to "COMPILER_${it.reason.name}" }
+            policyPacket.toPolicyDropObservationReservation(
+                anchor = policyAnchor,
+                policyIds = compilerDrops.keys,
+            )?.let { droppedReservation ->
+                policyExposureStore.recordDropObservation(
+                    observation = PolicyExposureDropObservation(
+                        reservation = droppedReservation,
+                        reasonByPolicyId = compilerDrops,
+                        compiledBeforeDrop = false,
+                    ),
+                    metadata = exposureMetadata,
+                    frozenNowEpochMs = memoryFrozenNowMs,
+                )
+            }
+        }
+        val observedUtilityPlan = if (
+            learnedPrepared != null && exposureReservation != null && exposureMetadata != null &&
+                policyExposureStore != null && grantsStillExactBeforeReservation &&
+                observedUtilityAssignments != null
+        ) {
+            runCatching {
+                ProductionMatchedObservedUtilityAssignmentPlanner.plan(
+                    reservation = exposureReservation,
+                    metadata = exposureMetadata,
+                    frozenNowMs = memoryFrozenNowMs,
+                )
+            }.getOrNull()
+        } else {
+            null
+        }
+        val policyHoldoutSelected = if (
+            observedUtilityPlan?.arm == ObservedUtilityArm.NON_EXPOSURE &&
+            observedUtilityAssignments != null
+        ) {
+            try {
+                when (observedUtilityAssignments.reserveMatched(observedUtilityPlan)) {
+                    is ObservedUtilityLedgerWriteResult.Applied,
+                    is ObservedUtilityLedgerWriteResult.Duplicate,
+                    -> true
+                    is ObservedUtilityLedgerWriteResult.Conflict,
+                    ObservedUtilityLedgerWriteResult.Unavailable,
+                    -> false
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                false
+            }
+        } else {
+            false
+        }
+        val policyAttemptObserver = if (
+            learnedPrepared != null && exposureReservation != null && exposureMetadata != null &&
+                policyExposureStore != null && grantsStillExactBeforeReservation &&
+                observedUtilityPlan?.arm != ObservedUtilityArm.NON_EXPOSURE
+        ) {
+            PolicyExposureAttemptObserver.create(
+                store = policyExposureStore,
+                reservation = exposureReservation,
+                metadata = exposureMetadata,
+                frozenNowEpochMs = memoryFrozenNowMs,
+                onReservedBeforeCompileOrInjection = {
+                    val plan = observedUtilityPlan
+                    if (plan == null) {
+                        true
+                    } else {
+                        when (observedUtilityAssignments?.reserveMatched(plan)) {
+                            is ObservedUtilityLedgerWriteResult.Applied,
+                            is ObservedUtilityLedgerWriteResult.Duplicate,
+                            -> true
+                            is ObservedUtilityLedgerWriteResult.Conflict,
+                            ObservedUtilityLedgerWriteResult.Unavailable,
+                            null,
+                            -> false
+                        }
+                    }
+                },
+            )
+        } else {
+            null
+        }
+        if (
+            policyAttemptObserver == null && !policyHoldoutSelected && exposureReservation != null &&
+            exposureMetadata != null && policyExposureStore != null
+        ) {
+            val dropReason = when {
+                learnedPrepared == null -> "FINAL_CONTEXT_GATE_REJECTED"
+                !grantsStillExactBeforeReservation -> "GRANT_REVALIDATION_FAILED"
+                observedUtilityPlan?.arm == ObservedUtilityArm.NON_EXPOSURE ->
+                    "UTILITY_ASSIGNMENT_FAILED"
+                else -> "EXPOSURE_RESERVATION_FAILED"
+            }
+            policyExposureStore.recordDropObservation(
+                observation = PolicyExposureDropObservation(
+                    reservation = exposureReservation,
+                    reasonByPolicyId = exposureReservation.bundle.policies.associate {
+                        it.policyId to dropReason
+                    },
+                    compiledBeforeDrop = true,
+                ),
+                metadata = exposureMetadata,
+                frozenNowEpochMs = memoryFrozenNowMs,
+            )
+        }
+        if (policyAttemptObserver != null) {
+            checkNotNull(runControl).recordPolicyExposureReservation(
+                checkNotNull(exposureReservation).key.reservationId,
+            )
+        }
+        val policySelected = policyAttemptObserver != null
+        val selectedRecall = if (policySelected) checkNotNull(learnedRecall) else baselineRecall
+        val selectedPrepared = if (policySelected) checkNotNull(learnedPrepared) else baselinePrepared
+        val contextPreparation = selectedPrepared.finalPreparation
         val internalMessages = contextPreparation.messages
-        val dreamPresentOnFinalWire = dreamContext.requirePresentOnFinalWire(internalMessages)
+        selectedRecall.requirePresentOnFinalWire(internalMessages)
+        val dreamPresentOnFinalWire =
+            selectedRecall.manifest.actualDreamItems.isNotEmpty() && selectedRecall.text.isNotEmpty()
         dreamRuntimeDiagnosticsSink.recordSafely(
             dreamContext.diagnostic.copy(
                 presentOnFinalWire = dreamPresentOnFinalWire,
@@ -3044,12 +3523,13 @@ class GenerationHandler(
                 "estimatedRequestTokens=${contextPreparation.estimatedRequestTokens}, " +
                 "summaryUsed=${contextPreparation.summaryUsed}, " +
                 "windowSource=${resolvedContextWindow.source}, " +
-                "memoryBudgetTokens=$memoryPromptBudget, " +
+                "memoryBudgetTokens=$recallPromptBudget, " +
                 "memoryInjected=${memoryCompileResult.actualIncludedIds.size}, " +
                 "memoryDropped=${memoryCompileResult.dropped.size}, " +
-                "dreamBudgetTokens=$dreamPromptBudget, " +
+                "dreamBudgetTokens=$recallPromptBudget, " +
                 "dreamStatus=${dreamContext.status}, " +
-                "dreamInjected=${dreamContext.compileResult?.actualClaimCount ?: 0}, " +
+                "dreamInjected=${selectedRecall.manifest.actualDreamItems.size}, " +
+                "policyInjected=${selectedRecall.manifest.actualPolicyItems.size}, " +
                 "advertisedModelWindowTokens=${contextPreparation.advertisedContextWindowTokens ?: "none"}",
         )
 
@@ -3059,33 +3539,31 @@ class GenerationHandler(
             .mapTo(linkedSetOf()) { tool -> tool.toolCallId }
         var messages: List<UIMessage> = messages
         var terminalTracker = GenerationTerminalTracker()
-        val finalWireProjectionText = try {
-            json.encodeToString(internalMessages)
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (error: Exception) {
-            // An incomplete namespace is more dangerous than a cold cache.
-            Log.w(TAG, "Unable to build final-wire cache identity; disabling warm reuse", error)
-            null
-        }
-        val providerCacheIdentity = finalWireProjectionText?.let { finalWire ->
-            buildProviderCacheIdentity(
-                conversationId = conversationId?.toString(),
-                assistantId = assistant.id.toString(),
-                memoryScopeId = memoryScopeId,
-                actualMemoryIds = memoryCompileResult.actualIncludedIds,
-                memoryProjectionText = memoryCompileResult.text,
-                compilerRevision = memoryCompileResult.compilerRevision,
-                finalWireProjectionText = finalWire,
-                dreamCacheProjectionCanonicalJson = dreamContext.compileResult
-                    ?.takeIf { it.status == DreamRuntimeCompileStatus.COMPILED }
-                    ?.cacheProjectionDigestInput
-                    ?.canonicalJson(),
-                dreamCompilerRevision = dreamContext.compileResult
-                    ?.takeIf { it.status == DreamRuntimeCompileStatus.COMPILED }
-                    ?.compilerRevision,
-            )
-        }
+        val providerCacheIdentity = buildProviderCacheIdentity(
+            conversationId = conversationId?.toString(),
+            assistantId = assistant.id.toString(),
+            memoryScopeId = memoryScopeId,
+            actualMemoryIds = selectedRecall.manifest.actualMemoryItems.map { it.id.toInt() },
+            memoryProjectionText = memoryCompileResult.text,
+            compilerRevision = memoryCompileResult.compilerRevision,
+            dreamCacheProjectionCanonicalJson = dreamContext.compileResult
+                ?.takeIf {
+                    it.status == DreamRuntimeCompileStatus.COMPILED &&
+                        selectedRecall.manifest.actualDreamItems.isNotEmpty()
+                }
+                ?.cacheProjectionDigestInput
+                ?.canonicalJson(),
+            dreamCompilerRevision = dreamContext.compileResult
+                ?.takeIf {
+                    it.status == DreamRuntimeCompileStatus.COMPILED &&
+                        selectedRecall.manifest.actualDreamItems.isNotEmpty()
+                }
+                ?.compilerRevision,
+            policyProjectionDigest = selectedRecall.policyProjectionDigestOrNull(),
+            policyCompilerRevision = selectedRecall.manifest.actualPolicyItems
+                .takeIf { it.isNotEmpty() }
+                ?.let { selectedRecall.compilerRevision },
+        )
         val params = agentTiming.timedAgentStage(
             AgentTimingEventKind.REQUEST_BUILD_STARTED,
             AgentTimingEventKind.REQUEST_BUILD_FINISHED,
@@ -3119,9 +3597,12 @@ class GenerationHandler(
         ) }
         var providerStarted = false
         var providerCallUsage: TokenUsage? = null
-        suspend fun recordActualMemoryAccess() {
-            val newlyTouched = memoryCompileResult.actualIncludedIds
+        suspend fun recordActualMemoryAccess(
+            actualRecall: RecallPromptCompileResult = selectedRecall,
+        ) {
+            val newlyTouched = actualRecall.manifest.actualMemoryItems
                 .asSequence()
+                .mapNotNull { item -> item.id.toIntOrNull() }
                 .filterNot(touchedMemoryIds::contains)
                 .toSet()
             if (newlyTouched.isEmpty()) return
@@ -3146,18 +3627,27 @@ class GenerationHandler(
                 }
             }
         }
-        suspend fun recordActualDreamUsage(isRetry: Boolean) {
-            if (!dreamPresentOnFinalWire) return
+        suspend fun recordActualDreamUsage(
+            isRetry: Boolean,
+            actualRecall: RecallPromptCompileResult = selectedRecall,
+        ) {
+            if (actualRecall.manifest.actualDreamItems.isEmpty() || actualRecall.text.isEmpty()) return
             val compiled = dreamContext.compileResult
                 ?.takeIf { it.status == DreamRuntimeCompileStatus.COMPILED }
                 ?: return
+            val actualRefs = actualRecall.manifest.actualDreamItems.map { actual ->
+                DreamRuntimeClaimRef(
+                    claimId = actual.id,
+                    claimRevision = requireNotNull(actual.revision),
+                )
+            }
             // Provider retries are separate wire requests and must remain observable. Primary
             // tool-loop turns still de-duplicate the same Claim refs within one generation so a
             // future durable recorder cannot turn a shared frozen projection into write churn.
             val newlyUsed = if (isRetry) {
-                compiled.actualClaimRefs
+                actualRefs
             } else {
-                compiled.actualClaimRefs.filterNot(touchedDreamClaimRefs::contains)
+                actualRefs.filterNot(touchedDreamClaimRefs::contains)
             }
             if (newlyUsed.isEmpty()) return
             try {
@@ -3198,7 +3688,10 @@ class GenerationHandler(
         val breakdown = agentTiming.timedAgentStage(
             AgentTimingEventKind.REQUEST_BREAKDOWN_BUILD_STARTED,
             AgentTimingEventKind.REQUEST_BREAKDOWN_BUILD_FINISHED,
-        ) { buildRequestBreakdown(internalMessages)
+        ) { buildRequestBreakdown(
+            finalMessages = internalMessages,
+            recallPrompt = selectedRecall.text,
+        )
             .withContextBudget(
             effectiveContextWindowTokens = contextPreparation.enforcedWindowTokens,
             requestedOutputTokens = contextPreparation.effectiveMaxOutputTokens,
@@ -3206,15 +3699,15 @@ class GenerationHandler(
             .withContextGate(
                 stage = RequestContextGateStage.INITIAL,
                 status = RequestContextGateStatus.SUCCESS,
-                trace = initialContextPreparation.trace,
-                originalMediaTokens = mediaTokens(providerEphemeralMessages),
-                finalMediaTokens = mediaTokens(initialContextPreparation.messages),
+                trace = selectedPrepared.initialPreparation.trace,
+                originalMediaTokens = mediaTokens(selectedPrepared.initialInputMessages),
+                finalMediaTokens = mediaTokens(selectedPrepared.initialPreparation.messages),
             )
             .withContextGate(
                 stage = RequestContextGateStage.FINAL,
                 status = RequestContextGateStatus.SUCCESS,
                 trace = contextPreparation.trace,
-                originalMediaTokens = mediaTokens(finalContextCandidateMessages),
+                originalMediaTokens = mediaTokens(selectedPrepared.finalInputMessages),
                 finalMediaTokens = mediaTokens(contextPreparation.messages),
             ) }
         agentTiming.timedAgentStage(
@@ -3238,7 +3731,83 @@ class GenerationHandler(
             DefaultProviderTurnRunner(runControl).run(
                 ProviderTurnRequest(
                     stream = stream,
-                    beforeAttempt = { isRetry ->
+                    beforeAttempt = null,
+                    preDispatchFence = if (policySelected) {
+                        { _, _ ->
+                            learnedPolicySource?.revalidateForDispatch(
+                                selectedGrantReceipts,
+                                checkNotNull(policyLearningContext).consumingAssistantId,
+                            ) == true
+                        }
+                    } else {
+                        null
+                    },
+                    primaryFallback = if (policySelected) {
+                        ProviderPrimaryFallback(
+                            streamCall = {
+                                providerImpl.streamText(
+                                    providerSetting = provider,
+                                    messages = baselinePrepared.finalPreparation.messages,
+                                    params = params.copy(
+                                        providerCacheIdentity = buildProviderCacheIdentity(
+                                            conversationId = conversationId?.toString(),
+                                            assistantId = assistant.id.toString(),
+                                            memoryScopeId = memoryScopeId,
+                                            actualMemoryIds = baselineRecall.manifest.actualMemoryItems
+                                                .map { it.id.toInt() },
+                                            memoryProjectionText = memoryCompileResult.text,
+                                            compilerRevision = memoryCompileResult.compilerRevision,
+                                            dreamCacheProjectionCanonicalJson = dreamContext.compileResult
+                                                ?.takeIf {
+                                                    it.status == DreamRuntimeCompileStatus.COMPILED &&
+                                                        baselineRecall.manifest.actualDreamItems
+                                                            .isNotEmpty()
+                                                }
+                                                ?.cacheProjectionDigestInput
+                                                ?.canonicalJson(),
+                                            dreamCompilerRevision = dreamContext.compileResult
+                                                ?.takeIf {
+                                                    it.status == DreamRuntimeCompileStatus.COMPILED &&
+                                                        baselineRecall.manifest.actualDreamItems
+                                                            .isNotEmpty()
+                                                }
+                                                ?.compilerRevision,
+                                        ),
+                                    ),
+                                )
+                            },
+                            retryStreamCall = if (watchdogEnabled) {
+                                {
+                                    providerImpl.streamText(
+                                        providerSetting = provider,
+                                        messages = baselinePrepared.finalPreparation.messages,
+                                        params = params.copy(
+                                            freshConnection = true,
+                                            providerCacheIdentity = null,
+                                        ),
+                                    )
+                                }
+                            } else {
+                                null
+                            },
+                            singleCall = {
+                                providerImpl.generateText(
+                                    providerSetting = provider,
+                                    messages = baselinePrepared.finalPreparation.messages,
+                                    params = params.copy(providerCacheIdentity = null),
+                                )
+                            },
+                            afterAdapterInvocation = {
+                                // Baseline Memory/Dream usage is independent from a Policy
+                                // reservation that lost its final authority fence.
+                                recordActualMemoryAccess(baselineRecall)
+                                recordActualDreamUsage(false, baselineRecall)
+                            },
+                        )
+                    } else {
+                        null
+                    },
+                    afterAdapterInvocation = { isRetry ->
                         recordActualMemoryAccess()
                         recordActualDreamUsage(isRetry)
                     },
@@ -3334,6 +3903,7 @@ class GenerationHandler(
                         null
                     },
                     timingHook = providerTimingHook,
+                    attemptObserver = policyAttemptObserver,
                 )
             )
         } catch (t: Throwable) {
@@ -3388,22 +3958,22 @@ class GenerationHandler(
             providerType = provider::class.simpleName ?: "unknown",
             requestMode = requestMode,
             contextOriginalTokens = (
-                initialContextPreparation.trace.originalMessageTokens.toLong() +
-                    initialContextPreparation.trace.toolSchemaTokens
+                selectedPrepared.initialPreparation.trace.originalMessageTokens.toLong() +
+                    selectedPrepared.initialPreparation.trace.toolSchemaTokens
                 ).coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
             contextPlannedTokens = (
                 contextPreparation.trace.finalMessageTokens.toLong() +
                     contextPreparation.trace.toolSchemaTokens
                 ).coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
             contextWindowTokens = contextPreparation.enforcedWindowTokens,
-            contextCompressed = initialContextPreparation.trace.droppedMessages > 0 ||
-                initialContextPreparation.trace.strippedHistoricalReasoningParts > 0 ||
-                initialContextPreparation.trace.outputClamped ||
+            contextCompressed = selectedPrepared.initialPreparation.trace.droppedMessages > 0 ||
+                selectedPrepared.initialPreparation.trace.strippedHistoricalReasoningParts > 0 ||
+                selectedPrepared.initialPreparation.trace.outputClamped ||
                 contextPreparation.trace.droppedMessages > 0 ||
                 contextPreparation.trace.strippedHistoricalReasoningParts > 0 ||
                 contextPreparation.trace.outputClamped,
             historicalReasoningRemoved =
-                initialContextPreparation.trace.strippedHistoricalReasoningParts +
+                selectedPrepared.initialPreparation.trace.strippedHistoricalReasoningParts +
                     contextPreparation.trace.strippedHistoricalReasoningParts,
         )
         return terminal

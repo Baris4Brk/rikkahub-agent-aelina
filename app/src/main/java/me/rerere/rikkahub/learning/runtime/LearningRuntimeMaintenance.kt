@@ -6,6 +6,7 @@ import me.rerere.rikkahub.learning.handoff.LearningConsumeResult
 import me.rerere.rikkahub.learning.handoff.LearningHandoffConsumer
 import me.rerere.rikkahub.learning.handoff.LearningOutboxReader
 import me.rerere.rikkahub.learning.handoff.LearningReconciliationScanner
+import me.rerere.rikkahub.learning.handoff.LearningReconciliationWorkRemainsException
 import me.rerere.rikkahub.learning.jobs.LearningDrainResult
 import me.rerere.rikkahub.learning.jobs.LearningDrainMode
 import me.rerere.rikkahub.learning.jobs.LearningJobBatchStopReason
@@ -13,6 +14,7 @@ import me.rerere.rikkahub.learning.jobs.LearningJobCoordinator
 import me.rerere.rikkahub.learning.jobs.LearningJobHandlerRegistry
 import me.rerere.rikkahub.learning.jobs.LearningJobRunner
 import me.rerere.rikkahub.learning.storage.LearningDatabase
+import me.rerere.rikkahub.learning.storage.LearningJobType
 import kotlin.uuid.Uuid
 
 private const val MAX_MAINTENANCE_JOBS = 16
@@ -24,10 +26,18 @@ data class LearningRuntimeMaintenanceRequest(
     val monotonicDeadlineMs: Long,
     val processJobs: Boolean = false,
     val mode: LearningDrainMode = LearningDrainMode.RECONCILE_AND_DRAIN,
+    /** Optional claim allow-list for synchronous callers that need one exact derived stage. */
+    val eligibleJobTypes: Set<LearningJobType>? = null,
 ) {
     init {
         require(maxJobs in 1..MAX_MAINTENANCE_JOBS) { "Unsafe maintenance job limit" }
         require(monotonicDeadlineMs >= 0L) { "Negative maintenance deadline" }
+        require(eligibleJobTypes == null || eligibleJobTypes.isNotEmpty()) {
+            "Empty maintenance job allow-list"
+        }
+        require(processJobs || eligibleJobTypes == null) {
+            "A maintenance job allow-list requires job processing"
+        }
     }
 }
 
@@ -62,6 +72,10 @@ internal suspend fun runLearningRuntimeMaintenanceCycle(
     monotonicMs: () -> Long,
     processSessionId: Uuid,
     jobHandlerRegistry: LearningJobHandlerRegistry,
+    learnedWorkflowErasePort:
+        me.rerere.rikkahub.learning.privacy.ExactScopeLearnedWorkflowErasePort? = null,
+    durableLearnedWorkflowPrivacyPort:
+        me.rerere.rikkahub.learning.privacy.DurableLearnedWorkflowPrivacyPort? = null,
 ): LearningDrainResult {
     require(frozenNowMs >= 0L) { "Negative maintenance clock" }
     if (!session.isCurrent()) return LearningDrainResult.RETRY
@@ -72,6 +86,8 @@ internal suspend fun runLearningRuntimeMaintenanceCycle(
         database = database,
         outboxReader = outboxReader,
         maxBatchElapsedMs = minOf(MAX_CONSUMER_ELAPSED_MS, consumerBudgetMs),
+        learnedWorkflowErasePort = learnedWorkflowErasePort,
+        durableLearnedWorkflowPrivacyPort = durableLearnedWorkflowPrivacyPort,
     ).consumeOnce(frozenNowMs)
     if (!session.isCurrent()) return LearningDrainResult.RETRY
 
@@ -86,15 +102,19 @@ internal suspend fun runLearningRuntimeMaintenanceCycle(
             if (bootstrapBudgetMs <= 0L) {
                 LearningDrainResult.WORK_REMAINS
             } else {
-                LearningBootstrapCoordinator(
-                    database = database,
-                    outboxReader = outboxReader,
-                    scanner = reconciliationScanner,
-                    clockMs = wallClockMs,
-                    monotonicMs = monotonicMs,
-                    maxElapsedMs = minOf(MAX_BOOTSTRAP_ELAPSED_MS, bootstrapBudgetMs),
-                ).bootstrap(frozenNowMs)
-                LearningDrainResult.WORK_REMAINS
+                try {
+                    LearningBootstrapCoordinator(
+                        database = database,
+                        outboxReader = outboxReader,
+                        scanner = reconciliationScanner,
+                        clockMs = wallClockMs,
+                        monotonicMs = monotonicMs,
+                        maxElapsedMs = minOf(MAX_BOOTSTRAP_ELAPSED_MS, bootstrapBudgetMs),
+                    ).bootstrap(frozenNowMs)
+                    LearningDrainResult.WORK_REMAINS
+                } catch (_: LearningReconciliationWorkRemainsException) {
+                    LearningDrainResult.WORK_REMAINS
+                }
             }
         }
 
@@ -118,6 +138,8 @@ internal suspend fun runLearningRuntimeMaintenanceCycle(
                         alreadyDidWork = true,
                         processSessionId = processSessionId,
                         jobHandlerRegistry = jobHandlerRegistry,
+                        learnedWorkflowErasePort = learnedWorkflowErasePort,
+                        durableLearnedWorkflowPrivacyPort = durableLearnedWorkflowPrivacyPort,
                     )
 
                 request.processJobs -> runJobsOnce(
@@ -150,6 +172,8 @@ internal suspend fun runLearningRuntimeMaintenanceCycle(
                     alreadyDidWork = false,
                     processSessionId = processSessionId,
                     jobHandlerRegistry = jobHandlerRegistry,
+                    learnedWorkflowErasePort = learnedWorkflowErasePort,
+                    durableLearnedWorkflowPrivacyPort = durableLearnedWorkflowPrivacyPort,
                 )
             } else if (request.processJobs) {
                 runJobsOnce(
@@ -181,19 +205,51 @@ private suspend fun reconcileAndDrainOnce(
     alreadyDidWork: Boolean,
     processSessionId: Uuid,
     jobHandlerRegistry: LearningJobHandlerRegistry,
+    learnedWorkflowErasePort:
+        me.rerere.rikkahub.learning.privacy.ExactScopeLearnedWorkflowErasePort?,
+    durableLearnedWorkflowPrivacyPort:
+        me.rerere.rikkahub.learning.privacy.DurableLearnedWorkflowPrivacyPort?,
 ): LearningDrainResult {
     if (!session.isCurrent() || remainingBudgetMs(request.monotonicDeadlineMs, monotonicMs) <= 0L) {
         return LearningDrainResult.WORK_REMAINS
     }
     val fixedDescriptor = outboxReader.inspect()
-    reconciliationScanner.scanAndRepairProvableTerminalEvents(
-        stream = fixedDescriptor,
-        frozenNowMs = frozenNowMs,
-        limits = me.rerere.rikkahub.learning.handoff.LearningBootstrapScanLimits(
-            maxRowsPerPage = 64,
-            maxPages = 16,
-        ),
-    )
+    val checkpoint = database.checkpointDao().find(fixedDescriptor.streamId.toString())
+        ?: throw LearningCheckpointConflictException()
+    try {
+        val checkpointDao = database.checkpointDao()
+        reconciliationScanner.scanAndRepairProvableTerminalEvents(
+            stream = fixedDescriptor,
+            cursorAccess = object :
+                me.rerere.rikkahub.learning.handoff.LearningReconciliationCursorAccess {
+                override val streamId: String = fixedDescriptor.streamId.toString()
+                override val replayGeneration: Long = checkpoint.replayGeneration
+
+                override suspend fun load(): String? = checkpointDao.findReconciliationCursor(
+                    streamId = streamId,
+                    replayGeneration = replayGeneration,
+                )
+
+                override suspend fun compareAndSet(
+                    expectedCursorJson: String?,
+                    newCursorJson: String?,
+                ): Boolean = checkpointDao.compareAndSetReconciliationCursor(
+                    streamId = streamId,
+                    replayGeneration = replayGeneration,
+                    expectedCursorJson = expectedCursorJson,
+                    newCursorJson = newCursorJson,
+                    updatedAtMs = frozenNowMs,
+                ) == 1
+            },
+            frozenNowMs = frozenNowMs,
+            limits = me.rerere.rikkahub.learning.handoff.LearningBootstrapScanLimits(
+                maxRowsPerPage = 64,
+                maxPages = 16,
+            ),
+        )
+    } catch (_: LearningReconciliationWorkRemainsException) {
+        return LearningDrainResult.WORK_REMAINS
+    }
     if (!session.isCurrent() || remainingBudgetMs(request.monotonicDeadlineMs, monotonicMs) <= 0L) {
         return LearningDrainResult.WORK_REMAINS
     }
@@ -210,6 +266,8 @@ private suspend fun reconcileAndDrainOnce(
             MAX_CONSUMER_ELAPSED_MS,
             remainingBudgetMs(request.monotonicDeadlineMs, monotonicMs).coerceAtLeast(1L),
         ),
+        learnedWorkflowErasePort = learnedWorkflowErasePort,
+        durableLearnedWorkflowPrivacyPort = durableLearnedWorkflowPrivacyPort,
     ).consumeOnce(frozenNowMs)
     if (!session.isCurrent()) return LearningDrainResult.RETRY
     return when (repaired) {
@@ -260,6 +318,7 @@ private suspend fun runJobsOnce(
         maxJobs = request.maxJobs,
         monotonicDeadlineMs = request.monotonicDeadlineMs,
         isRuntimeCurrent = session::isCurrent,
+        allowedJobTypes = request.eligibleJobTypes,
     )
     return when (batch.stopReason) {
         LearningJobBatchStopReason.LIMIT_REACHED -> LearningDrainResult.WORK_REMAINS

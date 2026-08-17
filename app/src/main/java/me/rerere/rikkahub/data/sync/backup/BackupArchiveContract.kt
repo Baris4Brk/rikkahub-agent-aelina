@@ -10,6 +10,12 @@ import kotlinx.serialization.json.Json
 
 const val BACKUP_ARCHIVE_FORMAT_VERSION: Int = 1
 const val BACKUP_ARCHIVE_MANIFEST_ENTRY: String = "backup_manifest.json"
+/**
+ * The single whole-AppDatabase snapshot. Content-free policy-grant heads and their revision
+ * journal travel only inside this entry; they are never duplicated into settings or file entries.
+ * The manifest never claims that a grant is rebound: after LearningDatabase rebuild, runtime
+ * eligibility still requires an exact stream/scope/consumer/policy-revision/artifact match.
+ */
 const val BACKUP_ARCHIVE_MAIN_DATABASE_ENTRY: String = "rikka_hub.db"
 const val BACKUP_ARCHIVE_SETTINGS_ENTRY: String = "settings.json"
 
@@ -235,7 +241,7 @@ internal fun isCanonicalBackupSha256(value: String): Boolean =
     value.length == 64 && value.all { it in '0'..'9' || it in 'a'..'f' }
 
 internal fun isCanonicalStreamId(value: String): Boolean = runCatching {
-    UUID.fromString(value).toString() == value
+    value != NIL_UUID && UUID.fromString(value).toString() == value
 }.getOrDefault(false)
 
 internal fun isSafeBackupEntryName(name: String): Boolean {
@@ -267,3 +273,4 @@ private fun rejected(failure: BackupArchiveManifestFailure) =
     BackupArchiveManifestDecodeResult.Rejected(failure)
 
 private val WINDOWS_ABSOLUTE = Regex("^[A-Za-z]:.*")
+private const val NIL_UUID = "00000000-0000-0000-0000-000000000000"

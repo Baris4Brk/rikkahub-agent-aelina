@@ -11,6 +11,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.datetime.LocalDateTime
 import me.rerere.ai.core.MessageRole
 import me.rerere.ai.ui.UIMessageAnnotation
 import me.rerere.ai.ui.UIMessagePart
@@ -41,7 +42,13 @@ class ConversationRuntimeTest {
 
     @Test
     fun `durable command codec preserves cron origin`() {
-        val command = messageCommand("scheduled")
+        val createdAt = LocalDateTime(2026, 8, 17, 16, 0, 0, 123_000_000)
+        val command = SendMessageCommand(
+            RawUserContent(
+                parts = listOf(UIMessagePart.Text("scheduled")),
+                createdAt = createdAt,
+            ),
+        )
         val encoded = CommandCodec.encodeDurable(command, CommandOrigin.CRON)
 
         assertEquals(CommandOrigin.CRON, CommandCodec.decodeDurableOrigin(encoded.second))

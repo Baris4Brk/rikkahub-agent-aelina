@@ -90,6 +90,14 @@ data class LearningInboxEventEntity(
     val messageId: String?,
     @ColumnInfo(name = "message_revision")
     val messageRevision: Long? = null,
+    @ColumnInfo(name = "reward_dimension")
+    val rewardDimension: String? = null,
+    @ColumnInfo(name = "reward_signal_kind")
+    val rewardSignalKind: String? = null,
+    @ColumnInfo(name = "reward_value_milli")
+    val rewardValueMilli: Int? = null,
+    @ColumnInfo(name = "execution_verification_state")
+    val executionVerificationState: String? = null,
     @ColumnInfo(name = "occurred_at_ms")
     val occurredAtMs: Long?,
     @ColumnInfo(name = "created_at_ms")
@@ -118,6 +126,9 @@ data class LearningInboxEventEntity(
             missingRevisionReason,
             scopeKind,
             completionKind,
+            rewardDimension,
+            rewardSignalKind,
+            executionVerificationState,
         ).forEach { code ->
             require(code.isSafeLearningCode()) { "Invalid learning inbox code" }
         }
@@ -182,6 +193,30 @@ data class LearningInboxEventEntity(
         require((messageId == null) == (messageRevision == null)) {
             "Learning message identity requires an exact revision"
         }
+        require((rewardDimension == null) == (rewardSignalKind == null)) {
+            "Learning reward authority requires a dimension/kind pair"
+        }
+        rewardDimension?.let { dimension ->
+            require(LearningRewardDimension.entries.any { it.name == dimension }) {
+                "Invalid Learning reward dimension"
+            }
+        }
+        rewardSignalKind?.let { kind ->
+            require(LearningRewardSignalKind.entries.any { it.name == kind }) {
+                "Invalid Learning reward signal kind"
+            }
+        }
+        require(rewardValueMilli == null || rewardValueMilli in -1_000..1_000) {
+            "Learning reward milli-value is outside its bound"
+        }
+        require(rewardValueMilli == null || rewardDimension != null) {
+            "Learning reward value has no authority dimension"
+        }
+        executionVerificationState?.let { state ->
+            require(LearningExecutionVerificationState.entries.any { it.name == state }) {
+                "Invalid Learning execution verification state"
+            }
+        }
         require(occurredAtMs == null || occurredAtMs >= 0L) { "Negative occurrence time" }
         require(createdAtMs >= 0L) { "Negative event creation time" }
         require(occurredAtMs == null || occurredAtMs <= createdAtMs) {
@@ -199,3 +234,10 @@ data class LearningInboxEventEntity(
 
 private const val MAX_EVENT_ID_CHARS = 160
 private const val MAX_REFERENCE_ID_CHARS = 256
+
+enum class LearningExecutionVerificationState {
+    NOT_APPLICABLE,
+    UNVERIFIED,
+    VERIFIED_SUCCESS,
+    VERIFIED_FAILURE,
+}

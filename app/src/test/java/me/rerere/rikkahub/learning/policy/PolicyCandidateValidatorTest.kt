@@ -154,13 +154,20 @@ class PolicyCandidateValidatorTest {
             emptySet(),
         )
         val inputHash = PolicyCandidateIdFactory.inputSetHash(evidence)
-        val artifact = LearningCanonicalId.digest(
-            "policy-artifact-v1",
-            listOf(type.name, summary.value, summary.value, summary.value, summary.value, summary.value),
+        val provider = "a".repeat(64)
+        val model = "b".repeat(64)
+        val configuration = "c".repeat(64)
+        val template = policyApplicableTemplateIdentity("prompt-v1")
+        val applicability = PolicyCandidateApplicabilityIdentity(
+            emptySet(), model, provider, template, configuration, 1L, null, null,
+        )
+        val artifact = policyArtifactSha256(
+            type, summary.value, summary.value, summary.value, summary.value, summary.value,
+            emptySet(), model, provider, template, configuration, 1L, null, null,
         )
         return PolicyCandidateDraft(
             candidateId = PolicyCandidateIdFactory.candidateId(
-                scope, signature, inputHash, "distiller-v1", "model-v1", "prompt-v1", 1,
+                scope, signature, inputHash, provider, model, "prompt-v1", 2, applicability,
             ),
             scope = scope,
             taskSignature = signature,
@@ -172,12 +179,19 @@ class PolicyCandidateValidatorTest {
             failureMode = summary,
             evidence = evidence,
             applicableToolSchemas = emptySet(),
+            applicableModelIdentity = model,
+            applicableProviderIdentity = provider,
+            applicableTemplateIdentity = template,
+            applicableConfigurationIdentity = configuration,
+            applicableConfigurationGeneration = 1L,
+            applicableCapabilityDigest = null,
+            applicableAuthorityDigest = null,
             inputSetHash = inputHash,
             artifactHash = artifact,
-            producerIdentity = "distiller-v1",
-            modelIdentity = "model-v1",
+            producerIdentity = provider,
+            modelIdentity = model,
             promptVersion = "prompt-v1",
-            schemaVersion = 1,
+            schemaVersion = 2,
         )
     }
 }

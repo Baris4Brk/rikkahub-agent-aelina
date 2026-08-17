@@ -3,8 +3,8 @@ package me.rerere.rikkahub.data.ai
 import java.security.MessageDigest
 import me.rerere.ai.provider.ProviderCacheIdentity
 
-private const val PROVIDER_CACHE_IDENTITY_DOMAIN = "rikkahub.provider-cache-namespace.v3"
-private const val PROVIDER_CACHE_COMPILER_REVISION = "provider-wire-dream-v3"
+private const val PROVIDER_CACHE_IDENTITY_DOMAIN = "rikkahub.provider-cache-namespace.v4"
+private const val PROVIDER_CACHE_COMPILER_REVISION = "provider-recall-projection-v4"
 
 /**
  * Builds the opaque namespace used by local/provider prefix caches.
@@ -21,15 +21,22 @@ internal fun buildProviderCacheIdentity(
     actualMemoryIds: Collection<Int>,
     memoryProjectionText: String,
     compilerRevision: String,
-    /** Exact post-transform, post-hard-gate provider message projection. */
-    finalWireProjectionText: String = memoryProjectionText,
     /** Canonical, identifier-free [DreamCacheProjectionDigestInput] material. */
     dreamCacheProjectionCanonicalJson: String? = null,
     dreamCompilerRevision: String? = null,
+    /** Digest of only the Policy items that survived the final Recall compiler. */
+    policyProjectionDigest: String? = null,
+    policyCompilerRevision: String? = null,
 ): ProviderCacheIdentity? {
     val stableConversationId = conversationId?.takeIf(String::isNotBlank) ?: return null
     require((dreamCacheProjectionCanonicalJson == null) == (dreamCompilerRevision == null)) {
         "Dream cache projection and compiler revision must be supplied together"
+    }
+    require((policyProjectionDigest == null) == (policyCompilerRevision == null)) {
+        "Policy projection and compiler revision must be supplied together"
+    }
+    policyProjectionDigest?.let {
+        require(it.matches(Regex("[0-9a-f]{64}"))) { "Invalid Policy projection digest" }
     }
     val digest = MessageDigest.getInstance("SHA-256")
     digest.updateDimension("domain", PROVIDER_CACHE_IDENTITY_DOMAIN)
@@ -48,9 +55,10 @@ internal fun buildProviderCacheIdentity(
     actualMemoryIds.distinct().sorted().forEach { memoryId ->
         digest.updateDimension("memory_id", memoryId.toString())
     }
-    // Strongly bind reuse to what actually survived transformers and the final context hard gate.
-    // Hashing first keeps the namespace input bounded without persisting or logging prompt text.
-    digest.updateDimension("final_wire_sha256", sha256Utf8(finalWireProjectionText))
+    // Do not bind the entire final request wire here. LiteRT separately fingerprints the exact
+    // system instruction and every ordered conversation turn; including the live user tail in the
+    // ConversationKey would make a clean one-turn append cold on every request. This namespace is
+    // intentionally limited to stable ownership plus the actual recall projection.
     if (dreamCacheProjectionCanonicalJson != null) {
         digest.updateDimension("dream_compiler_revision", checkNotNull(dreamCompilerRevision))
         digest.updateDimension(
@@ -59,6 +67,12 @@ internal fun buildProviderCacheIdentity(
         )
     } else {
         digest.updateDimension("dream_projection", "absent")
+    }
+    if (policyProjectionDigest != null) {
+        digest.updateDimension("policy_compiler_revision", checkNotNull(policyCompilerRevision))
+        digest.updateDimension("policy_projection_sha256", policyProjectionDigest)
+    } else {
+        digest.updateDimension("policy_projection", "absent")
     }
     val opaque = digest.digest().joinToString("") { byte ->
         (byte.toInt() and 0xff).toString(16).padStart(2, '0')

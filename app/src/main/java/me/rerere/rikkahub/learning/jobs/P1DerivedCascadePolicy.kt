@@ -43,9 +43,18 @@ internal object P1DerivedCascadePolicy {
 
     fun afterPolicyDistillation(): Set<LearningJobType> = emptySet()
 
-    /** A trigger creates one job for this newest-first bounded cohort, never one job per prefix. */
-    fun <T> singleDistillationCohort(newestFirstEvidence: List<T>, limit: Int): List<T> {
+    /** A trigger creates one job for one exact producer cohort, never silently mixing producers. */
+    fun <T> singleDistillationCohort(
+        newestFirstEvidence: List<T>,
+        limit: Int,
+        cohortIdentity: (T) -> String = { "single-cohort-v1" },
+    ): List<T> {
         require(limit in 2..64)
-        return newestFirstEvidence.take(limit)
+        val head = newestFirstEvidence.firstOrNull() ?: return emptyList()
+        val exact = cohortIdentity(head)
+        return newestFirstEvidence.asSequence()
+            .filter { cohortIdentity(it) == exact }
+            .take(limit)
+            .toList()
     }
 }

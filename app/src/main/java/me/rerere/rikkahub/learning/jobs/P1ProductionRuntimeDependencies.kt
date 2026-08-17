@@ -19,6 +19,7 @@ import me.rerere.rikkahub.learning.episode.EpisodeId
 import me.rerere.rikkahub.learning.episode.EpisodeSnapshot
 import me.rerere.rikkahub.learning.episode.LearningCompletionKind
 import me.rerere.rikkahub.learning.episode.LearningEpisodeStatus
+import me.rerere.rikkahub.learning.exposure.PolicyExposureOutcomeLinker
 import me.rerere.rikkahub.learning.model.LearningCanonicalId
 import me.rerere.rikkahub.learning.model.LearningFeatureFlagSource
 import me.rerere.rikkahub.learning.model.LearningModelResolution
@@ -35,7 +36,14 @@ import me.rerere.rikkahub.learning.policy.PolicyDistillationMaterialResolver
 import me.rerere.rikkahub.learning.policy.PolicyDistillationPrompt
 import me.rerere.rikkahub.learning.policy.PolicyEvidenceAuthorityOutcome
 import me.rerere.rikkahub.learning.policy.PolicyEvidenceHandle
+import me.rerere.rikkahub.learning.policy.PolicyProviderInputManifest
+import me.rerere.rikkahub.learning.policy.POLICY_PROVIDER_INPUT_IDENTITY_PREFIX
+import me.rerere.rikkahub.learning.policy.runtime.NoOpPolicyOutcomeLinkedObserver
+import me.rerere.rikkahub.learning.policy.runtime.NoOpPolicyOutcomeLinkedObserverFactory
+import me.rerere.rikkahub.learning.policy.runtime.PolicyOutcomeLinkedObserver
+import me.rerere.rikkahub.learning.policy.runtime.PolicyOutcomeLinkedObserverFactory
 import me.rerere.rikkahub.learning.reflection.ReflectionInputComposeResult
+import me.rerere.rikkahub.learning.reflection.ReflectionInputBundle
 import me.rerere.rikkahub.learning.reflection.ReflectionInputComposer
 import me.rerere.rikkahub.learning.reflection.ReflectionJobMaterial
 import me.rerere.rikkahub.learning.reflection.ReflectionJobMaterialResolver
@@ -47,6 +55,8 @@ import me.rerere.rikkahub.learning.reward.RewardComponent
 import me.rerere.rikkahub.learning.reward.RewardJobMaterial
 import me.rerere.rikkahub.learning.reward.RewardJobMaterialResolver
 import me.rerere.rikkahub.learning.reward.RewardSignal
+import me.rerere.rikkahub.learning.reward.RewardAuthorityJobMaterial
+import me.rerere.rikkahub.learning.reward.RewardAuthorityJobMaterialResolver
 import me.rerere.rikkahub.learning.reward.RewardUnknownReason
 import me.rerere.rikkahub.learning.reward.RewardWindow
 import me.rerere.rikkahub.learning.reward.RewardWindowState
@@ -59,18 +69,18 @@ import me.rerere.rikkahub.learning.storage.LearningJobEntity
 import me.rerere.rikkahub.learning.storage.LearningJobType
 import me.rerere.rikkahub.learning.storage.LearningLessonState
 import me.rerere.rikkahub.learning.storage.LearningRewardKnowledge
+import me.rerere.rikkahub.learning.storage.LearningRewardAuthorityOutcome
+import me.rerere.rikkahub.learning.storage.LearningRewardDimension
+import me.rerere.rikkahub.learning.storage.LearningRewardSignalEntity
+import me.rerere.rikkahub.learning.storage.LearningRewardSignalKind
 import me.rerere.rikkahub.learning.storage.LearningRewardWindowEntity
 import me.rerere.rikkahub.learning.storage.LearningRewardWindowState
-import me.rerere.rikkahub.learning.storage.LearningRetentionPolicyV1
-import me.rerere.rikkahub.learning.storage.LearningRetentionResult
-import me.rerere.rikkahub.learning.storage.LearningRetentionStore
+import me.rerere.rikkahub.learning.storage.LearningProviderConfigCohortEntity
+import me.rerere.rikkahub.learning.storage.LearningProviderJobManifestEntity
 import me.rerere.rikkahub.learning.storage.LearningSourceValidityState
 import me.rerere.rikkahub.learning.storage.LearningTraceFeatureEntity
 import me.rerere.rikkahub.learning.storage.StoredLearningEpisodeStatus
-import me.rerere.rikkahub.learning.task.LearningLanguageClass
-import me.rerere.rikkahub.learning.task.LearningModalityClass
-import me.rerere.rikkahub.learning.task.LearningTaskClass
-import me.rerere.rikkahub.learning.task.LearningToolSignature
+import me.rerere.rikkahub.learning.task.RuntimeTaskSignatureClassifier
 import me.rerere.rikkahub.learning.task.TaskSignatureV1
 import me.rerere.rikkahub.learning.trace.SanitizedTraceSummary
 import me.rerere.rikkahub.learning.trace.TraceActionType
@@ -84,28 +94,29 @@ import me.rerere.rikkahub.learning.trace.ExecutionTraceJobMaterial
 import me.rerere.rikkahub.learning.trace.ExecutionTraceJobMaterialResolver
 import kotlin.uuid.Uuid
 
-/**
- * Provider-backed P1 work stays fail-closed until execution bytes/config have a durable attestation.
- * Remote additionally needs transport idempotency; LiteRT needs artifact/runtime-preference identity.
- */
-internal const val P1_REMOTE_TRANSPORT_IDEMPOTENCY_READY = false
-internal const val P1_LOCAL_RUNTIME_ATTESTATION_READY = false
-internal const val P1_DURABLE_PROVIDER_BUDGET_READY = false
-internal const val P1_FROZEN_PROVIDER_INPUT_READY = false
+/** Dispatch facts required at the exact provider boundary; no editable readiness booleans. */
+internal data class P1ProviderExecutionCapabilities(
+    /** LOCAL runtime digest or REMOTE official transport/request digest. */
+    val runtimeAttestationSha256: String?,
+    val exactManifestValidated: Boolean,
+    val durableAttemptAuthorityPresent: Boolean,
+    val exactRemoteConsent: Boolean = false,
+) {
+    val dispatchAttestationSha256: String?
+        get() = runtimeAttestationSha256
+}
 
 internal fun isP1ProviderExecutionAuthorized(
     providerKind: LearningProviderKind,
-    remoteFlagEnabled: Boolean,
-    remoteTransportIdempotencyReady: Boolean = P1_REMOTE_TRANSPORT_IDEMPOTENCY_READY,
-    localRuntimeAttestationReady: Boolean = P1_LOCAL_RUNTIME_ATTESTATION_READY,
-    durableProviderBudgetReady: Boolean = P1_DURABLE_PROVIDER_BUDGET_READY,
-    frozenProviderInputReady: Boolean = P1_FROZEN_PROVIDER_INPUT_READY,
+    capabilities: P1ProviderExecutionCapabilities,
 ): Boolean = when (providerKind) {
     LearningProviderKind.LOCAL_LITERT ->
-        localRuntimeAttestationReady && durableProviderBudgetReady && frozenProviderInputReady
+        capabilities.dispatchAttestationSha256?.matches(LOWER_SHA256) == true &&
+            capabilities.exactManifestValidated && capabilities.durableAttemptAuthorityPresent
     LearningProviderKind.REMOTE ->
-        remoteFlagEnabled && remoteTransportIdempotencyReady && durableProviderBudgetReady &&
-            frozenProviderInputReady
+        capabilities.dispatchAttestationSha256?.matches(LOWER_SHA256) == true &&
+            capabilities.exactManifestValidated && capabilities.durableAttemptAuthorityPresent &&
+            capabilities.exactRemoteConsent
     LearningProviderKind.AICORE -> false
 }
 
@@ -192,15 +203,76 @@ internal class P1LearningModelClaimSource(
     private val host: SettingsBackedBackgroundGenerationHost,
     private val gate: P1RuntimeFeatureGate,
 ) {
-    fun resolve(): ResolvedLearningModel? {
-        val model = (host.resolveSingleAuthorizedForClaim() as? LearningModelResolution.Resolved)
+    suspend fun resolve(): ResolvedLearningModel? {
+        val model = (
+            host.resolveSingleAuthorizedForAttestedClaim() as? LearningModelResolution.Resolved
+        )
             ?.model ?: return null
-        // A durable job can be recovered after process death. Until the provider transport accepts
-        // the job's stable idempotency key, remote retry could duplicate a paid call.
-        if (!isP1ProviderExecutionAuthorized(model.providerKind, gate.remoteReflectionAllowed())) {
-            return null
+        // Exact manifest and attempt authority are proved after recovery/lease. Remote additionally
+        // requires the exact disclosed official provider/model pair at this planning boundary.
+        return model.takeIf { candidate ->
+            when (candidate.providerKind) {
+                LearningProviderKind.LOCAL_LITERT ->
+                    candidate.runtimeAttestationDigest?.matches(LOWER_SHA256) == true
+                LearningProviderKind.REMOTE -> gate.remoteReflectionAllowed() &&
+                    candidate.runtimeAttestationDigest == null &&
+                    host.remoteReflectionDisclosureTarget()?.let { target ->
+                        target.providerIdentityDigest == candidate.providerIdentityDigest &&
+                            target.modelIdentityDigest == candidate.modelIdentityDigest
+                    } == true
+                LearningProviderKind.AICORE -> false
+            }
         }
-        return model
+    }
+
+    fun exactRemoteConsent(model: ResolvedLearningModel): Boolean =
+        model.providerKind == LearningProviderKind.REMOTE && gate.remoteReflectionAllowed() &&
+            host.remoteReflectionDisclosureTarget()?.let { target ->
+                target.providerIdentityDigest == model.providerIdentityDigest &&
+                    target.modelIdentityDigest == model.modelIdentityDigest
+            } == true
+
+    fun expectedDispatchAttestationSha256(
+        model: ResolvedLearningModel,
+        templateVersion: String,
+        inputIdentitySha256: String,
+        providerRequestKey: String,
+        maxOutputTokens: Int,
+    ): String? = when (model.providerKind) {
+        LearningProviderKind.LOCAL_LITERT -> model.runtimeAttestationDigest
+            ?.takeIf(LOWER_SHA256::matches)
+        LearningProviderKind.REMOTE -> if (exactRemoteConsent(model)) {
+            host.expectedRemoteDispatchAttestationSha256(
+                frozenModel = model,
+                templateVersion = templateVersion,
+                inputIdentitySha256 = inputIdentitySha256,
+                providerRequestKey = providerRequestKey,
+                maxOutputTokens = maxOutputTokens,
+            )?.takeIf(LOWER_SHA256::matches)
+        } else {
+            null
+        }
+        LearningProviderKind.AICORE -> null
+    }
+
+    fun matchesExactCurrentConsentAndDispatch(
+        model: ResolvedLearningModel,
+        templateVersion: String,
+        inputIdentitySha256: String,
+        providerRequestKey: String,
+        maxOutputTokens: Int,
+        expectedDispatchAttestationSha256: String,
+    ): Boolean {
+        if (!expectedDispatchAttestationSha256.matches(LOWER_SHA256)) return false
+        return expectedDispatchAttestationSha256(
+            model = model,
+            templateVersion = templateVersion,
+            inputIdentitySha256 = inputIdentitySha256,
+            providerRequestKey = providerRequestKey,
+            maxOutputTokens = maxOutputTokens,
+        )?.let { observed ->
+            constantTimeShaEquals(observed, expectedDispatchAttestationSha256)
+        } == true
     }
 }
 
@@ -215,8 +287,13 @@ internal class RoomEpisodeAssemblyMaterialResolver(
         val event = database.inboxDao().find(input.streamId, input.sourceEventId) ?: return null
         if (!event.matches(input) || event.eventSchemaVersion != P1_EVENT_SCHEMA_VERSION) return null
         if (event.eventTypeCode == "COMMAND_ADMITTED") {
-            validateRootEvent(event) ?: return null
-            return EpisodeAssemblyMutation.ObserveAdmission
+            val root = validateRootEvent(event) ?: return null
+            val anchor = root.toEpisodeAnchor() ?: return null
+            return EpisodeAssemblyMutation.Admit(
+                authority = anchor,
+                taskSignature = defaultTaskSignature(),
+                occurredAtMs = requireNotNull(root.occurredAtMs),
+            )
         }
         if (event.eventTypeCode !in setOf("COMMAND_WAITING_APPROVAL", "COMMAND_TERMINAL")) {
             return null
@@ -230,13 +307,11 @@ internal class RoomEpisodeAssemblyMaterialResolver(
             requireNotNull(event.lineageId),
             requireNotNull(event.branchAnchorMessageId),
         )
-        val observedTaskSignature = event.episodeTaskSignature()
         val traceMaterial = event.toTraceMaterial(anchor.episodeId)
         return EpisodeAssemblyMutation.Complete(
             current = currentEntity?.toDomainSnapshot(),
             authority = anchor,
-            taskSignature = observedTaskSignature
-                ?: currentEntity?.let { TaskSignatureV1.parseOrNull(it.taskSignature) }
+            taskSignature = currentEntity?.let { TaskSignatureV1.parseOrNull(it.taskSignature) }
                 ?: defaultTaskSignature(),
             startedAtMs = requireNotNull(root.occurredAtMs),
             completionKind = completionKind,
@@ -274,22 +349,6 @@ internal class RoomEpisodeAssemblyMaterialResolver(
             )
         ) return null
         return root
-    }
-
-    private suspend fun LearningInboxEventEntity.episodeTaskSignature(): TaskSignatureV1? {
-        val rootCommandId = lineageId ?: return null
-        val finalCommandId = commandId ?: return null
-        val events = database.inboxDao().listExecutionTerminalsForEpisode(
-            streamId = streamId,
-            replayGeneration = replayGeneration,
-            scopeKind = scopeKind ?: return null,
-            scopeId = scopeId ?: return null,
-            conversationId = conversationId ?: return null,
-            rootCommandId = rootCommandId,
-            finalCommandId = finalCommandId,
-            limit = MAX_EPISODE_TOOL_EVENTS + 1,
-        )
-        return taskSignature(events)
     }
 
     private suspend fun LearningInboxEventEntity.toTraceMaterial(
@@ -436,6 +495,8 @@ internal class RoomExecutionTraceJobMaterialResolver(
 internal class RoomReflectionJobMaterialResolver(
     private val database: LearningDatabase,
     private val gate: P1RuntimeFeatureGate,
+    private val manifestKeyer: me.rerere.rikkahub.execution.ExecutionTokenProvider,
+    private val modelClaims: P1LearningModelClaimSource,
 ) : ReflectionJobMaterialResolver {
     override suspend fun resolve(input: LearningJobExecutionInputV1): ReflectionJobMaterial? {
         if (!gate.reflectionEnabled()) throw P1LearningConfigurationUnavailableException()
@@ -443,9 +504,9 @@ internal class RoomReflectionJobMaterialResolver(
         if (
             input.executionSpec.algorithmIdentity != REFLECTION_ALGORITHM_IDENTITY ||
             input.executionSpec.promptIdentity != ReflectionPrompt.TEMPLATE_VERSION ||
-            input.executionSpec.sourceSchemaIdentity != REFLECTION_SOURCE_SCHEMA_IDENTITY ||
             input.executionSpec.outputSchemaIdentity != "episode-lesson-v1"
         ) return null
+        val providerEnvelope = database.findExactProviderEnvelope(input) ?: return null
         val event = database.inboxDao().find(input.streamId, input.sourceEventId) ?: return null
         if (
             !event.matches(input) ||
@@ -454,41 +515,68 @@ internal class RoomReflectionJobMaterialResolver(
         ) return null
         val episode = event.findEpisode(database) ?: return null
         if (episode.status !in REFLECTABLE_EPISODE_STATES) return null
-        val expectedExecutionTraces = database.inboxDao().countExecutionTerminalsForEpisode(
-            episode.streamId,
-            episode.replayGeneration,
-            episode.scopeKind,
-            episode.scopeId,
-            episode.conversationId,
-            episode.rootCommandId,
-            episode.finalCommandId ?: episode.rootCommandId,
+        val composed = database.composeReflectionInput(
+            episode,
+            providerEnvelope.manifest.frozenAtMs,
+        ) ?: return null
+        if (input.executionSpec.sourceSchemaIdentity != composed.inputId) return null
+        val inputIdentity = composed.inputId.substringAfterLast(':')
+        val inputBytes = ReflectionPrompt.create(composed).totalUtf8Bytes.toLong()
+        return ReflectionJobMaterial(
+            input = composed,
+            frozenModel = providerEnvelope.validateAndResolve(
+                input = input,
+                gate = gate,
+                modelClaims = modelClaims,
+                manifestKeyer = manifestKeyer,
+                rebuiltInputIdentity = inputIdentity,
+                rebuiltInputUtf8Bytes = inputBytes,
+                expectedMaxOutputTokens = ReflectionPrompt.MAX_OUTPUT_TOKENS.toLong(),
+                expectedMaxOutputUtf8Bytes = ReflectionPrompt.MAX_OUTPUT_UTF8_BYTES.toLong(),
+                expectedTimeoutMs = P1_PROVIDER_TIMEOUT_MS,
+            ) ?: return null,
         )
-        if (database.episodeDao().countExecutionTraceSources(episode.id) != expectedExecutionTraces) {
-            throw IllegalStateException("execution_traces_not_ready")
+    }
+}
+
+/** Rebuilds exactly the provider-bound Reflection bytes and their source manifest. */
+private suspend fun LearningDatabase.composeReflectionInput(
+    episode: LearningEpisodeEntity,
+    frozenAtMs: Long = Long.MAX_VALUE,
+): ReflectionInputBundle? {
+    val expectedExecutionTraces = inboxDao().countExecutionTerminalsForEpisode(
+        episode.streamId,
+        episode.replayGeneration,
+        episode.scopeKind,
+        episode.scopeId,
+        episode.conversationId,
+        episode.rootCommandId,
+        episode.finalCommandId ?: episode.rootCommandId,
+    )
+    if (episodeDao().countExecutionTraceSources(episode.id) != expectedExecutionTraces) {
+        throw IllegalStateException("execution_traces_not_ready")
+    }
+    val traceRows = episodeDao().listTrace(episode.id, MAX_REFLECTION_TRACE_ROWS)
+    if (
+        traceRows.isEmpty() ||
+        traceRows.any { row -> row.createdAtMs > frozenAtMs } ||
+        traceRows.any { row ->
+            row.sourceType == LearningSourceKind.CONVERSATION_MESSAGE.name &&
+                !row.hasExactValidSource(this, episode)
+        } ||
+        traceRows.none { row ->
+            row.sourceType == LearningSourceKind.CONVERSATION_MESSAGE.name &&
+                row.hasExactValidSource(this, episode)
         }
-        val traceRows = database.episodeDao().listTrace(episode.id, MAX_REFLECTION_TRACE_ROWS)
-        if (
-            traceRows.isEmpty() ||
-            traceRows.any { row ->
-                row.sourceType == LearningSourceKind.CONVERSATION_MESSAGE.name &&
-                    !row.hasExactValidSource(database, episode)
-            } ||
-            traceRows.none { row ->
-                row.sourceType == LearningSourceKind.CONVERSATION_MESSAGE.name &&
-                    row.hasExactValidSource(database, episode)
-            }
-        ) return null
-        val traces = traceRows.toDomainTrace(episode) ?: return null
-        val composed = ReflectionInputComposer.compose(
+    ) return null
+    val traces = traceRows.toDomainTrace(episode) ?: return null
+    return (
+        ReflectionInputComposer.compose(
             episodeId = EpisodeId.parseOrNull(episode.id) ?: return null,
             episodeStatus = episode.status.toDomainStatus() ?: return null,
             features = traces,
-        ) as? ReflectionInputComposeResult.Composed ?: return null
-        return ReflectionJobMaterial(
-            input = composed.input,
-            frozenModel = input.executionSpec.toResolvedModel(gate) ?: return null,
-        )
-    }
+        ) as? ReflectionInputComposeResult.Composed
+    )?.input
 }
 
 internal class RoomRewardJobMaterialResolver(
@@ -533,6 +621,131 @@ internal class RoomRewardJobMaterialResolver(
     }
 }
 
+internal class RoomRewardAuthorityJobMaterialResolver(
+    private val database: LearningDatabase,
+    private val gate: P1RuntimeFeatureGate,
+) : RewardAuthorityJobMaterialResolver {
+    override suspend fun resolve(input: LearningJobExecutionInputV1): RewardAuthorityJobMaterial? {
+        if (input.executionSpec.jobType != LearningJobType.APPLY_REWARD_AUTHORITY_V1) return null
+        val event = database.inboxDao().find(input.streamId, input.sourceEventId) ?: return null
+        if (
+            !event.matches(input) || event.eventTypeCode != "USER_FEEDBACK_RECORDED" ||
+            event.eventSchemaVersion != 3 || event.sourceType != LearningSourceKind.USER_FEEDBACK.name
+        ) return null
+        // Capture consent gates only the first positive feedback projection. Once authority has an
+        // adjacent revision, an ACTIVE replacement or TOMBSTONED retraction is a negative
+        // maintenance fact and must remove/supersede the prior signal even after capture is off.
+        if (!rewardAuthorityCaptureGateAllows(
+                captureEnabled = gate.captureEnabled(),
+                previousSourceRevision = event.previousSourceRevision,
+            )
+        ) throw P1LearningConfigurationUnavailableException()
+        val episode = database.episodeDao().findEpisodesByCommandAuthority(
+            streamId = input.streamId,
+            replayGeneration = input.replayGeneration,
+            scopeKind = input.scopeKind,
+            scopeId = input.scopeId,
+            conversationId = event.conversationId ?: return null,
+            commandId = event.commandId ?: return null,
+        ).singleOrNull() ?: throw IllegalStateException("feedback_episode_not_ready")
+        if (
+            episode.resultAssistantMessageId != event.messageId ||
+            episode.resultAssistantMessageRevision != event.messageRevision
+        ) return null
+        val window = database.episodeDao().findRewardWindowByEpisode(episode.id)
+            ?: throw IllegalStateException("feedback_reward_window_not_ready")
+        val sourceRevision = event.sourceRevision ?: return null
+        val valueMilli = event.rewardValueMilli
+        val active = event.sourceState == "ACTIVE"
+        if (active != (valueMilli != null)) return null
+        val signalId = "reward-signal-v1:" + LearningCanonicalId.digest(
+            "reward-signal-v1",
+            listOf(
+                input.streamId,
+                input.replayGeneration.toString(),
+                input.scopeKind,
+                input.scopeId,
+                requireNotNull(event.sourceId),
+                sourceRevision.toString(),
+                requireNotNull(event.rewardDimension),
+            ),
+        )
+        val integrity = LearningCanonicalId.digest(
+            "reward-feedback-integrity-v1",
+            listOf(
+                requireNotNull(event.sourceId),
+                sourceRevision.toString(),
+                requireNotNull(event.rewardDimension),
+                requireNotNull(event.rewardSignalKind),
+                valueMilli?.toString(),
+                requireNotNull(event.sourceState),
+                requireNotNull(event.messageId),
+                requireNotNull(event.messageRevision).toString(),
+            ),
+        )
+        val signal = LearningRewardSignalEntity(
+            id = signalId,
+            episodeId = episode.id,
+            streamId = input.streamId,
+            replayGeneration = input.replayGeneration,
+            scopeKind = input.scopeKind,
+            scopeId = input.scopeId,
+            authorityEventId = event.eventId,
+            sourceType = LearningSourceKind.USER_FEEDBACK.name,
+            sourceId = requireNotNull(event.sourceId),
+            sourceRevision = sourceRevision,
+            sourceIntegritySha256 = integrity,
+            dimension = requireNotNull(event.rewardDimension),
+            signalKind = requireNotNull(event.rewardSignalKind),
+            knowledge = if (active) LearningRewardKnowledge.KNOWN.name
+                else LearningRewardKnowledge.CENSORED.name,
+            valueMilli = valueMilli,
+            unknownReason = if (active) null else RewardUnknownReason.CENSORED.name,
+            occurredAtMs = requireNotNull(event.occurredAtMs),
+            createdAtMs = event.ingestedAtMs,
+        )
+        val priorSignals = database.rewardSignalDao().listValidSignalsForEpisode(
+            episode.id,
+            MAX_REWARD_SIGNALS,
+        ).filterNot { prior ->
+            prior.sourceType == signal.sourceType && prior.sourceId == signal.sourceId &&
+                event.previousSourceRevision == prior.sourceRevision
+        }
+        val signals = (priorSignals + listOfNotNull(signal.takeIf { active }))
+            .distinctBy { it.id }.sortedBy { it.id }
+        val known = signals.filter { it.knowledge == LearningRewardKnowledge.KNOWN.name }
+        val outcome = foldRewardAuthorityOutcome(known)
+        val setIdentity = LearningCanonicalId.digest(
+            "reward-signal-set-v1",
+            known.flatMap { listOf(it.id, it.sourceRevision.toString(), it.valueMilli.toString()) },
+        )
+        return RewardAuthorityJobMaterial(
+            signal = signal,
+            expectedWindowRevision = window.revision,
+            signalSetSha256 = setIdentity,
+            authorityOutcome = outcome,
+        )
+    }
+}
+
+private fun foldRewardAuthorityOutcome(
+    signals: List<LearningRewardSignalEntity>,
+): LearningRewardAuthorityOutcome {
+    if (signals.isEmpty()) return LearningRewardAuthorityOutcome.UNKNOWN
+    val goalOrUser = signals.filter {
+        it.dimension == LearningRewardDimension.GOAL.name ||
+            it.dimension == LearningRewardDimension.USER.name
+    }.mapNotNull(LearningRewardSignalEntity::valueMilli)
+    if (goalOrUser.any { it < 0 } && goalOrUser.any { it > 0 }) {
+        return LearningRewardAuthorityOutcome.CONFLICT
+    }
+    return when {
+        goalOrUser.any { it < 0 } -> LearningRewardAuthorityOutcome.FAILURE
+        goalOrUser.any { it > 0 } -> LearningRewardAuthorityOutcome.SUCCESS
+        else -> LearningRewardAuthorityOutcome.UNKNOWN
+    }
+}
+
 /** Command persistence/host state cannot by itself prove task success, failure, or user value. */
 internal object P1RewardAuthorityPolicy {
     fun commandTerminalSignals(
@@ -550,6 +763,8 @@ internal object P1RewardAuthorityPolicy {
 internal class RoomPolicyDistillationMaterialResolver(
     private val database: LearningDatabase,
     private val gate: P1RuntimeFeatureGate,
+    private val manifestKeyer: me.rerere.rikkahub.execution.ExecutionTokenProvider,
+    private val modelClaims: P1LearningModelClaimSource,
 ) : PolicyDistillationMaterialResolver {
     override suspend fun resolve(input: LearningJobExecutionInputV1): PolicyDistillationMaterial? {
         if (!gate.policyEnabled()) throw P1LearningConfigurationUnavailableException()
@@ -557,51 +772,71 @@ internal class RoomPolicyDistillationMaterialResolver(
         if (
             input.executionSpec.algorithmIdentity != DISTILLATION_ALGORITHM_IDENTITY ||
             input.executionSpec.promptIdentity != PolicyDistillationPrompt.TEMPLATE_VERSION ||
-            input.executionSpec.outputSchemaIdentity != "policy-candidate-v1"
+            input.executionSpec.outputSchemaIdentity != "policy-candidate-v2"
         ) return null
+        val providerEnvelope = database.findExactProviderEnvelope(input) ?: return null
         val event = database.inboxDao().find(input.streamId, input.sourceEventId) ?: return null
         if (!event.matches(input) || event.eventSchemaVersion != P1_EVENT_SCHEMA_VERSION) return null
         val triggerEpisode = event.findEpisode(database) ?: return null
-        val expectedHash = input.executionSpec.sourceSchemaIdentity
-            .removePrefix(POLICY_INPUT_SCHEMA_PREFIX)
+        val expectedInputIdentity = input.executionSpec.sourceSchemaIdentity
+            .removePrefix(POLICY_PROVIDER_INPUT_IDENTITY_PREFIX)
             .takeIf { it.matches(LOWER_SHA256) } ?: return null
         val eligible = database.distillationEvidence(
             triggerEpisode.scopeKind,
             triggerEpisode.scopeId,
             triggerEpisode.taskSignature,
-            input.createdAtMs,
+            providerEnvelope.manifest.frozenAtMs,
         )
-        val frozenEvidence = (2..minOf(eligible.size, MAX_POLICY_EVIDENCE)).firstNotNullOfOrNull { size ->
-            eligible.take(size).takeIf {
-                PolicyCandidateIdFactory.inputSetHash(it.map(P1DistillationEvidence::handle)) ==
-                    expectedHash
-            }
+        val exactCohortEvidence = P1DerivedCascadePolicy.singleDistillationCohort(
+            eligible,
+            MAX_POLICY_EVIDENCE,
+            P1DistillationEvidence::producerCohortIdentity,
+        )
+        val frozenEvidence = (2..minOf(exactCohortEvidence.size, MAX_POLICY_EVIDENCE))
+            .firstNotNullOfOrNull { size ->
+                exactCohortEvidence.take(size).takeIf { evidence ->
+                    evidence.toPolicyMaterial(
+                        producerIdentity = input.executionSpec.providerIdentity,
+                        modelIdentity = input.executionSpec.modelIdentity,
+                        promptIdentity = input.executionSpec.promptIdentity,
+                    )?.let { material ->
+                        PolicyProviderInputManifest.identity(material.first, material.second)
+                    } == expectedInputIdentity
+                }
         } ?: return null
         if (policyToolsetIdentity(frozenEvidence) != input.executionSpec.toolsetIdentity) return null
-        val aliases = linkedMapOf<String, PolicyEvidenceHandle>()
-        frozenEvidence.forEachIndexed { index, evidence -> aliases["E${index + 1}"] = evidence.handle }
-        val toolSchemas = frozenEvidence.flatMap(P1DistillationEvidence::toolSchemas).toSortedSet()
-        val scope = LearningScope.parseOrNull(input.scopeKind, input.scopeId) ?: return null
-        val policyInput = PolicyDistillationInput(
-            scope = scope,
-            taskSignature = TaskSignatureV1.parseOrNull(triggerEpisode.taskSignature) ?: return null,
-            evidenceAllowlist = aliases,
-            toolSchemaAllowlist = toolSchemas,
+        val (policyInput, payloadJson) = frozenEvidence.toPolicyMaterial(
             producerIdentity = input.executionSpec.providerIdentity,
             modelIdentity = input.executionSpec.modelIdentity,
-            promptVersion = input.executionSpec.promptIdentity,
-        )
+            promptIdentity = input.executionSpec.promptIdentity,
+        ) ?: return null
+        val rebuiltIdentity = PolicyProviderInputManifest.identity(policyInput, payloadJson)
+        if (rebuiltIdentity != expectedInputIdentity) return null
+        val inputBytes = PolicyDistillationPrompt.create(payloadJson).totalUtf8Bytes.toLong()
         return PolicyDistillationMaterial(
             input = policyInput,
-            payloadJson = frozenEvidence.toPolicyPayload(aliases),
-            frozenModel = input.executionSpec.toResolvedModel(gate) ?: return null,
+            payloadJson = payloadJson,
+            frozenModel = providerEnvelope.validateAndResolve(
+                input = input,
+                gate = gate,
+                modelClaims = modelClaims,
+                manifestKeyer = manifestKeyer,
+                rebuiltInputIdentity = rebuiltIdentity,
+                rebuiltInputUtf8Bytes = inputBytes,
+                expectedMaxOutputTokens = PolicyDistillationPrompt.MAX_OUTPUT_TOKENS.toLong(),
+                expectedMaxOutputUtf8Bytes =
+                    me.rerere.rikkahub.learning.policy.ReasoningPolicyDistiller
+                        .MAX_OUTPUT_UTF8_BYTES.toLong(),
+                expectedTimeoutMs = P1_PROVIDER_TIMEOUT_MS,
+            ) ?: return null,
         )
     }
 }
 
 internal class RoomP1DerivedJobEnqueuer(
     private val gate: P1RuntimeFeatureGate,
-    private val modelClaims: P1LearningModelClaimSource,
+    private val policyOutcomeObserver: PolicyOutcomeLinkedObserver =
+        NoOpPolicyOutcomeLinkedObserver,
 ) : P1DerivedJobEnqueuer {
     override suspend fun afterEpisodeCommitted(
         database: LearningDatabase,
@@ -609,30 +844,29 @@ internal class RoomP1DerivedJobEnqueuer(
         event: LearningInboxEventEntity,
         episode: LearningEpisodeEntity,
     ) {
-        val model = if (gate.reflectionEnabled()) modelClaims.resolve() else null
-        val reflectionSpec = model?.let {
-            modelSpec(
-                type = LearningJobType.REFLECT_EPISODE_V1,
-                algorithm = REFLECTION_ALGORITHM_IDENTITY,
-                prompt = ReflectionPrompt.TEMPLATE_VERSION,
-                sourceSchema = REFLECTION_SOURCE_SCHEMA_IDENTITY,
-                toolset = REDACTED_TRACE_TOOLSET_IDENTITY,
-                outputSchema = "episode-lesson-v1",
-                model = it,
-            )
-        }
+        // The output committer and catch-up both invoke this callback while holding the same
+        // LearningDatabase transaction as the terminal Episode projection. Re-read committed
+        // authority and repair only bounded, exact logical-run attempts before optional P1 work.
+        PolicyExposureOutcomeLinker(
+            database = database,
+            outcomeObserver = policyOutcomeObserver,
+        ).replayCommittedTerminal(event, episode)
+        val hasStableSource =
+            database.episodeDao().countValidStableTraceSources(episode.id) > 0L &&
+                episode.hasCompleteExecutionTraceProjection(database)
         val plan = P1DerivedCascadePolicy.afterEpisode(
             episodeStatus = episode.status,
             captureEnabled = gate.captureEnabled(),
             reflectionEnabled = gate.reflectionEnabled(),
             policyEnabled = gate.policyEnabled(),
-            hasStableSource = database.episodeDao().countValidStableTraceSources(episode.id) > 0L &&
-                episode.hasCompleteExecutionTraceProjection(database),
+            hasStableSource = hasStableSource,
             lessonAlreadyExists = database.episodeDao().findLesson(episode.id, 1) != null,
             // Exact replay/model-cohort dedupe is enforced by enqueueExact below. An old cohort
             // must never suppress a job for the currently frozen provider configuration.
             reflectionJobAlreadyExists = false,
-            modelConfigured = model != null,
+            // Provider planning, including a potentially multi-gigabyte artifact SHA, is owned by
+            // post-commit catch-up. This callback always runs inside the output transaction.
+            modelConfigured = false,
         )
         if (!plan.enqueueRewardClose && !plan.enqueueReflection && !plan.attemptPolicyDistillation) {
             return
@@ -653,16 +887,7 @@ internal class RoomP1DerivedJobEnqueuer(
                 ),
             )
         }
-        if (plan.enqueueReflection) {
-            database.enqueueExact(
-                P1LearningJobFactory.create(
-                    source = event,
-                    frozen = requireNotNull(reflectionSpec),
-                    createdAtMs = event.ingestedAtMs,
-                ),
-            )
-        }
-        if (plan.attemptPolicyDistillation) maybeEnqueueDistillation(database, episode)
+        check(!plan.enqueueReflection) { "Provider job planning escaped post-commit maintenance" }
     }
 
     override suspend fun afterLessonCommitted(
@@ -671,8 +896,7 @@ internal class RoomP1DerivedJobEnqueuer(
         event: LearningInboxEventEntity,
         lesson: LearningEpisodeLessonEntity,
     ) {
-        val episode = database.episodeDao().findEpisode(lesson.episodeId) ?: return
-        maybeEnqueueDistillation(database, episode)
+        // Provider planning is post-commit only; this callback executes in the output transaction.
     }
 
     override suspend fun afterRewardCommitted(
@@ -680,8 +904,7 @@ internal class RoomP1DerivedJobEnqueuer(
         input: LearningJobExecutionInputV1,
         reward: LearningRewardWindowEntity,
     ) {
-        val episode = database.episodeDao().findEpisode(reward.episodeId) ?: return
-        maybeEnqueueDistillation(database, episode)
+        // Provider planning is post-commit only; this callback executes in the output transaction.
     }
 
     override suspend fun afterExecutionTraceCommitted(
@@ -689,88 +912,7 @@ internal class RoomP1DerivedJobEnqueuer(
         input: LearningJobExecutionInputV1,
         episode: LearningEpisodeEntity,
     ) {
-        // This runs in the trace job's fenced output transaction. It is the deterministic wake-up
-        // when Episode assembly originally observed an incomplete execution-trace set.
-        maybeEnqueueReflection(database, episode, input.createdAtMs)
-    }
-
-    private suspend fun maybeEnqueueDistillation(
-        database: LearningDatabase,
-        triggerEpisode: LearningEpisodeEntity,
-    ) {
-        val evidence = database.distillationEvidence(
-            triggerEpisode.scopeKind,
-            triggerEpisode.scopeId,
-            triggerEpisode.taskSignature,
-            Long.MAX_VALUE,
-        )
-        if (!P1DerivedCascadePolicy.afterLessonOrReward(gate.policyEnabled(), evidence.size)) return
-        val model = modelClaims.resolve() ?: return
-        // One deterministic, newest-first bounded cohort yields at most one provider-effect job for
-        // this cycle. The full evidence set participates in the frozen input hash/dedupe identity.
-        val frozenEvidence = P1DerivedCascadePolicy.singleDistillationCohort(
-            evidence,
-            MAX_POLICY_EVIDENCE,
-        )
-        val sourceEpisode = frozenEvidence.first().episode
-        val sourceEvent = sourceEpisode.terminalEvent(database) ?: return
-        val inputHash = PolicyCandidateIdFactory.inputSetHash(
-            frozenEvidence.map(P1DistillationEvidence::handle),
-        )
-        database.enqueueExact(
-            P1LearningJobFactory.create(
-                source = sourceEvent,
-                frozen = modelSpec(
-                    type = LearningJobType.DISTILL_POLICY_V1,
-                    algorithm = DISTILLATION_ALGORITHM_IDENTITY,
-                    prompt = PolicyDistillationPrompt.TEMPLATE_VERSION,
-                    sourceSchema = "$POLICY_INPUT_SCHEMA_PREFIX$inputHash",
-                    toolset = policyToolsetIdentity(frozenEvidence),
-                    outputSchema = "policy-candidate-v1",
-                    model = model,
-                ),
-                createdAtMs = maxOf(
-                    sourceEvent.ingestedAtMs,
-                    frozenEvidence.maxOf {
-                        maxOf(
-                            requireNotNull(it.episode.finalizedAtMs),
-                            it.lesson.updatedAtMs,
-                            it.reward.updatedAtMs,
-                        )
-                    },
-                ),
-            ),
-        )
-    }
-
-    private suspend fun maybeEnqueueReflection(
-        database: LearningDatabase,
-        episode: LearningEpisodeEntity,
-        materializedAtMs: Long,
-    ) {
-        if (!gate.reflectionEnabled() || episode.status !in REFLECTABLE_EPISODE_STATES) return
-        if (database.episodeDao().findLesson(episode.id, 1) != null) return
-        val model = modelClaims.resolve() ?: return
-        val event = episode.terminalEvent(database) ?: return
-        if (
-            database.episodeDao().countValidStableTraceSources(episode.id) <= 0L ||
-            !episode.hasCompleteExecutionTraceProjection(database)
-        ) return
-        database.enqueueExact(
-            P1LearningJobFactory.create(
-                source = event,
-                frozen = modelSpec(
-                    type = LearningJobType.REFLECT_EPISODE_V1,
-                    algorithm = REFLECTION_ALGORITHM_IDENTITY,
-                    prompt = ReflectionPrompt.TEMPLATE_VERSION,
-                    sourceSchema = REFLECTION_SOURCE_SCHEMA_IDENTITY,
-                    toolset = REDACTED_TRACE_TOOLSET_IDENTITY,
-                    outputSchema = "episode-lesson-v1",
-                    model = model,
-                ),
-                createdAtMs = maxOf(event.ingestedAtMs, episode.updatedAtMs, materializedAtMs),
-            ),
-        )
+        // Provider planning is post-commit only; the planner will observe this trace on catch-up.
     }
 }
 
@@ -802,19 +944,16 @@ internal sealed interface P1DerivedJobCatchUpResult {
         val redactedInvalidTraceRows: Int,
         val staleInvalidLessons: Int,
         val staleInvalidPolicies: Int,
-        val retention: LearningRetentionResult,
     ) : P1DerivedJobCatchUpResult {
         val didWork: Boolean
             get() = episodesVisited > 0 || redactedInvalidTraceRows > 0 ||
-                staleInvalidLessons > 0 || staleInvalidPolicies > 0 ||
-                retention.totalMutations > 0
+                staleInvalidLessons > 0 || staleInvalidPolicies > 0
 
         val workMayRemain: Boolean
             get() = episodesVisited == CATCH_UP_BATCH_SIZE ||
                 redactedInvalidTraceRows == CATCH_UP_BATCH_SIZE ||
                 staleInvalidLessons == CATCH_UP_BATCH_SIZE ||
-                staleInvalidPolicies == CATCH_UP_BATCH_SIZE ||
-                retention.anyBatchSaturated(CATCH_UP_BATCH_SIZE)
+                staleInvalidPolicies == CATCH_UP_BATCH_SIZE
     }
 
     data class Failed(
@@ -825,6 +964,7 @@ internal sealed interface P1DerivedJobCatchUpResult {
 internal class RoomP1DerivedJobCatchUp(
     private val downstream: P1DerivedJobEnqueuer,
     private val gate: P1RuntimeFeatureGate,
+    private val providerJobs: P1ProviderJobPlanner? = null,
 ) : P1DerivedJobCatchUp {
     private var afterUpdatedAtMs = -1L
     private var afterEpisodeId = ""
@@ -836,6 +976,10 @@ internal class RoomP1DerivedJobCatchUp(
         require(frozenNowMs >= 0L)
         if (!gate.captureEnabled()) return P1DerivedJobCatchUpResult.Disabled
         return try {
+            // Expensive local-runtime attestation happens here, outside every Room transaction.
+            // The planner then opens one short transaction to revalidate and insert immutable
+            // provider jobs/manifests.
+            providerJobs?.prepareOne(database, frozenNowMs)
             val episodesVisited = database.withTransaction {
                 val page = database.episodeDao().listTerminalEpisodePage(
                     afterUpdatedAtMs,
@@ -883,17 +1027,11 @@ internal class RoomP1DerivedJobCatchUp(
                     ),
                 )
             }
-            val retention = LearningRetentionStore(
-                database = database,
-                policy = LearningRetentionPolicyV1 { frozenNowMs },
-                batchLimit = CATCH_UP_BATCH_SIZE,
-            ).sweepOnce()
             P1DerivedJobCatchUpResult.Completed(
                 episodesVisited = episodesVisited,
                 redactedInvalidTraceRows = invalidState.redactedTraceRows,
                 staleInvalidLessons = invalidState.staleLessons,
                 staleInvalidPolicies = invalidState.stalePolicies,
-                retention = retention,
             )
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -909,27 +1047,434 @@ internal class RoomP1DerivedJobCatchUp(
     }
 }
 
+/**
+ * Bounded post-commit planner for provider-backed P1 jobs.
+ *
+ * It first chooses a content-free Episode candidate in a read transaction, resolves the exact
+ * provider/runtime attestation outside Room, then revalidates and inserts job+cohort+manifest in
+ * one short write transaction. At most one provider job is created per maintenance cycle.
+ */
+internal class P1ProviderJobPlanner(
+    private val gate: P1RuntimeFeatureGate,
+    private val models: P1LearningModelClaimSource,
+    private val manifestKeyer: me.rerere.rikkahub.execution.ExecutionTokenProvider,
+) {
+    private var afterUpdatedAtMs = -1L
+    private var afterEpisodeId = ""
+
+    suspend fun prepareOne(database: LearningDatabase, frozenNowMs: Long): Boolean {
+        if (!gate.reflectionEnabled() && !gate.policyEnabled()) return false
+        val candidates = database.withTransaction {
+            val page = database.episodeDao().listTerminalEpisodePage(
+                afterUpdatedAtMs,
+                afterEpisodeId,
+                CATCH_UP_BATCH_SIZE,
+            )
+            if (page.isEmpty()) {
+                afterUpdatedAtMs = -1L
+                afterEpisodeId = ""
+                return@withTransaction emptyList()
+            }
+            page.last().let { last ->
+                afterUpdatedAtMs = last.updatedAtMs
+                afterEpisodeId = last.id
+            }
+            page.filter { episode ->
+                episode.finalizedAtMs != null && episode.finalizedAtMs <= frozenNowMs &&
+                    episode.updatedAtMs <= frozenNowMs
+            }
+        }
+        if (candidates.isEmpty()) return false
+        val model = models.resolve() ?: return false
+        return database.withTransaction {
+            for (candidate in candidates) {
+                val current = database.episodeDao().findEpisode(candidate.id)
+                    ?.takeIf {
+                        it.revision == candidate.revision &&
+                            it.updatedAtMs == candidate.updatedAtMs &&
+                            it.finalizedAtMs != null && it.finalizedAtMs <= frozenNowMs &&
+                            it.updatedAtMs <= frozenNowMs
+                    }
+                    ?: continue
+                val created = if (
+                    gate.reflectionEnabled() &&
+                    database.episodeDao().findLesson(current.id, 1) == null
+                ) {
+                    createReflectionProviderJob(
+                        database, current, model, models, frozenNowMs, manifestKeyer,
+                    )
+                } else if (gate.policyEnabled()) {
+                    createDistillationProviderJob(
+                        database, current, model, models, frozenNowMs, manifestKeyer,
+                    )
+                } else {
+                    false
+                }
+                if (created) return@withTransaction true
+            }
+            false
+        }
+    }
+}
+
+private suspend fun createReflectionProviderJob(
+    database: LearningDatabase,
+    episode: LearningEpisodeEntity,
+    model: ResolvedLearningModel,
+    modelClaims: P1LearningModelClaimSource,
+    frozenNowMs: Long,
+    manifestKeyer: me.rerere.rikkahub.execution.ExecutionTokenProvider,
+): Boolean {
+    if (episode.status !in REFLECTABLE_EPISODE_STATES) return false
+    if (
+        database.episodeDao().countValidStableTraceSources(episode.id) <= 0L ||
+        !episode.hasCompleteExecutionTraceProjection(database)
+    ) return false
+    val event = episode.terminalEvent(database) ?: return false
+    if (event.createdAtMs > frozenNowMs) return false
+    val input = database.composeReflectionInput(episode, frozenNowMs) ?: return false
+    val payloadBytes = ReflectionPrompt.create(input).totalUtf8Bytes.toLong()
+    if (payloadBytes !in 1L..P1_PROVIDER_MAX_INPUT_UTF8_BYTES) return false
+    val cohort = resolveOrCreateProviderCohort(database, model, frozenNowMs)
+    val job = P1LearningJobFactory.create(
+        source = event,
+        frozen = modelSpec(
+            type = LearningJobType.REFLECT_EPISODE_V1,
+            algorithm = REFLECTION_ALGORITHM_IDENTITY,
+            prompt = ReflectionPrompt.TEMPLATE_VERSION,
+            sourceSchema = input.inputId,
+            toolset = REDACTED_TRACE_TOOLSET_IDENTITY,
+            outputSchema = "episode-lesson-v1",
+            model = model,
+            providerConfigGeneration = cohort.configurationGeneration,
+        ),
+        createdAtMs = frozenNowMs,
+    )
+    val inputIdentity = input.inputId.substringAfterLast(':')
+    val dispatchAttestation = modelClaims.expectedDispatchAttestationSha256(
+        model = model,
+        templateVersion = ReflectionPrompt.TEMPLATE_VERSION,
+        inputIdentitySha256 = inputIdentity,
+        providerRequestKey = learningProviderIdempotencyKey(job.id),
+        maxOutputTokens = ReflectionPrompt.MAX_OUTPUT_TOKENS,
+    ) ?: return false
+    val manifest = job.providerManifest(
+        cohort = cohort,
+        model = model,
+        dispatchAttestationDigest = dispatchAttestation,
+        inputIdentity = inputIdentity,
+        payloadBytes = payloadBytes,
+        maxOutputTokens = ReflectionPrompt.MAX_OUTPUT_TOKENS.toLong(),
+        maxOutputBytes = ReflectionPrompt.MAX_OUTPUT_UTF8_BYTES.toLong(),
+        timeoutMs = P1_PROVIDER_TIMEOUT_MS,
+        frozenAtMs = frozenNowMs,
+        manifestKeyer = manifestKeyer,
+    )
+    return database.enqueueProviderJobExact(job, manifest)
+}
+
+private suspend fun createDistillationProviderJob(
+    database: LearningDatabase,
+    trigger: LearningEpisodeEntity,
+    model: ResolvedLearningModel,
+    modelClaims: P1LearningModelClaimSource,
+    frozenNowMs: Long,
+    manifestKeyer: me.rerere.rikkahub.execution.ExecutionTokenProvider,
+): Boolean {
+    val evidence = database.distillationEvidence(
+        trigger.scopeKind,
+        trigger.scopeId,
+        trigger.taskSignature,
+        frozenNowMs,
+    )
+    if (!P1DerivedCascadePolicy.afterLessonOrReward(true, evidence.size)) return false
+    val frozenEvidence = P1DerivedCascadePolicy.singleDistillationCohort(
+        evidence,
+        MAX_POLICY_EVIDENCE,
+        P1DistillationEvidence::producerCohortIdentity,
+    )
+    if (frozenEvidence.size < 2) return false
+    val event = frozenEvidence.first().episode.terminalEvent(database) ?: return false
+    if (event.createdAtMs > frozenNowMs) return false
+    val cohort = resolveOrCreateProviderCohort(database, model, frozenNowMs)
+    val (input, payload) = frozenEvidence.toPolicyMaterial(
+        model.providerIdentityDigest,
+        model.modelIdentityDigest,
+        PolicyDistillationPrompt.TEMPLATE_VERSION,
+    ) ?: return false
+    val payloadBytes = PolicyDistillationPrompt.create(payload).totalUtf8Bytes.toLong()
+    if (payloadBytes !in 1L..P1_PROVIDER_MAX_INPUT_UTF8_BYTES) return false
+    val inputIdentity = PolicyProviderInputManifest.identity(input, payload)
+    val job = P1LearningJobFactory.create(
+        source = event,
+        frozen = modelSpec(
+            LearningJobType.DISTILL_POLICY_V1,
+            DISTILLATION_ALGORITHM_IDENTITY,
+            PolicyDistillationPrompt.TEMPLATE_VERSION,
+            "$POLICY_PROVIDER_INPUT_IDENTITY_PREFIX$inputIdentity",
+            policyToolsetIdentity(frozenEvidence),
+            "policy-candidate-v2",
+            model,
+            cohort.configurationGeneration,
+        ),
+        createdAtMs = frozenNowMs,
+    )
+    val dispatchAttestation = modelClaims.expectedDispatchAttestationSha256(
+        model = model,
+        templateVersion = PolicyDistillationPrompt.TEMPLATE_VERSION,
+        inputIdentitySha256 = inputIdentity,
+        providerRequestKey = learningProviderIdempotencyKey(job.id),
+        maxOutputTokens = PolicyDistillationPrompt.MAX_OUTPUT_TOKENS,
+    ) ?: return false
+    return database.enqueueProviderJobExact(
+        job,
+        job.providerManifest(
+            cohort,
+            model,
+            dispatchAttestation,
+            inputIdentity,
+            payloadBytes,
+            PolicyDistillationPrompt.MAX_OUTPUT_TOKENS.toLong(),
+            me.rerere.rikkahub.learning.policy.ReasoningPolicyDistiller.MAX_OUTPUT_UTF8_BYTES.toLong(),
+            P1_PROVIDER_TIMEOUT_MS,
+            frozenNowMs,
+            manifestKeyer,
+        ),
+    )
+}
+
+private suspend fun resolveOrCreateProviderCohort(
+    database: LearningDatabase,
+    model: ResolvedLearningModel,
+    frozenNowMs: Long,
+): LearningProviderConfigCohortEntity {
+    val dao = database.providerExecutionDao()
+    val kind = model.providerKind.toJobWireCode()
+    dao.findReusableConfigCohort(
+        kind,
+        model.providerIdentityDigest,
+        model.modelIdentityDigest,
+        model.configurationDigest,
+    ).singleOrNull()?.let { existing ->
+        require(existing.createdAtMs <= frozenNowMs) {
+            "Provider cohort clock rollback"
+        }
+        return existing
+    }
+    val generation = Math.addExact(dao.maxConfigurationGeneration() ?: 0L, 1L)
+    val id = "provider-cohort-v1:" + LearningCanonicalId.digest(
+        "provider-cohort-v1",
+        listOf(
+            kind,
+            model.providerIdentityDigest,
+            model.modelIdentityDigest,
+            model.configurationDigest,
+            generation.toString(),
+        ),
+    )
+    val entity = LearningProviderConfigCohortEntity(
+        id,
+        kind,
+        model.providerIdentityDigest,
+        model.modelIdentityDigest,
+        model.configurationDigest,
+        generation,
+        frozenNowMs,
+    )
+    if (dao.insertConfigCohortIgnore(entity) == -1L) {
+        return dao.findReusableConfigCohort(
+            kind,
+            model.providerIdentityDigest,
+            model.modelIdentityDigest,
+            model.configurationDigest,
+        ).singleOrNull() ?: throw IllegalStateException("Provider cohort allocation conflict")
+    }
+    return entity
+}
+
+private suspend fun LearningDatabase.enqueueProviderJobExact(
+    job: LearningJobEntity,
+    manifest: LearningProviderJobManifestEntity,
+): Boolean {
+    val inserted = jobDao().insertIgnore(job)
+    if (inserted == -1L) {
+        val existing = jobDao().findByDedupeKey(job.dedupeKey)
+            ?: throw IllegalStateException("Provider job replay disappeared")
+        require(existing.matchesProviderPlan(job)) { "Provider job replay identity conflict" }
+        // Job+manifest are inserted in the same transaction. A replay must retain the originally
+        // frozen timestamp/HMAC, not manufacture a new manifest from the maintenance clock.
+        require(providerExecutionDao().findJobManifest(existing.id) != null) {
+            "Provider job replay is missing its immutable manifest"
+        }
+        return false
+    }
+    val manifestInserted = providerExecutionDao().insertJobManifestIgnore(manifest)
+    if (manifestInserted == -1L) {
+        require(providerExecutionDao().findJobManifest(job.id) == manifest) {
+            "Provider manifest replay identity conflict"
+        }
+    }
+    return inserted != -1L
+}
+
+private fun LearningJobEntity.matchesProviderPlan(other: LearningJobEntity): Boolean =
+    id == other.id && dedupeKey == other.dedupeKey && jobType == other.jobType &&
+        jobSchemaVersion == other.jobSchemaVersion && streamId == other.streamId &&
+        sourceEventId == other.sourceEventId && scopeKind == other.scopeKind &&
+        scopeId == other.scopeId && replayGeneration == other.replayGeneration &&
+        algorithmIdentity == other.algorithmIdentity && promptIdentity == other.promptIdentity &&
+        providerKindIdentity == other.providerKindIdentity && modelIdentity == other.modelIdentity &&
+        providerIdentity == other.providerIdentity &&
+        providerConfigurationIdentity == other.providerConfigurationIdentity &&
+        providerConfigGeneration == other.providerConfigGeneration &&
+        sourceSchemaIdentity == other.sourceSchemaIdentity &&
+        toolsetIdentity == other.toolsetIdentity &&
+        outputSchemaIdentity == other.outputSchemaIdentity
+
+private fun LearningJobEntity.providerManifest(
+    cohort: LearningProviderConfigCohortEntity,
+    model: ResolvedLearningModel,
+    dispatchAttestationDigest: String,
+    inputIdentity: String,
+    payloadBytes: Long,
+    maxOutputTokens: Long,
+    maxOutputBytes: Long,
+    timeoutMs: Long,
+    frozenAtMs: Long,
+    manifestKeyer: me.rerere.rikkahub.execution.ExecutionTokenProvider,
+): LearningProviderJobManifestEntity {
+    val providerRequestKey = learningProviderIdempotencyKey(id)
+    val maxInputBytes = P1_PROVIDER_MAX_INPUT_UTF8_BYTES
+    val estimatedTokens = ((payloadBytes + 3L) / 4L).coerceAtLeast(1L)
+    val maxCalls = 1
+    val maxCostMicros = when (model.providerKind) {
+        LearningProviderKind.LOCAL_LITERT -> 0L
+        // This is a conservative authorization reservation, not a price estimate. Actual
+        // provider-reported cost is committed independently by the attempt authority.
+        LearningProviderKind.REMOTE -> REMOTE_PER_ATTEMPT_COST_RESERVATION_MICROS
+        LearningProviderKind.AICORE -> throw IllegalArgumentException(
+            "AICore cannot run Learning jobs",
+        )
+    }
+    val canonicalRequest = providerRequestAuditDigest(
+        jobId = id,
+        jobType = jobType,
+        jobSchemaVersion = jobSchemaVersion,
+        manifestSchemaVersion =
+            me.rerere.rikkahub.learning.storage.PROVIDER_JOB_MANIFEST_SCHEMA_VERSION,
+        algorithmIdentity = requireNotNull(algorithmIdentity),
+        promptIdentity = requireNotNull(promptIdentity),
+        providerKindIdentity = requireNotNull(providerKindIdentity),
+        modelIdentity = requireNotNull(modelIdentity),
+        providerIdentity = requireNotNull(providerIdentity),
+        providerConfigurationIdentity = requireNotNull(providerConfigurationIdentity),
+        providerConfigGeneration = requireNotNull(providerConfigGeneration),
+        sourceSchemaIdentity = requireNotNull(sourceSchemaIdentity),
+        toolsetIdentity = requireNotNull(toolsetIdentity),
+        outputSchemaIdentity = requireNotNull(outputSchemaIdentity),
+        cohortId = cohort.id,
+        dispatchAttestationDigest = dispatchAttestationDigest,
+        inputIdentity = inputIdentity,
+        providerRequestKey = providerRequestKey,
+        inputBytes = payloadBytes,
+        maxInputBytes = maxInputBytes,
+        estimatedInputTokens = estimatedTokens,
+        maxOutputTokens = maxOutputTokens,
+        maxOutputBytes = maxOutputBytes,
+        maxProviderCalls = maxCalls,
+        maxCostMicros = maxCostMicros,
+        timeoutMs = timeoutMs,
+        frozenAtMs = frozenAtMs,
+    )
+    val requestHmac = signProviderRequest(manifestKeyer, canonicalRequest, id)
+    return LearningProviderJobManifestEntity(
+        jobId = id,
+        cohortId = cohort.id,
+        manifestSchemaVersion = me.rerere.rikkahub.learning.storage.PROVIDER_JOB_MANIFEST_SCHEMA_VERSION,
+        requestHmacSha256 = requestHmac,
+        inputIdentitySha256 = inputIdentity,
+        runtimeAttestationSha256 = dispatchAttestationDigest,
+        redactionPolicyIdentity = P1_PROVIDER_REDACTION_IDENTITY,
+        fieldCategoriesIdentity = P1_PROVIDER_FIELDS_IDENTITY,
+        tokenEstimatorIdentity = P1_PROVIDER_TOKEN_ESTIMATOR_IDENTITY,
+        providerRequestKey = providerRequestKey,
+        inputUtf8Bytes = payloadBytes,
+        maxInputUtf8Bytes = maxInputBytes,
+        estimatedInputTokens = estimatedTokens,
+        maxOutputTokens = maxOutputTokens,
+        maxOutputUtf8Bytes = maxOutputBytes,
+        maxProviderCalls = maxCalls,
+        maxCostMicros = maxCostMicros,
+        timeoutMs = timeoutMs,
+        frozenAtMs = frozenAtMs,
+    )
+}
+
+private fun providerRequestAuditDigest(
+    jobId: String,
+    jobType: String,
+    jobSchemaVersion: Int,
+    manifestSchemaVersion: Int,
+    algorithmIdentity: String,
+    promptIdentity: String,
+    providerKindIdentity: String,
+    modelIdentity: String,
+    providerIdentity: String,
+    providerConfigurationIdentity: String,
+    providerConfigGeneration: Long,
+    sourceSchemaIdentity: String,
+    toolsetIdentity: String,
+    outputSchemaIdentity: String,
+    cohortId: String,
+    dispatchAttestationDigest: String,
+    inputIdentity: String,
+    providerRequestKey: String,
+    inputBytes: Long,
+    maxInputBytes: Long,
+    estimatedInputTokens: Long,
+    maxOutputTokens: Long,
+    maxOutputBytes: Long,
+    maxProviderCalls: Int,
+    maxCostMicros: Long,
+    timeoutMs: Long,
+    frozenAtMs: Long,
+): String = LearningCanonicalId.digest(
+    "learning-provider-request-hmac-v1",
+    listOf(
+        jobId, jobType, jobSchemaVersion.toString(), manifestSchemaVersion.toString(),
+        algorithmIdentity, promptIdentity,
+        providerKindIdentity, modelIdentity, providerIdentity, providerConfigurationIdentity,
+        providerConfigGeneration.toString(), sourceSchemaIdentity, toolsetIdentity,
+        outputSchemaIdentity, cohortId, dispatchAttestationDigest, inputIdentity,
+        P1_PROVIDER_REDACTION_IDENTITY, P1_PROVIDER_FIELDS_IDENTITY,
+        P1_PROVIDER_TOKEN_ESTIMATOR_IDENTITY, providerRequestKey, inputBytes.toString(),
+        maxInputBytes.toString(), estimatedInputTokens.toString(), maxOutputTokens.toString(),
+        maxOutputBytes.toString(), maxProviderCalls.toString(), maxCostMicros.toString(),
+        timeoutMs.toString(), frozenAtMs.toString(),
+    ),
+)
+
+private fun signProviderRequest(
+    keyer: me.rerere.rikkahub.execution.ExecutionTokenProvider,
+    canonicalRequest: String,
+    jobId: String,
+): String = keyer.ownerTokenFor(
+    "learning_provider_request_hmac_v1", canonicalRequest, jobId, "left",
+) + keyer.ownerTokenFor(
+    "learning_provider_request_hmac_v1", canonicalRequest, jobId, "right",
+)
+
+private const val P1_PROVIDER_REDACTION_IDENTITY = "learning-redaction-v1"
+private const val P1_PROVIDER_FIELDS_IDENTITY = "p1-bounded-provider-fields-v1"
+private const val P1_PROVIDER_TOKEN_ESTIMATOR_IDENTITY = "utf8-quarter-token-upper-v1"
+private const val P1_PROVIDER_MAX_INPUT_UTF8_BYTES = 160L * 1_024L
+private const val P1_PROVIDER_TIMEOUT_MS = 2L * 60L * 1_000L
+
 private data class P1InvalidDerivedStateResult(
     val redactedTraceRows: Int,
     val staleLessons: Int,
     val stalePolicies: Int,
 )
-
-private val LearningRetentionResult.totalMutations: Int
-    get() = censoredOpenEpisodes + deletedPolicies + deletedPolicyRevisions + deletedLessons +
-        deletedTraceFeatures + deletedRewardWindows + deletedEpisodes +
-        deletedSourceValidityRows
-
-private fun LearningRetentionResult.anyBatchSaturated(batchSize: Int): Boolean = listOf(
-    censoredOpenEpisodes,
-    deletedPolicies,
-    deletedPolicyRevisions,
-    deletedLessons,
-    deletedTraceFeatures,
-    deletedRewardWindows,
-    deletedEpisodes,
-    deletedSourceValidityRows,
-).any { it == batchSize }
 
 /** Production composition; every resolver is scoped to the one open LearningDatabase instance. */
 internal class ProductionP1LearningRuntimeDependencyFactory(
@@ -937,20 +1482,37 @@ internal class ProductionP1LearningRuntimeDependencyFactory(
     private val backgroundClient: BackgroundGenerationClient,
     backgroundHost: SettingsBackedBackgroundGenerationHost,
     mainDatabase: AppDatabase,
+    private val manifestKeyer: me.rerere.rikkahub.execution.ExecutionTokenProvider,
+    private val policyOutcomeObserverFactory: PolicyOutcomeLinkedObserverFactory =
+        NoOpPolicyOutcomeLinkedObserverFactory,
 ) : P1LearningRuntimeDependencyFactory {
     private val gate = P1RuntimeFeatureGate(featureFlags)
     private val modelClaims = P1LearningModelClaimSource(backgroundHost, gate)
     private val mainSources = RoomP1MainSourceAuthorityReader(mainDatabase)
 
     override fun create(database: LearningDatabase): P1LearningRuntimeDependencies {
-        val downstream = RoomP1DerivedJobEnqueuer(gate, modelClaims)
+        val downstream = RoomP1DerivedJobEnqueuer(
+            gate = gate,
+            policyOutcomeObserver = policyOutcomeObserverFactory.create(database),
+        )
         return P1LearningRuntimeDependencies(
             episodeAssemblyResolver = RoomEpisodeAssemblyMaterialResolver(database, mainSources, gate),
             executionTraceResolver = RoomExecutionTraceJobMaterialResolver(database, gate),
-            reflectionResolver = RoomReflectionJobMaterialResolver(database, gate),
+            reflectionResolver = RoomReflectionJobMaterialResolver(
+                database,
+                gate,
+                manifestKeyer,
+                modelClaims,
+            ),
             backgroundGenerationClient = backgroundClient,
             rewardResolver = RoomRewardJobMaterialResolver(database, gate),
-            policyDistillationResolver = RoomPolicyDistillationMaterialResolver(database, gate),
+            rewardAuthorityResolver = RoomRewardAuthorityJobMaterialResolver(database, gate),
+            policyDistillationResolver = RoomPolicyDistillationMaterialResolver(
+                database,
+                gate,
+                manifestKeyer,
+                modelClaims,
+            ),
             sourceIntegrityResolver = LearningSourceIntegrityResolver { event ->
                 if (event.sourceType != LearningSourceKind.CONVERSATION_MESSAGE.name) return@LearningSourceIntegrityResolver null
                 val revision = event.sourceRevision ?: return@LearningSourceIntegrityResolver null
@@ -963,7 +1525,8 @@ internal class ProductionP1LearningRuntimeDependencyFactory(
                 )?.payloadIntegritySha256
             },
             sourceInvalidationResolver = SourceInvalidationJobMaterialResolver { input ->
-                if (!gate.captureEnabled()) throw P1LearningConfigurationUnavailableException()
+                // SOURCE_INVALIDATED is an authority-loss lane, not new learning capture. It must
+                // remain executable after capture/jobs rollout is disabled.
                 RoomSourceInvalidationJobMaterialResolver(
                     database = database,
                     integrityResolver = LearningSourceIntegrityResolver { event ->
@@ -987,17 +1550,34 @@ internal class ProductionP1LearningRuntimeDependencyFactory(
                 ).resolve(input)
             },
             derivedJobEnqueuer = downstream,
-            catchUp = RoomP1DerivedJobCatchUp(downstream, gate),
+            catchUp = RoomP1DerivedJobCatchUp(
+                downstream,
+                gate,
+                P1ProviderJobPlanner(gate, modelClaims, manifestKeyer),
+            ),
             readiness = P1LearningRuntimeReadiness(
                 episodeAssembly = gate.readiness(gate::captureEnabled),
                 executionTrace = gate.readiness(gate::captureEnabled),
                 reflection = gate.modelReadiness(gate::reflectionEnabled, modelClaims),
                 reward = gate.readiness(gate::captureEnabled),
+                // Mixed job type: resolver still defers an initial positive feedback while the
+                // always-ready lane lets adjacent replacement/tombstone authority drain.
+                rewardAuthority = alwaysReadyP1JobProbe(),
                 policyDistillation = gate.modelReadiness(gate::policyEnabled, modelClaims),
-                sourceInvalidation = gate.readiness(gate::captureEnabled),
+                sourceInvalidation = alwaysReadyP1JobProbe(),
             ),
         )
     }
+}
+
+/** Initial feedback is positive capture; every adjacent revision is mandatory invalidation. */
+internal fun rewardAuthorityCaptureGateAllows(
+    captureEnabled: Boolean,
+    previousSourceRevision: Long?,
+): Boolean = captureEnabled || previousSourceRevision != null
+
+private fun alwaysReadyP1JobProbe() = LearningJobHandlerReadinessProbe {
+    LearningJobHandlerReadiness.READY
 }
 
 private fun P1RuntimeFeatureGate.readiness(
@@ -1023,6 +1603,22 @@ private data class P1DistillationEvidence(
     val toolSchemas: Set<String>,
 )
 
+private fun P1DistillationEvidence.producerCohortIdentity(): String =
+    LearningCanonicalId.digest(
+        domainVersion = "policy-evidence-producer-cohort-v1",
+        fields = listOf(
+            lesson.producerProviderKind,
+            lesson.producerProviderIdentity,
+            lesson.producerModelIdentity,
+            lesson.producerConfigurationIdentity,
+            lesson.producerConfigGeneration.toString(),
+            lesson.algorithmIdentity,
+            lesson.promptIdentity,
+            lesson.templateIdentity,
+            lesson.schemaIdentity,
+        ),
+    )
+
 private suspend fun LearningDatabase.distillationEvidence(
     scopeKind: String,
     scopeId: String,
@@ -1035,17 +1631,24 @@ private suspend fun LearningDatabase.distillationEvidence(
     frozenAtMs,
     MAX_DISTILLATION_SCAN,
 ).mapNotNull { episode ->
-    val outcome = when (episode.status) {
-        StoredLearningEpisodeStatus.SUCCESS.name -> PolicyEvidenceAuthorityOutcome.SUCCESS
-        StoredLearningEpisodeStatus.FAILURE.name -> PolicyEvidenceAuthorityOutcome.FAILURE
-        else -> return@mapNotNull null
-}
     val lesson = episodeDao().findLesson(episode.id, 1)
-        ?.takeIf { it.state == LearningLessonState.VALID.name } ?: return@mapNotNull null
+        ?.takeIf {
+            it.state == LearningLessonState.VALID.name && it.updatedAtMs <= frozenAtMs
+        } ?: return@mapNotNull null
     val reward = episodeDao().findRewardWindowByEpisode(episode.id)
         ?.takeIf {
-            it.state == LearningRewardWindowState.CLOSED.name && it.hasKnownRewardAuthority()
+            it.state == LearningRewardWindowState.CLOSED.name &&
+                it.updatedAtMs <= frozenAtMs &&
+                it.authorityOutcome in setOf(
+                    LearningRewardAuthorityOutcome.SUCCESS.name,
+                    LearningRewardAuthorityOutcome.FAILURE.name,
+                )
         } ?: return@mapNotNull null
+    val outcome = when (reward.authorityOutcome) {
+        LearningRewardAuthorityOutcome.SUCCESS.name -> PolicyEvidenceAuthorityOutcome.SUCCESS
+        LearningRewardAuthorityOutcome.FAILURE.name -> PolicyEvidenceAuthorityOutcome.FAILURE
+        else -> return@mapNotNull null
+    }
     if (episodeDao().countValidStableTraceSources(episode.id) <= 0L) return@mapNotNull null
     val scope = LearningScope.parseOrNull(episode.scopeKind, episode.scopeId) ?: return@mapNotNull null
     val schemas = episodeDao().listTrace(episode.id, MAX_REFLECTION_TRACE_ROWS)
@@ -1098,6 +1701,48 @@ private fun List<P1DistillationEvidence>.toPolicyPayload(
     }.toString()
 }
 
+/** Exact identity of every byte that can influence the provider's distillation response. */
+private fun List<P1DistillationEvidence>.toPolicyMaterial(
+    producerIdentity: String = firstOrNull()?.lesson?.producerProviderIdentity.orEmpty(),
+    modelIdentity: String = firstOrNull()?.lesson?.producerModelIdentity.orEmpty(),
+    promptIdentity: String = PolicyDistillationPrompt.TEMPLATE_VERSION,
+): Pair<PolicyDistillationInput, String>? {
+    if (size !in 2..MAX_POLICY_EVIDENCE) return null
+    val aliases = linkedMapOf<String, PolicyEvidenceHandle>()
+    forEachIndexed { index, item -> aliases["E${index + 1}"] = item.handle }
+    val firstEpisode = first().episode
+    val applicableConfigurationIdentity =
+        me.rerere.rikkahub.learning.policy.policyApplicableConfigurationIdentity(
+            producerIdentity,
+            modelIdentity,
+        )
+    val frozenToolSchemas = flatMap(P1DistillationEvidence::toolSchemas).toSortedSet()
+    val input = PolicyDistillationInput(
+        scope = LearningScope.parseOrNull(firstEpisode.scopeKind, firstEpisode.scopeId) ?: return null,
+        taskSignature = TaskSignatureV1.parseOrNull(firstEpisode.taskSignature) ?: return null,
+        evidenceAllowlist = aliases,
+        toolSchemaAllowlist = frozenToolSchemas,
+        producerIdentity = producerIdentity,
+        modelIdentity = modelIdentity,
+        promptVersion = promptIdentity,
+        applicableTemplateIdentity =
+            me.rerere.rikkahub.learning.policy.policyApplicableTemplateIdentity(promptIdentity),
+        applicableConfigurationIdentity = applicableConfigurationIdentity,
+        applicableConfigurationGeneration =
+            me.rerere.rikkahub.learning.policy.policyApplicableConfigurationGeneration(
+                applicableConfigurationIdentity,
+            ),
+        // An empty tool requirement has an exact empty capability surface. Non-empty schemas do
+        // not prove the complete capability catalog, so those candidates remain UNKNOWN/inert.
+        applicableCapabilityDigest =
+            me.rerere.rikkahub.learning.policy.policyApplicableCapabilityDigest(
+                frozenToolSchemas,
+            ),
+        applicableAuthorityDigest = null,
+    )
+    return input to toPolicyPayload(aliases)
+}
+
 private fun LearningInboxEventEntity.matches(input: LearningJobExecutionInputV1): Boolean =
     streamId == input.streamId &&
         eventId == input.sourceEventId &&
@@ -1120,26 +1765,8 @@ private fun LearningInboxEventEntity.toEpisodeAnchor(): EpisodeAuthorityAnchor? 
     )
 }.getOrNull()
 
-private fun taskSignature(
-    executionEvents: List<LearningInboxEventEntity>,
-): TaskSignatureV1? {
-    val tools = executionEvents.mapNotNull { execution ->
-        val name = execution.toolName?.takeIf { it.matches(Regex("[a-z][a-z0-9_.-]{0,95}")) }
-            ?: return@mapNotNull null
-        val schema = execution.toolSchemaFingerprint?.takeIf(LOWER_SHA256::matches)
-            ?: return@mapNotNull null
-        LearningToolSignature(name, schema)
-    }.toSet()
-    if (tools.size > MAX_EPISODE_TOOL_EVENTS) return null
-    return TaskSignatureV1.create(
-        taskClass = if (tools.isEmpty()) LearningTaskClass.OTHER else LearningTaskClass.AUTOMATION,
-        languageClass = LearningLanguageClass.UNKNOWN,
-        modalityClass = LearningModalityClass.TEXT_ONLY,
-        tools = tools,
-    )
-}
-
-private fun defaultTaskSignature(): TaskSignatureV1 = requireNotNull(taskSignature(emptyList()))
+private fun defaultTaskSignature(): TaskSignatureV1 =
+    RuntimeTaskSignatureClassifier.admissionSignature()
 
 private fun LearningEpisodeEntity.toDomainSnapshot(): EpisodeSnapshot? = runCatching {
     val scope = requireNotNull(LearningScope.parseOrNull(scopeKind, scopeId))
@@ -1354,11 +1981,6 @@ private fun LearningRewardWindowEntity.toOpenDomainWindow(): RewardWindow? {
     )
 }
 
-internal fun LearningRewardWindowEntity.hasKnownRewardAuthority(): Boolean =
-    goalKnowledge == LearningRewardKnowledge.KNOWN.name ||
-        processKnowledge == LearningRewardKnowledge.KNOWN.name ||
-        userKnowledge == LearningRewardKnowledge.KNOWN.name
-
 private suspend fun LearningDatabase.ensureOpenRewardWindow(
     episode: LearningEpisodeEntity,
     event: LearningInboxEventEntity,
@@ -1447,6 +2069,7 @@ private fun modelSpec(
     toolset: String,
     outputSchema: String,
     model: ResolvedLearningModel,
+    providerConfigGeneration: Long = 0L,
 ) = P1LearningJobFrozenSpec(
     jobType = type,
     algorithmIdentity = algorithm,
@@ -1455,7 +2078,7 @@ private fun modelSpec(
     modelIdentity = model.modelIdentityDigest,
     providerIdentity = model.providerIdentityDigest,
     providerConfigurationIdentity = model.configurationDigest,
-    providerConfigGeneration = 0,
+    providerConfigGeneration = providerConfigGeneration,
     sourceSchemaIdentity = sourceSchema,
     toolsetIdentity = toolset,
     outputSchemaIdentity = outputSchema,
@@ -1467,35 +2090,217 @@ private fun LearningProviderKind.toJobWireCode(): String = when (this) {
     LearningProviderKind.AICORE -> throw IllegalArgumentException("AICore cannot run Learning jobs")
 }
 
-private fun LearningJobExecutionSpecV1.toResolvedModel(
-    gate: P1RuntimeFeatureGate,
-): ResolvedLearningModel? {
-    val remote = when (providerKindIdentity) {
-        LearningJobProviderKindIdentity.LOCAL_LITERT.wireCode -> false
-        LearningJobProviderKindIdentity.REMOTE.wireCode -> true
-        else -> return null
+private data class P1ExactProviderEnvelope(
+    val manifest: LearningProviderJobManifestEntity,
+    val cohort: LearningProviderConfigCohortEntity,
+)
+
+private suspend fun LearningDatabase.findExactProviderEnvelope(
+    input: LearningJobExecutionInputV1,
+): P1ExactProviderEnvelope? {
+    val spec = input.executionSpec
+    if (
+        spec.providerKindIdentity != LearningJobProviderKindIdentity.LOCAL_LITERT.wireCode &&
+        spec.providerKindIdentity != LearningJobProviderKindIdentity.REMOTE.wireCode
+    ) {
+        return null
     }
-    val providerKind = if (remote) LearningProviderKind.REMOTE else LearningProviderKind.LOCAL_LITERT
-    if (!isP1ProviderExecutionAuthorized(providerKind, gate.remoteReflectionAllowed())) {
+    if (spec.providerConfigGeneration <= 0L) return null
+    val manifest = providerExecutionDao().findExactJobManifest(
+        jobId = input.jobId,
+        providerKind = spec.providerKindIdentity,
+        providerIdentitySha256 = spec.providerIdentity,
+        modelIdentitySha256 = spec.modelIdentity,
+        configurationIdentitySha256 = spec.providerConfigurationIdentity,
+        configurationGeneration = spec.providerConfigGeneration,
+    ).singleOrNull() ?: return null
+    val cohort = providerExecutionDao().findConfigCohort(manifest.cohortId) ?: return null
+    if (
+        cohort.providerKind != spec.providerKindIdentity ||
+        cohort.providerIdentitySha256 != spec.providerIdentity ||
+        cohort.modelIdentitySha256 != spec.modelIdentity ||
+        cohort.configurationIdentitySha256 != spec.providerConfigurationIdentity ||
+        cohort.configurationGeneration != spec.providerConfigGeneration
+    ) return null
+    return P1ExactProviderEnvelope(manifest, cohort)
+}
+
+private fun P1ExactProviderEnvelope.validateAndResolve(
+    input: LearningJobExecutionInputV1,
+    gate: P1RuntimeFeatureGate,
+    modelClaims: P1LearningModelClaimSource,
+    manifestKeyer: me.rerere.rikkahub.execution.ExecutionTokenProvider,
+    rebuiltInputIdentity: String,
+    rebuiltInputUtf8Bytes: Long,
+    expectedMaxOutputTokens: Long,
+    expectedMaxOutputUtf8Bytes: Long,
+    expectedTimeoutMs: Long,
+): ResolvedLearningModel? {
+    val spec = input.executionSpec
+    val receipt = input.providerManifestReceipt ?: return null
+    val attemptAuthority = input.providerAttemptAuthority ?: return null
+    if (!gate.reflectionEnabled() && !gate.policyEnabled()) {
+        throw P1LearningConfigurationUnavailableException()
+    }
+    if (!matches(receipt)) return null
+    val expectedEstimatedTokens = ((rebuiltInputUtf8Bytes + 3L) / 4L).coerceAtLeast(1L)
+    if (
+        manifest.jobId != input.jobId ||
+        manifest.cohortId != cohort.id ||
+        manifest.manifestSchemaVersion !=
+            me.rerere.rikkahub.learning.storage.PROVIDER_JOB_MANIFEST_SCHEMA_VERSION ||
+        manifest.inputIdentitySha256 != rebuiltInputIdentity ||
+        !manifest.runtimeAttestationSha256.matches(LOWER_SHA256) ||
+        manifest.redactionPolicyIdentity != P1_PROVIDER_REDACTION_IDENTITY ||
+        manifest.fieldCategoriesIdentity != P1_PROVIDER_FIELDS_IDENTITY ||
+        manifest.tokenEstimatorIdentity != P1_PROVIDER_TOKEN_ESTIMATOR_IDENTITY ||
+        manifest.providerRequestKey != input.stableProviderIdempotencyKey ||
+        manifest.providerRequestKey != learningProviderIdempotencyKey(input.jobId) ||
+        manifest.inputUtf8Bytes != rebuiltInputUtf8Bytes ||
+        manifest.maxInputUtf8Bytes != P1_PROVIDER_MAX_INPUT_UTF8_BYTES ||
+        manifest.estimatedInputTokens != expectedEstimatedTokens ||
+        manifest.maxOutputTokens != expectedMaxOutputTokens ||
+        manifest.maxOutputUtf8Bytes != expectedMaxOutputUtf8Bytes ||
+        manifest.maxProviderCalls != 1 ||
+        !manifest.hasValidCostReservation(spec.providerKindIdentity) ||
+        manifest.timeoutMs != expectedTimeoutMs ||
+        manifest.frozenAtMs != input.createdAtMs ||
+        cohort.createdAtMs > manifest.frozenAtMs
+    ) return null
+    val canonicalRequest = providerRequestAuditDigest(
+        jobId = input.jobId,
+        jobType = spec.jobType.name,
+        jobSchemaVersion = spec.jobSchemaVersion,
+        manifestSchemaVersion = manifest.manifestSchemaVersion,
+        algorithmIdentity = spec.algorithmIdentity,
+        promptIdentity = spec.promptIdentity,
+        providerKindIdentity = spec.providerKindIdentity,
+        modelIdentity = spec.modelIdentity,
+        providerIdentity = spec.providerIdentity,
+        providerConfigurationIdentity = spec.providerConfigurationIdentity,
+        providerConfigGeneration = spec.providerConfigGeneration,
+        sourceSchemaIdentity = spec.sourceSchemaIdentity,
+        toolsetIdentity = spec.toolsetIdentity,
+        outputSchemaIdentity = spec.outputSchemaIdentity,
+        cohortId = cohort.id,
+        dispatchAttestationDigest = manifest.dispatchAttestationSha256,
+        inputIdentity = rebuiltInputIdentity,
+        providerRequestKey = manifest.providerRequestKey,
+        inputBytes = manifest.inputUtf8Bytes,
+        maxInputBytes = manifest.maxInputUtf8Bytes,
+        estimatedInputTokens = manifest.estimatedInputTokens,
+        maxOutputTokens = manifest.maxOutputTokens,
+        maxOutputBytes = manifest.maxOutputUtf8Bytes,
+        maxProviderCalls = manifest.maxProviderCalls,
+        maxCostMicros = manifest.maxCostMicros,
+        timeoutMs = manifest.timeoutMs,
+        frozenAtMs = manifest.frozenAtMs,
+    )
+    val expectedHmac = signProviderRequest(manifestKeyer, canonicalRequest, input.jobId)
+    if (!constantTimeShaEquals(expectedHmac, manifest.requestHmacSha256)) return null
+    val frozenModel = spec.toResolvedProviderModel(manifest.dispatchAttestationSha256) ?: return null
+    val exactCurrentDispatch = modelClaims.matchesExactCurrentConsentAndDispatch(
+        model = frozenModel,
+        templateVersion = spec.promptIdentity,
+        inputIdentitySha256 = rebuiltInputIdentity,
+        providerRequestKey = manifest.providerRequestKey,
+        maxOutputTokens = expectedMaxOutputTokens.toInt(),
+        expectedDispatchAttestationSha256 = manifest.dispatchAttestationSha256,
+    )
+    if (!exactCurrentDispatch && frozenModel.providerKind == LearningProviderKind.REMOTE) {
+        // Revocation/configuration drift is not corrupt work. Keep it undispatched and retry only
+        // after the exact disclosed target becomes authorized again.
         throw P1LearningConfigurationUnavailableException()
     }
     if (
-        !providerIdentity.matches(LOWER_SHA256) ||
-        !modelIdentity.matches(LOWER_SHA256) ||
-        !providerConfigurationIdentity.matches(LOWER_SHA256)
+        attemptAuthority.stableProviderIdempotencyKey != manifest.providerRequestKey ||
+        attemptAuthority.expectedDispatchAttestationSha256 !=
+        manifest.dispatchAttestationSha256 ||
+        !exactCurrentDispatch ||
+        !isP1ProviderExecutionAuthorized(
+            providerKind = frozenModel.providerKind,
+            capabilities = P1ProviderExecutionCapabilities(
+                runtimeAttestationSha256 = manifest.dispatchAttestationSha256,
+                exactManifestValidated = true,
+                durableAttemptAuthorityPresent = true,
+                exactRemoteConsent = frozenModel.providerKind != LearningProviderKind.REMOTE ||
+                    modelClaims.exactRemoteConsent(frozenModel),
+            ),
+        )
     ) return null
+    return frozenModel
+}
+
+private fun LearningProviderJobManifestEntity.hasValidCostReservation(
+    providerKindIdentity: String,
+): Boolean = when (providerKindIdentity) {
+    LearningJobProviderKindIdentity.LOCAL_LITERT.wireCode -> maxCostMicros == 0L
+    LearningJobProviderKindIdentity.REMOTE.wireCode ->
+        maxCostMicros == REMOTE_PER_ATTEMPT_COST_RESERVATION_MICROS
+    else -> false
+}
+
+private fun String.toLearningProviderKind(): LearningProviderKind? = when (this) {
+    LearningJobProviderKindIdentity.LOCAL_LITERT.wireCode -> LearningProviderKind.LOCAL_LITERT
+    LearningJobProviderKindIdentity.REMOTE.wireCode -> LearningProviderKind.REMOTE
+    else -> null
+}
+
+private fun LearningJobExecutionSpecV1.toResolvedProviderModel(
+    dispatchAttestationSha256: String,
+): ResolvedLearningModel? {
+    val kind = providerKindIdentity.toLearningProviderKind() ?: return null
+    val remote = kind == LearningProviderKind.REMOTE
     return ResolvedLearningModel(
-        providerKind = providerKind,
+        providerKind = kind,
         providerIdentityDigest = providerIdentity,
         modelIdentityDigest = modelIdentity,
         configurationDigest = providerConfigurationIdentity,
         route = LearningRouteCapabilities(
-            executionClass = if (remote) LearningExecutionClass.REMOTE_NETWORK else LearningExecutionClass.LOCAL_COMPUTE,
+            executionClass = if (remote) {
+                LearningExecutionClass.REMOTE_NETWORK
+            } else {
+                LearningExecutionClass.LOCAL_COMPUTE
+            },
             requiresNetwork = remote,
             cancellation = LearningCancellationCapability.PROVEN_RELIABLE,
         ),
+        runtimeAttestationDigest = dispatchAttestationSha256.takeUnless { remote },
     )
 }
+
+private fun P1ExactProviderEnvelope.matches(
+    receipt: LearningProviderManifestReceipt,
+): Boolean =
+    receipt.cohortId == cohort.id &&
+        receipt.providerKind == cohort.providerKind &&
+        receipt.providerIdentitySha256 == cohort.providerIdentitySha256 &&
+        receipt.modelIdentitySha256 == cohort.modelIdentitySha256 &&
+        receipt.configurationIdentitySha256 == cohort.configurationIdentitySha256 &&
+        receipt.configurationGeneration == cohort.configurationGeneration &&
+        receipt.manifestSchemaVersion == manifest.manifestSchemaVersion &&
+        receipt.requestHmacSha256 == manifest.requestHmacSha256 &&
+        receipt.inputIdentitySha256 == manifest.inputIdentitySha256 &&
+        receipt.runtimeAttestationSha256 == manifest.runtimeAttestationSha256 &&
+        receipt.redactionPolicyIdentity == manifest.redactionPolicyIdentity &&
+        receipt.fieldCategoriesIdentity == manifest.fieldCategoriesIdentity &&
+        receipt.tokenEstimatorIdentity == manifest.tokenEstimatorIdentity &&
+        receipt.providerRequestKey == manifest.providerRequestKey &&
+        receipt.inputUtf8Bytes == manifest.inputUtf8Bytes &&
+        receipt.maxInputUtf8Bytes == manifest.maxInputUtf8Bytes &&
+        receipt.estimatedInputTokens == manifest.estimatedInputTokens &&
+        receipt.maxOutputTokens == manifest.maxOutputTokens &&
+        receipt.maxOutputUtf8Bytes == manifest.maxOutputUtf8Bytes &&
+        receipt.maxProviderCalls == manifest.maxProviderCalls &&
+        receipt.maxCostMicros == manifest.maxCostMicros &&
+        receipt.timeoutMs == manifest.timeoutMs &&
+        receipt.frozenAtMs == manifest.frozenAtMs
+
+private fun constantTimeShaEquals(left: String, right: String): Boolean =
+    java.security.MessageDigest.isEqual(
+        left.toByteArray(Charsets.US_ASCII),
+        right.toByteArray(Charsets.US_ASCII),
+    )
 
 private fun policyToolsetIdentity(evidence: List<P1DistillationEvidence>): String =
     "policy-toolset-v1:" + LearningCanonicalId.digest(
@@ -1525,18 +2330,16 @@ private val REFLECTABLE_EPISODE_STATES = setOf(
     StoredLearningEpisodeStatus.FAILURE.name,
 )
 private val LOWER_SHA256 = Regex("[0-9a-f]{64}")
-private const val REFLECTION_ALGORITHM_IDENTITY = "reflection-handler-v1"
-private const val REFLECTION_SOURCE_SCHEMA_IDENTITY = "reflection-input-v1"
+private const val REFLECTION_ALGORITHM_IDENTITY = "reflection-handler-v2"
 private const val REDACTED_TRACE_TOOLSET_IDENTITY = "redacted-trace-toolset-v1"
 private const val REWARD_ALGORITHM_IDENTITY = "reward-close-v1"
 private const val REWARD_SOURCE_SCHEMA_IDENTITY = "reward-window-input-v1"
 private const val REWARD_CONFIG_IDENTITY = "reward-config-v1"
 private const val REWARD_WINDOW_DURATION_MS = 24L * 60L * 60L * 1_000L
 private const val DISTILLATION_ALGORITHM_IDENTITY = "reasoning-policy-distiller-v1"
-private const val POLICY_INPUT_SCHEMA_PREFIX = "policy-input-set-v1:"
 private const val MAX_REFLECTION_TRACE_ROWS = 256
 private const val MAX_POLICY_EVIDENCE = 16
+private const val MAX_REWARD_SIGNALS = 64
 private const val MAX_DISTILLATION_SCAN = MAX_POLICY_EVIDENCE
 private const val CATCH_UP_BATCH_SIZE = 64
 private const val P1_EVENT_SCHEMA_VERSION = 2
-private const val MAX_EPISODE_TOOL_EVENTS = 16

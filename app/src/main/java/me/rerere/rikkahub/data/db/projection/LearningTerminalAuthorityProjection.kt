@@ -94,3 +94,58 @@ data class LearningExecutionTerminalAuthorityProjection(
     @ColumnInfo(name = "terminal_event_created_at_ms")
     val eventCreatedAtMs: Long,
 )
+
+/**
+ * Content-free current Conversation source head used only to repair a missed invalidation event.
+ * Payloads and branch/message identifiers are deliberately absent: the monotonic head alone
+ * proves that every lower revision is stale.
+ */
+data class LearningConversationSourceAuthorityProjection(
+    @ColumnInfo(name = "source_scope_kind")
+    val scopeKind: String,
+    @ColumnInfo(name = "source_scope_id")
+    val scopeId: String,
+    @ColumnInfo(name = "source_conversation_id")
+    val conversationId: String,
+    @ColumnInfo(name = "source_revision")
+    val sourceRevision: Long,
+    @ColumnInfo(name = "source_previous_revision")
+    val previousSourceRevision: Long?,
+    @ColumnInfo(name = "source_state")
+    val sourceState: String,
+    @ColumnInfo(name = "source_change_kind")
+    val changeKind: String,
+    @ColumnInfo(name = "source_occurred_at_ms")
+    val occurredAtMs: Long,
+    @ColumnInfo(name = "source_updated_at_ms")
+    val updatedAtMs: Long,
+)
+
+/**
+ * Content-free current message source head plus its current Conversation authority revision.
+ * Historical payloads are neither selected nor reconstructed.
+ */
+data class LearningMessageSourceAuthorityProjection(
+    @ColumnInfo(name = "source_scope_kind")
+    val scopeKind: String,
+    @ColumnInfo(name = "source_scope_id")
+    val scopeId: String,
+    @ColumnInfo(name = "source_conversation_id")
+    val conversationId: String,
+    @ColumnInfo(name = "source_message_id")
+    val messageId: String,
+    @ColumnInfo(name = "source_revision")
+    val sourceRevision: Long,
+    @ColumnInfo(name = "source_previous_revision")
+    val previousSourceRevision: Long?,
+    @ColumnInfo(name = "source_state")
+    val sourceState: String,
+    @ColumnInfo(name = "source_change_kind")
+    val changeKind: String,
+    @ColumnInfo(name = "source_conversation_revision")
+    val conversationSourceRevision: Long,
+    @ColumnInfo(name = "source_occurred_at_ms")
+    val occurredAtMs: Long,
+    @ColumnInfo(name = "source_updated_at_ms")
+    val updatedAtMs: Long,
+)

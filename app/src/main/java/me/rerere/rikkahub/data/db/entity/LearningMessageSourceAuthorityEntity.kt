@@ -86,6 +86,10 @@ data class LearningMessageSourceAuthorityEntity(
             "Invalid Learning source authority time"
         }
     }
+
+    override fun toString(): String =
+        "LearningMessageSourceAuthorityEntity(role=$messageRole, state=$sourceState, " +
+            "change=$changeKind, revision=$sourceRevision, ids-and-digest=<redacted>)"
 }
 
 private fun String.isLowerHexSha256(): Boolean =

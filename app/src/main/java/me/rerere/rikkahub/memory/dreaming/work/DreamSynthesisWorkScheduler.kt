@@ -25,6 +25,7 @@ enum class DreamSynthesisScanReason {
     SETTINGS_CHANGED,
     COST_POLICY_CHANGED,
     UTC_BUDGET_ROLLOVER,
+    APP_IDLE_RECHECK,
     FOLLOW_UP,
 }
 
@@ -36,6 +37,17 @@ interface DreamSynthesisWorkScheduler {
         policy: DreamingCostPolicy,
         replaceExisting: Boolean = false,
     )
+
+    /**
+     * The runtime already waited until the exact persisted idle deadline before requesting this
+     * scan. Reapplying the full idle threshold here would double every configured wait.
+     */
+    fun enqueueScopeAfterIdleRecheck(
+        scopeId: DreamScopeId,
+        runId: String,
+        policy: DreamingCostPolicy,
+        replaceExisting: Boolean = false,
+    ) = enqueueScope(scopeId, runId, policy, replaceExisting)
 
     fun cancelScope(scopeId: DreamScopeId)
 
@@ -61,6 +73,33 @@ class AndroidDreamSynthesisWorkScheduler(
         runId: String,
         policy: DreamingCostPolicy,
         replaceExisting: Boolean,
+    ) = enqueueScopeInternal(
+        scopeId = scopeId,
+        runId = runId,
+        policy = policy,
+        replaceExisting = replaceExisting,
+        initialDelayMsOverride = null,
+    )
+
+    override fun enqueueScopeAfterIdleRecheck(
+        scopeId: DreamScopeId,
+        runId: String,
+        policy: DreamingCostPolicy,
+        replaceExisting: Boolean,
+    ) = enqueueScopeInternal(
+        scopeId = scopeId,
+        runId = runId,
+        policy = policy,
+        replaceExisting = replaceExisting,
+        initialDelayMsOverride = 0L,
+    )
+
+    private fun enqueueScopeInternal(
+        scopeId: DreamScopeId,
+        runId: String,
+        policy: DreamingCostPolicy,
+        replaceExisting: Boolean,
+        initialDelayMsOverride: Long?,
     ) {
         val validatedPolicy = requireNotNull(policy.validatedOrNull()) {
             "Invalid Dreaming cost policy"
@@ -73,7 +112,11 @@ class AndroidDreamSynthesisWorkScheduler(
         val request = OneTimeWorkRequestBuilder<DreamSynthesisWorker>()
             .addTag(DREAM_SYNTHESIS_SCOPE_WORK_TAG)
             .setConstraints(constraints.toWorkConstraints())
-            .setInitialDelay(constraints.initialDelayMinutes.toLong(), TimeUnit.MINUTES)
+            .setInitialDelay(
+                initialDelayMsOverride
+                    ?: TimeUnit.MINUTES.toMillis(constraints.initialDelayMinutes.toLong()),
+                TimeUnit.MILLISECONDS,
+            )
             .setBackoffCriteria(
                 BackoffPolicy.EXPONENTIAL,
                 DREAM_SYNTHESIS_RETRY_BACKOFF_SECONDS,
@@ -228,7 +271,10 @@ internal fun dreamSynthesisScanExistingPolicy(
     reason: DreamSynthesisScanReason,
 ): ExistingWorkPolicy = if (reason == DreamSynthesisScanReason.COST_POLICY_CHANGED) {
     ExistingWorkPolicy.REPLACE
-} else if (reason == DreamSynthesisScanReason.FOLLOW_UP) {
+} else if (
+    reason == DreamSynthesisScanReason.FOLLOW_UP ||
+    reason == DreamSynthesisScanReason.APP_IDLE_RECHECK
+) {
     ExistingWorkPolicy.APPEND_OR_REPLACE
 } else {
     ExistingWorkPolicy.KEEP

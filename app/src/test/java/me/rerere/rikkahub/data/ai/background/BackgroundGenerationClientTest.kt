@@ -23,6 +23,7 @@ import me.rerere.ai.ui.UIMessageChoice
 import me.rerere.rikkahub.learning.model.LearningProviderKind
 import me.rerere.rikkahub.learning.model.ResolvedLearningModel
 import me.rerere.rikkahub.learning.privacy.LearningOutboundFieldCategory
+import me.rerere.rikkahub.learning.privacy.forbiddenLearningCorpus
 import me.rerere.rikkahub.learning.resources.LearningCancellationCapability
 import me.rerere.rikkahub.learning.resources.LearningDeviceConditions
 import me.rerere.rikkahub.learning.resources.LearningExecutionClass
@@ -43,6 +44,22 @@ import org.junit.Test
 
 class BackgroundGenerationClientTest {
     @Test
+    fun boundedPromptDefaultStringRedactsTheCompleteReleaseForbiddenCorpus() {
+        forbiddenLearningCorpus().forEach { value ->
+            val prompt = BoundedRedactedBackgroundPromptV1.fromRedacted(
+                systemText = "bounded-system-contract",
+                payloadText = value,
+                redactionPolicyVersion = "test-v1",
+                fieldCategories = setOf(
+                    LearningOutboundFieldCategory.REDACTED_TASK_FEATURES,
+                ),
+            )
+
+            assertFalse("provider prompt toString leaked forbidden material", value in prompt.toString())
+        }
+    }
+
+    @Test
     fun resourceAdmissionHappensBeforeExecutionTimeBinding() = runBlocking {
         val registry = LearningForegroundRegistry()
         val bindCalled = AtomicBoolean(false)
@@ -62,7 +79,9 @@ class BackgroundGenerationClientTest {
             authorizationGate = BackgroundGenerationAuthorizationGate { true },
         )
 
-        val result = client.generate(request(frozenModel()))
+        val request = request(frozenModel())
+        assertFalse(request.prompt.isClosed())
+        val result = client.generate(request)
 
         assertEquals(
             BackgroundGenerationResult.Deferred(
@@ -71,6 +90,7 @@ class BackgroundGenerationClientTest {
             result,
         )
         assertFalse(bindCalled.get())
+        assertTrue(request.prompt.isClosed())
     }
 
     @Test
@@ -225,9 +245,8 @@ class BackgroundGenerationClientTest {
                 }
             },
         )
-        val pending = async {
-            client(registry, execution).generate(request(execution.frozenModel))
-        }
+        val request = request(execution.frozenModel)
+        val pending = async { client(registry, execution).generate(request) }
         withTimeout(2_000) { started.await() }
 
         val foreground = registry.enter(LearningForegroundWorkKind.PET_DIALOGUE)
@@ -247,6 +266,7 @@ class BackgroundGenerationClientTest {
             result,
         )
         withTimeout(2_000) { cancelled.await() }
+        assertTrue(request.prompt.isClosed())
     }
 
     @Test
@@ -267,9 +287,8 @@ class BackgroundGenerationClientTest {
                 }
             },
         )
-        val pending = async {
-            client(registry, execution).generate(request(execution.frozenModel))
-        }
+        val request = request(execution.frozenModel)
+        val pending = async { client(registry, execution).generate(request) }
         withTimeout(2_000) { started.await() }
 
         pending.cancel(CancellationException("caller_cancelled"))
@@ -280,6 +299,7 @@ class BackgroundGenerationClientTest {
             Unit
         }
         withTimeout(2_000) { cancelled.await() }
+        assertTrue(request.prompt.isClosed())
     }
 
     @Test
@@ -299,9 +319,8 @@ class BackgroundGenerationClientTest {
             },
         )
 
-        val result = client(registry, execution).generate(
-            request(execution.frozenModel).copy(timeoutMs = 25L),
-        )
+        val request = request(execution.frozenModel).copy(timeoutMs = 25L)
+        val result = client(registry, execution).generate(request)
 
         assertEquals(
             BackgroundGenerationResult.Failure(
@@ -311,6 +330,7 @@ class BackgroundGenerationClientTest {
             result,
         )
         withTimeout(2_000) { cancelled.await() }
+        assertTrue(request.prompt.isClosed())
     }
 
     @Test

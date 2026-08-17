@@ -87,6 +87,10 @@ data class LearningConversationSourceAuthorityEntity(
             "Invalid Learning source authority time"
         }
     }
+
+    override fun toString(): String =
+        "LearningConversationSourceAuthorityEntity(state=$sourceState, change=$changeKind, " +
+            "revision=$sourceRevision, scope=$scopeKind, ids=<redacted>)"
 }
 
 internal fun String.isLearningSourceAuthorityState(): Boolean =

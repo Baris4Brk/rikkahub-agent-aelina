@@ -1,4 +1,4 @@
-package me.rerere.rikkahub.workflow.model
+﻿package me.rerere.rikkahub.workflow.model
 
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -14,10 +14,12 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.booleanOrNull
+import me.rerere.ai.core.Tool
 import me.rerere.rikkahub.data.capability.CapabilityKey
+import me.rerere.rikkahub.toolcatalog.ToolCatalogSnapshot
 
 /**
- * Phase 12 — strict JSON schema validator + parser/serializer.
+ * Phase 12 鈥?strict JSON schema validator + parser/serializer.
  *
  * Wire shape (LLM-facing):
  * ```
@@ -51,9 +53,19 @@ object WorkflowJson {
         // known key so canonical stored JSON can also pass through tooling without being
         // mistaken for a schema extension; callers still overwrite it from reviewed actions.
         "capability_snapshot",
+        "origin",
+        "source_candidate_id",
+        "source_artifact_hash",
+        "grant_digest",
+        "authority_subject_id",
     )
 
-    private val strictActionKeys = setOf("tool", "args", "timeout_seconds")
+    private val strictActionKeys = setOf(
+        "tool",
+        "args",
+        "timeout_seconds",
+        "tool_schema_fingerprint",
+    )
 
     @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
     private val strict: Json = Json {
@@ -63,25 +75,8 @@ object WorkflowJson {
         encodeDefaults = true
         // The wire shape uses snake_case (LLM-facing); Kotlin sealed-class fields are
         // camelCase. The naming strategy is applied to all properties of @Serializable
-        // classes — both encode and decode — so `thresholdPercent` becomes
+        // classes 鈥?both encode and decode 鈥?so `thresholdPercent` becomes
         // `threshold_percent` in JSON.
-        namingStrategy = kotlinx.serialization.json.JsonNamingStrategy.SnakeCase
-    }
-
-    /**
-     * Lenient decoder for the stored-read path ONLY. Identical to [strict] except it tolerates
-     * unknown keys. Persistence is forward-compatible: if a future build adds a field to a
-     * trigger/condition spec, an older build (or a downgrade) must still load the row instead
-     * of silently dropping the whole trigger and tearing the workflow down. The strict decoder
-     * stays on the LLM create/validate path so an unrecognised key there still surfaces as a
-     * repair signal to the model.
-     */
-    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
-    private val lenient: Json = Json {
-        ignoreUnknownKeys = true
-        coerceInputValues = false
-        explicitNulls = false
-        encodeDefaults = true
         namingStrategy = kotlinx.serialization.json.JsonNamingStrategy.SnakeCase
     }
 
@@ -97,7 +92,30 @@ object WorkflowJson {
      * with a stable error code. The caller is expected to surface the error verbatim so the
      * LLM can repair its emission.
      */
-    fun parse(rawJson: String, knownToolNames: Set<String>): ParseResult {
+    fun parse(rawJson: String, knownToolNames: Set<String>): ParseResult =
+        parseInternal(rawJson, knownToolNames, emptyMap())
+
+    /** Production authoring path: validates args against exact Tool definitions and stamps them. */
+    fun parse(rawJson: String, knownTools: Collection<Tool>): ParseResult {
+        val definitions = knownTools.distinctBy(Tool::name)
+        val catalog = ToolCatalogSnapshot.fromDefinitions(definitions)
+        val byName = definitions.associateBy(Tool::name)
+        return parseInternal(
+            rawJson = rawJson,
+            knownToolNames = byName.keys,
+            toolDefinitions = byName.mapValues { (name, tool) ->
+                ToolDefinition(tool, catalog.entry(name)?.schemaFingerprint)
+            },
+        )
+    }
+
+    private data class ToolDefinition(val tool: Tool, val schemaFingerprint: String?)
+
+    private fun parseInternal(
+        rawJson: String,
+        knownToolNames: Set<String>,
+        toolDefinitions: Map<String, ToolDefinition>,
+    ): ParseResult {
         val element: JsonElement = runCatching { Json.parseToJsonElement(rawJson) }.getOrElse {
             return ParseResult.Err("invalid_json", it.message ?: "JSON parse failed")
         }
@@ -112,17 +130,26 @@ object WorkflowJson {
             )
         }
 
-        val name = obj["name"]?.jsonPrimitive?.contentOrNull
+        val name = (obj["name"] as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull
             ?: return ParseResult.Err("missing_name", "name is required")
         if (name.isBlank()) return ParseResult.Err("invalid_name", "name must be non-blank")
         if (name.length > WorkflowConstants.MAX_NAME_LENGTH) {
             return ParseResult.Err("invalid_name",
-                "name must be ≤ ${WorkflowConstants.MAX_NAME_LENGTH} chars")
+                "name must be 鈮?${WorkflowConstants.MAX_NAME_LENGTH} chars")
         }
 
-        val description = obj["description"]?.jsonPrimitive?.contentOrNull
-            ?.take(WorkflowConstants.MAX_DESCRIPTION_LENGTH)
-        val enabled = obj["enabled"]?.jsonPrimitive?.booleanOrNull ?: true
+        val description = when (val element = obj["description"]) {
+            null, kotlinx.serialization.json.JsonNull -> null
+            is JsonPrimitive -> element.takeIf { it.isString }?.contentOrNull
+                ?: return ParseResult.Err("invalid_description", "description must be a string")
+            else -> return ParseResult.Err("invalid_description", "description must be a string")
+        }?.take(WorkflowConstants.MAX_DESCRIPTION_LENGTH)
+        val enabled = when (val element = obj["enabled"]) {
+            null -> true
+            is JsonPrimitive -> element.booleanOrNull
+                ?: return ParseResult.Err("invalid_enabled", "enabled must be a boolean")
+            else -> return ParseResult.Err("invalid_enabled", "enabled must be a boolean")
+        }
 
         val triggerObj = obj["trigger"] as? JsonObject
             ?: return ParseResult.Err("missing_trigger", "trigger object is required")
@@ -131,7 +158,11 @@ object WorkflowJson {
             is DecodeErr -> return r.err
         }
 
-        val conditionsArr = obj["conditions"]?.jsonArray ?: buildJsonArray { }
+        val conditionsArr = when (val element = obj["conditions"]) {
+            null -> JsonArray(emptyList())
+            is JsonArray -> element
+            else -> return ParseResult.Err("bad_conditions_shape", "conditions must be an array")
+        }
         val conditions = mutableListOf<ConditionSpec>()
         for ((idx, el) in conditionsArr.withIndex()) {
             val condObj = el as? JsonObject
@@ -143,14 +174,14 @@ object WorkflowJson {
             conditions += cond
         }
 
-        val actionsArr = obj["actions"]?.jsonArray
+        val actionsArr = obj["actions"] as? JsonArray
             ?: return ParseResult.Err("missing_actions", "actions array is required")
         if (actionsArr.isEmpty()) {
             return ParseResult.Err("empty_actions", "actions must be non-empty")
         }
         if (actionsArr.size > WorkflowConstants.MAX_ACTIONS) {
             return ParseResult.Err("too_many_actions",
-                "actions must be ≤ ${WorkflowConstants.MAX_ACTIONS}")
+                "actions must be 鈮?${WorkflowConstants.MAX_ACTIONS}")
         }
         val actions = mutableListOf<WorkflowAction>()
         for ((idx, el) in actionsArr.withIndex()) {
@@ -165,16 +196,14 @@ object WorkflowJson {
             }
             val toolName = (ao["tool"] as? JsonPrimitive)?.contentOrNull
                 ?: return ParseResult.Err("missing_tool", "action $idx missing 'tool'")
-            // knownToolNames is the assistant's currently-registered tool surface. Empty set is
-            // a sentinel meaning "skip the check" — used when reading stored definitions back
-            // from disk where we trust that what was persisted was already validated.
-            if (knownToolNames.isNotEmpty() && toolName !in knownToolNames) {
+            // Stored definitions use parseStored(); an empty current surface grants nothing.
+            if (toolName !in knownToolNames) {
                 return ParseResult.Err("unknown_tool",
                     "action $idx tool '$toolName' is not registered for this assistant")
             }
             // Forbid workflow chaining via workflow_run as an action. The spec explicitly
             // lists "Workflow chaining (one workflow triggering another)" as out-of-scope
-            // for v1 — without this guard, a malicious or hallucinated workflow definition
+            // for v1 鈥?without this guard, a malicious or hallucinated workflow definition
             // could trigger an unbounded chain across distinct workflow ids that the
             // per-workflow Mutex doesn't catch.
             if (toolName == "workflow_run") {
@@ -189,22 +218,56 @@ object WorkflowJson {
                     "action $idx args must be a JSON object",
                 )
             }
-            val timeout = ao["timeout_seconds"]?.jsonPrimitive?.intOrNull ?: 60
+            toolDefinitions[toolName]?.let { definition ->
+                WorkflowInputSchemaValidator.validate(args, definition.tool.parameters())?.let { error ->
+                    return ParseResult.Err(
+                        "invalid_action_args",
+                        "action $idx ${error.path}: ${error.detail}",
+                    )
+                }
+                if (definition.schemaFingerprint?.let(WorkflowToolSchemaSnapshot::isCanonical) != true) {
+                    return ParseResult.Err(
+                        "missing_tool_schema_fingerprint",
+                        "action $idx tool '$toolName' has no canonical schema fingerprint",
+                    )
+                }
+            }
+            val timeout = when (val element = ao["timeout_seconds"]) {
+                null -> 60
+                is JsonPrimitive -> element.intOrNull
+                    ?: return ParseResult.Err("invalid_timeout", "action $idx timeout_seconds must be an integer")
+                else -> return ParseResult.Err("invalid_timeout", "action $idx timeout_seconds must be an integer")
+            }
             if (timeout < WorkflowConstants.MIN_ACTION_TIMEOUT_S
                 || timeout > WorkflowConstants.MAX_ACTION_TIMEOUT_S) {
                 return ParseResult.Err("invalid_timeout",
                     "action $idx timeout_seconds must be ${WorkflowConstants.MIN_ACTION_TIMEOUT_S}..${WorkflowConstants.MAX_ACTION_TIMEOUT_S}")
             }
-            actions += WorkflowAction(tool = toolName, args = args, timeoutSeconds = timeout)
+            actions += WorkflowAction(
+                tool = toolName,
+                args = args,
+                timeoutSeconds = timeout,
+                toolSchemaFingerprint = toolDefinitions[toolName]?.schemaFingerprint,
+            )
         }
 
-        val cooldown = obj["cooldown_seconds"]?.jsonPrimitive?.intOrNull ?: 0
+        val cooldown = when (val element = obj["cooldown_seconds"]) {
+            null -> 0
+            is JsonPrimitive -> element.intOrNull
+                ?: return ParseResult.Err("invalid_cooldown", "cooldown_seconds must be an integer")
+            else -> return ParseResult.Err("invalid_cooldown", "cooldown_seconds must be an integer")
+        }
         if (cooldown < 0 || cooldown > WorkflowConstants.MAX_COOLDOWN_S) {
             return ParseResult.Err("invalid_cooldown",
                 "cooldown_seconds must be 0..${WorkflowConstants.MAX_COOLDOWN_S}")
         }
 
-        val maxRunsPerDay = obj["max_runs_per_day"]?.jsonPrimitive?.intOrNull
+        val maxRunsPerDay = when (val element = obj["max_runs_per_day"]) {
+            null, kotlinx.serialization.json.JsonNull -> null
+            is JsonPrimitive -> element.intOrNull
+                ?: return ParseResult.Err("invalid_daily_cap", "max_runs_per_day must be an integer")
+            else -> return ParseResult.Err("invalid_daily_cap", "max_runs_per_day must be an integer")
+        }
         if (maxRunsPerDay != null && (maxRunsPerDay < WorkflowConstants.MAX_RUNS_PER_DAY_FLOOR
                     || maxRunsPerDay > WorkflowConstants.MAX_RUNS_PER_DAY_CEIL)) {
             return ParseResult.Err("invalid_daily_cap",
@@ -216,7 +279,8 @@ object WorkflowJson {
             sanityCheckCondition(c)?.let { return it.withIndex(idx, "condition") }
         }
 
-        val id = obj["id"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+        val id = (obj["id"] as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull
+            ?.takeIf { it.isNotBlank() }
             ?: kotlin.uuid.Uuid.random().toString()
 
         val now = System.currentTimeMillis()
@@ -230,9 +294,10 @@ object WorkflowJson {
             actions = actions,
             cooldownSeconds = cooldown,
             maxRunsPerDay = maxRunsPerDay,
-            createdAtMs = obj["created_at_ms"]?.jsonPrimitive?.contentOrNull?.toLongOrNull() ?: now,
+            createdAtMs = (obj["created_at_ms"] as? JsonPrimitive)?.contentOrNull?.toLongOrNull() ?: now,
             updatedAtMs = now,
-            authoringAssistantId = obj["authoring_assistant_id"]?.jsonPrimitive?.contentOrNull
+            authoringAssistantId = (obj["authoring_assistant_id"] as? JsonPrimitive)
+                ?.takeIf { it.isString }?.contentOrNull
                 ?.takeIf { it.isNotBlank() },
         ))
     }
@@ -254,6 +319,9 @@ object WorkflowJson {
                         put("tool", JsonPrimitive(a.tool))
                         put("args", a.args)
                         put("timeout_seconds", JsonPrimitive(a.timeoutSeconds))
+                        a.toolSchemaFingerprint?.let { fingerprint ->
+                            put("tool_schema_fingerprint", JsonPrimitive(fingerprint))
+                        }
                     })
                 }
             })
@@ -278,18 +346,49 @@ object WorkflowJson {
                     }
                 })
             }
+            put("origin", JsonPrimitive(definition.origin.name))
+            if (definition.origin == WorkflowOrigin.LEARNED) {
+                definition.sourceCandidateId?.let { put("source_candidate_id", JsonPrimitive(it)) }
+                definition.sourceArtifactHash?.let { put("source_artifact_hash", JsonPrimitive(it)) }
+                definition.grantDigest?.let { put("grant_digest", JsonPrimitive(it)) }
+                // Presence is authoritative. Explicit null is Assistant scope; absence is an
+                // old/corrupt artifact whose exact scope is unavailable and must be quarantined.
+                put(
+                    "authority_subject_id",
+                    definition.authoritySubjectId?.let(::JsonPrimitive)
+                        ?: kotlinx.serialization.json.JsonNull,
+                )
+            }
         }
         return obj.toString()
     }
 
     /** Canonical learned-artifact encoder. Null means the capability snapshot failed closed. */
     fun encodeForLearned(definition: WorkflowDefinition): String? =
-        WorkflowCapabilitySnapshot.parsePersistedForLearnedExecution(
-            definition.capabilitySnapshot,
-        )?.let { encode(definition) }
+        definition.takeIf { candidate ->
+            candidate.origin == WorkflowOrigin.LEARNED &&
+                candidate.authoringAssistantId?.isNotBlank() == true &&
+                candidate.sourceCandidateId?.isNotBlank() == true &&
+                candidate.sourceArtifactHash?.isNotBlank() == true &&
+                candidate.grantDigest?.isNotBlank() == true &&
+                WorkflowCapabilitySnapshot.parsePersistedForLearnedExecution(
+                    candidate.capabilitySnapshot,
+                ) != null &&
+                WorkflowToolSchemaSnapshot.isComplete(candidate.actions)
+        }?.let(::encode)
 
     /** Whether a stored row predates persisted workflow capability snapshots. */
     enum class CapabilitySnapshotStorage {
+        PERSISTED,
+        LEGACY_MISSING,
+    }
+
+    enum class ToolSchemaSnapshotStorage {
+        PERSISTED,
+        LEGACY_MISSING,
+    }
+
+    enum class LearnedScopeStorage {
         PERSISTED,
         LEGACY_MISSING,
     }
@@ -302,6 +401,8 @@ object WorkflowJson {
     data class StoredDefinition(
         val definition: WorkflowDefinition,
         val capabilitySnapshotStorage: CapabilitySnapshotStorage,
+        val toolSchemaSnapshotStorage: ToolSchemaSnapshotStorage,
+        val learnedScopeStorage: LearnedScopeStorage,
     ) {
         fun learnedExecutionCapabilitiesOrNull(): Set<CapabilityKey>? =
             if (capabilitySnapshotStorage == CapabilitySnapshotStorage.PERSISTED) {
@@ -311,10 +412,20 @@ object WorkflowJson {
             } else {
                 null
             }
+
+        fun learnedToolSchemasOrNull(): List<String>? =
+            if (
+                toolSchemaSnapshotStorage == ToolSchemaSnapshotStorage.PERSISTED &&
+                WorkflowToolSchemaSnapshot.isComplete(definition.actions)
+            ) {
+                definition.actions.mapNotNull(WorkflowAction::toolSchemaFingerprint)
+            } else {
+                null
+            }
     }
 
     /**
-     * Round-trip parse — used when reading [me.rerere.rikkahub.workflow.db.WorkflowEntity.definitionJson]
+     * Round-trip parse 鈥?used when reading [me.rerere.rikkahub.workflow.db.WorkflowEntity.definitionJson]
      * back into a domain object.
      *
      * Compatibility-oriented: length / range / sanity checks are skipped on the read path
@@ -323,19 +434,24 @@ object WorkflowJson {
      * If we ever tighten constraints later (e.g. lower MAX_ACTIONS), existing rows must
      * still be loadable so the user can see them, edit them down, or delete them; rejecting
      * silently would hide them from the Settings page and tear down their triggers without
-     * explanation. Tool-name validation is also skipped — a row whose action references a
+     * explanation. Tool-name validation is also skipped 鈥?a row whose action references a
      * tool the user later disabled stays visible; the runner reports it at fire time.
      */
     fun parseStored(definitionJson: String): WorkflowDefinition? {
         val stored = parseStoredWithCompatibility(definitionJson) ?: return null
-        // The canonical encoder writes capability_snapshot for every reviewed non-legacy
-        // definition. A present-but-empty or malformed snapshot is therefore a current-format
-        // integrity failure and must not
-        // reach WorkflowEngine, whose legacy fallback intentionally applies only to absent
-        // pre-snapshot fields.
-        if (
+        if (stored.definition.origin == WorkflowOrigin.LEARNED) {
+            if (stored.learnedExecutionCapabilitiesOrNull() == null) return null
+            if (stored.learnedToolSchemasOrNull() == null) return null
+            if (stored.definition.authoringAssistantId.isNullOrBlank()) return null
+            if (stored.definition.sourceCandidateId.isNullOrBlank()) return null
+            if (stored.definition.sourceArtifactHash.isNullOrBlank()) return null
+            if (stored.definition.grantDigest.isNullOrBlank()) return null
+            if (stored.learnedScopeStorage != LearnedScopeStorage.PERSISTED) return null
+        } else if (
             stored.capabilitySnapshotStorage == CapabilitySnapshotStorage.PERSISTED &&
-            stored.learnedExecutionCapabilitiesOrNull() == null
+            stored.definition.capabilitySnapshot.any { raw ->
+                runCatching { CapabilityKey.of(raw) }.getOrNull()?.value != raw
+            }
         ) {
             return null
         }
@@ -345,57 +461,131 @@ object WorkflowJson {
     fun parseStoredWithCompatibility(definitionJson: String): StoredDefinition? {
         val element: JsonElement = runCatching { Json.parseToJsonElement(definitionJson) }.getOrNull() ?: return null
         val obj = element as? JsonObject ?: return null
-        val name = obj["name"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() } ?: return null
+        if ((obj.keys - strictRootKeys).isNotEmpty()) return null
+        val id = obj.stringValue("id")?.takeIf(String::isNotBlank) ?: return null
+        val name = obj.stringValue("name")?.takeIf(String::isNotBlank) ?: return null
         val triggerObj = obj["trigger"] as? JsonObject ?: return null
-        val triggerSpec = (decodeTrigger(triggerObj, lenient) as? DecodeOk)?.value as? TriggerSpec ?: return null
-        val conditions = (obj["conditions"]?.jsonArray ?: buildJsonArray { }).mapNotNull { el ->
-            (el as? JsonObject)?.let { (decodeCondition(it, lenient) as? DecodeOk)?.value as? ConditionSpec }
+        val triggerSpec = (decodeTrigger(triggerObj) as? DecodeOk)?.value as? TriggerSpec ?: return null
+        val conditionsElement = obj["conditions"]
+        val conditionArray = when (conditionsElement) {
+            null -> JsonArray(emptyList())
+            is JsonArray -> conditionsElement
+            else -> return null
         }
-        val actions = (obj["actions"]?.jsonArray ?: return null).mapNotNull { el ->
-            val ao = el as? JsonObject ?: return@mapNotNull null
-            val toolName = ao["tool"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
-            val args = ao["args"] as? JsonObject ?: buildJsonObject { }
-            val timeout = ao["timeout_seconds"]?.jsonPrimitive?.intOrNull ?: 60
-            WorkflowAction(tool = toolName, args = args, timeoutSeconds = timeout)
+        val conditions = conditionArray.map { el ->
+            val condition = el as? JsonObject ?: return null
+            (decodeCondition(condition) as? DecodeOk)?.value as? ConditionSpec ?: return null
         }
-        if (actions.isEmpty()) return null
-        val cooldown = obj["cooldown_seconds"]?.jsonPrimitive?.intOrNull ?: 0
-        val maxRunsPerDay = obj["max_runs_per_day"]?.jsonPrimitive?.intOrNull
-        val id = obj["id"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
-            ?: kotlin.uuid.Uuid.random().toString()
+        val actionArray = obj["actions"] as? JsonArray ?: return null
+        if (actionArray.isEmpty()) return null
+        var fingerprintsPresent: Boolean? = null
+        val actions = actionArray.map { el ->
+            val ao = el as? JsonObject ?: return null
+            if ((ao.keys - strictActionKeys).isNotEmpty()) return null
+            val toolName = ao.stringValue("tool")?.takeIf(String::isNotBlank) ?: return null
+            if (toolName == "workflow_run") return null
+            val args = ao["args"] as? JsonObject ?: return null
+            val timeout = when (val timeoutElement = ao["timeout_seconds"]) {
+                null -> 60
+                is JsonPrimitive -> timeoutElement.intOrNull ?: return null
+                else -> return null
+            }
+            if (timeout !in WorkflowConstants.MIN_ACTION_TIMEOUT_S..WorkflowConstants.MAX_ACTION_TIMEOUT_S) {
+                return null
+            }
+            val fingerprintElement = ao["tool_schema_fingerprint"]
+            val fingerprint = when (fingerprintElement) {
+                null -> null
+                is JsonPrimitive -> fingerprintElement.contentOrNull
+                    ?.takeIf(WorkflowToolSchemaSnapshot::isCanonical) ?: return null
+                else -> return null
+            }
+            val present = fingerprintElement != null
+            if (fingerprintsPresent != null && fingerprintsPresent != present) return null
+            fingerprintsPresent = present
+            WorkflowAction(
+                tool = toolName,
+                args = args,
+                timeoutSeconds = timeout,
+                toolSchemaFingerprint = fingerprint,
+            )
+        }
+        val cooldown = obj.optionalInt("cooldown_seconds", 0) ?: return null
+        val maxRunsPerDay = obj.optionalNullableInt("max_runs_per_day") ?: return null
         val snapshotElement = obj["capability_snapshot"]
         val snapshotStorage = if (snapshotElement == null) {
             CapabilitySnapshotStorage.LEGACY_MISSING
         } else {
             CapabilitySnapshotStorage.PERSISTED
         }
-        val capabilitySnapshot = when (snapshotElement) {
-            null -> emptySet()
+        val capabilityList = when (snapshotElement) {
+            null -> emptyList()
             is JsonArray -> snapshotElement.map { item ->
                 (item as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank) ?: return null
-            }.toSet()
+            }
             else -> return null
+        }
+        if (capabilityList.distinct().sorted() != capabilityList) return null
+        val capabilitySnapshot = capabilityList.toSet()
+        val enabled = when (val enabledElement = obj["enabled"]) {
+            null -> true
+            is JsonPrimitive -> enabledElement.booleanOrNull ?: return null
+            else -> return null
+        }
+        val originValue = obj.optionalString("origin") ?: return null
+        val origin = when (val rawOrigin = originValue.value) {
+            null -> WorkflowOrigin.USER
+            else -> runCatching { WorkflowOrigin.valueOf(rawOrigin) }.getOrNull() ?: return null
+        }
+        val learnedScopeStorage = if ("authority_subject_id" in obj) {
+            LearnedScopeStorage.PERSISTED
+        } else {
+            LearnedScopeStorage.LEGACY_MISSING
+        }
+        val authoritySubjectId = (obj.optionalString("authority_subject_id") ?: return null).value
+            ?.takeIf(String::isNotBlank)
+        if (origin == WorkflowOrigin.LEARNED && authoritySubjectId != null) {
+            val valid = runCatching {
+                me.rerere.rikkahub.learning.model.LearningScope.AuthoritySubject(
+                    authoritySubjectId,
+                )
+            }.isSuccess
+            if (!valid) return null
         }
         val now = System.currentTimeMillis()
         val definition = WorkflowDefinition(
             id = id,
             name = name,
-            description = obj["description"]?.jsonPrimitive?.contentOrNull,
-            enabled = obj["enabled"]?.jsonPrimitive?.booleanOrNull ?: true,
+            description = (obj.optionalString("description") ?: return null).value,
+            enabled = enabled,
             trigger = triggerSpec,
             conditions = conditions,
             actions = actions,
             cooldownSeconds = cooldown,
-            maxRunsPerDay = maxRunsPerDay,
-            createdAtMs = obj["created_at_ms"]?.jsonPrimitive?.contentOrNull?.toLongOrNull() ?: now,
-            updatedAtMs = obj["updated_at_ms"]?.jsonPrimitive?.contentOrNull?.toLongOrNull() ?: now,
-            authoringAssistantId = obj["authoring_assistant_id"]?.jsonPrimitive?.contentOrNull
-                ?.takeIf { it.isNotBlank() },
+            maxRunsPerDay = maxRunsPerDay.value,
+            createdAtMs = obj.optionalLong("created_at_ms", now) ?: return null,
+            updatedAtMs = obj.optionalLong("updated_at_ms", now) ?: return null,
+            authoringAssistantId = obj.optionalString("authoring_assistant_id")?.value
+                ?.takeIf(String::isNotBlank),
             capabilitySnapshot = capabilitySnapshot,
+            origin = origin,
+            sourceCandidateId = obj.optionalString("source_candidate_id")?.value
+                ?.takeIf(String::isNotBlank),
+            sourceArtifactHash = obj.optionalString("source_artifact_hash")?.value
+                ?.takeIf(String::isNotBlank),
+            grantDigest = obj.optionalString("grant_digest")?.value
+                ?.takeIf(String::isNotBlank),
+            authoritySubjectId = authoritySubjectId,
         )
         return StoredDefinition(
             definition = definition,
             capabilitySnapshotStorage = snapshotStorage,
+            toolSchemaSnapshotStorage = if (fingerprintsPresent == true) {
+                ToolSchemaSnapshotStorage.PERSISTED
+            } else {
+                ToolSchemaSnapshotStorage.LEGACY_MISSING
+            },
+            learnedScopeStorage = learnedScopeStorage,
         )
     }
 
@@ -405,15 +595,60 @@ object WorkflowJson {
     private data class DecodeOk(val value: Any) : DecodeOutcome()
     private data class DecodeErr(val err: ParseResult.Err) : DecodeOutcome()
 
+    private data class OptionalValue<T>(val value: T?)
+
+    private fun JsonObject.stringValue(key: String): String? {
+        val primitive = this[key] as? JsonPrimitive ?: return null
+        return primitive.takeIf { it.isString }?.contentOrNull
+    }
+
+    /** Null return = malformed; OptionalValue(null) = absent/explicit null. */
+    private fun JsonObject.optionalString(key: String): OptionalValue<String>? {
+        return when (val element = this[key]) {
+            null, kotlinx.serialization.json.JsonNull -> OptionalValue(null)
+            is JsonPrimitive -> element.takeIf { it.isString }?.contentOrNull
+                ?.let(::OptionalValue)
+            else -> null
+        }
+    }
+
+    private fun JsonObject.optionalInt(key: String, default: Int): Int? =
+        when (val element = this[key]) {
+            null -> default
+            is JsonPrimitive -> element.intOrNull
+            else -> null
+        }
+
+    private fun JsonObject.optionalNullableInt(key: String): OptionalValue<Int>? =
+        when (val element = this[key]) {
+            null, kotlinx.serialization.json.JsonNull -> OptionalValue(null)
+            is JsonPrimitive -> element.intOrNull?.let(::OptionalValue)
+            else -> null
+        }
+
+    private fun JsonObject.optionalLong(key: String, default: Long): Long? =
+        when (val element = this[key]) {
+            null -> default
+            is JsonPrimitive -> element.contentOrNull?.toLongOrNull()
+            else -> null
+        }
+
     private fun decodeTrigger(triggerObj: JsonObject, json: Json = strict): DecodeOutcome {
-        val type = triggerObj["type"]?.jsonPrimitive?.contentOrNull
+        val type = (triggerObj["type"] as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull
             ?: return DecodeErr(ParseResult.Err("missing_trigger_type", "trigger.type is required"))
         // Accept either nested {type, params:{...}} OR flat {type, ...keys}. The nested
         // form is canonical and what encodeTrigger emits, but most LLMs default to the
         // flat shape (it's the natural JSON for a single object). Without this leniency
         // any trigger with required params (time_cron's time_of_day, geofence_*'s lat/lng,
         // battery_*'s threshold_percent) gets rejected with a confusing serializer error.
-        val nestedParams = triggerObj["params"] as? JsonObject
+        val paramsElement = triggerObj["params"]
+        if (paramsElement != null && paramsElement !is JsonObject) {
+            return DecodeErr(ParseResult.Err("bad_trigger_params", "trigger.params must be an object"))
+        }
+        val nestedParams = paramsElement as? JsonObject
+        if (nestedParams != null && (triggerObj.keys - setOf("type", "params")).isNotEmpty()) {
+            return DecodeErr(ParseResult.Err("unknown_trigger_key", "trigger contains unknown key(s)"))
+        }
         val flat = buildJsonObject {
             put("type", JsonPrimitive(type))
             if (nestedParams != null) {
@@ -442,11 +677,18 @@ object WorkflowJson {
     }
 
     private fun decodeCondition(condObj: JsonObject, json: Json = strict): DecodeOutcome {
-        val type = condObj["type"]?.jsonPrimitive?.contentOrNull
+        val type = (condObj["type"] as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull
             ?: return DecodeErr(ParseResult.Err("missing_condition_type", "condition.type is required"))
         // Accept either nested {type, params:{...}} OR flat {type, ...keys}. See the
         // matching comment in decodeTrigger for the rationale.
-        val nestedParams = condObj["params"] as? JsonObject
+        val paramsElement = condObj["params"]
+        if (paramsElement != null && paramsElement !is JsonObject) {
+            return DecodeErr(ParseResult.Err("bad_condition_params", "condition.params must be an object"))
+        }
+        val nestedParams = paramsElement as? JsonObject
+        if (nestedParams != null && (condObj.keys - setOf("type", "params")).isNotEmpty()) {
+            return DecodeErr(ParseResult.Err("unknown_condition_key", "condition contains unknown key(s)"))
+        }
         val flat = buildJsonObject {
             put("type", JsonPrimitive(type))
             if (nestedParams != null) {
@@ -505,7 +747,7 @@ object WorkflowJson {
         is TriggerSpec.AppClosed -> if (t.packageName.isBlank())
             ParseResult.Err("invalid_trigger", "app_closed.package_name must be non-blank") else null
         is TriggerSpec.NotificationReceived -> when {
-            // At least one filter — otherwise the workflow fires on every notification.
+            // At least one filter 鈥?otherwise the workflow fires on every notification.
             t.packageName.isNullOrBlank() && t.titleContains.isNullOrBlank()
                 && t.textContains.isNullOrBlank() && t.titleMatches.isNullOrBlank()
                 && t.textMatches.isNullOrBlank() ->

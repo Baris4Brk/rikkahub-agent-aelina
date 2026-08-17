@@ -12,7 +12,13 @@ import me.rerere.rikkahub.memory.MemorySourceVersion
 import kotlin.uuid.Uuid
 
 object CommandCodec {
-    private val json = Json { ignoreUnknownKeys = true }
+    // Durable command payloads are authority-bearing state. Persist defaults explicitly so fields
+    // with dynamic defaults (for example RawUserContent.createdAt) can never be re-sampled while
+    // restoring a queued command.
+    private val json = Json {
+        ignoreUnknownKeys = true
+        encodeDefaults = true
+    }
     private const val DURABLE_ORIGIN_FIELD = "_commandOrigin"
 
     fun encodeDurable(command: ChatCommand, origin: CommandOrigin): Pair<String, String> {

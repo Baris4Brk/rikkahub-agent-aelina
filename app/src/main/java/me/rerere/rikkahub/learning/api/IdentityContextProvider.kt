@@ -31,9 +31,16 @@ class IdentityContextRequest(
     val expectedScope: LearningScope,
     val taskSignature: TaskSignatureV1,
     val budget: IdentityContextBudget,
+    /** Frozen once by the caller and reused for Dream source/temporal validation. */
+    val frozenNowEpochMs: Long,
 ) {
+    init {
+        require(frozenNowEpochMs >= 0L) { "Invalid frozen identity clock" }
+    }
+
     override fun toString(): String =
-        "IdentityContextRequest(scope=${expectedScope.kind}, task=<opaque>, budget=$budget)"
+        "IdentityContextRequest(scope=${expectedScope.kind}, task=<opaque>, " +
+            "clock=<frozen>, budget=$budget)"
 }
 
 enum class IdentityContextKind {
@@ -82,7 +89,12 @@ class ActiveIdentityBlock internal constructor(
 
 enum class IdentityContextUnavailableReason {
     DISABLED,
-    PUBLIC_READ_API_UNAVAILABLE,
+    /** Learning AUTHORITY_SUBJECT has no canonical Dream/Memory authority scope in V1. */
+    SCOPE_NOT_REPRESENTABLE,
+    /** The public API exists, but no current authority-owned projection is available. */
+    PROJECTION_UNAVAILABLE,
+    /** A valid projection contained no eligible whole item inside the requested bounds. */
+    NO_RELEVANT_CONTEXT,
     TIMEOUT,
     SOURCE_FAILURE,
     INVALID_PROJECTION,

@@ -11,6 +11,7 @@ import me.rerere.rikkahub.learning.policy.PolicyLineageEdge
 import me.rerere.rikkahub.learning.policy.PolicyLineageKind
 import me.rerere.rikkahub.learning.policy.PolicySourceInvalidationPlanner
 import me.rerere.rikkahub.learning.policy.PolicySourcePropagationResult
+import me.rerere.rikkahub.learning.model.LearningCanonicalId
 import me.rerere.rikkahub.learning.storage.LearningDatabase
 import me.rerere.rikkahub.learning.storage.LearningEpisodeEntity
 import me.rerere.rikkahub.learning.storage.LearningEpisodeLessonEntity
@@ -29,6 +30,13 @@ import me.rerere.rikkahub.learning.storage.PolicyEvidenceEntity
 import me.rerere.rikkahub.learning.storage.PolicyLineageEntity
 import me.rerere.rikkahub.learning.storage.PolicyRevisionEntity
 import me.rerere.rikkahub.learning.storage.StoredLearningPolicyStatus
+import me.rerere.rikkahub.learning.storage.POLICY_SOURCE_REDACTION_MARKER
+import me.rerere.rikkahub.learning.storage.sourcePrivacyAuditSnapshot
+import me.rerere.rikkahub.learning.storage.sourceRedactedArtifactSha256
+import me.rerere.rikkahub.learning.storage.sourceRedactedTaskSignature
+import me.rerere.rikkahub.learning.storage.entity.LearnedWorkflowCandidateRevisionActor
+import me.rerere.rikkahub.learning.storage.entity.LearnedWorkflowCandidateRevisionReason
+import me.rerere.rikkahub.learning.workflow.model.LearnedWorkflowCandidateState
 
 /** Atomic Episode projection output. The job terminal CAS is the enclosing transaction fence. */
 data class AssembleEpisodeOutputV1(
@@ -429,7 +437,7 @@ internal object SourceValidityOutputCommitter :
                         ),
                     ) != -1L
                 ) { "Previous source validity replay conflict" }
-            } else if (previous.state == LearningSourceValidityState.VALID.name) {
+            } else if (previous.state in NON_TERMINAL_SOURCE_VALIDITY_STATES) {
                 require(previous.replayGeneration == desired.replayGeneration) {
                     "Previous source validity replay conflict"
                 }
@@ -442,7 +450,8 @@ internal object SourceValidityOutputCommitter :
                         sourceType = previous.sourceType,
                         sourceId = previous.sourceId,
                         sourceRevision = previous.sourceRevision,
-                        expectedState = LearningSourceValidityState.VALID.name,
+                        previousSourceRevision = previous.previousSourceRevision,
+                        expectedState = previous.state,
                         newState = oldState,
                         integritySha256 = previous.integritySha256,
                         invalidationReason = output.transitionReason,
@@ -452,7 +461,9 @@ internal object SourceValidityOutputCommitter :
                     ) == 1
                 ) { "Previous source validity CAS lost" }
             } else {
-                require(previous.state == oldState) { "Previous source validity conflict" }
+                require(previous.state in TERMINAL_SOURCE_VALIDITY_STATES) {
+                    "Previous source validity conflict"
+                }
             }
             dao.clearTraceSummariesForSource(
                 desired.streamId,
@@ -487,6 +498,28 @@ internal object SourceValidityOutputCommitter :
                 desired.updatedAtMs,
             )
         }
+        // The current monotonic authority head supersedes every lower revision, not just N-1.
+        // This matters when capture was disabled across multiple edits: reconciliation sees only
+        // the current head, while an older derived revision may still be marked VALID locally.
+        val historicalState = if (desired.state == LearningSourceValidityState.TOMBSTONED.name) {
+            LearningSourceValidityState.TOMBSTONED.name
+        } else {
+            LearningSourceValidityState.SUPERSEDED.name
+        }
+        dao.invalidateAllEarlierSourceRevisions(
+            streamId = desired.streamId,
+            replayGeneration = desired.replayGeneration,
+            scopeKind = desired.scopeKind,
+            scopeId = desired.scopeId,
+            sourceType = desired.sourceType,
+            sourceId = desired.sourceId,
+            currentRevision = desired.sourceRevision,
+            newState = historicalState,
+            invalidationReason = output.transitionReason,
+            authorityEventId = desired.authorityEventId,
+            occurredAtMs = desired.occurredAtMs,
+            updatedAtMs = desired.updatedAtMs,
+        )
         val existing = dao.findSourceValidity(
             desired.streamId,
             desired.replayGeneration,
@@ -496,30 +529,52 @@ internal object SourceValidityOutputCommitter :
             desired.sourceId,
             desired.sourceRevision,
         )
-        if (existing == null) {
-            require(output.expectedPreviousState == null)
-            require(dao.insertSourceValidityIgnore(desired) != -1L)
-        } else if (existing != desired) {
-            val expectedState = requireNotNull(output.expectedPreviousState)
-            require(existing.replayGeneration == desired.replayGeneration)
-            val changed = dao.updateSourceValidityIfCurrent(
-                streamId = desired.streamId,
-                replayGeneration = desired.replayGeneration,
-                scopeKind = desired.scopeKind,
-                scopeId = desired.scopeId,
-                sourceType = desired.sourceType,
-                sourceId = desired.sourceId,
-                sourceRevision = desired.sourceRevision,
-                expectedState = expectedState,
-                newState = desired.state,
-                integritySha256 = desired.integritySha256,
-                invalidationReason = desired.invalidationReason,
-                authorityEventId = desired.authorityEventId,
-                occurredAtMs = desired.occurredAtMs,
-                updatedAtMs = desired.updatedAtMs,
-            )
-            require(changed == 1) { "Source validity CAS lost" }
+        val committed = when {
+            existing == null -> {
+                require(output.expectedPreviousState == null)
+                require(dao.insertSourceValidityIgnore(desired) != -1L)
+                desired
+            }
+            existing == desired -> existing
+            shouldPreserveExistingSourceInvalidity(existing.state, desired.state) -> existing
+            else -> {
+                val expectedState = requireNotNull(output.expectedPreviousState)
+                require(existing.replayGeneration == desired.replayGeneration)
+                val changed = dao.updateSourceValidityIfCurrent(
+                    streamId = desired.streamId,
+                    replayGeneration = desired.replayGeneration,
+                    scopeKind = desired.scopeKind,
+                    scopeId = desired.scopeId,
+                    sourceType = desired.sourceType,
+                    sourceId = desired.sourceId,
+                    sourceRevision = desired.sourceRevision,
+                    previousSourceRevision = desired.previousSourceRevision,
+                    expectedState = expectedState,
+                    newState = desired.state,
+                    integritySha256 = desired.integritySha256,
+                    invalidationReason = desired.invalidationReason,
+                    authorityEventId = desired.authorityEventId,
+                    occurredAtMs = desired.occurredAtMs,
+                    updatedAtMs = desired.updatedAtMs,
+                )
+                require(changed == 1) { "Source validity CAS lost" }
+                requireNotNull(
+                    dao.findSourceValidity(
+                        desired.streamId,
+                        desired.replayGeneration,
+                        desired.scopeKind,
+                        desired.scopeId,
+                        desired.sourceType,
+                        desired.sourceId,
+                        desired.sourceRevision,
+                    ),
+                )
+            }
         }
+        require(committed == desired || shouldPreserveExistingSourceInvalidity(
+            committed.state,
+            desired.state,
+        )) { "Source validity replay conflict" }
         require(
             dao.findSourceValidity(
                 desired.streamId,
@@ -529,44 +584,63 @@ internal object SourceValidityOutputCommitter :
                 desired.sourceType,
                 desired.sourceId,
                 desired.sourceRevision,
-            ) == desired
+            ) == committed
         ) { "Source validity replay conflict" }
-        if (desired.state != LearningSourceValidityState.VALID.name) {
+        if (committed.state != LearningSourceValidityState.VALID.name) {
             dao.clearTraceSummariesForSource(
-                desired.streamId,
-                desired.replayGeneration,
-                desired.scopeKind,
-                desired.scopeId,
-                desired.sourceType,
-                desired.sourceId,
-                desired.sourceRevision,
+                committed.streamId,
+                committed.replayGeneration,
+                committed.scopeKind,
+                committed.scopeId,
+                committed.sourceType,
+                committed.sourceId,
+                committed.sourceRevision,
                 MAX_SOURCE_INVALIDATION_FANOUT,
             )
             dao.markLessonsStaleForSource(
-                desired.streamId,
-                desired.replayGeneration,
-                desired.scopeKind,
-                desired.scopeId,
-                desired.sourceType,
-                desired.sourceId,
-                desired.sourceRevision,
-                desired.updatedAtMs,
+                committed.streamId,
+                committed.replayGeneration,
+                committed.scopeKind,
+                committed.scopeId,
+                committed.sourceType,
+                committed.sourceId,
+                committed.sourceRevision,
+                committed.updatedAtMs,
                 MAX_SOURCE_INVALIDATION_FANOUT,
             )
             invalidatePoliciesForSource(
                 database,
-                desired.streamId,
-                desired.replayGeneration,
-                desired.scopeKind,
-                desired.scopeId,
-                desired.sourceType,
-                desired.sourceId,
-                desired.sourceRevision,
-                desired.updatedAtMs,
+                committed.streamId,
+                committed.replayGeneration,
+                committed.scopeKind,
+                committed.scopeId,
+                committed.sourceType,
+                committed.sourceId,
+                committed.sourceRevision,
+                committed.updatedAtMs,
             )
         }
     }
 }
+
+private val NON_TERMINAL_SOURCE_VALIDITY_STATES = setOf(
+    LearningSourceValidityState.VALID.name,
+    LearningSourceValidityState.UNKNOWN.name,
+)
+
+private val TERMINAL_SOURCE_VALIDITY_STATES = setOf(
+    LearningSourceValidityState.INVALIDATED.name,
+    LearningSourceValidityState.SUPERSEDED.name,
+    LearningSourceValidityState.TOMBSTONED.name,
+)
+
+/** A later terminal projection must never regress when an older outbox row is replayed. */
+internal fun shouldPreserveExistingSourceInvalidity(
+    existingState: String,
+    desiredState: String,
+): Boolean = existingState == LearningSourceValidityState.TOMBSTONED.name ||
+    (existingState in TERMINAL_SOURCE_VALIDITY_STATES &&
+        desiredState != LearningSourceValidityState.TOMBSTONED.name)
 
 private suspend fun invalidatePoliciesForSource(
     database: LearningDatabase,
@@ -620,15 +694,23 @@ private suspend fun reconcilePolicySourceChanges(
     val staleRoots = linkedSetOf<String>()
     policyIds.distinct().sorted().forEach { policyId ->
         val current = policyDao.findPolicy(policyId) ?: return@forEach
-        if (!current.sourceValid) {
-            staleRoots += policyId
-            return@forEach
-        }
         val evidence = policyDao.listEvidenceValidity(policyId, MAX_POLICY_EVIDENCE_AUDIT + 1)
         require(evidence.size <= MAX_POLICY_EVIDENCE_AUDIT) { "Policy evidence audit bound exceeded" }
         require(evidence.all { it.policyId == policyId }) { "Cross-policy evidence projection" }
         val invalid = evidence.filterNot { it.sourceValid }
-        if (invalid.isEmpty()) return@forEach
+        // A source-invalid row can predate the privacy-redaction invariant. The bounded audit
+        // deliberately returns those legacy rows even when their invalid evidence edge has
+        // already been removed, so they must still pass through the exact redaction CAS.
+        if (invalid.isEmpty() && current.sourceValid) return@forEach
+        if (invalid.isEmpty() && current.hasCompleteSourcePrivacyRedaction()) {
+            redactCuratorCandidatesForPolicy(database, policyId, maxOf(current.updatedAtMs, updatedAtMs))
+            staleWorkflowCandidatesForPolicy(
+                database,
+                policyId,
+                maxOf(current.updatedAtMs, updatedAtMs),
+            )
+            return@forEach
+        }
         val surviving = evidence.filter { it.sourceValid }
         val statistics = P1PolicyEvidenceRecalculator.calculate(
             surviving.map { row ->
@@ -644,12 +726,32 @@ private suspend fun reconcilePolicySourceChanges(
                 "Policy invalid evidence deletion lost"
             }
         }
-        val becomesStale = statistics.distinctEpisodeSupport == 0
+        val lifecycleEvidence = PolicySourceLifecycleEvidence(
+            digest = LearningCanonicalId.digest(
+                domainVersion = "policy-source-reconciliation-evidence-v1",
+                fields = buildList {
+                    add(policyId)
+                    add(current.stateVersion.toString())
+                    add(current.contentRevision.toString())
+                    add(current.artifactSha256)
+                    invalid.map { it.episodeId }.sorted().forEach(::add)
+                },
+            ),
+            observedAtMs = maxOf(current.updatedAtMs, updatedAtMs),
+        )
         val next = current.copy(
             stateVersion = Math.addExact(current.stateVersion, 1L),
-            status = if (becomesStale) StoredLearningPolicyStatus.STALE.name else current.status,
-            sourceValid = !becomesStale,
-            staleReason = if (becomesStale) STALE_SOURCE_REASON else current.staleReason,
+            contentRevision = Math.addExact(current.contentRevision, 1L),
+            taskSignature = current.sourceRedactedTaskSignature(),
+            triggerSummary = POLICY_SOURCE_REDACTION_MARKER,
+            procedureSummary = POLICY_SOURCE_REDACTION_MARKER,
+            verificationSummary = POLICY_SOURCE_REDACTION_MARKER,
+            boundarySummary = POLICY_SOURCE_REDACTION_MARKER,
+            failureModeSummary = POLICY_SOURCE_REDACTION_MARKER,
+            artifactSha256 = current.sourceRedactedArtifactSha256(),
+            status = StoredLearningPolicyStatus.STALE_SOURCE.name,
+            sourceValid = false,
+            staleReason = STALE_SOURCE_REASON,
             distinctEpisodeSupport = statistics.distinctEpisodeSupport.toLong(),
             positiveEpisodeCount = statistics.positiveEpisodeCount.toLong(),
             negativeEpisodeCount = statistics.negativeEpisodeCount.toLong(),
@@ -660,8 +762,10 @@ private suspend fun reconcilePolicySourceChanges(
             policyDao = policyDao,
             current = current,
             next = next,
-            staleReason = next.staleReason,
+            lifecycleEvidence = lifecycleEvidence,
         )
+        redactCuratorCandidatesForPolicy(database, policyId, next.updatedAtMs)
+        staleWorkflowCandidatesForPolicy(database, policyId, next.updatedAtMs)
         require(policyDao.countDistinctEpisodeSupport(policyId) == next.distinctEpisodeSupport)
         require(
             policyDao.countDistinctEpisodeSupportByPolarity(
@@ -675,7 +779,7 @@ private suspend fun reconcilePolicySourceChanges(
                 LearningPolicyEvidencePolarity.NEGATIVE.name,
             ) == next.negativeEpisodeCount,
         )
-        if (becomesStale) staleRoots += policyId
+        staleRoots += policyId
     }
     if (staleRoots.isEmpty()) return
 
@@ -695,50 +799,145 @@ private suspend fun reconcilePolicySourceChanges(
     stalePolicyIds.minus(staleRoots).sorted().forEach { policyId ->
         val current = policyDao.findPolicy(policyId)
             ?: error("Policy lineage child disappeared")
-        if (!current.sourceValid) return@forEach
+        if (!current.sourceValid && current.hasCompleteSourcePrivacyRedaction()) return@forEach
         val next = current.copy(
             stateVersion = Math.addExact(current.stateVersion, 1L),
-            status = StoredLearningPolicyStatus.STALE.name,
+            contentRevision = Math.addExact(current.contentRevision, 1L),
+            taskSignature = current.sourceRedactedTaskSignature(),
+            triggerSummary = POLICY_SOURCE_REDACTION_MARKER,
+            procedureSummary = POLICY_SOURCE_REDACTION_MARKER,
+            verificationSummary = POLICY_SOURCE_REDACTION_MARKER,
+            boundarySummary = POLICY_SOURCE_REDACTION_MARKER,
+            failureModeSummary = POLICY_SOURCE_REDACTION_MARKER,
+            artifactSha256 = current.sourceRedactedArtifactSha256(),
+            status = StoredLearningPolicyStatus.STALE_SOURCE.name,
             sourceValid = false,
-            staleReason = ANCESTOR_STALE_SOURCE_REASON,
+            staleReason = STALE_SOURCE_REASON,
             updatedAtMs = maxOf(current.updatedAtMs, updatedAtMs),
         )
         persistSourceReconciliation(
             policyDao = policyDao,
             current = current,
             next = next,
-            staleReason = ANCESTOR_STALE_SOURCE_REASON,
+            lifecycleEvidence = PolicySourceLifecycleEvidence(
+                digest = LearningCanonicalId.digest(
+                    domainVersion = "policy-source-lineage-evidence-v1",
+                    fields = buildList {
+                        add(policyId)
+                        add(current.stateVersion.toString())
+                        add(current.contentRevision.toString())
+                        add(current.artifactSha256)
+                        staleRoots.sorted().forEach(::add)
+                    },
+                ),
+                observedAtMs = maxOf(current.updatedAtMs, updatedAtMs),
+            ),
         )
+        redactCuratorCandidatesForPolicy(database, policyId, next.updatedAtMs)
+        staleWorkflowCandidatesForPolicy(database, policyId, next.updatedAtMs)
     }
+}
+
+/**
+ * A learned workflow remains derived from its exact source Policy after promotion. Source
+ * invalidation therefore stales every execution-capable candidate in the same LearningDatabase
+ * transaction as the Policy/evidence mutation. The AppDatabase row may still say enabled, but
+ * its per-fire authority validator immediately observes this terminal candidate state and denies.
+ */
+private suspend fun staleWorkflowCandidatesForPolicy(
+    database: LearningDatabase,
+    policyId: String,
+    invalidatedAtMs: Long,
+) {
+    val dao = database.learnedWorkflowCandidateDao()
+    while (true) {
+        val candidates = dao.listSourceInvalidationCandidates(
+            sourcePolicyId = policyId,
+            limit = MAX_WORKFLOW_SOURCE_INVALIDATION_FANOUT,
+        )
+        if (candidates.isEmpty()) return
+        candidates.forEach { current ->
+            require(current.sourcePolicyId == policyId && current.stateVersion < Long.MAX_VALUE) {
+                "Workflow source invalidation invariant failed"
+            }
+            val next = current.copy(
+                state = LearnedWorkflowCandidateState.STALE_SOURCE.name,
+                stateVersion = current.stateVersion + 1L,
+                updatedAtMs = maxOf(current.updatedAtMs, invalidatedAtMs),
+            )
+            require(
+                dao.transitionFenced(
+                    expected = current,
+                    next = next,
+                    reason = LearnedWorkflowCandidateRevisionReason.SOURCE_INVALIDATED,
+                    actor = LearnedWorkflowCandidateRevisionActor.SOURCE_RECONCILER,
+                ),
+            ) { "Workflow source invalidation CAS lost" }
+        }
+    }
+}
+
+/** Policy-derived Curator wires are privacy-derived state and must stale in the same Room fence. */
+private suspend fun redactCuratorCandidatesForPolicy(
+    database: LearningDatabase,
+    policyId: String,
+    redactedAtMs: Long,
+) {
+    var hasMore: Boolean
+    do {
+        val result = database.curatorDeltaDao().redactByPolicySource(
+            policyId = policyId,
+            redactedAtMs = redactedAtMs,
+            limit = MAX_CURATOR_SOURCE_REDACTION_FANOUT,
+        )
+        require(result.redacted == result.scanned) {
+            "Curator source redaction did not cover the complete page"
+        }
+        hasMore = result.hasMore
+    } while (hasMore)
 }
 
 private suspend fun persistSourceReconciliation(
     policyDao: me.rerere.rikkahub.learning.storage.LearningPolicyDao,
     current: LearningPolicyEntity,
     next: LearningPolicyEntity,
-    staleReason: String?,
+    lifecycleEvidence: PolicySourceLifecycleEvidence,
 ) {
     require(
-        policyDao.reconcilePolicySourceIfCurrent(
+        policyDao.redactPolicySourceIfCurrent(
             policyId = current.id,
             expectedStateVersion = current.stateVersion,
-            status = next.status,
-            sourceValid = next.sourceValid,
-            staleReason = staleReason,
-            support = next.distinctEpisodeSupport,
-            positive = next.positiveEpisodeCount,
-            negative = next.negativeEpisodeCount,
-            confidence = next.confidence,
+            expectedContentRevision = current.contentRevision,
+            expectedArtifactSha256 = current.artifactSha256,
+            expectedApplicableToolSchemasWire = current.applicableToolSchemasWire,
+            expectedApplicableModelIdentityWire = current.applicableModelIdentityWire,
+            expectedApplicableProviderIdentityWire = current.applicableProviderIdentityWire,
+            expectedApplicableTemplateIdentity = current.applicableTemplateIdentity,
+            expectedApplicableConfigurationIdentity = current.applicableConfigurationIdentity,
+            expectedApplicableConfigurationGeneration =
+                current.applicableConfigurationGeneration,
+            expectedApplicableCapabilityDigest = current.applicableCapabilityDigest,
+            expectedApplicableAuthorityDigest = current.applicableAuthorityDigest,
+            newContentRevision = next.contentRevision,
+            redactedTaskSignature = next.taskSignature,
+            redactedArtifactSha256 = next.artifactSha256,
+            remainingSupport = next.distinctEpisodeSupport,
+            remainingPositive = next.positiveEpisodeCount,
+            remainingNegative = next.negativeEpisodeCount,
+            remainingConfidence = next.confidence,
             updatedAtMs = next.updatedAtMs,
         ) == 1,
     ) { "Policy source reconciliation CAS lost" }
     require(policyDao.findPolicy(current.id) == next) { "Policy source reconciliation mismatch" }
+    // Historic audit snapshots were previously allowed to contain the policy summaries. Source
+    // erasure rewrites them to a fixed marker before appending the new content-free receipt.
+    policyDao.redactPolicyRevisionSnapshots(current.id)
     policyDao.insertRevision(
         PolicyRevisionEntity(
             policyId = next.id,
             revision = next.stateVersion,
-            beforeSnapshot = current.toPolicyAuditSnapshot(),
-            afterSnapshot = next.toPolicyAuditSnapshot(),
+            beforeSnapshot = current.sourcePrivacyAuditSnapshot(lifecycleEvidence.digest),
+            afterSnapshot = next.sourcePrivacyAuditSnapshot(lifecycleEvidence.digest),
             beforeArtifactSha256 = current.artifactSha256,
             afterArtifactSha256 = next.artifactSha256,
             reasonCode = LearningPolicyRevisionReason.SOURCE_INVALIDATED.name,
@@ -746,6 +945,27 @@ private suspend fun persistSourceReconciliation(
             createdAtMs = next.updatedAtMs,
         ),
     )
+}
+
+private fun LearningPolicyEntity.hasCompleteSourcePrivacyRedaction(): Boolean =
+    taskSignature.startsWith("policy-source-redacted-v1:") &&
+        triggerSummary == POLICY_SOURCE_REDACTION_MARKER &&
+        procedureSummary == POLICY_SOURCE_REDACTION_MARKER &&
+        verificationSummary == POLICY_SOURCE_REDACTION_MARKER &&
+        boundarySummary == POLICY_SOURCE_REDACTION_MARKER &&
+        failureModeSummary == POLICY_SOURCE_REDACTION_MARKER
+
+private const val MAX_CURATOR_SOURCE_REDACTION_FANOUT = 128
+private const val MAX_WORKFLOW_SOURCE_INVALIDATION_FANOUT = 128
+
+private data class PolicySourceLifecycleEvidence(
+    val digest: String,
+    val observedAtMs: Long,
+) {
+    init {
+        require(digest.matches(Regex("[0-9a-f]{64}")))
+        require(observedAtMs >= 0L)
+    }
 }
 
 private suspend fun loadBoundedDerivedLineage(
@@ -797,25 +1017,6 @@ private fun String.toDomainEvidencePolarity(): PolicyEvidencePolarity = when (th
     else -> PolicyEvidencePolarity.NEUTRAL
 }
 
-private fun LearningPolicyEntity.toPolicyAuditSnapshot(): String = listOf(
-    "policy-audit-snapshot-v1",
-    "status=$status",
-    "source_valid=$sourceValid",
-    "schema_valid=$schemaValid",
-    "task=$taskSignature",
-    "type=$policyType",
-    "trigger=$triggerSummary",
-    "procedure=$procedureSummary",
-    "verification=$verificationSummary",
-    "boundary=$boundarySummary",
-    "failure=$failureModeSummary",
-    "artifact=$artifactSha256",
-    "support=$distinctEpisodeSupport",
-    "positive=$positiveEpisodeCount",
-    "negative=$negativeEpisodeCount",
-    "confidence=$confidence",
-).joinToString("\n")
-
 internal object PolicyMutationOutputCommitter :
     LearningJobTypedOutputCommitter<PolicyMutationOutputV1> {
     override suspend fun persistInOpenTransaction(
@@ -866,7 +1067,17 @@ internal object PolicyMutationOutputCommitter :
             val changed = dao.updatePolicyIfCurrent(
                 policyId = desired.id,
                 expectedStateVersion = requireNotNull(output.expectedPreviousStateVersion),
+                expectedContentRevision = existing.contentRevision,
                 expectedArtifactSha256 = requireNotNull(output.expectedPreviousArtifactSha256),
+                expectedApplicableToolSchemasWire = existing.applicableToolSchemasWire,
+                expectedApplicableModelIdentityWire = existing.applicableModelIdentityWire,
+                expectedApplicableProviderIdentityWire = existing.applicableProviderIdentityWire,
+                expectedApplicableTemplateIdentity = existing.applicableTemplateIdentity,
+                expectedApplicableConfigurationIdentity = existing.applicableConfigurationIdentity,
+                expectedApplicableConfigurationGeneration =
+                    existing.applicableConfigurationGeneration,
+                expectedApplicableCapabilityDigest = existing.applicableCapabilityDigest,
+                expectedApplicableAuthorityDigest = existing.applicableAuthorityDigest,
                 taskSignature = desired.taskSignature,
                 policyType = desired.policyType,
                 triggerSummary = desired.triggerSummary,
@@ -874,11 +1085,20 @@ internal object PolicyMutationOutputCommitter :
                 verificationSummary = desired.verificationSummary,
                 boundarySummary = desired.boundarySummary,
                 failureModeSummary = desired.failureModeSummary,
+                newContentRevision = desired.contentRevision,
                 newArtifactSha256 = desired.artifactSha256,
                 compilerAbi = desired.compilerAbi,
                 status = desired.status,
                 sourceValid = desired.sourceValid,
                 schemaValid = desired.schemaValid,
+                applicableToolSchemasWire = desired.applicableToolSchemasWire,
+                applicableModelIdentityWire = desired.applicableModelIdentityWire,
+                applicableProviderIdentityWire = desired.applicableProviderIdentityWire,
+                applicableTemplateIdentity = desired.applicableTemplateIdentity,
+                applicableConfigurationIdentity = desired.applicableConfigurationIdentity,
+                applicableConfigurationGeneration = desired.applicableConfigurationGeneration,
+                applicableCapabilityDigest = desired.applicableCapabilityDigest,
+                applicableAuthorityDigest = desired.applicableAuthorityDigest,
                 staleReason = desired.staleReason,
                 distinctEpisodeSupport = desired.distinctEpisodeSupport,
                 positiveEpisodeCount = desired.positiveEpisodeCount,
@@ -974,6 +1194,13 @@ private fun LearningPolicyEntity.hasSamePolicyProducerAndScopeAs(other: Learning
         producerPromptIdentity == other.producerPromptIdentity &&
         producerTemplateIdentity == other.producerTemplateIdentity &&
         producerSchemaIdentity == other.producerSchemaIdentity &&
+        applicableModelIdentityWire == other.applicableModelIdentityWire &&
+        applicableProviderIdentityWire == other.applicableProviderIdentityWire &&
+        applicableTemplateIdentity == other.applicableTemplateIdentity &&
+        applicableConfigurationIdentity == other.applicableConfigurationIdentity &&
+        applicableConfigurationGeneration == other.applicableConfigurationGeneration &&
+        applicableCapabilityDigest == other.applicableCapabilityDigest &&
+        applicableAuthorityDigest == other.applicableAuthorityDigest &&
         createdAtMs == other.createdAtMs &&
         usageCount == 0L && other.usageCount == 0L &&
         lastUsedAtMs == null && other.lastUsedAtMs == null &&
@@ -991,5 +1218,4 @@ private const val MAX_POLICY_EVIDENCE_AUDIT = 256
 private const val MAX_POLICY_LINEAGE_FANOUT = 64
 private const val MAX_POLICY_LINEAGE_EDGES = 512
 private const val STALE_SOURCE_REASON = "STALE_SOURCE"
-private const val ANCESTOR_STALE_SOURCE_REASON = "ANCESTOR_STALE_SOURCE"
 private const val SOURCE_INVALIDATION_EVENT_SCHEMA_VERSION = 2

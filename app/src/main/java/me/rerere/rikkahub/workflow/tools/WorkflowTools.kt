@@ -36,7 +36,7 @@ import me.rerere.rikkahub.workflow.trigger.TriggerRegistry
 
 fun workflowCreateTool(
     repository: WorkflowRepository,
-    knownToolNamesProvider: () -> List<String>,
+    knownToolsProvider: () -> List<Tool>,
     callerContext: me.rerere.rikkahub.data.ai.tools.ToolInvocationContext =
         me.rerere.rikkahub.data.ai.tools.ToolInvocationContext.EMPTY,
 ): Tool = Tool(
@@ -110,7 +110,8 @@ fun workflowCreateTool(
     execute = { json ->
         val definitionEl = json.jsonObject["definition"]
             ?: return@Tool errorResponse("missing_definition", "definition object required")
-        val parsed = WorkflowJson.parse(definitionEl.toString(), knownToolNamesProvider().toSet())
+        val toolDefinitions = knownToolsProvider()
+        val parsed = WorkflowJson.parse(definitionEl.toString(), toolDefinitions)
         when (parsed) {
             is WorkflowJson.ParseResult.Err -> errorResponse(parsed.error, parsed.detail)
             is WorkflowJson.ParseResult.Ok -> {
@@ -122,6 +123,10 @@ fun workflowCreateTool(
                     authoringAssistantId = parsed.definition.authoringAssistantId
                         ?: callerContext.callerAssistantId,
                     capabilitySnapshot = WorkflowCapabilitySnapshot.capture(parsed.definition.actions),
+                    origin = me.rerere.rikkahub.workflow.model.WorkflowOrigin.USER,
+                    sourceCandidateId = null,
+                    sourceArtifactHash = null,
+                    grantDigest = null,
                 )
                 runCatching { repository.upsert(def) }.fold(
                     onSuccess = {
@@ -228,7 +233,7 @@ fun workflowGetTool(repository: WorkflowRepository): Tool = Tool(
 
 fun workflowUpdateTool(
     repository: WorkflowRepository,
-    knownToolNamesProvider: () -> List<String>,
+    knownToolsProvider: () -> List<Tool>,
     callerContext: me.rerere.rikkahub.data.ai.tools.ToolInvocationContext =
         me.rerere.rikkahub.data.ai.tools.ToolInvocationContext.EMPTY,
 ): Tool = Tool(
@@ -256,7 +261,8 @@ fun workflowUpdateTool(
     execute = { json ->
         val definitionEl = json.jsonObject["definition"]
             ?: return@Tool errorResponse("missing_definition", "definition object required")
-        val parsed = WorkflowJson.parse(definitionEl.toString(), knownToolNamesProvider().toSet())
+        val toolDefinitions = knownToolsProvider()
+        val parsed = WorkflowJson.parse(definitionEl.toString(), toolDefinitions)
         when (parsed) {
             is WorkflowJson.ParseResult.Err -> errorResponse(parsed.error, parsed.detail)
             is WorkflowJson.ParseResult.Ok -> {
@@ -270,6 +276,10 @@ fun workflowUpdateTool(
                         ?: parsed.definition.authoringAssistantId
                         ?: callerContext.callerAssistantId,
                     capabilitySnapshot = WorkflowCapabilitySnapshot.capture(parsed.definition.actions),
+                    origin = existing.definition.origin,
+                    sourceCandidateId = existing.definition.sourceCandidateId,
+                    sourceArtifactHash = existing.definition.sourceArtifactHash,
+                    grantDigest = existing.definition.grantDigest,
                 )
                 runCatching { repository.upsert(def) }.fold(
                     onSuccess = {
@@ -348,7 +358,12 @@ fun workflowSetEnabledTool(repository: WorkflowRepository): Tool = Tool(
         if (repository.getById(id) == null) {
             return@Tool errorResponse("not_found", "no workflow with id=$id")
         }
-        repository.setEnabled(id, enabled)
+        if (!repository.setEnabled(id, enabled)) {
+            return@Tool errorResponse(
+                "enable_denied_or_conflict",
+                "learned workflows require the dedicated reviewed enable flow; retry other state changes",
+            )
+        }
         listOf(UIMessagePart.Text(buildJsonObject {
             put("ok", true); put("id", id); put("enabled", enabled)
         }.toString()))

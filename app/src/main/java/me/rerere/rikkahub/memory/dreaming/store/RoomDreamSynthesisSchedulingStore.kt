@@ -6,6 +6,8 @@ import me.rerere.rikkahub.data.db.dao.DreamDao
 import me.rerere.rikkahub.data.db.entity.DreamRunEntity
 import me.rerere.rikkahub.data.db.entity.MemoryScopeStateEntity
 import me.rerere.rikkahub.memory.dreaming.model.DreamObserverStorageCodec
+import me.rerere.rikkahub.memory.dreaming.model.AuthorityChangeReason
+import me.rerere.rikkahub.memory.dreaming.model.DreamRunFailureCode
 import me.rerere.rikkahub.memory.dreaming.model.DreamRunMode
 import me.rerere.rikkahub.memory.dreaming.model.DreamRunStatus
 import me.rerere.rikkahub.memory.dreaming.model.DreamScopeId
@@ -37,6 +39,17 @@ class RoomDreamSynthesisSchedulingStore(
         request: EnsurePendingSynthesisRunRequest,
         allowCreate: Boolean,
     ): EnsurePendingSynthesisRunResult = database.withTransaction {
+        // A process death or platform worker stop can leave the durable mirror RUNNING after its
+        // lease has expired. Recover those mirrors before evaluating budget/identity so a stale
+        // run cannot block every subsequent Dream attempt forever.
+        dreamDao.failExpiredRunMirrors(
+            nowMs = request.createdAtMs,
+            failureCode = DreamRunFailureCode.LEASE_EXPIRED.name,
+        )
+        dreamDao.recoverExpiredScopeLeases(
+            nowMs = request.createdAtMs,
+            reasonCode = AuthorityChangeReason.LEASE_RECOVERED.name,
+        )
         val state = dreamDao.getScopeState(request.scopeId.value)
             ?: return@withTransaction EnsurePendingSynthesisRunResult.ScopeNotDirty
         if (!state.hasValidSchedulingShape()) {

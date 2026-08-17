@@ -5,7 +5,7 @@ import kotlin.uuid.Uuid
 const val LEARNING_STREAM_INIT_EVENT_ID_V1: String = "learning-stream-init:v1"
 
 /** Increment whenever raw event/schema interpretation changes; persisted rows are reinterpreted. */
-const val CURRENT_LEARNING_EVENT_INTERPRETATION_VERSION: Int = 2
+const val CURRENT_LEARNING_EVENT_INTERPRETATION_VERSION: Int = 3
 
 /** Content-free protocol failures shared by producers, imported-row decoders and replay. */
 enum class LearningEventContractViolation {
@@ -29,6 +29,12 @@ enum class LearningEventContractViolation {
     COMMAND_COMPLETION_REQUIRED,
     MESSAGE_REVISION_PAIR_REQUIRED,
     EXECUTION_TOOL_IDENTITY_INCOMPLETE,
+    INVALID_REWARD_METADATA,
+    REWARD_METADATA_REQUIRED,
+    REWARD_METADATA_FORBIDDEN,
+    FEEDBACK_CORRELATION_REQUIRED,
+    EXECUTION_VERIFICATION_REQUIRED,
+    EXECUTION_VERIFICATION_FORBIDDEN,
 }
 
 /**
@@ -47,6 +53,10 @@ object LearningEventContract {
         missingRevisionReasonCode: String?,
         terminalStateCode: String?,
         correlation: LearningCorrelation,
+        rewardDimensionCode: String? = null,
+        rewardSignalKindCode: String? = null,
+        rewardValueMilli: Int? = null,
+        executionVerificationStateCode: String? = null,
     ): LearningEventContractViolation? {
         val knownType = eventCode.knownType
         if (knownType == LearningEventType.STREAM_INIT) {
@@ -61,6 +71,10 @@ object LearningEventContract {
                 sourceTypeCode == null &&
                 missingRevisionReasonCode == null &&
                 terminalStateCode == null &&
+                rewardDimensionCode == null &&
+                rewardSignalKindCode == null &&
+                rewardValueMilli == null &&
+                executionVerificationStateCode == null &&
                 correlation == LearningCorrelation()
             ) {
                 null
@@ -81,6 +95,9 @@ object LearningEventContract {
         ) {
             return LearningEventContractViolation.MESSAGE_REVISION_PAIR_REQUIRED
         }
+        val isV3Feedback = knownType == LearningEventType.USER_FEEDBACK_RECORDED &&
+            eventCode.schemaVersion >= 3 &&
+            eventCode.decodeState == LearningEventDecodeState.KNOWN
         if (knownType == LearningEventType.SOURCE_INVALIDATED &&
             eventCode.decodeState == LearningEventDecodeState.KNOWN
         ) {
@@ -89,6 +106,15 @@ object LearningEventContract {
                 correlation.sourceStateCode == null ||
                 businessSource.sourceRevision == null ||
                 correlation.previousSourceRevision >= businessSource.sourceRevision
+            ) {
+                return LearningEventContractViolation.SOURCE_TRANSITION_REQUIRED
+            }
+        } else if (isV3Feedback) {
+            val revision = businessSource.sourceRevision
+            if (
+                revision == null || correlation.sourceStateCode == null ||
+                (revision == 1L && correlation.previousSourceRevision != null) ||
+                (revision > 1L && correlation.previousSourceRevision != revision - 1L)
             ) {
                 return LearningEventContractViolation.SOURCE_TRANSITION_REQUIRED
             }
@@ -124,6 +150,16 @@ object LearningEventContract {
         if (terminalStateCode != null && !terminalStateCode.isSafeLearningCode()) {
             return LearningEventContractViolation.INVALID_TERMINAL_STATE
         }
+        if (
+            listOfNotNull(
+                rewardDimensionCode,
+                rewardSignalKindCode,
+                executionVerificationStateCode,
+            ).any { !it.isSafeLearningCode() } ||
+            (rewardValueMilli != null && (rewardValueMilli !in -1000..1000 || rewardValueMilli == 0))
+        ) {
+            return LearningEventContractViolation.INVALID_REWARD_METADATA
+        }
 
         // An unknown/incompatible business event is retained without guessing its newer semantics.
         if (eventCode.decodeState != LearningEventDecodeState.KNOWN || knownType == null) return null
@@ -146,6 +182,55 @@ object LearningEventContract {
         if (businessSource.sourceKind == LearningSourceKind.UNKNOWN) return null
         if (!isExpectedSource(knownType, businessSource.sourceKind)) {
             return LearningEventContractViolation.EVENT_SOURCE_MISMATCH
+        }
+        val hasRewardMetadata = rewardDimensionCode != null || rewardSignalKindCode != null ||
+            rewardValueMilli != null
+        if (isV3Feedback) {
+            if (
+                rewardDimensionCode !in REWARD_DIMENSIONS ||
+                rewardSignalKindCode !in EXPLICIT_REWARD_SIGNAL_KINDS ||
+                correlation.sourceStateCode !in setOf("ACTIVE", "TOMBSTONED") ||
+                businessSource.sourceRevision == null
+            ) {
+                return LearningEventContractViolation.REWARD_METADATA_REQUIRED
+            }
+            if (
+                (correlation.sourceStateCode == "ACTIVE" && rewardValueMilli == null) ||
+                (correlation.sourceStateCode == "TOMBSTONED" &&
+                    (rewardValueMilli != null || businessSource.sourceRevision == 1L))
+            ) {
+                return LearningEventContractViolation.INVALID_REWARD_METADATA
+            }
+            if (
+                correlation.sourceStateCode == "ACTIVE" &&
+                rewardValueMilli != -1_000 && rewardValueMilli != 1_000
+            ) {
+                return LearningEventContractViolation.INVALID_REWARD_METADATA
+            }
+            if (executionVerificationStateCode != null) {
+                return LearningEventContractViolation.EXECUTION_VERIFICATION_FORBIDDEN
+            }
+            if (
+                correlation.conversationId == null ||
+                correlation.conversationSourceRevision == null ||
+                correlation.commandId == null ||
+                correlation.lineageId == null ||
+                correlation.branchAnchorMessageId == null ||
+                correlation.branchAnchorMessageRevision == null ||
+                correlation.messageId == null ||
+                correlation.messageRevision == null
+            ) {
+                return LearningEventContractViolation.FEEDBACK_CORRELATION_REQUIRED
+            }
+        } else if (hasRewardMetadata) {
+            return LearningEventContractViolation.REWARD_METADATA_FORBIDDEN
+        }
+        if (knownType == LearningEventType.EXECUTION_TERMINAL && eventCode.schemaVersion >= 3) {
+            if (executionVerificationStateCode !in EXECUTION_VERIFICATION_STATES) {
+                return LearningEventContractViolation.EXECUTION_VERIFICATION_REQUIRED
+            }
+        } else if (executionVerificationStateCode != null) {
+            return LearningEventContractViolation.EXECUTION_VERIFICATION_FORBIDDEN
         }
         return when (knownType) {
             LearningEventType.COMMAND_ADMITTED,
@@ -202,6 +287,10 @@ object LearningEventContract {
         missingRevisionReasonCode: String?,
         terminalStateCode: String?,
         correlation: LearningCorrelation,
+        rewardDimensionCode: String? = null,
+        rewardSignalKindCode: String? = null,
+        rewardValueMilli: Int? = null,
+        executionVerificationStateCode: String? = null,
     ) {
         val violation = violationOrNull(
             streamId = streamId,
@@ -211,6 +300,10 @@ object LearningEventContract {
             missingRevisionReasonCode = missingRevisionReasonCode,
             terminalStateCode = terminalStateCode,
             correlation = correlation,
+            rewardDimensionCode = rewardDimensionCode,
+            rewardSignalKindCode = rewardSignalKindCode,
+            rewardValueMilli = rewardValueMilli,
+            executionVerificationStateCode = executionVerificationStateCode,
         )
         require(violation == null) { "Invalid learning event contract: $violation" }
     }
@@ -275,6 +368,16 @@ object LearningEventContract {
             "SKIPPED_DAILY_CAP",
             "SKIPPED_DISABLED",
         ),
+    )
+
+    private val REWARD_DIMENSIONS = setOf("GOAL", "PROCESS", "USER")
+    private val EXPLICIT_REWARD_SIGNAL_KINDS =
+        setOf("EXPLICIT_USER_FEEDBACK", "EXPLICIT_USER_CORRECTION")
+    private val EXECUTION_VERIFICATION_STATES = setOf(
+        "NOT_APPLICABLE",
+        "UNVERIFIED",
+        "VERIFIED_SUCCESS",
+        "VERIFIED_FAILURE",
     )
 }
 

@@ -274,7 +274,22 @@ class OwnerWorkflowOperationHandler(
             ?: return failure(index, action.type, "WORKFLOW_ENABLED_REQUIRED", "enabled must be true or false.")
         val old = repository.getById(id)!!
         val receipt = WorkflowReceipt(id, old.definition, old.entity.enabled)
-        repository.setEnabled(id, enabled)
+        if (!repository.setEnabled(id, enabled)) {
+            return failure(
+                index,
+                action.type,
+                if (old.entity.origin == me.rerere.rikkahub.workflow.model.WorkflowOrigin.LEARNED.name && enabled) {
+                    "LEARNED_WORKFLOW_ENABLE_REQUIRES_REVIEW"
+                } else {
+                    "WORKFLOW_ENABLE_CONFLICT"
+                },
+                if (old.entity.origin == me.rerere.rikkahub.workflow.model.WorkflowOrigin.LEARNED.name && enabled) {
+                    "Learned workflows can only be enabled from the two-step Workflow review flow."
+                } else {
+                    "Workflow enabled state changed concurrently. Reload and retry."
+                },
+            )
+        }
         return success(index, action.type, "WORKFLOW_ENABLED_UPDATED", "Workflow enabled state updated.", buildJsonObject {
             put("workflow_id", id)
             put("enabled", enabled)
@@ -601,10 +616,11 @@ class OwnerWorkflowOperationHandler(
     private fun parseDefinition(request: OwnerOperationRequest, action: OwnerAction): ParsedDefinition {
         val element = action.arguments["definition"]
             ?: return ParsedDefinition.Error("WORKFLOW_DEFINITION_REQUIRED", "definition is required.")
-        val known = request.availableToolNames.filterNotTo(mutableSetOf()) {
+        val allowedNames = request.availableToolNames.filterNotTo(mutableSetOf()) {
             it.startsWith("owner_") || it == "workflow_run"
         }
-        return when (val parsed = WorkflowJson.parse(element.toString(), known)) {
+        val definitions = request.availableTools.filter { tool -> tool.name in allowedNames }
+        return when (val parsed = WorkflowJson.parse(element.toString(), definitions)) {
             is WorkflowJson.ParseResult.Ok -> ParsedDefinition.Value(parsed.definition)
             is WorkflowJson.ParseResult.Err -> ParsedDefinition.Error(parsed.error, parsed.detail)
         }

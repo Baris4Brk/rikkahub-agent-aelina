@@ -15,7 +15,7 @@ import me.rerere.rikkahub.learning.model.LearningSourceRef
 import me.rerere.rikkahub.learning.trace.TraceFeature
 import me.rerere.rikkahub.learning.trace.TraceMetric
 
-const val REFLECTION_INPUT_SCHEMA_VERSION = 1
+const val REFLECTION_INPUT_SCHEMA_VERSION = 2
 const val REFLECTION_INPUT_MAX_FEATURES = 64
 const val REFLECTION_INPUT_MAX_EVIDENCE = 32
 const val REFLECTION_INPUT_MAX_UTF8_BYTES = 96 * 1_024
@@ -27,7 +27,7 @@ data class ReflectionInputBundle(
     val payloadJson: String,
 ) {
     init {
-        require(inputId.matches(Regex("reflection-input-v1:[0-9a-f]{64}")))
+        require(inputId.matches(Regex("reflection-input-v2:[0-9a-f]{64}")))
         require(allowedEvidence.isNotEmpty() && allowedEvidence.size <= REFLECTION_INPUT_MAX_EVIDENCE)
         require(allowedEvidence.keys.toList() == allowedEvidence.keys.sorted())
         require(allowedEvidence.keys.all { it.matches(Regex("E[1-9][0-9]?")) })
@@ -78,38 +78,44 @@ object ReflectionInputComposer {
         }
         val aliases = sources.mapIndexed { index, source -> "E${index + 1}" to source }.toMap()
         val aliasBySource = aliases.entries.associate { (alias, source) -> source to alias }
-        val featureDigests = features.sortedBy { it.sequence }.map { feature ->
-            LearningCanonicalId.digest(
-                domainVersion = "reflection-feature-v1",
-                fields = buildList {
-                    add(feature.sequence.toString())
-                    add(feature.actionType.name)
-                    add(feature.outcomeClass.name)
-                    feature.sources.sortedWith(SOURCE_ORDER).forEach { source ->
-                        add(source.sourceKind.name)
-                        add(source.sourceId)
-                        add(source.sourceRevision?.toString())
-                    }
-                },
-            )
+        val featurePayload = buildJsonArray {
+            features.sortedBy { it.sequence }.forEach { feature ->
+                add(feature.toJson(aliasBySource))
+            }
         }
-        val featureSetDigest = LearningCanonicalId.digest(
-            domainVersion = "reflection-feature-set-v1",
-            fields = featureDigests,
+        val payloadCore = buildJsonObject {
+            put("schema_version", REFLECTION_INPUT_SCHEMA_VERSION)
+            put("episode_status", episodeStatus.name)
+            put("features", featurePayload)
+        }
+        val evidenceManifestDigest = LearningCanonicalId.digest(
+            domainVersion = "reflection-evidence-manifest-v2",
+            fields = sources.flatMap { source ->
+                listOf(
+                    source.sourceKind.name,
+                    source.sourceId,
+                    source.sourceRevision?.toString(),
+                    source.missingRevisionReason?.name,
+                    source.databaseStreamId.toString(),
+                    source.scope.kind.name,
+                    source.scope.storageId,
+                    source.occurredAtMs.toString(),
+                )
+            },
         )
-        val inputId = "reflection-input-v1:" + LearningCanonicalId.digest(
-            domainVersion = "reflection-input-v1",
-            fields = listOf(episodeId.value, episodeStatus.name, featureSetDigest),
+        val inputId = "reflection-input-v2:" + LearningCanonicalId.digest(
+            domainVersion = "reflection-provider-input-v2",
+            fields = listOf(
+                episodeId.value,
+                evidenceManifestDigest,
+                payloadCore.toString(),
+            ),
         )
         val payload = buildJsonObject {
             put("schema_version", REFLECTION_INPUT_SCHEMA_VERSION)
             put("input_id", inputId)
             put("episode_status", episodeStatus.name)
-            put("features", buildJsonArray {
-                features.sortedBy { it.sequence }.forEach { feature ->
-                    add(feature.toJson(aliasBySource))
-                }
-            })
+            put("features", featurePayload)
         }.toString()
         if (payload.toByteArray(StandardCharsets.UTF_8).size > REFLECTION_INPUT_MAX_UTF8_BYTES) {
             return ReflectionInputComposeResult.Rejected(ReflectionInputFailure.PAYLOAD_TOO_LARGE)

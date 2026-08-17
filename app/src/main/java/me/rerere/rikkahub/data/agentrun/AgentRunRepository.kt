@@ -66,7 +66,7 @@ class AgentRunRepository(private val dao: AgentRunDao) {
                 dao.insert(row)
                 dao.purgeOldest(AgentRunDefaults.RETENTION_CAP)
             }
-        }.onFailure { logSafe { Log.w(TAG, "open($kind, $domainId) failed", it) } }
+        }.onFailure { logSafe { Log.w(TAG, "agent_run_open_failed") } }
         return id
     }
 
@@ -86,11 +86,11 @@ class AgentRunRepository(private val dao: AgentRunDao) {
                         status = status.name,
                         updatedAtMs = now,
                         startedAtMs = existing.startedAtMs ?: if (status == AgentRunStatus.running) now else null,
-                        lastError = lastError?.take(LAST_ERROR_MAX) ?: existing.lastError,
+                        lastError = AgentRunFailureCode.sanitize(lastError) ?: existing.lastError,
                     )
                 )
             }
-        }.onFailure { logSafe { Log.w(TAG, "setStatus($id, $status) failed", it) } }
+        }.onFailure { logSafe { Log.w(TAG, "agent_run_status_write_failed") } }
     }
 
     /**
@@ -100,7 +100,7 @@ class AgentRunRepository(private val dao: AgentRunDao) {
      */
     suspend fun markTerminal(id: String, status: AgentRunStatus, lastError: String? = null) {
         if (!status.isTerminal) {
-            logSafe { Log.w(TAG, "markTerminal($id) called with non-terminal status $status — ignoring") }
+            logSafe { Log.w(TAG, "agent_run_terminal_status_invalid") }
             return
         }
         runCatching {
@@ -113,11 +113,11 @@ class AgentRunRepository(private val dao: AgentRunDao) {
                         status = status.name,
                         updatedAtMs = now,
                         finishedAtMs = now,
-                        lastError = lastError?.take(LAST_ERROR_MAX) ?: existing.lastError,
+                        lastError = AgentRunFailureCode.sanitize(lastError) ?: existing.lastError,
                     )
                 )
             }
-        }.onFailure { logSafe { Log.w(TAG, "markTerminal($id, $status) failed", it) } }
+        }.onFailure { logSafe { Log.w(TAG, "agent_run_terminal_write_failed") } }
     }
 
     fun observeRecent(limit: Int = 50): Flow<List<AgentRun>> = dao.observeRecent(limit)
@@ -162,13 +162,13 @@ class AgentRunRepository(private val dao: AgentRunDao) {
                             status = AgentRunStatus.process_lost.name,
                             updatedAtMs = now,
                             finishedAtMs = now,
-                            lastError = existing.lastError ?: "process killed mid-run",
+                            lastError = existing.lastError ?: AgentRunFailureCode.PROCESS_LOST,
                         )
                     )
                     flipped++
                 }
             }
-        }.onFailure { logSafe { Log.w(TAG, "markAllProcessLost failed", it) } }
+        }.onFailure { logSafe { Log.w(TAG, "agent_run_recovery_write_failed") } }
         return flipped
     }
 
@@ -185,9 +185,37 @@ class AgentRunRepository(private val dao: AgentRunDao) {
         }
     }
 
-    companion object {
-        /** `last_error` column is kept short — full detail lives in the domain table. */
-        private const val LAST_ERROR_MAX = 500
+}
+
+
+/** Durable AgentRun errors are allowlisted, stable, content-free reason codes. */
+object AgentRunFailureCode {
+    const val RUNTIME_FAILURE = "runtime_failure"
+    const val PROCESS_LOST = "process_lost"
+
+    private val allowed = setOf(
+        RUNTIME_FAILURE, PROCESS_LOST,
+        "owner_operation_cancelled", "owner_operation_failed", "owner_operation_rejected",
+        "generation_timeout", "generation_failed", "generation_cancelled",
+        "invalid_parent_assistant", "execution_profile_conflict", "empty_final_answer",
+        "subagent_timeout", "subagent_cancelled", "subagent_failed",
+        "setup_incomplete", "setup_validation_failed",
+        "emergency_stop", "workflow_not_found", "learned_definition_invalid",
+        "condition_not_met", "learned_authority_inactive", "learned_assistant_missing",
+        "workflow_assistant_missing", "learned_capability_missing",
+        "learned_capability_stale", "capability_stale", "learned_schema_stale",
+        "tool_schema_stale", "geofence_fine_location_missing",
+        "geofence_background_location_missing", "notification_listener_missing",
+        "accessibility_service_missing", "bluetooth_permission_missing",
+        "action_hardline_blocked", "action_unknown_tool", "action_invalid_schema",
+        "action_invalid_args", "action_runtime_failure", "action_timeout",
+        "action_rejected", "action_runtime_fence_rejected", "workflow_gate_skipped",
+    )
+
+    fun sanitize(value: String?): String? = when (value) {
+        null -> null
+        in allowed -> value
+        else -> RUNTIME_FAILURE
     }
 }
 

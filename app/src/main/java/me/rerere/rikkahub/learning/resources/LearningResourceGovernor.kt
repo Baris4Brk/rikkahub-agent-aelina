@@ -8,6 +8,8 @@ import kotlinx.coroutines.withTimeoutOrNull
 enum class LearningResourceKind {
     LANGUAGE_MODEL,
     EMBEDDING,
+    /** Low-priority, local, bounded database maintenance. */
+    MAINTENANCE,
 }
 
 enum class LearningExecutionClass {
@@ -39,6 +41,12 @@ data class LearningRouteCapabilities(
     val executionClass: LearningExecutionClass,
     val requiresNetwork: Boolean,
     val cancellation: LearningCancellationCapability,
+    /**
+     * Provider work requires the device-local background-model consent. Retention/repair is a
+     * correctness and privacy task, so it may run without that model consent while still obeying
+     * foreground, battery and thermal gates.
+     */
+    val requiresUserBackgroundAuthorization: Boolean = true,
 ) {
     init {
         require(
@@ -95,17 +103,22 @@ class LearningResourceGovernor(
     private val conditionsSource: LearningDeviceConditionsSource,
     maxLanguageModelConcurrency: Int = 1,
     maxEmbeddingConcurrency: Int = 1,
+    maxMaintenanceConcurrency: Int = 1,
     private val admissionWaitMs: Long = 2_000L,
     private val onYield: (LearningYieldReason) -> Unit = {},
 ) {
     private val semaphores = mapOf(
         LearningResourceKind.LANGUAGE_MODEL to Semaphore(maxLanguageModelConcurrency),
         LearningResourceKind.EMBEDDING to Semaphore(maxEmbeddingConcurrency),
+        LearningResourceKind.MAINTENANCE to Semaphore(maxMaintenanceConcurrency),
     )
 
     init {
         require(maxLanguageModelConcurrency in 1..4)
         require(maxEmbeddingConcurrency in 1..4)
+        require(maxMaintenanceConcurrency == 1) {
+            "Maintenance must remain a single bounded background lane"
+        }
         require(admissionWaitMs in 1L..30_000L)
     }
 
@@ -227,7 +240,8 @@ private fun admissionFailure(
     route: LearningRouteCapabilities,
     conditions: LearningDeviceConditions,
 ): LearningYieldReason? = when {
-    !conditions.userAllowsBackgroundWork -> LearningYieldReason.USER_DISABLED
+    route.requiresUserBackgroundAuthorization && !conditions.userAllowsBackgroundWork ->
+        LearningYieldReason.USER_DISABLED
     conditions.batterySaver == LearningSignal.UNKNOWN -> LearningYieldReason.POWER_STATE_UNKNOWN
     conditions.batterySaver == LearningSignal.YES -> LearningYieldReason.BATTERY_SAVER
     conditions.thermalState == LearningThermalState.UNKNOWN -> LearningYieldReason.THERMAL_UNKNOWN

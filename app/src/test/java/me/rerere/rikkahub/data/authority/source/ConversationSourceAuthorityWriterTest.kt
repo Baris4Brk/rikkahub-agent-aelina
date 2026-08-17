@@ -9,6 +9,32 @@ import org.junit.Test
 
 class ConversationSourceAuthorityWriterTest {
     @Test
+    fun `disabled initial capture supplies ephemeral correlation with zero authority writes`() =
+        runBlocking {
+            val store = FakeConversationSourceAuthorityStore()
+            val writer = ConversationSourceAuthorityWriter(
+                store = store,
+                initialCaptureGate = ConversationSourceInitialCaptureGate { false },
+            )
+
+            val commit = writer.reconcileAllKnownScopesInCurrentTransaction(snapshot()).single()
+
+            assertFalse(commit.didMutate)
+            assertEquals(0, store.countConversationScopes(CONVERSATION_ID))
+            assertEquals(0, store.countMessagesForConversation(SCOPE, CONVERSATION_ID))
+            assertEquals(
+                1L,
+                commit.requireActiveMessage(ASSISTANT_MESSAGE_ID, "ASSISTANT").sourceRevision,
+            )
+
+            val enabled = ConversationSourceAuthorityWriter(store)
+                .reconcileAllKnownScopesInCurrentTransaction(snapshot()).single()
+            assertTrue(enabled.didMutate)
+            assertEquals(1, store.countConversationScopes(CONVERSATION_ID))
+            assertEquals(2, store.countMessagesForConversation(SCOPE, CONVERSATION_ID))
+        }
+
+    @Test
     fun `initial graph gets revision one and exact branch head without invalidation`() = runBlocking {
         val store = FakeConversationSourceAuthorityStore()
         val events = FakeSourceEvents()
@@ -249,6 +275,39 @@ class ConversationSourceAuthorityWriterTest {
         assertEquals(1, events.dispatchCount)
     }
 
+    @Test
+    fun `edit branch supersession and deletion invalidate feedback once before one commit wake`() =
+        runBlocking {
+            val mutations = listOf(
+                snapshot(assistantDigest = DIGEST_C, occurredAtMs = 20L),
+                snapshot(selected = listOf(USER_MESSAGE_ID), occurredAtMs = 20L),
+                snapshot(
+                    messages = listOf(message(USER_MESSAGE_ID, "USER", DIGEST_A)),
+                    selected = listOf(USER_MESSAGE_ID),
+                    occurredAtMs = 20L,
+                ),
+            )
+            mutations.forEach { mutation ->
+                val store = FakeConversationSourceAuthorityStore()
+                val events = FakeSourceEvents(acceptInserts = false)
+                val invalidations = RecordingTransitionInvalidations()
+                val writer = ConversationSourceAuthorityWriter(store, events, invalidations)
+                writer.reconcileInCurrentTransaction(snapshot())
+
+                val changed = writer.reconcileInCurrentTransaction(mutation)
+
+                assertEquals(listOf(ASSISTANT_MESSAGE_ID), invalidations.targetIds)
+                assertTrue(changed.insertedOutbox)
+                assertEquals(0, events.dispatchCount)
+                writer.dispatchPostCommit(changed)
+                assertEquals(1, events.dispatchCount)
+
+                val replay = writer.reconcileInCurrentTransaction(mutation)
+                assertEquals(listOf(ASSISTANT_MESSAGE_ID), invalidations.targetIds)
+                assertFalse(replay.insertedOutbox)
+            }
+        }
+
     private fun snapshot(
         messages: List<MessageSourceSnapshot> = listOf(
             message(USER_MESSAGE_ID, "USER", DIGEST_A),
@@ -283,7 +342,9 @@ class ConversationSourceAuthorityWriterTest {
         payloadIntegritySha256 = digest,
     )
 
-    private class FakeSourceEvents : SourceInvalidationAuthorityEventPort {
+    private class FakeSourceEvents(
+        private val acceptInserts: Boolean = true,
+    ) : SourceInvalidationAuthorityEventPort {
         val events = mutableListOf<SourceInvalidationAuthorityEvent>()
         var dispatchCount = 0
 
@@ -293,12 +354,23 @@ class ConversationSourceAuthorityWriterTest {
                     existing.sourceId == event.sourceId &&
                     existing.sourceRevision == event.sourceRevision
             }
-            if (inserted) events += event
-            return inserted
+            if (inserted && acceptInserts) events += event
+            return inserted && acceptInserts
         }
 
         override fun dispatchPostCommit(insertedOutbox: Boolean) {
             if (insertedOutbox) dispatchCount++
+        }
+    }
+
+    private class RecordingTransitionInvalidations : MessageSourceTransitionInvalidationPort {
+        val targetIds = mutableListOf<String>()
+
+        override suspend fun invalidateInCurrentTransaction(
+            transition: MessageSourceRevisionTransition,
+        ): Boolean {
+            targetIds += transition.current.messageId
+            return true
         }
     }
 

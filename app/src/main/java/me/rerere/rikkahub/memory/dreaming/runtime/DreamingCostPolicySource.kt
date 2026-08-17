@@ -1,5 +1,6 @@
 package me.rerere.rikkahub.memory.dreaming.runtime
 
+import kotlinx.coroutines.flow.first
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.memory.dreaming.model.DreamScopeId
 import me.rerere.rikkahub.memory.dreaming.model.DreamingFeatureFlags
@@ -31,7 +32,9 @@ class SettingsDreamingPreferencesSource(
     private val trustedSchemaReady: Boolean,
 ) : DreamingPreferencesSource {
     override suspend fun preferences(): DreamingPreferencesV1 =
-        settingsStore.settingsFlow.value.dreamingPreferences.failClosed()
+        settingsStore.settingsFlow.first { settings -> !settings.init }
+            .dreamingPreferences
+            .failClosed()
 
     override fun schemaReady(): Boolean = trustedSchemaReady
 }

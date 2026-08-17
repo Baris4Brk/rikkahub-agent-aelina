@@ -24,6 +24,15 @@ import org.junit.Test
  */
 class LiteRtRuntimeTest {
 
+    @Test
+    fun `runtime attests the backend it actually constructs`() {
+        assertEquals("GPU", canonicalLiteRtAccelerator("gpu"))
+        assertEquals("NPU", canonicalLiteRtAccelerator("QNN"))
+        assertEquals("NPU", canonicalLiteRtAccelerator("TPU"))
+        assertEquals("CPU", canonicalLiteRtAccelerator("NNAPI"))
+        assertEquals("CPU", canonicalLiteRtAccelerator(null))
+    }
+
     // ---- planTurns -----------------------------------------------------------------
 
     private val u1 = turnSignature(ROLE_USER, "hello")

@@ -26,6 +26,10 @@ class LearningHandoffConsumer(
     private val outboxReader: LearningOutboxReader,
     private val batchLimit: Int = DEFAULT_CONSUMER_BATCH_LIMIT,
     private val maxBatchElapsedMs: Long = DEFAULT_CONSUMER_BATCH_ELAPSED_MS,
+    private val learnedWorkflowErasePort:
+        me.rerere.rikkahub.learning.privacy.ExactScopeLearnedWorkflowErasePort? = null,
+    private val durableLearnedWorkflowPrivacyPort:
+        me.rerere.rikkahub.learning.privacy.DurableLearnedWorkflowPrivacyPort? = null,
 ) {
     init {
         require(batchLimit in 1..DEFAULT_CONSUMER_BATCH_LIMIT) {
@@ -55,7 +59,7 @@ class LearningHandoffConsumer(
             )
         ) {
             is LearningStreamPlan.Reset -> {
-                LearningDerivedStateResetter(database).reset(
+                resetterOrThrow().reset(
                     streamId = descriptor.streamId,
                     observedHeadSeq = descriptor.headSequence,
                     reason = plan.reason,
@@ -87,7 +91,7 @@ class LearningHandoffConsumer(
             else -> null
         }
         if (resetReason != null) {
-            LearningDerivedStateResetter(database).reset(
+            resetterOrThrow().reset(
                 streamId = verifiedDescriptor.streamId,
                 observedHeadSeq = verifiedDescriptor.headSequence,
                 reason = resetReason,
@@ -108,4 +112,15 @@ class LearningHandoffConsumer(
             ),
         )
     }
+
+    /** Resolve both AppDatabase fences before either port can mutate durable state. */
+    private fun resetterOrThrow(): LearningDerivedStateResetter = LearningDerivedStateResetter(
+        database = database,
+        learnedWorkflowErasePort = checkNotNull(learnedWorkflowErasePort) {
+            "derived_reset_candidate_fence_unconfigured"
+        },
+        durableLearnedWorkflowPrivacyPort = checkNotNull(durableLearnedWorkflowPrivacyPort) {
+            "derived_reset_orphan_quarantine_unconfigured"
+        },
+    )
 }

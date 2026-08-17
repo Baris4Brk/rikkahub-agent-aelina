@@ -22,8 +22,10 @@ class LearningRuntimeFacadeTest {
     private var facade: LearningRuntimeFacade? = null
 
     @After
-    fun tearDown() = runBlocking {
-        facade?.close()
+    fun tearDown() {
+        runBlocking {
+            facade?.close()
+        }
         context.deleteDatabase("learning_runtime.db")
     }
 

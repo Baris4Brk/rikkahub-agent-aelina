@@ -11,6 +11,8 @@ import me.rerere.rikkahub.data.authority.source.ConversationSourceSnapshot
 import me.rerere.rikkahub.data.authority.source.ConversationSourceState
 import me.rerere.rikkahub.data.authority.source.MessageSourceAuthorityHead
 import me.rerere.rikkahub.data.authority.source.MessageSourceSnapshot
+import me.rerere.rikkahub.data.authority.source.MessageSourceTransitionInvalidationPort
+import me.rerere.rikkahub.data.authority.source.SourceAuthorityObjectKind
 import me.rerere.rikkahub.data.authority.source.SourceInvalidationAuthorityEvent
 import me.rerere.rikkahub.data.authority.source.SourceInvalidationAuthorityEventPort
 import me.rerere.rikkahub.service.chat.CommandClaim
@@ -126,6 +128,34 @@ class ConversationCommandAuthorityTransactionsTest {
             fixture.store.message(SCOPE, ASSISTANT_MESSAGE_ID)?.sourceRevision,
         )
         assertEquals(DIGEST_B, fixture.store.message(SCOPE, ASSISTANT_MESSAGE_ID)?.payloadIntegritySha256)
+    }
+
+    @Test
+    fun `feedback invalidation failure rolls source transition and outbox back`() = runBlocking {
+        val fixture = Fixture()
+        fixture.seedSource(snapshot())
+        val failingWriter = ConversationSourceAuthorityWriter(
+            store = fixture.store,
+            events = fixture.sourceEvents,
+            transitionInvalidations = MessageSourceTransitionInvalidationPort {
+                error("feedback_invalidation_failed")
+            },
+        )
+
+        assertThrows(IllegalStateException::class.java) {
+            runBlocking {
+                fixture.runner.inTransaction {
+                    failingWriter.reconcileInCurrentTransaction(
+                        snapshot(assistantDigest = DIGEST_C, occurredAtMs = 20L),
+                    )
+                }
+            }
+        }
+
+        assertEquals(1L, fixture.store.message(SCOPE, ASSISTANT_MESSAGE_ID)?.sourceRevision)
+        assertEquals(DIGEST_B, fixture.store.message(SCOPE, ASSISTANT_MESSAGE_ID)?.payloadIntegritySha256)
+        assertTrue(fixture.sourceEvents.events.isEmpty())
+        assertEquals(0, fixture.sourceEvents.dispatchCount)
     }
 
     @Test
@@ -295,6 +325,124 @@ class ConversationCommandAuthorityTransactionsTest {
         }
     }
 
+    @Test
+    fun `transient regeneration fallback commits legacy invalidation graph source and outbox before one wake`() =
+        runBlocking {
+            val fixture = Fixture()
+            fixture.seedSource(snapshot())
+
+            val commit = fixture.transientFinalizationCoordinator().finish(
+                graphMutation = fixture.graph.transientFinalizationMutation(
+                    regeneratedSnapshot(),
+                ),
+            )
+
+            assertEquals(listOf(CONVERSATION_ID), fixture.graph.legacyInvalidations)
+            assertEquals(1, fixture.graph.persisted.size)
+            assertEquals(1, commit.sources.size)
+            assertEquals(
+                2L,
+                commit.sources.single().messagesById.getValue(ASSISTANT_MESSAGE_ID).sourceRevision,
+            )
+            assertEquals(2, fixture.sourceEvents.events.size)
+            val exactMessageEvent = fixture.sourceEvents.events.single {
+                it.objectKind == SourceAuthorityObjectKind.MESSAGE
+            }
+            assertEquals(SCOPE, exactMessageEvent.scope)
+            assertEquals(ASSISTANT_MESSAGE_ID, exactMessageEvent.sourceId)
+            assertEquals(1L, exactMessageEvent.previousSourceRevision)
+            assertEquals(2L, exactMessageEvent.sourceRevision)
+            assertEquals(ConversationSourceState.TOMBSTONED, exactMessageEvent.sourceState)
+            assertEquals(ConversationSourceChangeKind.DELETED, exactMessageEvent.changeKind)
+            assertEquals(1, fixture.sourceEvents.dispatchCount)
+            assertFalse(fixture.runner.inTransaction)
+        }
+
+    @Test
+    fun `transient regeneration fallback rolls back every authority write when source invalidation fails`() =
+        runBlocking {
+            val fixture = Fixture()
+            fixture.seedSource(snapshot())
+            val failingSources = ConversationSourceAuthorityWriter(
+                store = fixture.store,
+                events = fixture.sourceEvents,
+                transitionInvalidations = MessageSourceTransitionInvalidationPort {
+                    error("simulated_source_invalidation_failure")
+                },
+            )
+
+            assertThrows(IllegalStateException::class.java) {
+                runBlocking {
+                    fixture.transientFinalizationCoordinator(failingSources).finish(
+                        graphMutation = fixture.graph.transientFinalizationMutation(
+                            regeneratedSnapshot(),
+                        ),
+                    )
+                }
+            }
+
+            assertTrue(fixture.graph.legacyInvalidations.isEmpty())
+            assertTrue(fixture.graph.persisted.isEmpty())
+            assertTrue(fixture.sourceEvents.events.isEmpty())
+            assertEquals(0, fixture.sourceEvents.dispatchCount)
+            assertEquals(
+                1L,
+                fixture.store.message(SCOPE, ASSISTANT_MESSAGE_ID)?.sourceRevision,
+            )
+            assertEquals(
+                DIGEST_B,
+                fixture.store.message(SCOPE, ASSISTANT_MESSAGE_ID)?.payloadIntegritySha256,
+            )
+        }
+
+    @Test
+    fun `transient regeneration fallback replay is source and outbox idempotent`() = runBlocking {
+        val fixture = Fixture()
+        fixture.seedSource(snapshot())
+        val coordinator = fixture.transientFinalizationCoordinator()
+        val final = regeneratedSnapshot()
+
+        val first = coordinator.finish(fixture.graph.transientFinalizationMutation(final))
+        val replay = coordinator.finish(fixture.graph.transientFinalizationMutation(final))
+
+        assertTrue(first.sources.single().didMutate)
+        assertFalse(replay.sources.single().didMutate)
+        assertFalse(replay.sources.single().insertedOutbox)
+        assertEquals(2L, fixture.store.message(SCOPE, ASSISTANT_MESSAGE_ID)?.sourceRevision)
+        assertEquals(
+            ConversationSourceState.TOMBSTONED,
+            fixture.store.message(SCOPE, ASSISTANT_MESSAGE_ID)?.sourceState,
+        )
+        assertEquals(
+            1L,
+            fixture.store.message(SCOPE, REGENERATED_ASSISTANT_MESSAGE_ID)?.sourceRevision,
+        )
+        assertEquals(2, fixture.sourceEvents.events.size)
+        assertEquals(1, fixture.sourceEvents.dispatchCount)
+        assertEquals(2, fixture.graph.persisted.size)
+    }
+
+    @Test
+    fun `transient regeneration fallback reconciles all known scopes with one coalesced wake`() =
+        runBlocking {
+            val fixture = Fixture()
+            fixture.seedSource(snapshot())
+            fixture.seedSource(snapshot().copy(scope = SUBJECT_SCOPE))
+
+            val commit = fixture.transientFinalizationCoordinator().finish(
+                fixture.graph.transientFinalizationMutation(
+                    regeneratedSnapshot(),
+                ),
+            )
+
+            assertEquals(setOf(SCOPE, SUBJECT_SCOPE), commit.sources.map { it.conversation.scope }.toSet())
+            assertTrue(commit.sources.all {
+                it.messagesById.getValue(ASSISTANT_MESSAGE_ID).sourceRevision == 2L
+            })
+            assertEquals(4, fixture.sourceEvents.events.size)
+            assertEquals(1, fixture.sourceEvents.dispatchCount)
+        }
+
     private fun Fixture.admissionCoordinator() = CommandAdmissionAuthorityCoordinator(
         transactions = runner,
         sources = sources,
@@ -311,6 +459,13 @@ class ConversationCommandAuthorityTransactionsTest {
         transactions = runner,
         sources = sources,
         commands = commands,
+    )
+
+    private fun Fixture.transientFinalizationCoordinator(
+        writer: ConversationSourceAuthorityWriter = sources,
+    ) = TransientConversationFinalizationAuthorityCoordinator(
+        transactions = runner,
+        sources = writer,
     )
 
     private fun admissionDraft(branchRevision: Long = 1L) = CommandAdmissionAuthorityDraft(
@@ -361,6 +516,18 @@ class ConversationCommandAuthorityTransactionsTest {
         occurredAtMs = occurredAtMs,
     )
 
+    private fun regeneratedSnapshot() = ConversationSourceSnapshot(
+        scope = SCOPE,
+        conversationId = CONVERSATION_ID,
+        assistantIdSnapshot = ASSISTANT_ID,
+        messages = listOf(
+            MessageSourceSnapshot(USER_MESSAGE_ID, "USER", DIGEST_A),
+            MessageSourceSnapshot(REGENERATED_ASSISTANT_MESSAGE_ID, "ASSISTANT", DIGEST_C),
+        ),
+        selectedBranchMessageIds = listOf(USER_MESSAGE_ID, REGENERATED_ASSISTANT_MESSAGE_ID),
+        occurredAtMs = 20L,
+    )
+
     private class Fixture {
         val store = TransactionSourceStore()
         val sourceEvents = TransactionSourceEvents()
@@ -389,10 +556,15 @@ class ConversationCommandAuthorityTransactionsTest {
             ConversationSourceScopeKind.ASSISTANT,
             "00000000-0000-0000-0000-000000000001",
         )
+        val SUBJECT_SCOPE = ConversationSourceScope(
+            ConversationSourceScopeKind.AUTHORITY_SUBJECT,
+            "authority-subject-0001",
+        )
         const val ASSISTANT_ID = "00000000-0000-0000-0000-000000000001"
         const val CONVERSATION_ID = "00000000-0000-0000-0000-000000000002"
         const val USER_MESSAGE_ID = "00000000-0000-0000-0000-000000000003"
         const val ASSISTANT_MESSAGE_ID = "00000000-0000-0000-0000-000000000004"
+        const val REGENERATED_ASSISTANT_MESSAGE_ID = "00000000-0000-0000-0000-000000000007"
         const val COMMAND_ID = "00000000-0000-0000-0000-000000000005"
         const val WORKER_ID = "00000000-0000-0000-0000-000000000006"
         val DIGEST_A = "a".repeat(64)
@@ -584,9 +756,14 @@ private class TransactionSourceEvents : SourceInvalidationAuthorityEventPort {
 }
 
 private class TransactionGraphPort {
-    data class State(val persisted: List<ConversationSourceSnapshot>, val failNext: Boolean)
+    data class State(
+        val persisted: List<ConversationSourceSnapshot>,
+        val legacyInvalidations: List<String>,
+        val failNext: Boolean,
+    )
     lateinit var runner: RollbackRunner
     val persisted = mutableListOf<ConversationSourceSnapshot>()
+    val legacyInvalidations = mutableListOf<String>()
     var failNext = false
 
     suspend fun persistInCurrentTransaction(snapshot: ConversationSourceSnapshot) {
@@ -600,10 +777,21 @@ private class TransactionGraphPort {
         snapshot
     }
 
-    fun state() = State(persisted.toList(), failNext)
+    fun transientFinalizationMutation(
+        snapshot: ConversationSourceSnapshot,
+    ) = ConversationGraphAuthorityMutation {
+        check(runner.inTransaction)
+        legacyInvalidations += snapshot.conversationId
+        persistInCurrentTransaction(snapshot)
+        snapshot
+    }
+
+    fun state() = State(persisted.toList(), legacyInvalidations.toList(), failNext)
     fun restore(state: State) {
         persisted.clear()
         persisted.addAll(state.persisted)
+        legacyInvalidations.clear()
+        legacyInvalidations.addAll(state.legacyInvalidations)
         failNext = state.failNext
     }
 }

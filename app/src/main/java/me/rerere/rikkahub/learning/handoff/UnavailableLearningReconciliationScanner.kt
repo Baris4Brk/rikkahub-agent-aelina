@@ -7,6 +7,7 @@ package me.rerere.rikkahub.learning.handoff
 object UnavailableLearningReconciliationScanner : LearningReconciliationScanner {
     override suspend fun scanAndRepairProvableTerminalEvents(
         stream: LearningOutboxDescriptor,
+        cursorAccess: LearningReconciliationCursorAccess,
         frozenNowMs: Long,
         limits: LearningBootstrapScanLimits,
     ): LearningBootstrapCoverage = throw IllegalStateException(

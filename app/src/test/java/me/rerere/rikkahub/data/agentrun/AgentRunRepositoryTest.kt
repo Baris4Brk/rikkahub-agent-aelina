@@ -57,14 +57,14 @@ class AgentRunRepositoryTest {
     }
 
     @Test
-    fun `markTerminal sets finished_at and last_error`() = runBlocking {
+    fun `markTerminal sets finished_at and allowlisted last_error`() = runBlocking {
         val repo = repo()
         val id = repo.open(AgentRunKind.Workflow, domainId = "wf-1")
         repo.markTerminal(id, AgentRunStatus.failed, lastError = "boom")
         val row = repo.getById(id)!!
         assertEquals(AgentRunStatus.failed.name, row.status)
         assertNotNull(row.finishedAtMs)
-        assertEquals("boom", row.lastError)
+        assertEquals(AgentRunFailureCode.RUNTIME_FAILURE, row.lastError)
     }
 
     @Test

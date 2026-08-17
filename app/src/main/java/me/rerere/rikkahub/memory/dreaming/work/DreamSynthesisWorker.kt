@@ -10,6 +10,7 @@ import androidx.work.WorkerParameters
 import kotlinx.coroutines.CancellationException
 import me.rerere.rikkahub.memory.dreaming.model.DreamScopeId
 import me.rerere.rikkahub.memory.dreaming.model.requireCanonicalDreamRunId
+import me.rerere.rikkahub.memory.dreaming.orchestration.DreamSynthesisRetryReason
 import me.rerere.rikkahub.memory.dreaming.runtime.DreamSynthesisRuntime
 import me.rerere.rikkahub.memory.dreaming.runtime.DreamSynthesisWorkerDirective
 import me.rerere.rikkahub.memory.dreaming.runtime.DreamWorkerDeferralReason
@@ -47,8 +48,24 @@ class DreamSynthesisWorker(
                 DreamSynthesisWorkerDirective.Complete -> Result.success()
                 DreamSynthesisWorkerDirective.Fail -> Result.failure()
                 is DreamSynthesisWorkerDirective.Retry -> {
-                    if (runAttemptCount < directive.retryLimit) Result.retry()
-                    else Result.failure()
+                    if (directive.reason == DreamSynthesisRetryReason.LEASE_CONFLICT) {
+                        // Retrying the same identity can never repair an expired/foreign lease:
+                        // begin() will reject the same RUNNING row on every WorkManager attempt.
+                        // Finish this stale scope work and let the coordinator's existing recovery
+                        // path fail the expired mirror, release the scope lease, and allocate a
+                        // fresh run identity from durable dirtiness.
+                        runCatching {
+                            scheduler.enqueueDirtyScan(DreamSynthesisScanReason.FOLLOW_UP)
+                        }
+                        Result.success()
+                    } else if (
+                        directive.reason != DreamSynthesisRetryReason.MODEL_TEMPORARY_FAILURE ||
+                        runAttemptCount < directive.retryLimit
+                    ) {
+                        Result.retry()
+                    } else {
+                        Result.failure()
+                    }
                 }
 
                 is DreamSynthesisWorkerDirective.Deferred -> {
@@ -57,6 +74,8 @@ class DreamSynthesisWorker(
                             directive.retryAtEpochMs != null
                         ) {
                             DreamSynthesisScanReason.UTC_BUDGET_ROLLOVER
+                        } else if (directive.reason == DreamWorkerDeferralReason.APP_IDLE_REQUIRED) {
+                            DreamSynthesisScanReason.APP_IDLE_RECHECK
                         } else {
                             DreamSynthesisScanReason.FOLLOW_UP
                         },
@@ -70,8 +89,11 @@ class DreamSynthesisWorker(
             throw cancelled
         } catch (error: Exception) {
             Log.w(TAG, "Dream synthesis worker failed", error)
-            // The current policy could not be read reliably, so a hard-coded retry would bypass it.
-            Result.failure()
+            // No durable run transition is guaranteed on this path. Marking Work failed can
+            // strand a still-PENDING run forever because the per-scope unique work has become
+            // terminal. WorkManager backoff is only a wake-up retry; runForWorker re-reads the
+            // current policy and environment before every provider boundary.
+            Result.retry()
         }
     }
 

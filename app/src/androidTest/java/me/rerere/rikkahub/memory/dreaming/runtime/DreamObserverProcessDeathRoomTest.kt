@@ -21,7 +21,6 @@ import me.rerere.rikkahub.memory.dreaming.store.StartDreamRunRequest
 import me.rerere.rikkahub.memory.dreaming.work.DreamObserverWorkScheduler
 import org.junit.After
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -94,7 +93,10 @@ class DreamObserverProcessDeathRoomTest {
         assertEquals(DreamRunStatus.SUCCEEDED, store.readRun(runId)?.status)
         assertEquals(1L, store.readScopeState(PRIVATE_SCOPE)?.observerCheckpointEpoch)
         assertEquals(1, store.readRun(runId)?.attempt)
-        assertTrue(database.dreamDao().countChangesThrough(PRIVATE_SCOPE.value, Long.MAX_VALUE) == 0)
+        // Synthesis has not consumed epoch 1, so the shared prune watermark must retain it even
+        // though Observer replay itself resumed and committed exactly once after process death.
+        assertEquals(0, result.prunedChangeCount)
+        assertEquals(1, database.dreamDao().countChangesThrough(PRIVATE_SCOPE.value, Long.MAX_VALUE))
     }
 
     private suspend fun record(

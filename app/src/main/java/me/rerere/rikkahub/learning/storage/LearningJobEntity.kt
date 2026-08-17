@@ -245,6 +245,7 @@ enum class LearningJobType {
     RECONCILE_SOURCE,
     REFLECT_EPISODE_V1,
     CLOSE_REWARD_WINDOW_V1,
+    APPLY_REWARD_AUTHORITY_V1,
     DISTILL_POLICY_V1,
     INVALIDATE_SOURCE_V1,
 }
@@ -257,6 +258,7 @@ internal val LearningJobType.requiresFrozenP1ExecutionIdentity: Boolean
 
         LearningJobType.REFLECT_EPISODE_V1,
         LearningJobType.CLOSE_REWARD_WINDOW_V1,
+        LearningJobType.APPLY_REWARD_AUTHORITY_V1,
         LearningJobType.DISTILL_POLICY_V1,
         LearningJobType.INVALIDATE_SOURCE_V1,
         -> true
@@ -264,6 +266,8 @@ internal val LearningJobType.requiresFrozenP1ExecutionIdentity: Boolean
 
 enum class LearningJobErrorCode {
     LOST_LEASE,
+    /** Explicit user/admin replay fence; never synthesized by a worker or retention sweep. */
+    MANUAL_REQUEUE,
     LEASE_EXPIRED,
     ATTEMPTS_EXHAUSTED,
     CLOCK_ROLLBACK,
@@ -273,6 +277,7 @@ enum class LearningJobErrorCode {
     WAITING_CONFIGURATION,
     DEADLINE_EXCEEDED,
     INVALID_JOB_SPEC,
+    WAITING_BUDGET,
     CANCELLED_BY_RESET,
     INTERNAL,
     UNKNOWN,

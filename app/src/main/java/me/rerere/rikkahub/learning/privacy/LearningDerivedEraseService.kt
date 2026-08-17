@@ -78,6 +78,13 @@ data class LearningEraseReceipt(
     val erasedSourceValidityRows: Int = 0,
     val erasedJobs: Int = 0,
     val erasedInboxEvents: Int = 0,
+    val erasedPolicyExposures: Int = 0,
+    val erasedPolicyShadowObservations: Int = 0,
+    /** Existing AppDatabase LEARNED definitions redacted; fence-only claims are not counted. */
+    val erasedMainDatabaseWorkflows: Int = 0,
+    val erasedObservedUtilityEvaluationReceipts: Int = 0,
+    val erasedObservedUtilityAssignments: Int = 0,
+    val erasedProviderConfigCohorts: Int = 0,
 ) {
     init {
         require(
@@ -91,6 +98,12 @@ data class LearningEraseReceipt(
                 erasedSourceValidityRows,
                 erasedJobs,
                 erasedInboxEvents,
+                erasedPolicyExposures,
+                erasedPolicyShadowObservations,
+                erasedMainDatabaseWorkflows,
+                erasedObservedUtilityEvaluationReceipts,
+                erasedObservedUtilityAssignments,
+                erasedProviderConfigCohorts,
             ).all { it >= 0 },
         )
     }
@@ -98,6 +111,7 @@ data class LearningEraseReceipt(
 
 enum class LearningDerivedEraseFailureCode {
     CONFIRMATION_INVALID,
+    EPHEMERAL_CLEAR_FAILED,
     WRONG_PROCESS,
     RESTORE_IN_PROGRESS,
     DATABASE_OPEN_FAILED,
@@ -190,6 +204,11 @@ class LearningDerivedEraseService internal constructor(
     ): LearningEraseReceipt = operationMutex.withLock {
         val frozenNowMs = clockMs().coerceAtLeast(0L)
         requireConfirmation(scope, confirmationToken, frozenNowMs)
+        if (!ephemeralRegistry.clearForScope(scope)) {
+            throw LearningDerivedEraseUnavailableException(
+                LearningDerivedEraseFailureCode.EPHEMERAL_CLEAR_FAILED,
+            )
+        }
         store.eraseScope(scope, frozenNowMs)
     }
 

@@ -7,6 +7,8 @@ import me.rerere.rikkahub.learning.handoff.LearningOutboxAppender
 import me.rerere.rikkahub.learning.handoff.LearningOutboxAppendResult
 import me.rerere.rikkahub.learning.handoff.LearningOutboxDraft
 import me.rerere.rikkahub.learning.model.DisabledLearningFeatureFlagSource
+import me.rerere.rikkahub.learning.model.DisabledLearningScopeConsentSource
+import me.rerere.rikkahub.learning.model.LearningScopeConsentSource
 import me.rerere.rikkahub.learning.model.LearningCanonicalId
 import me.rerere.rikkahub.learning.model.LearningCorrelation
 import me.rerere.rikkahub.learning.model.LearningEventCode
@@ -120,6 +122,8 @@ class ExecutionStateTransaction(
     private val learningOutboxAppender: LearningOutboxAppender? = null,
     private val learningFeatureFlags: LearningFeatureFlagSource =
         DisabledLearningFeatureFlagSource,
+    private val learningScopeConsent: LearningScopeConsentSource =
+        DisabledLearningScopeConsentSource,
     /** Best-effort scheduling hook invoked only after an outbox-bearing transaction commits. */
     private val learningPostCommitWake: () -> Unit = {},
 ) {
@@ -324,6 +328,7 @@ class ExecutionStateTransaction(
         // Null/invalid scope is a legacy imported row. It remains ineligible; never infer a scope
         // from a principal string at terminal time.
         val scope = record.learningScopeOrNull() ?: return false
+        if (!learningScopeConsent.captureAllowed(scope)) return false
         val toolIdentity = listOf(record.toolCallId, record.toolName, record.toolSchemaFingerprint)
         val hasAnyToolIdentity = toolIdentity.any { it != null }
         if (hasAnyToolIdentity &&

@@ -2,6 +2,7 @@ package me.rerere.rikkahub.memory.dreaming.runtime
 
 import me.rerere.rikkahub.memory.dreaming.orchestration.DreamSynthesisRetryReason
 import me.rerere.rikkahub.memory.dreaming.orchestration.DreamSynthesisRunResult
+import me.rerere.rikkahub.memory.dreaming.store.DreamSynthesisFailure
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -69,7 +70,25 @@ class DreamWorkerEnvironmentTest {
             ),
             deferred,
         )
-        assertEquals(DreamSynthesisWorkerDirective.Retry(2), modelFailure)
+        assertEquals(
+            DreamSynthesisWorkerDirective.Retry(
+                2,
+                DreamSynthesisRetryReason.MODEL_TEMPORARY_FAILURE,
+            ),
+            modelFailure,
+        )
+    }
+
+    @Test
+    fun `transient store failure remains retryable for worker recovery`() {
+        assertEquals(
+            DreamSynthesisWorkerDirective.Retry(
+                2,
+                DreamSynthesisRetryReason.STORE_TEMPORARY_FAILURE,
+            ),
+            DreamSynthesisRunResult.Failed(DreamSynthesisFailure.STORE_FAILURE)
+                .toWorkerDirective(retryLimit = 2),
+        )
     }
 
     private fun environment(

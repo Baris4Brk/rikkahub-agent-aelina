@@ -9,6 +9,7 @@ import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.intOrNull
 import me.rerere.rikkahub.learning.model.LearningCanonicalId
 import me.rerere.rikkahub.learning.model.LearningSourceRef
+import me.rerere.rikkahub.learning.model.StrictLearningJsonEnvelope
 import me.rerere.rikkahub.learning.model.StrictLearningJsonKeyScanner
 import me.rerere.rikkahub.learning.trace.SanitizedTraceSummary
 import me.rerere.rikkahub.learning.trace.TraceSanitizationResult
@@ -85,7 +86,9 @@ object ReflectionParser {
         if (raw.toByteArray(StandardCharsets.UTF_8).size > MAX_OUTPUT_BYTES) {
             return ReflectionParseResult.Rejected(ReflectionParseFailure.TOO_LARGE)
         }
-        when (StrictLearningJsonKeyScanner.scan(raw)) {
+        val document = StrictLearningJsonEnvelope.unwrapSingleDocument(raw)
+            ?: return ReflectionParseResult.Rejected(ReflectionParseFailure.INVALID_JSON)
+        when (StrictLearningJsonKeyScanner.scan(document)) {
             StrictLearningJsonKeyScanner.Result.DUPLICATE ->
                 return ReflectionParseResult.Rejected(ReflectionParseFailure.DUPLICATE_KEY)
             StrictLearningJsonKeyScanner.Result.INVALID ->
@@ -93,7 +96,7 @@ object ReflectionParser {
             StrictLearningJsonKeyScanner.Result.VALID -> Unit
         }
         val root = try {
-            json.parseToJsonElement(raw) as? JsonObject
+            json.parseToJsonElement(document) as? JsonObject
                 ?: return ReflectionParseResult.Rejected(ReflectionParseFailure.ROOT_NOT_OBJECT)
         } catch (_: Exception) {
             return ReflectionParseResult.Rejected(ReflectionParseFailure.INVALID_JSON)

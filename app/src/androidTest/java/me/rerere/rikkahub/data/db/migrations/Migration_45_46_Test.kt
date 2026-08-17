@@ -72,6 +72,10 @@ class Migration_45_46_Test {
             true,
             MIGRATION_45_46,
         )
+        // MigrationTestHelper's custom SupportSQLite factory does not run Room's normal
+        // open-time foreign-key configuration. Exercise RESTRICT/CASCADE with production's
+        // connection invariant enabled rather than silently accepting orphaned test rows.
+        db.execSQL("PRAGMA foreign_keys = ON")
 
         assertEquals(
             setOf(

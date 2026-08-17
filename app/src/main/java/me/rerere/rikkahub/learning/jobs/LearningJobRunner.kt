@@ -3,9 +3,11 @@ package me.rerere.rikkahub.learning.jobs
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.uuid.Uuid
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import me.rerere.rikkahub.learning.storage.LearningJobType
 
@@ -38,7 +40,7 @@ interface LearningJobExecutionCoordinator {
         lease: LearningJobLease,
         retryDelayMs: Long,
         errorCode: LearningJobFailureCode,
-    )
+    ): LearningJobAttemptFailureResult
 
     suspend fun failPermanently(
         lease: LearningJobLease,
@@ -91,15 +93,20 @@ internal class LearningJobRunner(
         maxJobs: Int,
         monotonicDeadlineMs: Long,
         isRuntimeCurrent: () -> Boolean,
+        allowedJobTypes: Set<LearningJobType>? = null,
     ): LearningJobBatchResult {
         require(maxJobs in 1..MAX_RUNNER_JOBS) { "Unsafe job batch limit" }
         require(monotonicDeadlineMs >= 0L) { "Negative job deadline" }
+        require(allowedJobTypes == null || allowedJobTypes.isNotEmpty()) {
+            "Empty learning job allow-list"
+        }
 
         val readiness = registry.readiness()
         if (readiness.registeredCount == 0) {
             return emptyResult(LearningJobBatchStopReason.NO_REGISTERED_HANDLER)
         }
-        if (readiness.readyTypes.isEmpty()) {
+        val readyTypes = restrictReadyLearningJobTypes(readiness.readyTypes, allowedJobTypes)
+        if (readyTypes.isEmpty()) {
             return emptyResult(LearningJobBatchStopReason.WAITING_CONFIGURATION)
         }
 
@@ -131,11 +138,11 @@ internal class LearningJobRunner(
                 )
             }
             val eligibleJobTypes = eligibleLearningJobTypesForBudget(
-                readiness.readyTypes,
+                readyTypes,
                 remainingBudgetMs,
                 providerEffectJobClaimed,
             )
-            val providerJobsDeferred = eligibleJobTypes != readiness.readyTypes
+            val providerJobsDeferred = eligibleJobTypes != readyTypes
             if (eligibleJobTypes.isEmpty()) {
                 return result(
                     claimed,
@@ -195,6 +202,7 @@ internal class LearningJobRunner(
                             monotonicDeadlineMs = monotonicDeadlineMs,
                         )
                     } catch (cancelled: CancellationException) {
+                        settleCancelledClaim(claim.lease)
                         throw cancelled
                     } catch (_: LearningLostLeaseException) {
                         return result(
@@ -204,13 +212,31 @@ internal class LearningJobRunner(
                             deadLettered,
                             LearningJobBatchStopReason.LOST_LEASE,
                         )
+                    } catch (_: LearningJobClockRollbackException) {
+                        return result(
+                            claimed,
+                            completed,
+                            retried,
+                            deadLettered,
+                            LearningJobBatchStopReason.CLOCK_ROLLBACK,
+                        )
                     } catch (_: Exception) {
-                        if (!failRetryBestEffort(
+                        val failure = try {
+                            failRetryBestEffort(
                                 lease = claim.lease,
                                 delayMs = DEFAULT_DEADLINE_RETRY_DELAY_MS,
                                 code = LearningJobFailureCode.INTERNAL,
                             )
-                        ) {
+                        } catch (_: LearningJobClockRollbackException) {
+                            return result(
+                                claimed,
+                                completed,
+                                retried,
+                                deadLettered,
+                                LearningJobBatchStopReason.CLOCK_ROLLBACK,
+                            )
+                        }
+                        if (failure == null) {
                             return result(
                                 claimed,
                                 completed,
@@ -219,17 +245,28 @@ internal class LearningJobRunner(
                                 LearningJobBatchStopReason.LOST_LEASE,
                             )
                         }
-                        retried += 1
+                        if (failure == LearningJobAttemptFailureResult.RETRIED) retried += 1
+                        else deadLettered += 1
                         continue
                     }
 
                     if (execution == null) {
-                        if (!failRetryBestEffort(
+                        val failure = try {
+                            failRetryBestEffort(
                                 lease = claim.lease,
                                 delayMs = DEFAULT_DEADLINE_RETRY_DELAY_MS,
                                 code = LearningJobFailureCode.DEADLINE_EXCEEDED,
                             )
-                        ) {
+                        } catch (_: LearningJobClockRollbackException) {
+                            return result(
+                                claimed,
+                                completed,
+                                retried,
+                                deadLettered,
+                                LearningJobBatchStopReason.CLOCK_ROLLBACK,
+                            )
+                        }
+                        if (failure == null) {
                             return result(
                                 claimed,
                                 completed,
@@ -238,7 +275,8 @@ internal class LearningJobRunner(
                                 LearningJobBatchStopReason.LOST_LEASE,
                             )
                         }
-                        retried += 1
+                        if (failure == LearningJobAttemptFailureResult.RETRIED) retried += 1
+                        else deadLettered += 1
                         return result(
                             claimed,
                             completed,
@@ -256,12 +294,17 @@ internal class LearningJobRunner(
                             }
 
                             is LearningJobDispatchResult.Retry -> {
-                                coordinator.failAttempt(
-                                    lease = execution.lease,
-                                    retryDelayMs = dispatch.retryDelayMs,
-                                    errorCode = dispatch.errorCode,
-                                )
-                                retried += 1
+                                when (
+                                    coordinator.failAttempt(
+                                        lease = execution.lease,
+                                        retryDelayMs = dispatch.retryDelayMs,
+                                        errorCode = dispatch.errorCode,
+                                    )
+                                ) {
+                                    LearningJobAttemptFailureResult.RETRIED -> retried += 1
+                                    LearningJobAttemptFailureResult.DEAD_LETTERED ->
+                                        deadLettered += 1
+                                }
                             }
 
                             is LearningJobDispatchResult.DeadLetter -> {
@@ -273,6 +316,7 @@ internal class LearningJobRunner(
                             }
                         }
                     } catch (cancelled: CancellationException) {
+                        settleCancelledClaim(execution.lease)
                         throw cancelled
                     } catch (_: LearningLostLeaseException) {
                         return result(
@@ -282,6 +326,41 @@ internal class LearningJobRunner(
                             deadLettered,
                             LearningJobBatchStopReason.LOST_LEASE,
                         )
+                    } catch (_: LearningJobClockRollbackException) {
+                        return result(
+                            claimed,
+                            completed,
+                            retried,
+                            deadLettered,
+                            LearningJobBatchStopReason.CLOCK_ROLLBACK,
+                        )
+                    } catch (_: Exception) {
+                        val failure = try {
+                            failRetryBestEffort(
+                                lease = execution.lease,
+                                delayMs = DEFAULT_DEADLINE_RETRY_DELAY_MS,
+                                code = LearningJobFailureCode.INTERNAL,
+                            )
+                        } catch (_: LearningJobClockRollbackException) {
+                            return result(
+                                claimed,
+                                completed,
+                                retried,
+                                deadLettered,
+                                LearningJobBatchStopReason.CLOCK_ROLLBACK,
+                            )
+                        }
+                        if (failure == null) {
+                            return result(
+                                claimed,
+                                completed,
+                                retried,
+                                deadLettered,
+                                LearningJobBatchStopReason.LOST_LEASE,
+                            )
+                        }
+                        if (failure == LearningJobAttemptFailureResult.RETRIED) retried += 1
+                        else deadLettered += 1
                     }
                 }
             }
@@ -306,6 +385,8 @@ internal class LearningJobRunner(
                 job = claim.job,
                 monotonicDeadlineMs = monotonicDeadlineMs,
                 monotonicMs = monotonicMs,
+                providerAttemptAuthority = claim.providerAttemptAuthority,
+                providerManifestReceipt = claim.providerManifestReceipt,
             )
         }
         val heartbeatIntervalMs = (leaseDurationMs / 3L).coerceAtLeast(1L)
@@ -332,13 +413,32 @@ internal class LearningJobRunner(
         lease: LearningJobLease,
         delayMs: Long,
         code: LearningJobFailureCode,
-    ): Boolean = try {
+    ): LearningJobAttemptFailureResult? = try {
         coordinator.failAttempt(lease, delayMs, code)
-        true
     } catch (cancelled: CancellationException) {
         throw cancelled
     } catch (_: LearningLostLeaseException) {
-        false
+        null
+    }
+
+    /**
+     * WorkManager cancellation must not leave the durable job RUNNING until the six-hour recovery
+     * scan. The same failAttempt transaction proves whether the provider was never dispatched
+     * (safe RETRY) or was possibly/actually dispatched (terminal DEAD_LETTER, never blind retry).
+     * Cleanup is bounded by the still-live Room lease and cannot replace the original cancellation.
+     */
+    private suspend fun settleCancelledClaim(lease: LearningJobLease) {
+        withContext(NonCancellable) {
+            try {
+                coordinator.failAttempt(
+                    lease = lease,
+                    retryDelayMs = DEFAULT_DEADLINE_RETRY_DELAY_MS,
+                    errorCode = LearningJobFailureCode.INTERNAL,
+                )
+            } catch (_: Exception) {
+                // A committed completion or an already-lost lease needs no second transition.
+            }
+        }
     }
 
     private fun remainingMs(deadlineMs: Long): Long {
@@ -362,6 +462,13 @@ internal fun eligibleLearningJobTypesForBudget(
         readyTypes
     }
 }
+
+internal fun restrictReadyLearningJobTypes(
+    readyTypes: Set<LearningJobType>,
+    allowedJobTypes: Set<LearningJobType>?,
+): Set<LearningJobType> = allowedJobTypes
+    ?.let { allowed -> readyTypes.intersect(allowed) }
+    ?: readyTypes
 
 private data class HeartbeatedDispatch(
     val dispatch: LearningJobDispatchResult,

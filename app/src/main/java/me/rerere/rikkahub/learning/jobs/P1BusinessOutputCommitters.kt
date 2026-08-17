@@ -2,6 +2,7 @@ package me.rerere.rikkahub.learning.jobs
 
 import me.rerere.rikkahub.learning.episode.EpisodeAssemblyJobOutput
 import me.rerere.rikkahub.learning.episode.EpisodeBoundaryReason
+import me.rerere.rikkahub.learning.episode.LearningCompletionKind
 import me.rerere.rikkahub.learning.episode.LearningEpisodeStatus as DomainEpisodeStatus
 import me.rerere.rikkahub.learning.model.LearningCanonicalId
 import me.rerere.rikkahub.learning.model.LearningSourceRef
@@ -18,10 +19,14 @@ import me.rerere.rikkahub.learning.policy.PolicyMutationResult
 import me.rerere.rikkahub.learning.policy.PolicyMutationStore
 import me.rerere.rikkahub.learning.policy.PolicyMutationTransaction
 import me.rerere.rikkahub.learning.policy.ValidatingPolicyMutationStore
+import me.rerere.rikkahub.learning.policy.policyApplicableConfigurationGeneration
+import me.rerere.rikkahub.learning.policy.policyApplicableConfigurationIdentity
+import me.rerere.rikkahub.learning.policy.policyApplicableTemplateIdentity
 import me.rerere.rikkahub.learning.reflection.EpisodeLessonJobOutput
 import me.rerere.rikkahub.learning.reward.RewardComponent
 import me.rerere.rikkahub.learning.reward.RewardUnknownReason
 import me.rerere.rikkahub.learning.reward.RewardWindowJobOutput
+import me.rerere.rikkahub.learning.reward.RewardAuthorityJobOutput
 import me.rerere.rikkahub.learning.storage.LearningDatabase
 import me.rerere.rikkahub.learning.storage.LearningEpisodeBoundaryReason
 import me.rerere.rikkahub.learning.storage.LearningEpisodeEntity
@@ -30,12 +35,19 @@ import me.rerere.rikkahub.learning.storage.StoredLearningEpisodeStatus
 import me.rerere.rikkahub.learning.storage.LearningLessonState
 import me.rerere.rikkahub.learning.storage.LearningLessonType
 import me.rerere.rikkahub.learning.storage.LearningPolicyEntity
+import me.rerere.rikkahub.learning.storage.PolicyApplicabilityWire
+import me.rerere.rikkahub.learning.storage.POLICY_APPLICABILITY_UNPROVEN_V5_REASON
+import me.rerere.rikkahub.learning.storage.POLICY_TOOL_APPLICABILITY_UNPROVEN_V5
 import me.rerere.rikkahub.learning.storage.LearningPolicyEvidencePolarity
 import me.rerere.rikkahub.learning.storage.LearningPolicyRevisionActor
 import me.rerere.rikkahub.learning.storage.LearningPolicyRevisionReason
 import me.rerere.rikkahub.learning.storage.StoredLearningPolicyStatus
 import me.rerere.rikkahub.learning.storage.LearningRewardKnowledge
+import me.rerere.rikkahub.learning.storage.LearningRewardAuthorityOutcome
+import me.rerere.rikkahub.learning.storage.LearningRewardDimension
+import me.rerere.rikkahub.learning.storage.LearningRewardSignalKind
 import me.rerere.rikkahub.learning.storage.LearningRewardWindowEntity
+import me.rerere.rikkahub.learning.storage.LearningRewardWindowState
 import me.rerere.rikkahub.learning.storage.LearningSourceValidityState
 import me.rerere.rikkahub.learning.storage.PolicyEvidenceEntity
 import me.rerere.rikkahub.learning.storage.PolicyRevisionEntity
@@ -57,9 +69,36 @@ internal class EpisodeAssemblyJobOutputCommitter(
     ) {
         val event = input.requireAuthoritativeSourceEvent(database)
         if (output === EpisodeAssemblyJobOutput.NoEpisode) return
+        if (output is EpisodeAssemblyJobOutput.RemoveNonLlmOpenEpisode) {
+            require(
+                event.eventTypeCode == "COMMAND_TERMINAL" &&
+                    event.eventSchemaVersion == P1_EVENT_SCHEMA_VERSION,
+            )
+            require(
+                event.completionKind in setOf(
+                    LearningCompletionKind.FAST_PATH_HANDLED.name,
+                    LearningCompletionKind.CONTROL_ONLY.name,
+                ),
+            )
+            require(event.lineageId != null && event.branchAnchorMessageId != null)
+            require(
+                database.episodeDao().deleteExactUnusedOpenEpisode(
+                    id = output.episodeId,
+                    streamId = input.streamId,
+                    replayGeneration = input.replayGeneration,
+                    scopeKind = input.scopeKind,
+                    scopeId = input.scopeId,
+                    lineageId = event.lineageId,
+                    branchAnchorMessageId = event.branchAnchorMessageId,
+                    expectedRevision = output.expectedRevision,
+                ) == 1,
+            ) { "Non-LLM Episode placeholder is no longer exact or unused" }
+            return
+        }
         output as EpisodeAssemblyJobOutput.Snapshot
         val snapshot = output.snapshot
         val anchor = snapshot.authority
+        val desiredStatus = snapshot.status.toStorageStatus()
         require(output.outputSchemaIdentity == input.executionSpec.outputSchemaIdentity)
         require(event.eventSchemaVersion == P1_EVENT_SCHEMA_VERSION) {
             "Only the exact P1 command schema can prove an Episode"
@@ -73,8 +112,12 @@ internal class EpisodeAssemblyJobOutputCommitter(
         require(event.branchAnchorMessageRevision == anchor.branchAnchorMessageRevision)
         require(event.conversationSourceRevision != null)
         require(event.sourceRevision != null)
-        require(event.messageId == anchor.resultAssistantMessageId?.toString())
-        require(event.messageRevision == anchor.resultAssistantMessageRevision)
+        if (desiredStatus == StoredLearningEpisodeStatus.OPEN.name) {
+            require(anchor.resultAssistantMessageId == null && anchor.resultAssistantMessageRevision == null)
+        } else {
+            require(event.messageId == anchor.resultAssistantMessageId?.toString())
+            require(event.messageRevision == anchor.resultAssistantMessageRevision)
+        }
 
         val rootCandidates = database.inboxDao().findRootAdmissionCandidates(
             streamId = input.streamId,
@@ -90,7 +133,6 @@ internal class EpisodeAssemblyJobOutputCommitter(
         require(root.scopeKind == input.scopeKind && root.scopeId == input.scopeId)
         val rootRevision = requireNotNull(root.sourceRevision)
 
-        val desiredStatus = snapshot.status.toStorageStatus()
         val entity = LearningEpisodeEntity(
             id = anchor.episodeId.value,
             streamId = input.streamId,
@@ -430,6 +472,149 @@ internal class RewardWindowJobOutputCommitter(
     }
 }
 
+/** Inserts one exact authority signal and advances the reward window in the job DONE transaction. */
+internal class RewardAuthorityJobOutputCommitter(
+    private val downstream: P1DerivedJobEnqueuer = NoOpP1DerivedJobEnqueuer,
+) : LearningJobTypedOutputCommitter<RewardAuthorityJobOutput> {
+    override suspend fun persistInOpenTransaction(
+        database: LearningDatabase,
+        input: LearningJobExecutionInputV1,
+        output: RewardAuthorityJobOutput,
+    ) {
+        val event = input.requireAuthoritativeSourceEvent(database)
+        require(event.eventTypeCode == "USER_FEEDBACK_RECORDED" && event.eventSchemaVersion == 3)
+        val signal = output.signal
+        require(signal.authorityEventId == event.eventId)
+        require(signal.streamId == input.streamId && signal.replayGeneration == input.replayGeneration)
+        require(signal.scopeKind == input.scopeKind && signal.scopeId == input.scopeId)
+        require(signal.sourceId == event.sourceId && signal.sourceRevision == event.sourceRevision)
+        require(signal.dimension == event.rewardDimension)
+        require(signal.signalKind == event.rewardSignalKind)
+        require(signal.valueMilli == event.rewardValueMilli)
+
+        val inserted = database.rewardSignalDao().insertSignalIgnore(signal)
+        if (inserted == -1L) {
+            require(database.rewardSignalDao().findSignal(signal.id) == signal) {
+                "Reward signal replay identity conflict"
+            }
+        }
+        val validity = LearningSourceValidityEntity(
+            streamId = signal.streamId,
+            scopeKind = signal.scopeKind,
+            scopeId = signal.scopeId,
+            sourceType = signal.sourceType,
+            sourceId = signal.sourceId,
+            sourceRevision = signal.sourceRevision,
+            previousSourceRevision = event.previousSourceRevision,
+            state = if (event.sourceState == "ACTIVE") {
+                LearningSourceValidityState.VALID.name
+            } else {
+                LearningSourceValidityState.TOMBSTONED.name
+            },
+            integritySha256 = signal.sourceIntegritySha256.takeIf { event.sourceState == "ACTIVE" },
+            invalidationReason = "FEEDBACK_RETRACTED".takeIf { event.sourceState != "ACTIVE" },
+            authorityEventId = event.eventId,
+            replayGeneration = input.replayGeneration,
+            occurredAtMs = signal.occurredAtMs,
+            updatedAtMs = signal.createdAtMs,
+        )
+        val validityInserted = database.episodeDao().insertSourceValidityIgnore(validity)
+        if (validityInserted == -1L) {
+            require(
+                database.episodeDao().findSourceValidity(
+                    validity.streamId,
+                    validity.replayGeneration,
+                    validity.scopeKind,
+                    validity.scopeId,
+                    validity.sourceType,
+                    validity.sourceId,
+                    validity.sourceRevision,
+                ) == validity,
+            ) { "Reward source validity replay conflict" }
+        }
+        event.previousSourceRevision?.let { previousRevision ->
+            val previous = database.episodeDao().findSourceValidity(
+                signal.streamId,
+                signal.replayGeneration,
+                signal.scopeKind,
+                signal.scopeId,
+                signal.sourceType,
+                signal.sourceId,
+                previousRevision,
+            )
+            if (previous?.state == LearningSourceValidityState.VALID.name) {
+                val invalidated = database.episodeDao().updateSourceValidityIfCurrent(
+                    streamId = previous.streamId,
+                    replayGeneration = previous.replayGeneration,
+                    scopeKind = previous.scopeKind,
+                    scopeId = previous.scopeId,
+                    sourceType = previous.sourceType,
+                    sourceId = previous.sourceId,
+                    sourceRevision = previous.sourceRevision,
+                    previousSourceRevision = previous.previousSourceRevision,
+                    expectedState = LearningSourceValidityState.VALID.name,
+                    newState = if (event.sourceState == "TOMBSTONED") {
+                        LearningSourceValidityState.TOMBSTONED.name
+                    } else {
+                        LearningSourceValidityState.SUPERSEDED.name
+                    },
+                    integritySha256 = null,
+                    invalidationReason = if (event.sourceState == "TOMBSTONED") {
+                        "FEEDBACK_RETRACTED"
+                    } else {
+                        "FEEDBACK_SUPERSEDED"
+                    },
+                    authorityEventId = event.eventId,
+                    occurredAtMs = signal.occurredAtMs,
+                    updatedAtMs = signal.createdAtMs,
+                )
+                require(invalidated == 1) { "Previous feedback revision changed concurrently" }
+            }
+        }
+
+        val window = requireNotNull(database.episodeDao().findRewardWindowByEpisode(signal.episodeId))
+        require(window.revision == output.expectedWindowRevision)
+        val validSignals = database.rewardSignalDao().listValidSignalsForEpisode(
+            signal.episodeId,
+            MAX_REWARD_SIGNAL_SCAN,
+        )
+        require(validSignals.size <= MAX_REWARD_SIGNAL_SCAN)
+        val goal = validSignals.component(LearningRewardDimension.GOAL)
+        val process = validSignals.component(LearningRewardDimension.PROCESS)
+        val user = validSignals.component(LearningRewardDimension.USER)
+        val updatedAtMs = maxOf(window.updatedAtMs, signal.createdAtMs)
+        val changed = database.rewardSignalDao().updateRewardWindowIfCurrent(
+            id = window.id,
+            expectedRevision = window.revision,
+            state = LearningRewardWindowState.CLOSED.name,
+            goalKnowledge = goal.knowledge,
+            goalValue = goal.value,
+            goalUnknownReason = goal.reason,
+            goalEvidenceSha256 = goal.evidence,
+            goalSignalKind = goal.signalKind,
+            processKnowledge = process.knowledge,
+            processValue = process.value,
+            processUnknownReason = process.reason,
+            processEvidenceSha256 = process.evidence,
+            processSignalKind = process.signalKind,
+            userKnowledge = user.knowledge,
+            userValue = user.value,
+            userUnknownReason = user.reason,
+            userEvidenceSha256 = user.evidence,
+            userSignalKind = user.signalKind,
+            weakLabel = null,
+            signalSetSha256 = output.signalSetSha256,
+            authorityOutcome = output.authorityOutcome.name,
+            lastSignalAtMs = validSignals.maxOfOrNull { it.occurredAtMs },
+            closedAtMs = window.closedAtMs ?: signal.createdAtMs,
+            updatedAtMs = updatedAtMs,
+        )
+        require(changed == 1) { "Reward window revision changed during authority fold" }
+        val committed = requireNotNull(database.episodeDao().findRewardWindow(window.id))
+        downstream.afterRewardCommitted(database, input, committed)
+    }
+}
+
 /** Storage adapter for the one and only Distiller candidate output. */
 internal object PolicyCandidateJobOutputCommitter :
     LearningJobTypedOutputCommitter<PolicyCandidateJobOutput> {
@@ -453,6 +638,25 @@ internal object PolicyCandidateJobOutputCommitter :
                 require(request is PolicyMutationRequest.CreateCandidate)
                 require(request.draft == output.draft) { "Policy draft changed at write boundary" }
                 val draft = request.draft
+                require(draft.applicableProviderIdentity == input.executionSpec.providerIdentity)
+                require(draft.applicableModelIdentity == input.executionSpec.modelIdentity)
+                require(draft.promptVersion == input.executionSpec.promptIdentity)
+                require(draft.applicableTemplateIdentity == policyApplicableTemplateIdentity(
+                    input.executionSpec.promptIdentity,
+                ))
+                val expectedApplicableConfiguration = policyApplicableConfigurationIdentity(
+                    input.executionSpec.providerIdentity,
+                    input.executionSpec.modelIdentity,
+                )
+                require(draft.applicableConfigurationIdentity == expectedApplicableConfiguration)
+                require(draft.applicableConfigurationGeneration ==
+                    policyApplicableConfigurationGeneration(expectedApplicableConfiguration))
+                require(
+                    draft.applicableCapabilityDigest ==
+                        me.rerere.rikkahub.learning.policy.policyApplicableCapabilityDigest(
+                            draft.applicableToolSchemas,
+                        ) && draft.applicableAuthorityDigest == null,
+                ) { "Capability/authority applicability proof is not exact" }
                 require(draft.scope.kind.name == input.scopeKind && draft.scope.storageId == input.scopeId)
                 require(draft.evidence.map { it.episodeId.value }.distinct().size == draft.evidence.size) {
                     "Multiple retries from one Episode cannot become independent evidence"
@@ -471,15 +675,33 @@ internal object PolicyCandidateJobOutputCommitter :
                         it.authorityOutcome == PolicyEvidenceAuthorityOutcome.FAILURE
                     }) { "Failure policy requires an authoritative failure" }
                 }
-                val existingArtifacts = database.policyDao().findPoliciesByArtifact(
+                val sameArtifact = database.policyDao().findPoliciesByArtifact(
                     input.scopeKind,
                     input.scopeId,
                     draft.taskSignature.value,
                     draft.artifactHash,
                 )
+                val existingArtifacts = database.policyDao().findPoliciesByExactArtifactCohort(
+                    input.scopeKind,
+                    input.scopeId,
+                    draft.taskSignature.value,
+                    draft.artifactHash,
+                    draft.applicableModelIdentity,
+                    draft.applicableProviderIdentity,
+                    output.producerConfigurationDigest,
+                    input.executionSpec.providerConfigGeneration,
+                )
+                require(sameArtifact.size <= 1) { "Policy artifact uniqueness violated" }
                 require(existingArtifacts.size <= 1) { "Policy artifact uniqueness violated" }
+                require(sameArtifact.isEmpty() || existingArtifacts.singleOrNull() ==
+                    sameArtifact.single()) {
+                    "Cross-producer cohort artifact cannot be silently merged"
+                }
                 val existingArtifact = existingArtifacts.singleOrNull()
                 val targetPolicyId = existingArtifact?.id ?: draft.candidateId
+                val rewardEvidence = mutableListOf<
+                    me.rerere.rikkahub.learning.storage.PolicyRewardEvidenceEntity
+                >()
                 val evidence = draft.evidence.sortedBy { it.episodeId.value }.map { handle ->
                     val episode = requireNotNull(database.episodeDao().findEpisode(handle.episodeId.value))
                     require(episode.scopeKind == input.scopeKind && episode.scopeId == input.scopeId)
@@ -509,6 +731,22 @@ internal object PolicyCandidateJobOutputCommitter :
                         trace to validity
                     }
                     val stableSourcePair = stableSources.first()
+                    val rewardWindow = requireNotNull(
+                        database.episodeDao().findRewardWindowByEpisode(episode.id),
+                    )
+                    val expectedRewardOutcome = when (handle.authorityOutcome) {
+                        PolicyEvidenceAuthorityOutcome.SUCCESS ->
+                            LearningRewardAuthorityOutcome.SUCCESS.name
+                        PolicyEvidenceAuthorityOutcome.FAILURE ->
+                            LearningRewardAuthorityOutcome.FAILURE.name
+                        else -> error("Unknown/censored evidence passed the validator")
+                    }
+                    require(rewardWindow.authorityOutcome == expectedRewardOutcome)
+                    val rewardSignals = database.rewardSignalDao().listValidSignalsForEpisode(
+                        episode.id,
+                        MAX_REWARD_SIGNAL_SCAN,
+                    )
+                    require(rewardSignals.isNotEmpty() && rewardSignals.size <= MAX_REWARD_SIGNAL_SCAN)
                     PolicyEvidenceEntity(
                         policyId = targetPolicyId,
                         episodeId = episode.id,
@@ -531,7 +769,20 @@ internal object PolicyCandidateJobOutputCommitter :
                         sourceRevision = requireNotNull(stableSourcePair.first.sourceRevision),
                         sourceIntegritySha256 = requireNotNull(stableSourcePair.second.integritySha256),
                         createdAtMs = stableSourcePair.first.createdAtMs,
-                    )
+                    ).also {
+                        rewardSignals.forEach { signal ->
+                            rewardEvidence += me.rerere.rikkahub.learning.storage.PolicyRewardEvidenceEntity(
+                                policyId = targetPolicyId,
+                                episodeId = episode.id,
+                                rewardSignalId = signal.id,
+                                sourceType = signal.sourceType,
+                                sourceId = signal.sourceId,
+                                sourceRevision = signal.sourceRevision,
+                                sourceIntegritySha256 = signal.sourceIntegritySha256,
+                                createdAtMs = signal.createdAtMs,
+                            )
+                        }
+                    }
                 }
                 val nowMs = evidence.maxOf(PolicyEvidenceEntity::createdAtMs)
                 val existingEvidence = existingArtifact?.let { existing ->
@@ -541,10 +792,42 @@ internal object PolicyCandidateJobOutputCommitter :
                             require(rows.all { it.sourceValid }) { "Existing policy evidence is stale" }
                         }
                 }.orEmpty()
+                val rebuildingLegacyApplicability = existingArtifact?.let { existing ->
+                    existing.status == StoredLearningPolicyStatus.STALE_SCHEMA.name &&
+                        existing.sourceValid && !existing.schemaValid &&
+                        existing.staleReason == POLICY_APPLICABILITY_UNPROVEN_V5_REASON &&
+                        existing.applicableToolSchemasWire ==
+                            POLICY_TOOL_APPLICABILITY_UNPROVEN_V5
+                } == true
                 val newEvidence = if (existingArtifact == null) {
                     evidence
                 } else {
-                    require(existingArtifact.sourceValid && existingArtifact.schemaValid)
+                    require(existingArtifact.sourceValid)
+                    require(existingArtifact.schemaValid || rebuildingLegacyApplicability)
+                    if (!rebuildingLegacyApplicability) {
+                        require(
+                            existingArtifact.applicableToolSchemasWire ==
+                                PolicyApplicabilityWire.encodeToolSchemas(draft.applicableToolSchemas)
+                        ) { "Policy tool applicability replay conflict" }
+                    }
+                    require(existingArtifact.applicableModelIdentityWire ==
+                        PolicyApplicabilityWire.encodeExactIdentity(draft.applicableModelIdentity))
+                    require(existingArtifact.applicableProviderIdentityWire ==
+                        PolicyApplicabilityWire.encodeExactIdentity(draft.applicableProviderIdentity))
+                    require(existingArtifact.applicableTemplateIdentity ==
+                        draft.applicableTemplateIdentity)
+                    require(existingArtifact.applicableConfigurationIdentity ==
+                        draft.applicableConfigurationIdentity)
+                    require(existingArtifact.applicableConfigurationGeneration ==
+                        draft.applicableConfigurationGeneration)
+                    require(existingArtifact.applicableCapabilityDigest ==
+                        draft.applicableCapabilityDigest)
+                    require(existingArtifact.applicableAuthorityDigest ==
+                        draft.applicableAuthorityDigest)
+                    require(existingArtifact.producerConfigurationIdentity ==
+                        output.producerConfigurationDigest)
+                    require(existingArtifact.producerConfigGeneration ==
+                        input.executionSpec.providerConfigGeneration)
                     require(existingArtifact.policyType == draft.type.name)
                     require(existingArtifact.triggerSummary == draft.trigger.value)
                     require(existingArtifact.procedureSummary == draft.procedure.value)
@@ -557,7 +840,9 @@ internal object PolicyCandidateJobOutputCommitter :
                         prior == null
                     }
                 }
-                if (existingArtifact != null && newEvidence.isEmpty()) {
+                if (existingArtifact != null && newEvidence.isEmpty() &&
+                    !rebuildingLegacyApplicability
+                ) {
                     return@PolicyMutationTransaction PolicyMutationResult.Duplicate(
                         policyId = existingArtifact.id,
                         revision = existingArtifact.stateVersion,
@@ -580,6 +865,42 @@ internal object PolicyCandidateJobOutputCommitter :
                 )
                 val policy = existingArtifact?.copy(
                     stateVersion = Math.addExact(existingArtifact.stateVersion, 1L),
+                    contentRevision = if (rebuildingLegacyApplicability) {
+                        Math.addExact(existingArtifact.contentRevision, 1L)
+                    } else {
+                        existingArtifact.contentRevision
+                    },
+                    status = if (rebuildingLegacyApplicability) {
+                        StoredLearningPolicyStatus.CANDIDATE.name
+                    } else {
+                        existingArtifact.status
+                    },
+                    schemaValid = if (rebuildingLegacyApplicability) {
+                        true
+                    } else {
+                        existingArtifact.schemaValid
+                    },
+                    applicableToolSchemasWire = if (rebuildingLegacyApplicability) {
+                        PolicyApplicabilityWire.encodeToolSchemas(draft.applicableToolSchemas)
+                    } else {
+                        existingArtifact.applicableToolSchemasWire
+                    },
+                    applicableModelIdentityWire = PolicyApplicabilityWire.encodeExactIdentity(
+                        draft.applicableModelIdentity,
+                    ),
+                    applicableProviderIdentityWire = PolicyApplicabilityWire.encodeExactIdentity(
+                        draft.applicableProviderIdentity,
+                    ),
+                    applicableTemplateIdentity = draft.applicableTemplateIdentity,
+                    applicableConfigurationIdentity = draft.applicableConfigurationIdentity,
+                    applicableConfigurationGeneration = draft.applicableConfigurationGeneration,
+                    applicableCapabilityDigest = draft.applicableCapabilityDigest,
+                    applicableAuthorityDigest = draft.applicableAuthorityDigest,
+                    staleReason = if (rebuildingLegacyApplicability) {
+                        null
+                    } else {
+                        existingArtifact.staleReason
+                    },
                     distinctEpisodeSupport = statistics.distinctEpisodeSupport.toLong(),
                     positiveEpisodeCount = statistics.positiveEpisodeCount.toLong(),
                     negativeEpisodeCount = statistics.negativeEpisodeCount.toLong(),
@@ -597,11 +918,26 @@ internal object PolicyCandidateJobOutputCommitter :
                     boundarySummary = draft.boundary.value,
                     failureModeSummary = draft.failureMode.value,
                     stateVersion = 1,
+                    contentRevision = 1,
                     artifactSha256 = draft.artifactHash,
                     compilerAbi = P1_POLICY_COMPILER_ABI,
                     status = StoredLearningPolicyStatus.CANDIDATE.name,
                     sourceValid = true,
                     schemaValid = true,
+                    applicableToolSchemasWire = PolicyApplicabilityWire.encodeToolSchemas(
+                        draft.applicableToolSchemas,
+                    ),
+                    applicableModelIdentityWire = PolicyApplicabilityWire.encodeExactIdentity(
+                        draft.applicableModelIdentity,
+                    ),
+                    applicableProviderIdentityWire = PolicyApplicabilityWire.encodeExactIdentity(
+                        draft.applicableProviderIdentity,
+                    ),
+                    applicableTemplateIdentity = draft.applicableTemplateIdentity,
+                    applicableConfigurationIdentity = draft.applicableConfigurationIdentity,
+                    applicableConfigurationGeneration = draft.applicableConfigurationGeneration,
+                    applicableCapabilityDigest = draft.applicableCapabilityDigest,
+                    applicableAuthorityDigest = draft.applicableAuthorityDigest,
                     staleReason = null,
                     distinctEpisodeSupport = statistics.distinctEpisodeSupport.toLong(),
                     positiveEpisodeCount = statistics.positiveEpisodeCount.toLong(),
@@ -640,6 +976,8 @@ internal object PolicyCandidateJobOutputCommitter :
                             afterArtifactSha256 = policy.artifactSha256,
                             reasonCode = if (existingArtifact == null) {
                                 LearningPolicyRevisionReason.CREATE.name
+                            } else if (rebuildingLegacyApplicability) {
+                                LearningPolicyRevisionReason.APPLICABILITY_REBUILT.name
                             } else {
                                 LearningPolicyRevisionReason.EVIDENCE_ADDED.name
                             },
@@ -650,6 +988,19 @@ internal object PolicyCandidateJobOutputCommitter :
                         lineage = emptyList(),
                     ),
                 )
+                rewardEvidence.forEach { rewardEdge ->
+                    val insertedReward = database.rewardSignalDao()
+                        .insertPolicyRewardEvidenceIgnore(rewardEdge)
+                    if (insertedReward == -1L) {
+                        require(
+                            database.rewardSignalDao().listPolicyRewardEvidence(
+                                rewardEdge.policyId,
+                                rewardEdge.episodeId,
+                                MAX_REWARD_SIGNAL_SCAN,
+                            ).contains(rewardEdge),
+                        ) { "Policy reward evidence replay conflict" }
+                    }
+                }
                 PolicyMutationResult.Applied(
                     policyId = policy.id,
                     revision = policy.stateVersion,
@@ -751,6 +1102,67 @@ private data class StorageRewardComponent(
     val evidence: String?,
 )
 
+private fun List<me.rerere.rikkahub.learning.storage.LearningRewardSignalEntity>.component(
+    dimension: LearningRewardDimension,
+): StorageRewardSignalComponent {
+    val selected = filter {
+        it.dimension == dimension.name && it.knowledge == LearningRewardKnowledge.KNOWN.name
+    }
+    if (selected.isEmpty()) {
+        return StorageRewardSignalComponent(
+            knowledge = LearningRewardKnowledge.UNKNOWN.name,
+            value = null,
+            reason = RewardUnknownReason.NO_SIGNAL.name,
+            evidence = null,
+            signalKind = null,
+        )
+    }
+    val strongestPriority = selected.maxOf { signal ->
+        signal.signalKind.rewardPriority()
+    }
+    val strongest = selected.filter { it.signalKind.rewardPriority() == strongestPriority }
+    val values = strongest.mapNotNull { it.valueMilli }.distinct()
+    if (values.size != 1) {
+        return StorageRewardSignalComponent(
+            knowledge = LearningRewardKnowledge.UNKNOWN.name,
+            value = null,
+            reason = RewardUnknownReason.CONFLICTING_AUTHORITATIVE_SIGNALS.name,
+            evidence = null,
+            signalKind = null,
+        )
+    }
+    return StorageRewardSignalComponent(
+        knowledge = LearningRewardKnowledge.KNOWN.name,
+        value = values.single() / 1_000.0,
+        reason = null,
+        evidence = LearningCanonicalId.digest(
+            "reward-component-evidence-v1",
+            strongest.sortedBy { it.id }.flatMap {
+                listOf(it.id, it.sourceRevision.toString(), it.sourceIntegritySha256)
+            },
+        ),
+        signalKind = strongest.first().signalKind,
+    )
+}
+
+private data class StorageRewardSignalComponent(
+    val knowledge: String,
+    val value: Double?,
+    val reason: String?,
+    val evidence: String?,
+    val signalKind: String?,
+)
+
+private fun String.rewardPriority(): Int = when (this) {
+    LearningRewardSignalKind.EXPLICIT_USER_CORRECTION.name -> 500
+    LearningRewardSignalKind.EXPLICIT_USER_FEEDBACK.name -> 400
+    LearningRewardSignalKind.VERIFIED_TOOL_RESULT.name -> 300
+    LearningRewardSignalKind.COMMAND_TERMINAL.name -> 200
+    LearningRewardSignalKind.PROGRAMMATIC_METRIC.name -> 100
+    LearningRewardSignalKind.JUDGE.name -> 10
+    else -> 0
+}
+
 private suspend fun LearningDatabase.toStorageComponent(
     episode: LearningEpisodeEntity,
     component: RewardComponent,
@@ -781,7 +1193,7 @@ private suspend fun LearningDatabase.toStorageComponent(
 
 private fun LearningPolicyEntity.toCandidateAuditSnapshot(): String {
     return listOf(
-        "policy-candidate-snapshot-v1",
+        "policy-candidate-snapshot-v3",
         "type=$policyType",
         "task=$taskSignature",
         "trigger=$triggerSummary",
@@ -789,6 +1201,14 @@ private fun LearningPolicyEntity.toCandidateAuditSnapshot(): String {
         "verification=$verificationSummary",
         "boundary=$boundarySummary",
         "failure=$failureModeSummary",
+        "applicable_tools=$applicableToolSchemasWire",
+        "applicable_model=$applicableModelIdentityWire",
+        "applicable_provider=$applicableProviderIdentityWire",
+        "applicable_template=${applicableTemplateIdentity ?: "UNPROVEN"}",
+        "applicable_configuration=${applicableConfigurationIdentity ?: "UNPROVEN"}",
+        "applicable_configuration_generation=${applicableConfigurationGeneration ?: "UNPROVEN"}",
+        "applicable_capability=${applicableCapabilityDigest ?: "UNKNOWN"}",
+        "applicable_authority=${applicableAuthorityDigest ?: "UNKNOWN"}",
         "artifact=$artifactSha256",
         "support=$distinctEpisodeSupport",
         "positive=$positiveEpisodeCount",
@@ -804,6 +1224,7 @@ private val COMMAND_EPISODE_EVENTS = setOf(
 private const val LESSON_SCHEMA_VERSION = 1
 private const val MAX_TRACE_SOURCE_SCAN = 256
 private const val MAX_POLICY_SOURCE_SCAN = 256
+private const val MAX_REWARD_SIGNAL_SCAN = 64
 private const val P1_POLICY_COMPILER_ABI = "policy-shadow-compiler-v1"
 private const val P1_EVENT_SCHEMA_VERSION = 2
 

@@ -2,11 +2,11 @@ package me.rerere.rikkahub.learning.api
 
 import kotlin.uuid.Uuid
 import kotlinx.coroutines.runBlocking
-import me.rerere.rikkahub.learning.adapters.DreamingIdentityAdapter
 import me.rerere.rikkahub.learning.model.LearningScope
 import me.rerere.rikkahub.learning.task.TaskSignatureV1
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class IdentityContextProviderTest {
@@ -19,28 +19,31 @@ class IdentityContextProviderTest {
     }
 
     @Test
-    fun dreamingAdapterDoesNotGuessFromInternalTables() = runBlocking {
-        assertEquals(
-            IdentityContextResult.Unavailable(
-                IdentityContextUnavailableReason.PUBLIC_READ_API_UNAVAILABLE,
-            ),
-            DreamingIdentityAdapter.queryRelevantIdentity(request()),
-        )
-    }
-
-    @Test
     fun requestAndProvidersDoNotLeakScopeOrTaskIdentifiersInToString() {
         val request = request()
         assertFalse(request.toString().contains(ASSISTANT_ID.toString()))
         assertFalse(request.toString().contains(TASK_SIGNATURE.value))
+        assertFalse(request.toString().contains("1720000000000"))
         assertFalse(NoOpIdentityContextProvider.toString().contains(ASSISTANT_ID.toString()))
-        assertFalse(DreamingIdentityAdapter.toString().contains(ASSISTANT_ID.toString()))
+    }
+
+    @Test
+    fun requestRejectsAnUnfrozenNegativeClock() {
+        assertThrows(IllegalArgumentException::class.java) {
+            IdentityContextRequest(
+                expectedScope = LearningScope.Assistant(ASSISTANT_ID),
+                taskSignature = TASK_SIGNATURE,
+                budget = IdentityContextBudget(maxItems = 1, maxChars = 1),
+                frozenNowEpochMs = -1L,
+            )
+        }
     }
 
     private fun request() = IdentityContextRequest(
         expectedScope = LearningScope.Assistant(ASSISTANT_ID),
         taskSignature = TASK_SIGNATURE,
         budget = IdentityContextBudget(maxItems = 4, maxChars = 1_024),
+        frozenNowEpochMs = 1_720_000_000_000L,
     )
 
     private companion object {

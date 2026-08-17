@@ -39,10 +39,13 @@ val appModule = module {
     single {
         me.rerere.rikkahub.diagnostics.agenttiming.AgentTimingStore(clock = get())
     }
-    // Learning only sees bounded, content-free public projections. Dreaming currently exposes no
-    // suitable public projection, so its adapter is intentionally unavailable/fail-closed.
+    // Learning sees only Dreaming's bounded public projection. The adapter never opens Dream DAOs
+    // and rejects every Learning scope that has no exact private Memory authority counterpart.
     single<me.rerere.rikkahub.learning.api.IdentityContextProvider> {
-        me.rerere.rikkahub.learning.adapters.DreamingIdentityAdapter
+        me.rerere.rikkahub.learning.adapters.DreamingIdentityAdapter(
+            featureFlags = get(),
+            projectionReader = get(),
+        )
     }
     single {
         me.rerere.rikkahub.learning.adapters.AgentTimingLearningAdapter(
@@ -942,6 +945,7 @@ val appModule = module {
             chatService = get(),
             toolExperiences = get(),
             toolShortcuts = get(),
+            learningAuthorityRevocation = get(),
         )
     }
 

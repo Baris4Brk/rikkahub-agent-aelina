@@ -1,9 +1,15 @@
 package me.rerere.rikkahub.service.chat
 
+import kotlinx.datetime.LocalDateTime
+import kotlinx.datetime.TimeZone
+import kotlinx.datetime.toLocalDateTime
 import kotlinx.serialization.Serializable
+import me.rerere.ai.core.MessageRole
+import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessageAnnotation
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.rikkahub.memory.MemorySourceVersion
+import kotlin.time.Clock
 import kotlin.uuid.Uuid
 
 sealed interface ChatCommand
@@ -44,6 +50,24 @@ data class RawUserContent(
     val parts: List<UIMessagePart>,
     val answer: Boolean = true,
     val annotations: List<UIMessageAnnotation> = emptyList(),
+    /**
+     * Frozen once at submission and persisted with the durable command. Admission and execution
+     * must build the branch anchor with this same value; sampling the clock twice changes the
+     * authority payload digest even when the user's content is byte-for-byte identical.
+     */
+    val createdAt: LocalDateTime = Clock.System.now()
+        .toLocalDateTime(TimeZone.currentSystemDefault()),
+)
+
+internal fun RawUserContent.toAnchoredUserMessage(
+    messageId: Uuid,
+    effectiveParts: List<UIMessagePart> = parts,
+): UIMessage = UIMessage(
+    id = messageId,
+    role = MessageRole.USER,
+    parts = effectiveParts,
+    annotations = annotations,
+    createdAt = createdAt,
 )
 
 data class StopCommand(

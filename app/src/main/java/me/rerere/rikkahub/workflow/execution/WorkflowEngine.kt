@@ -28,11 +28,28 @@ import me.rerere.rikkahub.workflow.condition.ContextProvider
 import me.rerere.rikkahub.workflow.model.WorkflowAction
 import me.rerere.rikkahub.workflow.model.WorkflowDefinition
 import me.rerere.rikkahub.workflow.model.WorkflowCapabilitySnapshot
+import me.rerere.rikkahub.workflow.model.WorkflowInputSchemaValidator
+import me.rerere.rikkahub.workflow.model.WorkflowOrigin
 import me.rerere.rikkahub.workflow.model.WorkflowRunStatus
+import me.rerere.rikkahub.workflow.model.WorkflowToolSchemaSnapshot
 import me.rerere.rikkahub.workflow.repository.WorkflowRepository
 import me.rerere.rikkahub.workflow.trigger.TriggerFireCallback
 import java.time.LocalDate
 import java.time.ZoneId
+
+data class LearnedWorkflowAuthoritySnapshot(
+    val sourceCandidateId: String,
+    val sourceArtifactHash: String,
+    val grantDigest: String,
+    val authoringAssistantId: String,
+    /** The definition parsed from the exact AppDatabase row selected for this fire. */
+    val installedDefinition: WorkflowDefinition,
+)
+
+/** P4 promotion binds this port; absence is intentionally fail-closed. */
+fun interface LearnedWorkflowAuthorityValidator {
+    suspend fun isActive(snapshot: LearnedWorkflowAuthoritySnapshot): Boolean
+}
 
 /**
  * Phase 12 — workflow execution engine. The single entry point for any workflow fire.
@@ -94,6 +111,10 @@ class WorkflowEngine(
         org.koin.java.KoinJavaComponent.getKoin().get<me.rerere.rikkahub.data.agentrun.AgentRunRepository>()
     }
 
+    private val learnedAuthorityValidator: LearnedWorkflowAuthorityValidator? by lazy {
+        org.koin.java.KoinJavaComponent.getKoin().getOrNull<LearnedWorkflowAuthorityValidator>()
+    }
+
     private val perWorkflowLocks = mutableMapOf<String, Mutex>()
     private val locksMutex = Mutex()
 
@@ -126,14 +147,23 @@ class WorkflowEngine(
         emergencyController.runTracked(workflowId) {
             val lock = lockFor(workflowId)
             lock.withLock { fireLocked(workflowId) }
-        } ?: FireOutcome(WorkflowRunStatus.FAILED, "emergency_stop", "")
+        } ?: FireOutcome(WorkflowRunStatus.FAILED, WorkflowFailureCode.EMERGENCY_STOP, "")
     }
 
     private suspend fun fireLocked(workflowId: String): FireOutcome {
         val firedAtMs = System.currentTimeMillis()
         val started = System.nanoTime()
-        val loaded = repository.getById(workflowId)
-            ?: return FireOutcome(WorkflowRunStatus.FAILED, "workflow_not_found", "")
+        val loaded = repository.getById(workflowId) ?: run {
+            val disabled = repository.disableInvalidLearnedById(
+                workflowId,
+                WorkflowFailureCode.LEARNED_DEFINITION_INVALID,
+            )
+            return FireOutcome(
+                WorkflowRunStatus.FAILED,
+                if (disabled) WorkflowFailureCode.LEARNED_DEFINITION_INVALID else WorkflowFailureCode.NOT_FOUND,
+                "",
+            )
+        }
         val def = loaded.definition
         val entity = loaded.entity
 
@@ -145,8 +175,10 @@ class WorkflowEngine(
             kind = me.rerere.rikkahub.data.agentrun.AgentRunKind.Workflow,
             domainId = workflowId,
             metadata = buildJsonObject {
-                put("name", entity.name)
-                put("trigger", def.trigger::class.simpleName ?: "unknown")
+                // Content-free diagnostics only: workflow names/descriptions/args never enter
+                // the cross-pillar run ledger.
+                put("origin", entity.origin)
+                put("trigger_kind", def.trigger::class.simpleName ?: "unknown")
             },
         )
 
@@ -190,7 +222,41 @@ class WorkflowEngine(
             if (cr is ConditionEvaluator.Result.FailedAt) {
                 return persistAndReturn(
                     workflowId, firedAtMs, started, WorkflowRunStatus.SKIPPED_CONDITIONS,
-                    "condition[${cr.index}] failed: ${cr.reason}", "", ledgerId,
+                    WorkflowFailureCode.CONDITION_NOT_MET, "", ledgerId,
+                )
+            }
+        }
+
+        val isLearned = entity.origin == WorkflowOrigin.LEARNED.name
+        var learnedAuthority: LearnedWorkflowAuthoritySnapshot? = null
+        if (isLearned) {
+            val authority = LearnedWorkflowAuthoritySnapshot(
+                sourceCandidateId = def.sourceCandidateId.orEmpty(),
+                sourceArtifactHash = def.sourceArtifactHash.orEmpty(),
+                grantDigest = def.grantDigest.orEmpty(),
+                authoringAssistantId = def.authoringAssistantId.orEmpty(),
+                installedDefinition = def,
+            )
+            learnedAuthority = authority
+            val authorityActive = authority.sourceCandidateId.isNotBlank() &&
+                authority.sourceArtifactHash.isNotBlank() &&
+                authority.grantDigest.isNotBlank() &&
+                authority.authoringAssistantId.isNotBlank() &&
+                runCatching { learnedAuthorityValidator?.isActive(authority) == true }
+                    .getOrDefault(false)
+            if (!authorityActive) {
+                repository.disableLearnedAsStale(
+                    loaded,
+                    WorkflowFailureCode.LEARNED_AUTHORITY_INACTIVE,
+                )
+                return persistAndReturn(
+                    workflowId,
+                    firedAtMs,
+                    started,
+                    WorkflowRunStatus.FAILED,
+                    WorkflowFailureCode.LEARNED_AUTHORITY_INACTIVE,
+                    "",
+                    ledgerId,
                 )
             }
         }
@@ -208,9 +274,11 @@ class WorkflowEngine(
             } else null
             if (byId != null) {
                 byId
+            } else if (isLearned) {
+                null
             } else {
                 if (storedId != null) {
-                    Log.w(TAG, "fire: authoring assistant $storedId for workflow $workflowId no longer exists; falling back to first-with-Workflows")
+                    logSafe("workflow_authoring_assistant_fallback")
                 }
                 settings.assistants.firstOrNull { asst ->
                     asst.localTools.any { it is me.rerere.rikkahub.data.ai.tools.LocalToolOption.Workflows }
@@ -218,20 +286,39 @@ class WorkflowEngine(
             }
         }
         if (authoringAssistant == null) {
+            if (isLearned) {
+                repository.disableLearnedAsStale(
+                    loaded,
+                    WorkflowFailureCode.LEARNED_ASSISTANT_MISSING,
+                )
+            }
             return persistAndReturn(workflowId, firedAtMs, started, WorkflowRunStatus.FAILED,
-                "no_workflows_assistant", "", ledgerId)
+                if (isLearned) WorkflowFailureCode.LEARNED_ASSISTANT_MISSING else WorkflowFailureCode.NO_ASSISTANT,
+                "", ledgerId)
         }
         // Headless context — sub-agent recursion guard fires from workflow-action
         // dispatch so a workflow's actions can't spawn a sub-agent that re-fires another
         // workflow_run that re-spawns ad infinitum.
-        val frozenCapabilities = WorkflowCapabilitySnapshot.parse(
-            def.capabilitySnapshot.ifEmpty {
+        val frozenCapabilities = if (isLearned) {
+            WorkflowCapabilitySnapshot.parsePersistedForLearnedExecution(def.capabilitySnapshot)
+                ?: run {
+                    repository.disableLearnedAsStale(
+                        loaded,
+                        WorkflowFailureCode.LEARNED_CAPABILITY_MISSING,
+                    )
+                    return persistAndReturn(
+                        workflowId, firedAtMs, started, WorkflowRunStatus.FAILED,
+                        WorkflowFailureCode.LEARNED_CAPABILITY_MISSING, "", ledgerId,
+                    )
+                }
+        } else {
+            WorkflowCapabilitySnapshot.parse(def.capabilitySnapshot.ifEmpty {
                 // Legacy definitions have no persisted snapshot. Derive the narrowest snapshot
                 // from their already-persisted actions rather than granting the author's whole
                 // current tool surface; workflow_update will persist it explicitly.
                 WorkflowCapabilitySnapshot.capture(def.actions)
-            },
-        )
+            })
+        }
         val executionContext = ToolExecutionContext(
             runId = kotlin.uuid.Uuid.random(),
             conversationId = kotlin.uuid.Uuid.random(),
@@ -257,6 +344,50 @@ class WorkflowEngine(
             ),
         )
 
+        // Resolver changes may narrow or widen current requirements, but they never mutate the
+        // frozen grant. Any newly-required capability makes the durable workflow stale instead
+        // of silently expanding its authority.
+        val currentRequirements = WorkflowCapabilitySnapshot.capture(def.actions)
+        val authorizedCapabilities = frozenCapabilities.mapTo(hashSetOf()) { it.value }
+        val capabilitiesStillValid = if (isLearned) {
+            authorizedCapabilities == currentRequirements
+        } else {
+            authorizedCapabilities.containsAll(currentRequirements)
+        }
+        if (!capabilitiesStillValid) {
+            if (isLearned) repository.disableLearnedAsStale(
+                loaded,
+                WorkflowFailureCode.LEARNED_CAPABILITY_STALE,
+            )
+            return persistAndReturn(
+                workflowId, firedAtMs, started, WorkflowRunStatus.FAILED,
+                if (isLearned) WorkflowFailureCode.LEARNED_CAPABILITY_STALE else WorkflowFailureCode.CAPABILITY_STALE,
+                "", ledgerId,
+            )
+        }
+
+        val currentSchemas = me.rerere.rikkahub.toolcatalog.ToolCatalogSnapshot
+            .fromDefinitions(tools)
+        val schemaMismatch = def.actions.firstOrNull { action ->
+            val stored = action.toolSchemaFingerprint
+            when {
+                stored == null -> isLearned
+                !WorkflowToolSchemaSnapshot.isCanonical(stored) -> true
+                else -> currentSchemas.entry(action.tool)?.schemaFingerprint != stored
+            }
+        }
+        if (schemaMismatch != null) {
+            if (isLearned) repository.disableLearnedAsStale(
+                loaded,
+                WorkflowFailureCode.LEARNED_SCHEMA_STALE,
+            )
+            return persistAndReturn(
+                workflowId, firedAtMs, started, WorkflowRunStatus.FAILED,
+                if (isLearned) WorkflowFailureCode.LEARNED_SCHEMA_STALE else WorkflowFailureCode.SCHEMA_STALE,
+                "", ledgerId,
+            )
+        }
+
         // Execute the action sequence. ActionRunner enforces per-action timeout + HARDLINE.
         val result = actionRunner.run(
             actions = def.actions,
@@ -267,6 +398,15 @@ class WorkflowEngine(
                 // legacy unrestricted marker. Future scoped workflow grants plug in here.
                 unrestrictedOverride = false,
             ),
+            beforeAction = {
+                val authority = learnedAuthority
+                if (authority == null) {
+                    true
+                } else {
+                    runCatching { learnedAuthorityValidator?.isActive(authority) == true }
+                        .getOrDefault(false)
+                }
+            },
         )
         val status = if (result.success) WorkflowRunStatus.SUCCESS else WorkflowRunStatus.FAILED
         return persistAndReturn(workflowId, firedAtMs, started, status, result.error, result.summary, ledgerId)
@@ -297,20 +437,20 @@ class WorkflowEngine(
                     ) == android.content.pm.PackageManager.PERMISSION_GRANTED
                 } else true
                 when {
-                    !fineGranted -> "geofence_unavailable: ACCESS_FINE_LOCATION not granted — open Settings → Apps → RikkaHub → Permissions → Location and pick Allow all the time"
-                    !bgGranted -> "geofence_unavailable: ACCESS_BACKGROUND_LOCATION not granted — open Settings → Apps → RikkaHub → Permissions → Location and pick Allow all the time"
+                    !fineGranted -> WorkflowFailureCode.GEOFENCE_FINE_LOCATION_MISSING
+                    !bgGranted -> WorkflowFailureCode.GEOFENCE_BACKGROUND_LOCATION_MISSING
                     else -> null
                 }
             }
             is me.rerere.rikkahub.workflow.model.TriggerSpec.NotificationReceived -> {
                 if (!me.rerere.rikkahub.data.ai.tools.local.NotificationListenerHandle.isBound()) {
-                    "notification_listener_not_enabled: enable the RikkaHub notification listener in Settings → Apps → Special access → Notification access"
+                    WorkflowFailureCode.NOTIFICATION_LISTENER_MISSING
                 } else null
             }
             is me.rerere.rikkahub.workflow.model.TriggerSpec.AppLaunched,
             is me.rerere.rikkahub.workflow.model.TriggerSpec.AppClosed -> {
                 if (!me.rerere.rikkahub.data.ai.tools.local.AccessibilityServiceHandle.isRunning()) {
-                    "accessibility_not_enabled: enable the RikkaHub accessibility service in Settings → Accessibility (required for app_launched / app_closed triggers)"
+                    WorkflowFailureCode.ACCESSIBILITY_MISSING
                 } else null
             }
             is me.rerere.rikkahub.workflow.model.TriggerSpec.BluetoothDeviceConnected,
@@ -319,7 +459,7 @@ class WorkflowEngine(
                     val granted = androidx.core.content.ContextCompat.checkSelfPermission(
                         ctx, android.Manifest.permission.BLUETOOTH_CONNECT
                     ) == android.content.pm.PackageManager.PERMISSION_GRANTED
-                    if (!granted) "bluetooth_connect_not_granted: BLUETOOTH_CONNECT runtime permission not granted — required on Android 12+ to read paired-device addresses"
+                    if (!granted) WorkflowFailureCode.BLUETOOTH_PERMISSION_MISSING
                     else null
                 } else null
             }
@@ -345,7 +485,7 @@ class WorkflowEngine(
                 durationMs = durationMs,
                 errorMessage = error,
             )
-        }.onFailure { Log.w(TAG, "recordFire failed for $workflowId", it) }
+        }.onFailure { logSafe("workflow_run_persistence_failed") }
         // Phase 24 — mirror the terminal outcome into the cross-pillar ledger. Every
         // WorkflowRunStatus is terminal from the ledger's point of view: SUCCESS →
         // succeeded; FAILED → failed; every SKIPPED_* variant → cancelled (the fire was
@@ -358,12 +498,18 @@ class WorkflowEngine(
         agentRunRepo.markTerminal(
             id = ledgerId,
             status = ledgerStatus,
-            lastError = error ?: if (ledgerStatus == me.rerere.rikkahub.data.agentrun.AgentRunStatus.cancelled) status.name else null,
+            lastError = error ?: if (
+                ledgerStatus == me.rerere.rikkahub.data.agentrun.AgentRunStatus.cancelled
+            ) WorkflowFailureCode.GATE_SKIPPED else null,
         )
         return FireOutcome(status, error, summary)
     }
 
     companion object { private const val TAG = "WorkflowEngine" }
+
+    private fun logSafe(code: String) {
+        runCatching { Log.w(TAG, code) }
+    }
 
     data class FireOutcome(
         val status: WorkflowRunStatus,
@@ -405,19 +551,55 @@ class WorkflowActionRunner(
         actions: List<WorkflowAction>,
         availableTools: List<Tool>,
         invocation: ToolRuntimeInvocation,
+        /** Last-responsible-boundary grant/rollout fence; checked before every action. */
+        beforeAction: suspend () -> Boolean = { true },
     ): RunResult {
-        val outputs = mutableListOf<String>()
+        var completed = 0
         for ((idx, action) in actions.withIndex()) {
+            val actionAuthorized = try {
+                beforeAction()
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                false
+            }
+            if (!actionAuthorized) {
+                return RunResult(
+                    false,
+                    WorkflowFailureCode.ACTION_RUNTIME_FENCE_REJECTED,
+                    WorkflowFailureCode.ACTIONS_INCOMPLETE,
+                )
+            }
             val argsJson = action.args.toString()
             val hardlineReason = HardlineCommandGuard.checkTool(action.tool, argsJson)
             if (hardlineReason != null) {
-                logSafe("workflow hardline-blocked action $idx tool=${action.tool}: $hardlineReason")
+                logSafe(WorkflowFailureCode.ACTION_HARDLINE_BLOCKED)
                 return RunResult(success = false,
-                    error = "action $idx: hardline:$hardlineReason",
-                    summary = outputs.joinToString("\n"))
+                    error = WorkflowFailureCode.ACTION_HARDLINE_BLOCKED,
+                    summary = WorkflowFailureCode.ACTIONS_INCOMPLETE)
             }
             val tool = availableTools.find { it.name == action.tool }
-                ?: return RunResult(false, "action $idx: unknown_tool:${action.tool}", outputs.joinToString("\n"))
+                ?: return RunResult(
+                    false,
+                    WorkflowFailureCode.ACTION_UNKNOWN_TOOL,
+                    WorkflowFailureCode.ACTIONS_INCOMPLETE,
+                )
+            val inputSchemaError = runCatching {
+                WorkflowInputSchemaValidator.validate(action.args, tool.parameters())
+            }.getOrElse {
+                return RunResult(
+                    false,
+                    WorkflowFailureCode.ACTION_INVALID_SCHEMA,
+                    WorkflowFailureCode.ACTIONS_INCOMPLETE,
+                )
+            }
+            if (inputSchemaError != null) {
+                return RunResult(
+                    false,
+                    WorkflowFailureCode.ACTION_INVALID_ARGS,
+                    WorkflowFailureCode.ACTIONS_INCOMPLETE,
+                )
+            }
             val runtimeResult = try {
                 toolRuntime.execute(
                     ToolExecutionPlanRequest(
@@ -452,31 +634,35 @@ class WorkflowActionRunner(
                 // unwind the fire (e.g. the engine scope is cancelled on shutdown). The
                 // generic catch below would otherwise turn it into a spurious FAILED row.
                 throw c
-            } catch (t: Throwable) {
-                logSafe("workflow action $idx tool=${action.tool} threw: ${t.message}")
+            } catch (_: Throwable) {
+                logSafe(WorkflowFailureCode.ACTION_RUNTIME_FAILURE)
                 return RunResult(false,
-                    "action $idx: ${t::class.simpleName}: ${t.message.orEmpty()}".take(500),
-                    outputs.joinToString("\n"))
+                    WorkflowFailureCode.ACTION_RUNTIME_FAILURE,
+                    WorkflowFailureCode.ACTIONS_INCOMPLETE)
             }
             if (runtimeResult is ToolExecutionPlanResult.TimedOut) {
                 return RunResult(false,
-                    "action $idx: ${action.tool} exceeded ${action.timeoutSeconds}s",
-                    outputs.joinToString("\n"))
+                    WorkflowFailureCode.ACTION_TIMEOUT,
+                    WorkflowFailureCode.ACTIONS_INCOMPLETE)
             }
             if (runtimeResult is ToolExecutionPlanResult.Rejected) {
                 return RunResult(
                     false,
-                    "action $idx: ${runtimeResult.errorCode}: ${runtimeResult.detail}".take(500),
-                    outputs.joinToString("\n"),
+                    WorkflowFailureCode.ACTION_REJECTED,
+                    WorkflowFailureCode.ACTIONS_INCOMPLETE,
                 )
             }
-            val out = (runtimeResult as ToolExecutionPlanResult.Completed).output
-            // Surface the first ~200 chars of the tool's text output for the run history.
-            val text = out.filterIsInstance<me.rerere.ai.ui.UIMessagePart.Text>()
-                .joinToString("\n") { it.text }
-            outputs += "[$idx] ${action.tool}: ${text.take(200)}"
+            completed++
         }
-        return RunResult(true, null, outputs.joinToString("\n").take(2000))
+        return RunResult(
+            true,
+            null,
+            if (completed == actions.size) {
+                WorkflowFailureCode.ACTIONS_COMPLETED
+            } else {
+                WorkflowFailureCode.ACTIONS_INCOMPLETE
+            },
+        )
     }
 
     /**
@@ -488,4 +674,54 @@ class WorkflowActionRunner(
     }
 
     companion object { private const val TAG = "WorkflowActionRunner" }
+}
+
+/** Content-free workflow run reasons. Never append runtime values to these allowlisted codes. */
+object WorkflowFailureCode {
+    const val EMERGENCY_STOP = "emergency_stop"
+    const val NOT_FOUND = "workflow_not_found"
+    const val LEARNED_DEFINITION_INVALID = "learned_definition_invalid"
+    const val CONDITION_NOT_MET = "condition_not_met"
+    const val LEARNED_AUTHORITY_INACTIVE = "learned_authority_inactive"
+    const val LEARNED_ASSISTANT_MISSING = "learned_assistant_missing"
+    const val NO_ASSISTANT = "workflow_assistant_missing"
+    const val LEARNED_CAPABILITY_MISSING = "learned_capability_missing"
+    const val LEARNED_CAPABILITY_STALE = "learned_capability_stale"
+    const val CAPABILITY_STALE = "capability_stale"
+    const val LEARNED_SCHEMA_STALE = "learned_schema_stale"
+    const val SCHEMA_STALE = "tool_schema_stale"
+    const val GEOFENCE_FINE_LOCATION_MISSING = "geofence_fine_location_missing"
+    const val GEOFENCE_BACKGROUND_LOCATION_MISSING = "geofence_background_location_missing"
+    const val NOTIFICATION_LISTENER_MISSING = "notification_listener_missing"
+    const val ACCESSIBILITY_MISSING = "accessibility_service_missing"
+    const val BLUETOOTH_PERMISSION_MISSING = "bluetooth_permission_missing"
+    const val ACTION_HARDLINE_BLOCKED = "action_hardline_blocked"
+    const val ACTION_UNKNOWN_TOOL = "action_unknown_tool"
+    const val ACTION_INVALID_SCHEMA = "action_invalid_schema"
+    const val ACTION_INVALID_ARGS = "action_invalid_args"
+    const val ACTION_RUNTIME_FAILURE = "action_runtime_failure"
+    const val ACTION_TIMEOUT = "action_timeout"
+    const val ACTION_REJECTED = "action_rejected"
+    const val ACTION_RUNTIME_FENCE_REJECTED = "action_runtime_fence_rejected"
+    const val ACTIONS_COMPLETED = "actions_completed"
+    const val ACTIONS_INCOMPLETE = "actions_incomplete"
+    const val GATE_SKIPPED = "workflow_gate_skipped"
+
+    private val durable = setOf(
+        EMERGENCY_STOP, NOT_FOUND, LEARNED_DEFINITION_INVALID, CONDITION_NOT_MET,
+        LEARNED_AUTHORITY_INACTIVE, LEARNED_ASSISTANT_MISSING, NO_ASSISTANT,
+        LEARNED_CAPABILITY_MISSING, LEARNED_CAPABILITY_STALE, CAPABILITY_STALE,
+        LEARNED_SCHEMA_STALE, SCHEMA_STALE, GEOFENCE_FINE_LOCATION_MISSING,
+        GEOFENCE_BACKGROUND_LOCATION_MISSING, NOTIFICATION_LISTENER_MISSING,
+        ACCESSIBILITY_MISSING, BLUETOOTH_PERMISSION_MISSING, ACTION_HARDLINE_BLOCKED,
+        ACTION_UNKNOWN_TOOL, ACTION_INVALID_SCHEMA, ACTION_INVALID_ARGS,
+        ACTION_RUNTIME_FAILURE, ACTION_TIMEOUT, ACTION_REJECTED,
+        ACTION_RUNTIME_FENCE_REJECTED, GATE_SKIPPED,
+    )
+
+    fun durableOrGeneric(value: String?): String? = when (value) {
+        null -> null
+        in durable -> value
+        else -> ACTION_RUNTIME_FAILURE
+    }
 }

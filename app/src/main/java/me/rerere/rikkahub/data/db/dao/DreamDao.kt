@@ -185,6 +185,15 @@ interface DreamDao {
             "FROM dream_runs WHERE mode IN ('INCREMENTAL', 'FULL') " +
             "AND started_at_ms IS NOT NULL AND started_at_ms >= :startInclusiveEpochMs " +
             "AND started_at_ms < :endExclusiveEpochMs " +
+            "AND (" +
+            "(prompt_contract_version IS NOT NULL AND validator_version IS NOT NULL " +
+            "AND input_memory_count IS NOT NULL AND input_manifest_hash IS NOT NULL) " +
+            "OR failure_code IN ('MODEL_PERMANENT_FAILURE', 'MODEL_UNAVAILABLE', " +
+            "'MODEL_PROVIDER_UNAVAILABLE', 'MODEL_TIMEOUT', 'MODEL_CANCELLED_BY_PROVIDER', " +
+            "'MODEL_OUTPUT_LIMIT', 'MODEL_SAFETY_REJECTION', 'MODEL_INVALID_CONFIGURATION', " +
+            "'MODEL_AUDIT_MISMATCH', " +
+            "'MODEL_OUTPUT_PARSE_REJECTED', 'MODEL_OUTPUT_VALIDATION_REJECTED', " +
+            "'SNAPSHOT_COMPILATION_FAILED')) " +
             "AND (:excludingRunId IS NULL OR run_id != :excludingRunId)",
     )
     suspend fun readGlobalDreamDailyUsage(

@@ -51,6 +51,27 @@ sealed interface DreamSynthesisStoreResult {
     data class Rejected(val reason: DreamSynthesisStoreRejection) : DreamSynthesisStoreResult
 }
 
+/**
+ * Durable pre-dispatch marker. Once this transaction commits, a process death leaves provider
+ * spend indeterminate, so the run must count against the daily provider-run budget even if the
+ * provider never returns an audit payload.
+ */
+data class DreamProviderDispatchRequest(
+    val fence: DreamSynthesisFence,
+    val promptContractVersion: String,
+    val validatorVersion: String,
+    val inputMemoryCount: Int,
+    val inputManifestHash: DreamSha256,
+    val markedAtEpochMs: Long,
+) {
+    init {
+        require(promptContractVersion.matches(Regex("^[A-Za-z0-9._-]{1,64}$")))
+        require(validatorVersion.matches(Regex("^[A-Za-z0-9._-]{1,64}$")))
+        require(inputMemoryCount in 0..1_024)
+        require(markedAtEpochMs >= fence.frozenNowEpochMs)
+    }
+}
+
 data class DreamSynthesisCommitRequest(
     val fence: DreamSynthesisFence,
     val plan: DreamValidatedPlan,
@@ -165,6 +186,13 @@ enum class DreamSynthesisStoreRejection {
 enum class DreamSynthesisFailure {
     INPUT_REJECTED,
     MODEL_PERMANENT_FAILURE,
+    MODEL_UNAVAILABLE,
+    MODEL_PROVIDER_UNAVAILABLE,
+    MODEL_TIMEOUT,
+    MODEL_CANCELLED_BY_PROVIDER,
+    MODEL_OUTPUT_LIMIT,
+    MODEL_SAFETY_REJECTION,
+    MODEL_INVALID_CONFIGURATION,
     MODEL_AUDIT_MISMATCH,
     MODEL_OUTPUT_PARSE_REJECTED,
     MODEL_OUTPUT_VALIDATION_REJECTED,
@@ -176,6 +204,13 @@ enum class DreamSynthesisFailure {
 fun DreamSynthesisFailure.toRunFailureCode(): DreamRunFailureCode = when (this) {
     DreamSynthesisFailure.INPUT_REJECTED -> DreamRunFailureCode.INPUT_REJECTED
     DreamSynthesisFailure.MODEL_PERMANENT_FAILURE -> DreamRunFailureCode.MODEL_PERMANENT_FAILURE
+    DreamSynthesisFailure.MODEL_UNAVAILABLE -> DreamRunFailureCode.MODEL_UNAVAILABLE
+    DreamSynthesisFailure.MODEL_PROVIDER_UNAVAILABLE -> DreamRunFailureCode.MODEL_PROVIDER_UNAVAILABLE
+    DreamSynthesisFailure.MODEL_TIMEOUT -> DreamRunFailureCode.MODEL_TIMEOUT
+    DreamSynthesisFailure.MODEL_CANCELLED_BY_PROVIDER -> DreamRunFailureCode.MODEL_CANCELLED_BY_PROVIDER
+    DreamSynthesisFailure.MODEL_OUTPUT_LIMIT -> DreamRunFailureCode.MODEL_OUTPUT_LIMIT
+    DreamSynthesisFailure.MODEL_SAFETY_REJECTION -> DreamRunFailureCode.MODEL_SAFETY_REJECTION
+    DreamSynthesisFailure.MODEL_INVALID_CONFIGURATION -> DreamRunFailureCode.MODEL_INVALID_CONFIGURATION
     DreamSynthesisFailure.MODEL_AUDIT_MISMATCH -> DreamRunFailureCode.MODEL_AUDIT_MISMATCH
     DreamSynthesisFailure.MODEL_OUTPUT_PARSE_REJECTED -> DreamRunFailureCode.MODEL_OUTPUT_PARSE_REJECTED
     DreamSynthesisFailure.MODEL_OUTPUT_VALIDATION_REJECTED ->
@@ -206,6 +241,12 @@ interface DreamSynthesisStore {
         nowMs: Long,
         leaseDurationMs: Long,
     ): DreamSynthesisStoreResult
+
+    /**
+     * Persist the exact model-input identity immediately before the provider call. This is the
+     * durable accounting boundary used by the daily Dream budget.
+     */
+    suspend fun markProviderDispatch(request: DreamProviderDispatchRequest): DreamSynthesisStoreResult
 
     /** One transaction: verify every fence/pin, write versions+sources+snapshot, then advance both CAS values. */
     suspend fun commit(request: DreamSynthesisCommitRequest): DreamSynthesisCommitResult

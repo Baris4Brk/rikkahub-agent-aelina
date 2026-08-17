@@ -179,13 +179,14 @@ class MemoryV2DaoRetryTest {
 
     @Test
     fun terminalFailure_isNotAutomaticWorkUntilUserExplicitlyRetries() = runBlocking {
-        val scopeId = "scope"
+        val assistantId = Uuid.parse("00000000-0000-0000-0000-000000000001")
+        val scopeId = assistantId.toString()
         val terminalConversationId = "terminal-conversation"
         val nowMs = 10_000L
         dao.insertCapture(
             MemoryCaptureEntity(
                 id = "terminal-failure",
-                assistantId = "assistant",
+                assistantId = scopeId,
                 scopeId = scopeId,
                 conversationId = terminalConversationId,
                 userMessageId = "terminal-user-message",
@@ -232,7 +233,7 @@ class MemoryV2DaoRetryTest {
         )
         val queued = coordinator.capture(
             CompletedMemoryTurn(
-                assistantId = Uuid.parse("00000000-0000-0000-0000-000000000001"),
+                assistantId = assistantId,
                 scopeId = scopeId,
                 conversationId = Uuid.parse("00000000-0000-0000-0000-000000000002"),
                 userMessageId = Uuid.parse("00000000-0000-0000-0000-000000000003"),

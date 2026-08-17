@@ -18,6 +18,7 @@ import me.rerere.rikkahub.learning.model.LearningFeatureFlagSource
 import me.rerere.rikkahub.learning.model.LearningScope
 import me.rerere.rikkahub.learning.model.LearningSourceKind
 import me.rerere.rikkahub.learning.model.LearningSourceRef
+import me.rerere.rikkahub.learning.privacy.LearningEphemeralScopeRegistry
 import me.rerere.rikkahub.learning.storage.LearningInboxEventEntity
 import me.rerere.rikkahub.utils.JsonInstant
 
@@ -32,6 +33,7 @@ class RoomConversationLearningSourceSnapshotResolver(
     private val authority: LearningSourceAuthorityReadPort,
     private val payloads: ConversationMessagePayloadReadPort,
     private val featureFlags: LearningFeatureFlagSource,
+    private val ephemeralRegistry: LearningEphemeralScopeRegistry? = null,
 ) : LearningSourceSnapshotResolver, LearningSourceIntegrityResolver {
     constructor(
         database: AppDatabase,
@@ -39,11 +41,13 @@ class RoomConversationLearningSourceSnapshotResolver(
         conversations: ConversationDAO = database.conversationDao(),
         messageNodes: MessageNodeDAO = database.messageNodeDao(),
         featureFlags: LearningFeatureFlagSource,
+        ephemeralRegistry: LearningEphemeralScopeRegistry? = null,
     ) : this(
         transactions = RoomConversationLearningSourceTransactionRunner(database),
         authority = RoomLearningSourceAuthorityReadPort(authority),
         payloads = RoomConversationMessagePayloadReadPort(conversations, messageNodes),
-        featureFlags = featureFlags,
+            featureFlags = featureFlags,
+            ephemeralRegistry = ephemeralRegistry,
     )
     override suspend fun resolve(
         request: LearningSourceSnapshotRequest,
@@ -89,6 +93,7 @@ class RoomConversationLearningSourceSnapshotResolver(
                             alias = "E1",
                             text = decoded.text,
                             expiresAtMs = request.expiresAtMs,
+                            ephemeralRegistry = ephemeralRegistry,
                         ),
                     )
                 }

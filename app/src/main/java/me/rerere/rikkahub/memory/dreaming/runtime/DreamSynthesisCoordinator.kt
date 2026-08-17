@@ -216,10 +216,14 @@ class DreamSynthesisCoordinator(
                     policy = policy,
                     nowMs = now,
                     allowCreate = remainingNewRuns > 0L,
-                    // A scope settings scan may be caused by use=false, so it must KEEP. Global
-                    // cost changes rebuild the Work request so relaxed/tightened constraints do
-                    // not leave a queued request governed by stale network/battery policy.
-                    replaceExisting = reason == DreamSynthesisScanReason.COST_POLICY_CHANGED,
+                    // Startup replaces a queued PENDING request so stale WorkManager backoff and
+                    // pre-upgrade attempt counters cannot delay durable recovery for hours. A
+                    // RUNNING provider call is still protected by schedule()'s running fence.
+                    // Cost changes likewise rebuild immutable Work constraints.
+                    replaceExisting = reason == DreamSynthesisScanReason.STARTUP ||
+                        reason == DreamSynthesisScanReason.COST_POLICY_CHANGED,
+                    idleDeadlineAlreadyObserved =
+                        reason == DreamSynthesisScanReason.APP_IDLE_RECHECK,
                 )) {
                     is ScheduleOneResult.Scheduled -> {
                         scheduled += scope.scopeId
@@ -312,6 +316,7 @@ class DreamSynthesisCoordinator(
             now,
             allowCreate = coarse.remainingNewRuns > 0L,
             replaceExisting = false,
+            idleDeadlineAlreadyObserved = false,
         )) {
             is ScheduleOneResult.Scheduled -> DreamSynthesisScanResult(
                 listOf(scopeId), emptyList(), emptyMap(), false,
@@ -376,6 +381,7 @@ class DreamSynthesisCoordinator(
         nowMs: Long,
         allowCreate: Boolean,
         replaceExisting: Boolean,
+        idleDeadlineAlreadyObserved: Boolean,
     ): ScheduleOneResult {
         val mode = if (scope.lastAppliedMemoryEpoch == 0L) DreamRunMode.FULL
         else DreamRunMode.INCREMENTAL
@@ -396,15 +402,25 @@ class DreamSynthesisCoordinator(
         }
         return when (ensured) {
             is EnsurePendingSynthesisRunResult.Ready -> {
-                scheduler.enqueueScope(
-                    scopeId = scope.scopeId,
-                    runId = ensured.runId,
-                    policy = policy,
-                    // Rebuild immutable Work constraints only while queued. Replacing a RUNNING
-                    // provider call would reset Work attempt identity and make unknown spend look
-                    // like a first attempt.
-                    replaceExisting = replaceExisting && !ensured.running,
-                )
+                val effectiveReplace = replaceExisting && !ensured.running
+                if (idleDeadlineAlreadyObserved) {
+                    scheduler.enqueueScopeAfterIdleRecheck(
+                        scopeId = scope.scopeId,
+                        runId = ensured.runId,
+                        policy = policy,
+                        replaceExisting = effectiveReplace,
+                    )
+                } else {
+                    scheduler.enqueueScope(
+                        scopeId = scope.scopeId,
+                        runId = ensured.runId,
+                        policy = policy,
+                        // Rebuild immutable Work constraints only while queued. Replacing a
+                        // RUNNING provider call would reset Work attempt identity and make unknown
+                        // spend look like a first attempt.
+                        replaceExisting = effectiveReplace,
+                    )
+                }
                 ScheduleOneResult.Scheduled(created = ensured.created)
             }
 

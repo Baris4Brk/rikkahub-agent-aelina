@@ -75,6 +75,7 @@ import me.rerere.hugeicons.stroke.Menu03
 import me.rerere.hugeicons.stroke.MessageAdd01
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.Screen
+import me.rerere.rikkahub.data.authority.reward.RewardFeedbackWriteResult
 import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.datastore.findProvider
 import me.rerere.rikkahub.data.datastore.getCurrentAssistant
@@ -293,6 +294,7 @@ private fun ChatPageContent(
     val queueStatus by vm.queueStatus.collectAsStateWithLifecycle()
     val queuedMessages by vm.queuedMessages.collectAsStateWithLifecycle()
     val steeringEntries by vm.steeringEntries.collectAsStateWithLifecycle()
+    val rewardFeedbackAvailable by vm.rewardFeedbackAvailable.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val workspaceRepository: WorkspaceRepository = koinInject()
     var previewMode by rememberSaveable { mutableStateOf(false) }
@@ -300,6 +302,21 @@ private fun ChatPageContent(
     val assistant = setting.getAssistantById(conversation.assistantId) ?: setting.getCurrentAssistant()
     var showFilesSheet by remember { mutableStateOf(false) }
     var showSendModeDialog by remember { mutableStateOf(false) }
+
+    fun showRewardFeedbackResult(result: RewardFeedbackWriteResult) {
+        when (result) {
+            is RewardFeedbackWriteResult.Committed,
+            is RewardFeedbackWriteResult.Duplicate -> toaster.show(
+                context.getString(R.string.learning_feedback_recorded),
+                type = ToastType.Success,
+            )
+
+            is RewardFeedbackWriteResult.Rejected -> toaster.show(
+                context.getString(R.string.learning_feedback_unavailable),
+                type = ToastType.Error,
+            )
+        }
+    }
 
     LaunchedEffect(runtimeState) {
         me.rerere.rikkahub.pet.overlay.TrustedApprovalSurfaceVisibility.setVisible(
@@ -735,6 +752,20 @@ private fun ChatPageContent(
                         ))
                     vm.saveConversationAsync()
                 },
+                onHelpfulFeedback = if (rewardFeedbackAvailable) {
+                    { message ->
+                        scope.launch {
+                            showRewardFeedbackResult(vm.recordHelpfulFeedback(message.id))
+                        }
+                    }
+                } else null,
+                onNotHelpfulFeedback = if (rewardFeedbackAvailable) {
+                    { message ->
+                        scope.launch {
+                            showRewardFeedbackResult(vm.recordNotHelpfulFeedback(message.id))
+                        }
+                    }
+                } else null,
                 onClickSuggestion = { suggestion ->
                     inputState.editingMessage = null
                     inputState.editingQueuedCommand = null

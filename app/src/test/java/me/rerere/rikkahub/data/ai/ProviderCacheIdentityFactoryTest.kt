@@ -25,10 +25,13 @@ class ProviderCacheIdentityFactoryTest {
         assertNotEquals(baseline, identity(memoryIds = listOf(3, 9)))
         assertNotEquals(baseline, identity(memoryProjectionText = "memory projection b"))
         assertNotEquals(baseline, identity(compilerRevision = "memory-prompt-v2"))
-        assertNotEquals(baseline, identity(finalWire = "final wire b"))
         assertNotEquals(
             identity(dreamProjection = "{\"claim_revision\":1}", dreamRevision = "dream-v1"),
             identity(dreamProjection = "{\"claim_revision\":2}", dreamRevision = "dream-v1"),
+        )
+        assertNotEquals(
+            identity(policyProjection = "a".repeat(64), policyRevision = "recall-v1"),
+            identity(policyProjection = "b".repeat(64), policyRevision = "recall-v1"),
         )
     }
 
@@ -62,9 +65,10 @@ class ProviderCacheIdentityFactoryTest {
         memoryIds: List<Int> = listOf(3, 8),
         memoryProjectionText: String = "memory projection a",
         compilerRevision: String = "memory-prompt-v1",
-        finalWire: String = "final wire a",
         dreamProjection: String? = null,
         dreamRevision: String? = null,
+        policyProjection: String? = null,
+        policyRevision: String? = null,
     ) = requireNotNull(
         buildProviderCacheIdentity(
             conversationId = conversationId,
@@ -73,9 +77,10 @@ class ProviderCacheIdentityFactoryTest {
             actualMemoryIds = memoryIds,
             memoryProjectionText = memoryProjectionText,
             compilerRevision = compilerRevision,
-            finalWireProjectionText = finalWire,
             dreamCacheProjectionCanonicalJson = dreamProjection,
             dreamCompilerRevision = dreamRevision,
+            policyProjectionDigest = policyProjection,
+            policyCompilerRevision = policyRevision,
         ),
     )
 }

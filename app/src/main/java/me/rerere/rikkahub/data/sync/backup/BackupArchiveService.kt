@@ -75,7 +75,9 @@ class BackupArchiveService(
         val sources = mutableListOf<BackupArchiveSourceV1>(
             BackupArchiveSourceV1.Bytes(
                 name = BACKUP_ARCHIVE_SETTINGS_ENTRY,
-                bytes = json.encodeToString(settingsStore.settingsFlow.value)
+                bytes = json.encodeToString(
+                    BackupSettingsSanitizer.forPortableArchive(settingsStore.settingsFlow.value),
+                )
                     .toByteArray(Charsets.UTF_8),
             ),
         )
@@ -169,7 +171,11 @@ class BackupArchiveService(
             maxBytes = MAX_SETTINGS_RESTORE_BYTES,
         )
         val migrated = SettingsJsonMigrator.migrate(settingsBytes.toString(Charsets.UTF_8))
-        settingsStore.update(json.decodeFromString<Settings>(migrated))
+        settingsStore.update(
+            BackupSettingsSanitizer.afterPortableRestore(
+                json.decodeFromString<Settings>(migrated),
+            ),
+        )
     }
 
     private fun restoreFiles(archive: VerifiedBackupArchiveV1) {
@@ -303,15 +309,19 @@ class BackupArchiveService(
                     check(cursor.moveToFirst() && cursor.getString(0) == "ok" &&
                         !cursor.moveToNext())
                 }
-                check(database.version == me.rerere.rikkahub.data.db.ImportedDatabaseReconciler.EXPECTED_VERSION)
                 val identity = database.rawQuery(
                     "SELECT identity_hash FROM room_master_table WHERE id = 42 LIMIT 1",
                     null,
                 ).use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
-                return when (identity) {
-                    me.rerere.rikkahub.data.db.ImportedDatabaseReconciler.EXPECTED_IDENTITY_HASH ->
+                return when (
+                    me.rerere.rikkahub.data.db.ImportedDatabaseReconciler
+                        .legacyV46AuthorityPlanOrThrow(database.version, identity)
+                ) {
+                    me.rerere.rikkahub.data.db.ImportedDatabaseReconciler
+                        .LegacyV46AuthorityPlan.READ_EXISTING_STREAM ->
                         readAndValidateAuthorityStream(databaseFile)
-                    me.rerere.rikkahub.data.db.ImportedDatabaseReconciler.PRE_LEARNING_V46_IDENTITY_HASH ->
+                    me.rerere.rikkahub.data.db.ImportedDatabaseReconciler
+                        .LegacyV46AuthorityPlan.CREATE_STREAM ->
                         BackupAuthorityStreamV1(
                             streamId = UUID.randomUUID().toString(),
                             headSeq = 1L,

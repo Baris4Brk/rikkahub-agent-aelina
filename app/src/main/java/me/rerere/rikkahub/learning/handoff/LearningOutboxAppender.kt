@@ -20,6 +20,10 @@ data class LearningOutboxDraft(
     val sourceTypeCode: String? = source?.sourceKind?.name,
     val correlation: LearningCorrelation,
     val terminalStateCode: String?,
+    val rewardDimensionCode: String? = null,
+    val rewardSignalKindCode: String? = null,
+    val rewardValueMilli: Int? = null,
+    val executionVerificationStateCode: String? = null,
     val createdAtMs: Long,
 ) {
     init {
@@ -47,6 +51,13 @@ data class LearningOutboxDraft(
             require(correlation.previousSourceRevision != null && correlation.sourceStateCode != null) {
                 "Source invalidation requires a monotonic transition"
             }
+        } else if (
+            eventCode.knownType == LearningEventType.USER_FEEDBACK_RECORDED &&
+            eventCode.schemaVersion >= 3
+        ) {
+            require(correlation.sourceStateCode != null) {
+                "User feedback requires a source lifecycle state"
+            }
         } else {
             require(correlation.previousSourceRevision == null && correlation.sourceStateCode == null) {
                 "Only source invalidation carries a source transition"
@@ -60,6 +71,10 @@ data class LearningOutboxDraft(
             missingRevisionReasonCode = source?.missingRevisionReason?.name,
             terminalStateCode = terminalStateCode,
             correlation = correlation,
+            rewardDimensionCode = rewardDimensionCode,
+            rewardSignalKindCode = rewardSignalKindCode,
+            rewardValueMilli = rewardValueMilli,
+            executionVerificationStateCode = executionVerificationStateCode,
         )
     }
 
@@ -81,6 +96,10 @@ data class LearningOutboxDraft(
                 previousSourceRevision = correlation.previousSourceRevision,
                 sourceStateCode = correlation.sourceStateCode,
                 correlation = correlation,
+                rewardDimensionCode = rewardDimensionCode,
+                rewardSignalKindCode = rewardSignalKindCode,
+                rewardValueMilli = rewardValueMilli,
+                executionVerificationStateCode = executionVerificationStateCode,
             )
         }
         return LearningOutboxEntity(
@@ -112,6 +131,10 @@ data class LearningOutboxDraft(
             toolSchemaFingerprint = correlation.toolSchemaFingerprint,
             messageId = correlation.messageId,
             messageRevision = correlation.messageRevision,
+            rewardDimension = rewardDimensionCode,
+            rewardSignalKind = rewardSignalKindCode,
+            rewardValueMilli = rewardValueMilli,
+            executionVerificationState = executionVerificationStateCode,
             occurredAtMs = source?.occurredAtMs,
             createdAtMs = createdAtMs,
         )

@@ -1,11 +1,22 @@
 package me.rerere.rikkahub.learning.handoff
 
 import androidx.room.withTransaction
+import me.rerere.rikkahub.data.authority.reward.RewardFeedbackAuthorityJournalSource
+import me.rerere.rikkahub.data.authority.reward.RewardFeedbackJournalCursor
+import me.rerere.rikkahub.data.authority.reward.RoomRewardFeedbackAuthorityJournalSource
+import me.rerere.rikkahub.data.authority.source.ConversationSourceChangeKind
+import me.rerere.rikkahub.data.authority.source.ConversationSourceScope
+import me.rerere.rikkahub.data.authority.source.ConversationSourceScopeKind
+import me.rerere.rikkahub.data.authority.source.ConversationSourceState
+import me.rerere.rikkahub.data.authority.source.SourceAuthorityObjectKind
+import me.rerere.rikkahub.data.authority.source.SourceInvalidationAuthorityEvent
 import me.rerere.rikkahub.data.db.AppDatabase
 import me.rerere.rikkahub.data.db.dao.LearningOutboxDao
 import me.rerere.rikkahub.data.db.dao.LearningReconciliationAuthorityDao
 import me.rerere.rikkahub.data.db.projection.LearningCommandTerminalAuthorityProjection
+import me.rerere.rikkahub.data.db.projection.LearningConversationSourceAuthorityProjection
 import me.rerere.rikkahub.data.db.projection.LearningExecutionTerminalAuthorityProjection
+import me.rerere.rikkahub.data.db.projection.LearningMessageSourceAuthorityProjection
 import me.rerere.rikkahub.data.execution.ExecutionRetentionManager
 import me.rerere.rikkahub.data.execution.ExecutionStatus
 import me.rerere.rikkahub.data.execution.toLearningTerminalCode
@@ -14,6 +25,8 @@ import me.rerere.rikkahub.learning.model.LearningCorrelation
 import me.rerere.rikkahub.learning.model.LearningEventCode
 import me.rerere.rikkahub.learning.model.LearningEventType
 import me.rerere.rikkahub.learning.model.LearningScope
+import me.rerere.rikkahub.learning.model.LearningScopeConsentSource
+import me.rerere.rikkahub.learning.model.DisabledLearningScopeConsentSource
 import me.rerere.rikkahub.learning.model.LearningSourceKind
 import me.rerere.rikkahub.learning.model.LearningSourceRef
 import kotlin.math.min
@@ -22,7 +35,7 @@ import kotlin.uuid.Uuid
 private const val MAX_RECONCILIATION_PAGE_ROWS = 64
 
 /**
- * Repairs only terminal Learning events that remain provable from content-free authority rows.
+ * Repairs Learning events that remain provable from content-free authority rows and journals.
  *
  * The scanner does not read command payloads, tool arguments, outputs, errors, or conversation
  * messages. Every bounded page is read and repaired in one primary-database transaction after
@@ -34,6 +47,9 @@ class RoomLearningReconciliationScanner(
     private val authorityDao: LearningReconciliationAuthorityDao =
         database.learningReconciliationAuthorityDao(),
     private val outboxDao: LearningOutboxDao = database.learningOutboxDao(),
+    private val rewardFeedbackJournal: RewardFeedbackAuthorityJournalSource =
+        RoomRewardFeedbackAuthorityJournalSource(database.rewardFeedbackAuthorityDao()),
+    private val scopeConsent: LearningScopeConsentSource = DisabledLearningScopeConsentSource,
     private val supportedWindowMs: Long = ExecutionRetentionManager.RETENTION_AGE_MS,
 ) : LearningReconciliationScanner {
     init {
@@ -42,114 +58,297 @@ class RoomLearningReconciliationScanner(
 
     override suspend fun scanAndRepairProvableTerminalEvents(
         stream: LearningOutboxDescriptor,
+        cursorAccess: LearningReconciliationCursorAccess,
         frozenNowMs: Long,
         limits: LearningBootstrapScanLimits,
     ): LearningBootstrapCoverage {
         require(frozenNowMs >= 0L) { "Negative reconciliation clock" }
+        require(cursorAccess.streamId == stream.streamId.toString()) {
+            "Reconciliation cursor access is bound to another stream"
+        }
+        require(cursorAccess.replayGeneration >= 0L) { "Negative reconciliation replay" }
         require(limits.maxRowsPerPage <= MAX_RECONCILIATION_PAGE_ROWS) {
             "Unsafe reconciliation page size"
         }
-        val windowStartMs = if (frozenNowMs < supportedWindowMs) {
-            0L
-        } else {
-            frozenNowMs - supportedWindowMs
+        var raw = cursorAccess.load()
+        var cursor = LearningReconciliationCursorV1Codec.decode(raw)
+        val requestedWindowStart = windowStart(frozenNowMs)
+        val mustRestart = cursor == null || (
+            cursor.state == LearningReconciliationCursorStateV1.COMPLETE &&
+                (cursor.frozenHeadSequence != stream.headSequence ||
+                    cursor.windowStartMs != requestedWindowStart ||
+                    cursor.windowEndMs != frozenNowMs)
+            )
+        if (mustRestart) {
+            val initialized = LearningReconciliationCursorV1.initialize(
+                streamId = stream.streamId.toString(),
+                frozenHeadSequence = stream.headSequence,
+                windowStartMs = requestedWindowStart,
+                windowEndMs = frozenNowMs,
+            )
+            val initializedRaw = LearningReconciliationCursorV1Codec.encode(initialized)
+            if (!cursorAccess.compareAndSet(raw, initializedRaw)) {
+                throw LearningCheckpointConflictException()
+            }
+            raw = initializedRaw
+            cursor = initialized
         }
-        val budget = ReconciliationPageBudget(limits.maxPages)
-        val commandFloor = scanCommands(
-            stream = stream,
-            windowStartMs = windowStartMs,
-            windowEndMs = frozenNowMs,
-            pageSize = limits.maxRowsPerPage,
-            budget = budget,
+        var current = checkNotNull(cursor)
+        validateContinuation(current, stream, frozenNowMs)
+        var pages = 0
+        while (current.state != LearningReconciliationCursorStateV1.COMPLETE) {
+            if (pages >= limits.maxPages) throw LearningReconciliationWorkRemainsException()
+            val fixed = stream.copy(headSequence = current.frozenHeadSequence)
+            val page = scanOnePage(fixed, current, limits.maxRowsPerPage)
+            val next = if (page.rowCount == 0) {
+                if (current.phase == LearningReconciliationPhaseV1.FEEDBACK_REVISION) {
+                    current.complete()
+                } else {
+                    current.nextPhase()
+                }
+            } else {
+                val after = checkNotNull(page.after)
+                current.advance(
+                    after = after,
+                    observedCoverageFloorMs = page.provenCoverageFloorMs?.coerceIn(
+                        current.windowStartMs,
+                        after.orderingTimeMs,
+                    ),
+                )
+            }
+            val nextRaw = LearningReconciliationCursorV1Codec.encode(next)
+            if (!cursorAccess.compareAndSet(raw, nextRaw)) {
+                throw LearningCheckpointConflictException()
+            }
+            raw = nextRaw
+            current = next
+            pages += 1
+        }
+        return current.toCoverage()
+    }
+
+    private fun windowStart(windowEndMs: Long): Long =
+        if (windowEndMs < supportedWindowMs) 0L else windowEndMs - supportedWindowMs
+
+    private fun validateContinuation(
+        cursor: LearningReconciliationCursorV1,
+        stream: LearningOutboxDescriptor,
+        frozenNowMs: Long,
+    ) {
+        if (cursor.streamId != stream.streamId.toString()) {
+            throw LearningBootstrapException(LearningBootstrapFailureCode.STREAM_CHANGED)
+        }
+        if (cursor.frozenHeadSequence > stream.headSequence) {
+            throw LearningBootstrapException(LearningBootstrapFailureCode.HEAD_REWIND)
+        }
+        if (cursor.windowEndMs > frozenNowMs) {
+            throw LearningBootstrapException(LearningBootstrapFailureCode.CLOCK_ROLLBACK)
+        }
+        if (cursor.windowStartMs != windowStart(cursor.windowEndMs)) {
+            throw LearningBootstrapException(LearningBootstrapFailureCode.INVALID_CHECKPOINT)
+        }
+    }
+
+    private suspend fun scanOnePage(
+        stream: LearningOutboxDescriptor,
+        cursor: LearningReconciliationCursorV1,
+        pageSize: Int,
+    ): DurableAuthorityPage = when (cursor.phase) {
+        LearningReconciliationPhaseV1.COMMAND -> scanCommandPage(stream, cursor, pageSize)
+        LearningReconciliationPhaseV1.EXECUTION -> scanExecutionPage(stream, cursor, pageSize)
+        LearningReconciliationPhaseV1.CONVERSATION_SOURCE ->
+            scanConversationSourcePage(stream, cursor, pageSize)
+        LearningReconciliationPhaseV1.MESSAGE_SOURCE ->
+            scanMessageSourcePage(stream, cursor, pageSize)
+        LearningReconciliationPhaseV1.FEEDBACK_REVISION ->
+            scanFeedbackPage(stream, cursor, pageSize)
+    }
+
+    private suspend fun scanCommandPage(
+        stream: LearningOutboxDescriptor,
+        cursor: LearningReconciliationCursorV1,
+        pageSize: Int,
+    ): DurableAuthorityPage = database.withTransaction {
+        requireFixedOutboxLineage(stream)
+        val after = cursor.command.after as? LearningReconciliationAfterKeyV1.Command
+        val rows = authorityDao.listTerminalCommandsAfter(
+            cursor.windowStartMs,
+            cursor.windowEndMs,
+            after?.finishedAtMs,
+            after?.id,
+            pageSize,
         )
-        val executionFloor = scanExecutions(
-            stream = stream,
-            windowStartMs = windowStartMs,
-            windowEndMs = frozenNowMs,
-            pageSize = limits.maxRowsPerPage,
-            budget = budget,
-        )
-        return LearningBootstrapCoverage(
-            coverageStartMs = listOfNotNull(commandFloor, executionFloor).minOrNull(),
-            commandCoverageStartMs = commandFloor,
-            executionCoverageStartMs = executionFloor,
+        var floor: Long? = null
+        rows.forEach { row ->
+            projectCommandTerminalDraft(row, stream.streamId)?.let { draft ->
+                if (!scopeConsent.captureAllowed(checkNotNull(draft.source).scope)) return@let
+                appendValidatedBusinessDraft(outboxDao, stream.streamId) { draft }
+                floor = minimumTime(floor, draft.source?.occurredAtMs)
+            }
+        }
+        DurableAuthorityPage(
+            rows.size,
+            rows.lastOrNull()?.let {
+                LearningReconciliationAfterKeyV1.Command(checkNotNull(it.finishedAtMs), it.commandId)
+            },
+            floor,
         )
     }
 
-    private suspend fun scanCommands(
+    private suspend fun scanExecutionPage(
         stream: LearningOutboxDescriptor,
-        windowStartMs: Long,
-        windowEndMs: Long,
+        cursor: LearningReconciliationCursorV1,
         pageSize: Int,
-        budget: ReconciliationPageBudget,
-    ): Long? {
-        var cursorTime: Long? = null
-        var cursorId: String? = null
-        var coverageFloor: Long? = null
-        while (true) {
-            budget.claimPage()
-            val page = database.withTransaction {
-                requireFixedOutboxLineage(stream)
-                val rows = authorityDao.listTerminalCommandsAfter(
-                    windowStartMs = windowStartMs,
-                    windowEndMs = windowEndMs,
-                    afterFinishedAtMs = cursorTime,
-                    afterId = cursorId,
-                    limit = pageSize,
-                )
-                var pageFloor: Long? = null
-                rows.forEach { row ->
-                    projectCommandTerminalDraft(row, stream.streamId)?.let { draft ->
-                        appendValidatedBusinessDraft(outboxDao, stream.streamId) { draft }
-                        pageFloor = minimumTime(pageFloor, draft.source?.occurredAtMs)
-                    }
-                }
-                AuthorityPageResult.fromCommands(rows, pageFloor)
+    ): DurableAuthorityPage = database.withTransaction {
+        requireFixedOutboxLineage(stream)
+        val after = cursor.execution.after as? LearningReconciliationAfterKeyV1.Execution
+        val rows = authorityDao.listTerminalExecutionsAfter(
+            cursor.windowStartMs,
+            cursor.windowEndMs,
+            after?.finishedAtMs,
+            after?.id,
+            pageSize,
+        )
+        var floor: Long? = null
+        rows.forEach { row ->
+            projectExecutionTerminalDraft(row, stream.streamId)?.let { draft ->
+                if (!scopeConsent.captureAllowed(checkNotNull(draft.source).scope)) return@let
+                appendValidatedBusinessDraft(outboxDao, stream.streamId) { draft }
+                floor = minimumTime(floor, draft.source?.occurredAtMs)
             }
-            coverageFloor = minimumTime(coverageFloor, page.provenCoverageFloorMs)
-            if (page.rowCount < pageSize) return coverageFloor
-            if (!budget.hasRemaining) budget.exhausted()
-            cursorTime = checkNotNull(page.lastFinishedAtMs)
-            cursorId = checkNotNull(page.lastId)
         }
+        DurableAuthorityPage(
+            rows.size,
+            rows.lastOrNull()?.let {
+                LearningReconciliationAfterKeyV1.Execution(
+                    checkNotNull(it.finishedAtMs),
+                    it.executionId,
+                )
+            },
+            floor,
+        )
     }
 
-    private suspend fun scanExecutions(
+    private suspend fun scanConversationSourcePage(
         stream: LearningOutboxDescriptor,
-        windowStartMs: Long,
-        windowEndMs: Long,
+        cursor: LearningReconciliationCursorV1,
         pageSize: Int,
-        budget: ReconciliationPageBudget,
-    ): Long? {
-        var cursorTime: Long? = null
-        var cursorId: String? = null
-        var coverageFloor: Long? = null
-        while (true) {
-            budget.claimPage()
-            val page = database.withTransaction {
-                requireFixedOutboxLineage(stream)
-                val rows = authorityDao.listTerminalExecutionsAfter(
-                    windowStartMs = windowStartMs,
-                    windowEndMs = windowEndMs,
-                    afterFinishedAtMs = cursorTime,
-                    afterId = cursorId,
-                    limit = pageSize,
-                )
-                var pageFloor: Long? = null
-                rows.forEach { row ->
-                    projectExecutionTerminalDraft(row, stream.streamId)?.let { draft ->
-                        appendValidatedBusinessDraft(outboxDao, stream.streamId) { draft }
-                        pageFloor = minimumTime(pageFloor, draft.source?.occurredAtMs)
-                    }
-                }
-                AuthorityPageResult.fromExecutions(rows, pageFloor)
+    ): DurableAuthorityPage = database.withTransaction {
+        requireFixedOutboxLineage(stream)
+        val after = cursor.conversationSource.after as?
+            LearningReconciliationAfterKeyV1.ConversationSource
+        val rows = authorityDao.listConversationSourceHeadsAfter(
+            cursor.windowStartMs,
+            cursor.windowEndMs,
+            after?.updatedAtMs ?: -1L,
+            after?.conversationId.orEmpty(),
+            after?.scopeKind.orEmpty(),
+            after?.scopeId.orEmpty(),
+            pageSize,
+        )
+        var floor: Long? = null
+        rows.forEach { row ->
+            projectConversationSourceInvalidationDraft(row, stream.streamId)?.let { draft ->
+                val source = checkNotNull(draft.source)
+                val active = draft.correlation?.sourceStateCode == "ACTIVE"
+                if (active && !scopeConsent.captureAllowed(source.scope)) return@let
+                appendValidatedBusinessDraft(outboxDao, stream.streamId) { draft }
+                floor = minimumTime(floor, draft.source?.occurredAtMs)
             }
-            coverageFloor = minimumTime(coverageFloor, page.provenCoverageFloorMs)
-            if (page.rowCount < pageSize) return coverageFloor
-            if (!budget.hasRemaining) budget.exhausted()
-            cursorTime = checkNotNull(page.lastFinishedAtMs)
-            cursorId = checkNotNull(page.lastId)
         }
+        DurableAuthorityPage(
+            rows.size,
+            rows.lastOrNull()?.let {
+                LearningReconciliationAfterKeyV1.ConversationSource(
+                    it.updatedAtMs,
+                    it.conversationId,
+                    it.scopeKind,
+                    it.scopeId,
+                )
+            },
+            floor,
+        )
+    }
+
+    private suspend fun scanMessageSourcePage(
+        stream: LearningOutboxDescriptor,
+        cursor: LearningReconciliationCursorV1,
+        pageSize: Int,
+    ): DurableAuthorityPage = database.withTransaction {
+        requireFixedOutboxLineage(stream)
+        val after = cursor.messageSource.after as?
+            LearningReconciliationAfterKeyV1.MessageSource
+        val rows = authorityDao.listMessageSourceHeadsAfter(
+            cursor.windowStartMs,
+            cursor.windowEndMs,
+            after?.updatedAtMs ?: -1L,
+            after?.conversationId.orEmpty(),
+            after?.messageId.orEmpty(),
+            after?.scopeKind.orEmpty(),
+            after?.scopeId.orEmpty(),
+            pageSize,
+        )
+        var floor: Long? = null
+        rows.forEach { row ->
+            projectMessageSourceInvalidationDraft(row, stream.streamId)?.let { draft ->
+                val source = checkNotNull(draft.source)
+                val active = draft.correlation?.sourceStateCode == "ACTIVE"
+                if (active && !scopeConsent.captureAllowed(source.scope)) return@let
+                appendValidatedBusinessDraft(outboxDao, stream.streamId) { draft }
+                floor = minimumTime(floor, draft.source?.occurredAtMs)
+            }
+        }
+        DurableAuthorityPage(
+            rows.size,
+            rows.lastOrNull()?.let {
+                LearningReconciliationAfterKeyV1.MessageSource(
+                    it.updatedAtMs,
+                    it.conversationId,
+                    it.messageId,
+                    it.scopeKind,
+                    it.scopeId,
+                )
+            },
+            floor,
+        )
+    }
+
+    private suspend fun scanFeedbackPage(
+        stream: LearningOutboxDescriptor,
+        cursor: LearningReconciliationCursorV1,
+        pageSize: Int,
+    ): DurableAuthorityPage = database.withTransaction {
+        requireFixedOutboxLineage(stream)
+        val after = cursor.feedbackRevision.after as?
+            LearningReconciliationAfterKeyV1.FeedbackRevision
+        val page = rewardFeedbackJournal.listJournalPage(
+            fromInclusiveMs = cursor.windowStartMs,
+            toExclusiveMs = Math.addExact(cursor.windowEndMs, 1L),
+            after = after?.let {
+                RewardFeedbackJournalCursor(it.updatedAtMs, it.feedbackId, it.sourceRevision)
+            } ?: RewardFeedbackJournalCursor(),
+            limit = pageSize,
+        )
+        var floor: Long? = null
+        page.events.forEach { event ->
+            val scope = LearningScope.parseOrNull(event.scopeKind, event.scopeId)
+            if (scope == null || !scopeConsent.captureAllowed(scope)) return@forEach
+            appendValidatedBusinessDraft(outboxDao, stream.streamId) { streamId ->
+                event.toLearningOutboxDraft(streamId)
+            }
+            floor = minimumTime(floor, event.occurredAtMs)
+        }
+        DurableAuthorityPage(
+            page.events.size,
+            page.nextCursor?.let {
+                LearningReconciliationAfterKeyV1.FeedbackRevision(
+                    it.updatedAtMs,
+                    it.feedbackId,
+                    it.sourceRevision,
+                )
+            },
+            floor,
+        )
     }
 
     private suspend fun requireFixedOutboxLineage(fixed: LearningOutboxDescriptor) {
@@ -162,6 +361,88 @@ class RoomLearningReconciliationScanner(
         if (currentHead < fixed.headSequence) {
             throw LearningBootstrapException(LearningBootstrapFailureCode.HEAD_REWIND)
         }
+    }
+}
+
+private data class DurableAuthorityPage(
+    val rowCount: Int,
+    val after: LearningReconciliationAfterKeyV1?,
+    val provenCoverageFloorMs: Long?,
+)
+
+private fun LearningReconciliationCursorV1.toCoverage(): LearningBootstrapCoverage {
+    check(state == LearningReconciliationCursorStateV1.COMPLETE)
+    val sourceFloor = minimumTime(
+        conversationSource.coverageFloorMs,
+        messageSource.coverageFloorMs,
+    )
+    val floors = listOfNotNull(
+        command.coverageFloorMs,
+        execution.coverageFloorMs,
+        sourceFloor,
+        feedbackRevision.coverageFloorMs,
+    )
+    return LearningBootstrapCoverage(
+        coverageStartMs = floors.minOrNull(),
+        commandCoverageStartMs = command.coverageFloorMs,
+        executionCoverageStartMs = execution.coverageFloorMs,
+        sourceAuthorityCoverageStartMs = sourceFloor,
+        feedbackCoverageStartMs = feedbackRevision.coverageFloorMs,
+    )
+}
+
+/** Same canonical schema-v2 projection as the direct Conversation source authority writer. */
+internal fun projectConversationSourceInvalidationDraft(
+    row: LearningConversationSourceAuthorityProjection,
+    streamId: Uuid,
+): LearningOutboxDraft? {
+    if (row.sourceRevision <= 1L || row.previousSourceRevision != row.sourceRevision - 1L) {
+        // A revision-one non-ACTIVE head has no historical revision to invalidate.
+        return null
+    }
+    val scope = row.toConversationSourceScopeOrNull() ?: return null
+    return try {
+        SourceInvalidationAuthorityEvent(
+            scope = scope,
+            conversationId = row.conversationId,
+            objectKind = SourceAuthorityObjectKind.CONVERSATION,
+            sourceId = row.conversationId,
+            sourceRevision = row.sourceRevision,
+            previousSourceRevision = requireNotNull(row.previousSourceRevision),
+            conversationSourceRevision = row.sourceRevision,
+            sourceState = ConversationSourceState.valueOf(row.sourceState),
+            changeKind = ConversationSourceChangeKind.valueOf(row.changeKind),
+            occurredAtMs = row.occurredAtMs,
+        ).toLearningOutboxDraft(streamId)
+    } catch (_: IllegalArgumentException) {
+        null
+    }
+}
+
+/** Same canonical schema-v2 projection as the direct message source authority writer. */
+internal fun projectMessageSourceInvalidationDraft(
+    row: LearningMessageSourceAuthorityProjection,
+    streamId: Uuid,
+): LearningOutboxDraft? {
+    if (row.sourceRevision <= 1L || row.previousSourceRevision != row.sourceRevision - 1L) {
+        return null
+    }
+    val scope = row.toConversationSourceScopeOrNull() ?: return null
+    return try {
+        SourceInvalidationAuthorityEvent(
+            scope = scope,
+            conversationId = row.conversationId,
+            objectKind = SourceAuthorityObjectKind.MESSAGE,
+            sourceId = row.messageId,
+            sourceRevision = row.sourceRevision,
+            previousSourceRevision = requireNotNull(row.previousSourceRevision),
+            conversationSourceRevision = row.conversationSourceRevision,
+            sourceState = ConversationSourceState.valueOf(row.sourceState),
+            changeKind = ConversationSourceChangeKind.valueOf(row.changeKind),
+            occurredAtMs = row.occurredAtMs,
+        ).toLearningOutboxDraft(streamId)
+    } catch (_: IllegalArgumentException) {
+        null
     }
 }
 
@@ -354,6 +635,65 @@ private data class AuthorityPageResult(
     }
 }
 
+private data class ConversationSourceCursor(
+    val updatedAtMs: Long = -1L,
+    val conversationId: String = "",
+    val scopeKind: String = "",
+    val scopeId: String = "",
+)
+
+private data class MessageSourceCursor(
+    val updatedAtMs: Long = -1L,
+    val conversationId: String = "",
+    val messageId: String = "",
+    val scopeKind: String = "",
+    val scopeId: String = "",
+)
+
+private data class SourceAuthorityPageResult(
+    val rowCount: Int,
+    val conversationCursor: ConversationSourceCursor?,
+    val messageCursor: MessageSourceCursor?,
+    val provenCoverageFloorMs: Long?,
+) {
+    companion object {
+        fun fromConversations(
+            rows: List<LearningConversationSourceAuthorityProjection>,
+            floorMs: Long?,
+        ): SourceAuthorityPageResult = SourceAuthorityPageResult(
+            rowCount = rows.size,
+            conversationCursor = rows.lastOrNull()?.let { row ->
+                ConversationSourceCursor(
+                    updatedAtMs = row.updatedAtMs,
+                    conversationId = row.conversationId,
+                    scopeKind = row.scopeKind,
+                    scopeId = row.scopeId,
+                )
+            },
+            messageCursor = null,
+            provenCoverageFloorMs = floorMs,
+        )
+
+        fun fromMessages(
+            rows: List<LearningMessageSourceAuthorityProjection>,
+            floorMs: Long?,
+        ): SourceAuthorityPageResult = SourceAuthorityPageResult(
+            rowCount = rows.size,
+            conversationCursor = null,
+            messageCursor = rows.lastOrNull()?.let { row ->
+                MessageSourceCursor(
+                    updatedAtMs = row.updatedAtMs,
+                    conversationId = row.conversationId,
+                    messageId = row.messageId,
+                    scopeKind = row.scopeKind,
+                    scopeId = row.scopeId,
+                )
+            },
+            provenCoverageFloorMs = floorMs,
+        )
+    }
+}
+
 private class ReconciliationPageBudget(private val maximum: Int) {
     private var claimed = 0
     val hasRemaining: Boolean get() = claimed < maximum
@@ -386,4 +726,22 @@ private fun String.parseNonNilUuidOrNull(): Uuid? {
     return parsed.takeUnless {
         it.toString() == "00000000-0000-0000-0000-000000000000"
     }
+}
+
+private fun LearningConversationSourceAuthorityProjection.toConversationSourceScopeOrNull():
+    ConversationSourceScope? = parseConversationSourceScopeOrNull(scopeKind, scopeId)
+
+private fun LearningMessageSourceAuthorityProjection.toConversationSourceScopeOrNull():
+    ConversationSourceScope? = parseConversationSourceScopeOrNull(scopeKind, scopeId)
+
+private fun parseConversationSourceScopeOrNull(
+    scopeKind: String,
+    scopeId: String,
+): ConversationSourceScope? = try {
+    ConversationSourceScope(
+        kind = ConversationSourceScopeKind.valueOf(scopeKind),
+        id = scopeId,
+    )
+} catch (_: IllegalArgumentException) {
+    null
 }

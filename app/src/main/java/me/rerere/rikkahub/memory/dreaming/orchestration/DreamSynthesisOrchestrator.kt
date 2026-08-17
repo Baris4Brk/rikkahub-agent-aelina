@@ -21,6 +21,7 @@ import me.rerere.rikkahub.memory.dreaming.store.DreamSynthesisCommitRejection
 import me.rerere.rikkahub.memory.dreaming.store.DreamSynthesisCommitRequest
 import me.rerere.rikkahub.memory.dreaming.store.DreamSynthesisCommitResult
 import me.rerere.rikkahub.memory.dreaming.store.DreamSynthesisFailure
+import me.rerere.rikkahub.memory.dreaming.store.DreamProviderDispatchRequest
 import me.rerere.rikkahub.memory.dreaming.store.DreamSynthesisStore
 import me.rerere.rikkahub.memory.dreaming.store.DreamSynthesisStoreRejection
 import me.rerere.rikkahub.memory.dreaming.store.DreamSynthesisStoreResult
@@ -31,6 +32,7 @@ import me.rerere.rikkahub.memory.dreaming.synthesis.DreamProposalValidationReque
 import me.rerere.rikkahub.memory.dreaming.synthesis.DreamProposalValidationResult
 import me.rerere.rikkahub.memory.dreaming.synthesis.DreamProposalValidator
 import me.rerere.rikkahub.memory.dreaming.synthesis.DreamSynthesizeRequest
+import me.rerere.rikkahub.memory.dreaming.synthesis.DreamSynthesizeFailure
 import me.rerere.rikkahub.memory.dreaming.synthesis.DreamSynthesizeResult
 import me.rerere.rikkahub.memory.dreaming.synthesis.DreamSynthesizer
 import me.rerere.rikkahub.memory.dreaming.synthesis.DREAM_PROMPT_CONTRACT_VERSION
@@ -101,6 +103,7 @@ class DreamSynthesisOrchestrator(
     suspend fun run(
         request: BeginDreamSynthesisRequest,
         firstProviderAttempt: Boolean = true,
+        terminalizeRetryableModelFailure: Boolean = false,
     ): DreamSynthesisRunResult {
         val begin = try {
             store.begin(request)
@@ -125,8 +128,7 @@ class DreamSynthesisOrchestrator(
             fence.frozenNowEpochMs > request.attemptNowEpochMs ||
             fence.sourceTimezoneId != request.sourceTimezoneId
         ) {
-            safeFail(fence, DreamSynthesisFailure.INPUT_REJECTED)
-            return DreamSynthesisRunResult.Failed(DreamSynthesisFailure.INPUT_REJECTED)
+            return failOrRetry(fence, DreamSynthesisFailure.INPUT_REJECTED)
         }
 
         val seed = try {
@@ -144,8 +146,7 @@ class DreamSynthesisOrchestrator(
             is ReadDreamInputSeedResult.Rejected -> return handleReadRejection(fence, seed.reason)
         }
         if (inputRequest.fence != fence) {
-            safeFail(fence, DreamSynthesisFailure.INPUT_REJECTED)
-            return DreamSynthesisRunResult.Failed(DreamSynthesisFailure.INPUT_REJECTED)
+            return failOrRetry(fence, DreamSynthesisFailure.INPUT_REJECTED)
         }
 
         val input = try {
@@ -155,10 +156,13 @@ class DreamSynthesisOrchestrator(
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Exception) {
-            safeFail(fence, DreamSynthesisFailure.INPUT_REJECTED)
-            return DreamSynthesisRunResult.Failed(DreamSynthesisFailure.INPUT_REJECTED)
+            return failOrRetry(fence, DreamSynthesisFailure.INPUT_REJECTED)
         }
-        val gate = budgetGate ?: return synthesizeValidateAndCommit(fence, input)
+        val gate = budgetGate ?: return synthesizeValidateAndCommit(
+            fence,
+            input,
+            terminalizeRetryableModelFailure,
+        )
         val estimatedInputTokens = conservativeDreamModelInputTokens(input.modelInput)
             ?: return DreamSynthesisRunResult.PolicyDeferred(
                 DreamBudgetDenialReason.TOKEN_ARITHMETIC_OVERFLOW,
@@ -176,7 +180,7 @@ class DreamSynthesisOrchestrator(
         ) {
             // The global permit remains held until commit has durably stored nullable provider
             // usage. A failed/rolled-back call leaves NULL, so a capped retry fails closed.
-            synthesizeValidateAndCommit(fence, input)
+            synthesizeValidateAndCommit(fence, input, terminalizeRetryableModelFailure)
         }
         return when (permit) {
             is DreamBudgetPermitResult.Granted -> permit.value
@@ -190,7 +194,32 @@ class DreamSynthesisOrchestrator(
     private suspend fun synthesizeValidateAndCommit(
         fence: me.rerere.rikkahub.memory.dreaming.model.DreamSynthesisFence,
         input: DreamInputBundle,
+        terminalizeRetryableModelFailure: Boolean,
     ): DreamSynthesisRunResult {
+        val dispatchMarker = try {
+            store.markProviderDispatch(
+                DreamProviderDispatchRequest(
+                    fence = fence,
+                    promptContractVersion = config.promptContractVersion,
+                    validatorVersion = config.validatorVersion,
+                    inputMemoryCount = input.allowedMemories.size,
+                    inputManifestHash = input.inputManifestHash,
+                    markedAtEpochMs = requireClockAtLeast(fence.frozenNowEpochMs),
+                ),
+            )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            return DreamSynthesisRunResult.Retry(DreamSynthesisRetryReason.STORE_TEMPORARY_FAILURE)
+        }
+        if (dispatchMarker is DreamSynthesisStoreResult.Rejected) {
+            return when (dispatchMarker.reason) {
+                DreamSynthesisStoreRejection.FEATURE_DISABLED -> DreamSynthesisRunResult.Disabled
+                DreamSynthesisStoreRejection.STORE_CORRUPTION ->
+                    failOrRetry(fence, DreamSynthesisFailure.STORE_FAILURE)
+                else -> DreamSynthesisRunResult.Retry(dispatchMarker.reason.toRetryReason())
+            }
+        }
         val synthesized = try {
             withLeaseHeartbeat(fence) {
                 synthesizer.synthesize(
@@ -207,30 +236,35 @@ class DreamSynthesisOrchestrator(
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Exception) {
-            return DreamSynthesisRunResult.Retry(DreamSynthesisRetryReason.MODEL_TEMPORARY_FAILURE)
+            return handleRetryableModelFailure(
+                fence,
+                DreamSynthesizeFailure.PROVIDER_UNAVAILABLE,
+                terminalizeRetryableModelFailure,
+            )
         }
         val success = when (synthesized) {
             is DreamSynthesizeResult.Success -> synthesized
             is DreamSynthesizeResult.Failure -> {
                 if (synthesized.retryable) {
-                    return DreamSynthesisRunResult.Retry(DreamSynthesisRetryReason.MODEL_TEMPORARY_FAILURE)
+                    return handleRetryableModelFailure(
+                        fence,
+                        synthesized.reason,
+                        terminalizeRetryableModelFailure,
+                    )
                 }
-                safeFail(fence, DreamSynthesisFailure.MODEL_PERMANENT_FAILURE)
-                return DreamSynthesisRunResult.Failed(DreamSynthesisFailure.MODEL_PERMANENT_FAILURE)
+                return failOrRetry(fence, synthesized.reason.toDurableSynthesisFailure())
             }
         }
         if (
             success.audit.promptContractVersion != config.promptContractVersion ||
             success.audit.validatorVersion != config.validatorVersion
         ) {
-            safeFail(fence, DreamSynthesisFailure.MODEL_AUDIT_MISMATCH)
-            return DreamSynthesisRunResult.Failed(DreamSynthesisFailure.MODEL_AUDIT_MISMATCH)
+            return failOrRetry(fence, DreamSynthesisFailure.MODEL_AUDIT_MISMATCH)
         }
         val parsed = when (val result = DreamProposalParser.parse(success.rawOutput)) {
             is DreamProposalParseResult.Parsed -> result.proposal
             is DreamProposalParseResult.Rejected -> {
-                safeFail(fence, DreamSynthesisFailure.MODEL_OUTPUT_PARSE_REJECTED)
-                return DreamSynthesisRunResult.Failed(DreamSynthesisFailure.MODEL_OUTPUT_PARSE_REJECTED)
+                return failOrRetry(fence, DreamSynthesisFailure.MODEL_OUTPUT_PARSE_REJECTED)
             }
         }
         val plan = when (
@@ -238,8 +272,7 @@ class DreamSynthesisOrchestrator(
         ) {
             is DreamProposalValidationResult.Valid -> result.plan
             is DreamProposalValidationResult.Rejected -> {
-                safeFail(fence, DreamSynthesisFailure.MODEL_OUTPUT_VALIDATION_REJECTED)
-                return DreamSynthesisRunResult.Failed(DreamSynthesisFailure.MODEL_OUTPUT_VALIDATION_REJECTED)
+                return failOrRetry(fence, DreamSynthesisFailure.MODEL_OUTPUT_VALIDATION_REJECTED)
             }
         }
         val snapshot = try {
@@ -247,8 +280,7 @@ class DreamSynthesisOrchestrator(
                 DreamSnapshotCompileRequest(fence.scopeId, config.compilerRevision, plan.resultingClaims),
             )
         } catch (_: Exception) {
-            safeFail(fence, DreamSynthesisFailure.SNAPSHOT_COMPILATION_FAILED)
-            return DreamSynthesisRunResult.Failed(DreamSynthesisFailure.SNAPSHOT_COMPILATION_FAILED)
+            return failOrRetry(fence, DreamSynthesisFailure.SNAPSHOT_COMPILATION_FAILED)
         }
         val liveAuthorityPins = (
             plan.resultingClaims
@@ -312,11 +344,29 @@ class DreamSynthesisOrchestrator(
         }
     }
 
+    private suspend fun handleRetryableModelFailure(
+        fence: me.rerere.rikkahub.memory.dreaming.model.DreamSynthesisFence,
+        failure: DreamSynthesizeFailure,
+        terminalize: Boolean,
+    ): DreamSynthesisRunResult {
+        if (!terminalize) {
+            return DreamSynthesisRunResult.Retry(DreamSynthesisRetryReason.MODEL_TEMPORARY_FAILURE)
+        }
+        return failOrRetry(fence, failure.toDurableSynthesisFailure())
+    }
+
     private suspend fun handleReadRejection(
         fence: me.rerere.rikkahub.memory.dreaming.model.DreamSynthesisFence,
         reason: DreamSynthesisStoreRejection,
     ): DreamSynthesisRunResult {
         if (reason == DreamSynthesisStoreRejection.FEATURE_DISABLED) return DreamSynthesisRunResult.Disabled
+        if (reason == DreamSynthesisStoreRejection.STORE_CORRUPTION) {
+            // This is a deterministic authority/data-contract failure, not a transient database
+            // transport error. Retrying the same immutable seed only creates exponential backoff
+            // forever. Record a durable terminal failure; failOrRetry keeps the Work retryable only
+            // if that terminal transition itself cannot be persisted.
+            return failOrRetry(fence, DreamSynthesisFailure.STORE_FAILURE)
+        }
         if (reason == DreamSynthesisStoreRejection.FENCE_CONFLICT) {
             try {
                 store.terminalizeConflict(
@@ -378,13 +428,24 @@ class DreamSynthesisOrchestrator(
         }
     }
 
-    private suspend fun safeFail(fence: me.rerere.rikkahub.memory.dreaming.model.DreamSynthesisFence, failure: DreamSynthesisFailure) {
-        try {
-            store.fail(fence, failure, requireClockAtLeast(fence.frozenNowEpochMs))
+    private suspend fun failOrRetry(
+        fence: me.rerere.rikkahub.memory.dreaming.model.DreamSynthesisFence,
+        failure: DreamSynthesisFailure,
+    ): DreamSynthesisRunResult {
+        val terminalized = try {
+            store.fail(fence, failure, requireClockAtLeast(fence.frozenNowEpochMs)) is
+                DreamSynthesisStoreResult.Accepted
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Exception) {
-            // A durable lease plus startup dirty scan remains the recovery path.
+            false
+        }
+        return if (terminalized) {
+            DreamSynthesisRunResult.Failed(failure)
+        } else {
+            // Returning a terminal Worker failure without a matching durable run transition
+            // strands the active scope until lease recovery. Keep Work retryable instead.
+            DreamSynthesisRunResult.Retry(DreamSynthesisRetryReason.STORE_TEMPORARY_FAILURE)
         }
     }
 
@@ -399,6 +460,16 @@ private sealed interface LeaseGuardResult<out T> {
 }
 
 private class LeaseLost : RuntimeException()
+
+private fun DreamSynthesizeFailure.toDurableSynthesisFailure(): DreamSynthesisFailure = when (this) {
+    DreamSynthesizeFailure.PROVIDER_UNAVAILABLE -> DreamSynthesisFailure.MODEL_PROVIDER_UNAVAILABLE
+    DreamSynthesizeFailure.MODEL_UNAVAILABLE -> DreamSynthesisFailure.MODEL_UNAVAILABLE
+    DreamSynthesizeFailure.TIMEOUT -> DreamSynthesisFailure.MODEL_TIMEOUT
+    DreamSynthesizeFailure.CANCELLED_BY_PROVIDER -> DreamSynthesisFailure.MODEL_CANCELLED_BY_PROVIDER
+    DreamSynthesizeFailure.OUTPUT_LIMIT -> DreamSynthesisFailure.MODEL_OUTPUT_LIMIT
+    DreamSynthesizeFailure.SAFETY_REJECTION -> DreamSynthesisFailure.MODEL_SAFETY_REJECTION
+    DreamSynthesizeFailure.INVALID_CONFIGURATION -> DreamSynthesisFailure.MODEL_INVALID_CONFIGURATION
+}
 
 /**
  * UTF-8 bytes are a provider-independent upper bound for byte-fallback tokenizers. The fixed

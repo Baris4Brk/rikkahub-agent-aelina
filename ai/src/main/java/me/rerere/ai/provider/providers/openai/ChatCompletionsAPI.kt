@@ -2,6 +2,8 @@ package me.rerere.ai.provider.providers.openai
 
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
@@ -28,9 +30,11 @@ import me.rerere.ai.core.MessageRole
 import me.rerere.ai.core.ReasoningLevel
 import me.rerere.ai.core.TokenUsage
 import me.rerere.ai.provider.Modality
+import me.rerere.ai.provider.BackgroundProviderDispatchCallback
 import me.rerere.ai.provider.Model
 import me.rerere.ai.provider.ModelAbility
 import me.rerere.ai.provider.ProviderSetting
+import me.rerere.ai.provider.RemoteBackgroundDispatchAttestation
 import me.rerere.ai.provider.ProviderLogPrivacy
 import me.rerere.ai.provider.TextGenerationParams
 import me.rerere.ai.provider.ToolReplayArguments
@@ -179,6 +183,14 @@ internal fun OkHttpClient.forProviderStreamAttempt(freshConnection: Boolean): Ok
             .build()
     }
 
+private fun OkHttpClient.forPreparedBackgroundAttempt(): OkHttpClient =
+    newBuilder()
+        .retryOnConnectionFailure(false)
+        .followRedirects(false)
+        .followSslRedirects(false)
+        .connectionPool(ConnectionPool(0, 1, TimeUnit.NANOSECONDS))
+        .build()
+
 class ChatCompletionsAPI(
     private val client: OkHttpClient,
     private val keyRoulette: KeyRoulette
@@ -250,8 +262,40 @@ class ChatCompletionsAPI(
         providerSetting: ProviderSetting.OpenAI,
         messages: List<UIMessage>,
         params: TextGenerationParams,
+    ): Flow<MessageChunk> = streamProviderText(
+        providerSetting = providerSetting,
+        messages = messages,
+        params = params,
+        attestation = null,
+        onDispatchStarted = BackgroundProviderDispatchCallback.NO_OP,
+    )
+
+    fun streamPreparedBackgroundText(
+        providerSetting: ProviderSetting.OpenAI,
+        messages: List<UIMessage>,
+        params: TextGenerationParams,
+        attestation: RemoteBackgroundDispatchAttestation,
+        onDispatchStarted: BackgroundProviderDispatchCallback,
+    ): Flow<MessageChunk> = streamProviderText(
+        providerSetting = providerSetting,
+        messages = messages,
+        params = params,
+        attestation = attestation,
+        onDispatchStarted = onDispatchStarted,
+    )
+
+    private fun streamProviderText(
+        providerSetting: ProviderSetting.OpenAI,
+        messages: List<UIMessage>,
+        params: TextGenerationParams,
+        attestation: RemoteBackgroundDispatchAttestation?,
+        onDispatchStarted: BackgroundProviderDispatchCallback,
     ): Flow<MessageChunk> = callbackFlow {
-        val attemptClient = client.forProviderStreamAttempt(params.freshConnection)
+        val attemptClient = if (attestation == null) {
+            client.forProviderStreamAttempt(params.freshConnection)
+        } else {
+            client.forPreparedBackgroundAttempt()
+        }
         val requestBody = buildChatCompletionRequest(
             messages = messages,
             params = params,
@@ -260,19 +304,16 @@ class ChatCompletionsAPI(
         )
 
         val request = Request.Builder()
-            .url("${providerSetting.baseUrl}${providerSetting.chatCompletionsPath}")
+            .url(
+                attestation?.let { it.apiFamily.canonicalOrigin + it.apiFamily.canonicalPath }
+                    ?: "${providerSetting.baseUrl}${providerSetting.chatCompletionsPath}",
+            )
             .headers(params.customHeaders.toHeaders())
             .post(json.encodeToString(requestBody).toRequestBody("application/json".toMediaType()))
             .addHeader("Authorization", "Bearer ${keyRoulette.next(providerSetting.apiKey, providerSetting.id.toString())}")
             .addHeader("Content-Type", "application/json")
             .configureReferHeaders(providerSetting.baseUrl)
             .build()
-
-        Log.i(
-            TAG,
-            "streamText: model=${params.model.modelId}, messages=${messages.size}, " +
-                "tools=${params.tools.size}, requestChars=${requestBody.toString().length}",
-        )
 
         // just for debugging response body
         // println(client.newCall(request).await().body.string())
@@ -366,6 +407,22 @@ class ChatCompletionsAPI(
                 close()
             }
         }
+
+        if (attestation != null) {
+            check(requestBody["stream"]?.jsonPrimitive?.content == "true")
+            check(requestBody["store"]?.jsonPrimitive?.content != "true")
+            check(requestBody["tools"] == null)
+            check(requestBody["model"]?.jsonPrimitive?.content == params.model.modelId)
+            check(params.maxTokens == attestation.context.maxOutputTokens)
+            onDispatchStarted.onDispatchStarted(attestation)
+            currentCoroutineContext().ensureActive()
+        }
+
+        Log.i(
+            TAG,
+            "streamText: model=${params.model.modelId}, messages=${messages.size}, " +
+                "tools=${params.tools.size}, requestChars=${requestBody.toString().length}",
+        )
 
         val eventSource = EventSources.createFactory(attemptClient).newEventSource(request, listener)
 

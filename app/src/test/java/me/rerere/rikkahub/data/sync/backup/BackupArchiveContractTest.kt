@@ -61,6 +61,24 @@ class BackupArchiveContractTest {
     }
 
     @Test
+    fun authorityStreamRejectsNilUppercaseAndNonCanonicalUUIDs() {
+        listOf(
+            "00000000-0000-0000-0000-000000000000",
+            "A0000000-0000-0000-0000-000000000001",
+            "00000000000000000000000000000001",
+            "not-a-stream",
+        ).forEach { streamId ->
+            val result = BackupArchiveManifestCodec.validate(
+                validManifest().copy(
+                    mainStream = BackupAuthorityStreamV1(streamId = streamId, headSeq = 7L),
+                ),
+            )
+
+            assertEquals(BackupArchiveManifestFailure.MAIN_STREAM_ID_INVALID, result)
+        }
+    }
+
+    @Test
     fun traversalAndLearningDatabaseEntriesAreRejected() {
         val traversal = validManifest().copy(
             entries = validManifest().entries +
@@ -78,6 +96,32 @@ class BackupArchiveContractTest {
             BackupArchiveManifestFailure.UNSUPPORTED_ENTRY,
             BackupArchiveManifestCodec.validate(learningDatabase),
         )
+    }
+
+    @Test
+    fun policyGrantAuthorityHasNoStandaloneSettingsOrFilesEntry() {
+        assertEquals(
+            null,
+            BackupArchiveManifestCodec.validate(validManifest()),
+        )
+        val standaloneGrantExport = validManifest().copy(
+            entries = validManifest().entries +
+                ("learning_policy_grants.json" to entry("d")),
+        )
+
+        assertEquals(
+            BackupArchiveManifestFailure.UNSUPPORTED_ENTRY,
+            BackupArchiveManifestCodec.validate(standaloneGrantExport),
+        )
+        assertTrue(
+            validManifest().entries.keys.single { it.endsWith(".db") } ==
+                BACKUP_ARCHIVE_MAIN_DATABASE_ENTRY,
+        )
+        val encoded = BackupArchiveManifestCodec.encode(validManifest())
+            .toString(Charsets.UTF_8)
+            .lowercase()
+        assertTrue("grant" !in encoded)
+        assertTrue("rebind" !in encoded)
     }
 
     private fun validManifest() = BackupArchiveManifestV1(

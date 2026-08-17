@@ -5,8 +5,8 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
-import me.rerere.rikkahub.learning.model.LearningCanonicalId
 import me.rerere.rikkahub.learning.model.LearningScope
+import me.rerere.rikkahub.learning.model.StrictLearningJsonEnvelope
 import me.rerere.rikkahub.learning.model.StrictLearningJsonKeyScanner
 import me.rerere.rikkahub.learning.task.TaskSignatureV1
 import me.rerere.rikkahub.learning.trace.SanitizedTraceSummary
@@ -21,6 +21,11 @@ data class PolicyDistillationInput(
     val producerIdentity: String,
     val modelIdentity: String,
     val promptVersion: String,
+    val applicableTemplateIdentity: String,
+    val applicableConfigurationIdentity: String,
+    val applicableConfigurationGeneration: Long,
+    val applicableCapabilityDigest: String? = null,
+    val applicableAuthorityDigest: String? = null,
 ) {
     init {
         require(evidenceAllowlist.size in 2..32)
@@ -29,7 +34,28 @@ data class PolicyDistillationInput(
         require(producerIdentity.matches(PolicyCandidateDraft.SAFE_VERSION))
         require(modelIdentity.matches(PolicyCandidateDraft.SAFE_VERSION))
         require(promptVersion.matches(PolicyCandidateDraft.SAFE_VERSION))
+        listOf(
+            producerIdentity,
+            modelIdentity,
+            applicableTemplateIdentity,
+            applicableConfigurationIdentity,
+        ).forEach { require(it.matches(LOWER_DISTILLATION_SHA256)) }
+        require(applicableConfigurationGeneration > 0L)
+        applicableCapabilityDigest?.let { require(it.matches(LOWER_DISTILLATION_SHA256)) }
+        applicableAuthorityDigest?.let { require(it.matches(LOWER_DISTILLATION_SHA256)) }
     }
+
+    val frozenApplicability: PolicyCandidateApplicabilityIdentity
+        get() = PolicyCandidateApplicabilityIdentity(
+            toolSchemaFingerprints = toolSchemaAllowlist,
+            modelIdentity = modelIdentity,
+            providerIdentity = producerIdentity,
+            templateIdentity = applicableTemplateIdentity,
+            configurationIdentity = applicableConfigurationIdentity,
+            configurationGeneration = applicableConfigurationGeneration,
+            capabilityDigest = applicableCapabilityDigest,
+            authorityDigest = applicableAuthorityDigest,
+        )
 }
 
 enum class PolicyDistillationFailure {
@@ -56,7 +82,7 @@ sealed interface PolicyDistillationResult {
 
 /** The only parser/constructor for model-produced PolicyCandidateDraft. */
 object ReasoningPolicyDistiller {
-    const val SCHEMA_VERSION = 1
+    const val SCHEMA_VERSION = 2
     const val MAX_OUTPUT_UTF8_BYTES = 32 * 1_024
     private val json = Json { isLenient = false; ignoreUnknownKeys = false; coerceInputValues = false }
 
@@ -65,13 +91,16 @@ object ReasoningPolicyDistiller {
         if (raw.toByteArray(StandardCharsets.UTF_8).size > MAX_OUTPUT_UTF8_BYTES) {
             return rejected(PolicyDistillationFailure.TOO_LARGE)
         }
-        when (StrictLearningJsonKeyScanner.scan(raw)) {
+        val document = StrictLearningJsonEnvelope.unwrapSingleDocument(raw)
+            ?: return rejected(PolicyDistillationFailure.INVALID_JSON)
+        when (StrictLearningJsonKeyScanner.scan(document)) {
             StrictLearningJsonKeyScanner.Result.DUPLICATE -> return rejected(PolicyDistillationFailure.DUPLICATE_KEY)
             StrictLearningJsonKeyScanner.Result.INVALID -> return rejected(PolicyDistillationFailure.INVALID_JSON)
             StrictLearningJsonKeyScanner.Result.VALID -> Unit
         }
         val root = try {
-            json.parseToJsonElement(raw) as? JsonObject ?: return rejected(PolicyDistillationFailure.INVALID_JSON)
+            json.parseToJsonElement(document) as? JsonObject
+                ?: return rejected(PolicyDistillationFailure.INVALID_JSON)
         } catch (_: Exception) {
             return rejected(PolicyDistillationFailure.INVALID_JSON)
         }
@@ -116,17 +145,21 @@ object ReasoningPolicyDistiller {
         val boundary = root.summary("boundary")
         val failureMode = root.summary("failure_mode")
         val inputSetHash = PolicyCandidateIdFactory.inputSetHash(evidence)
-        val artifactHash = LearningCanonicalId.digest(
-            domainVersion = "policy-artifact-v1",
-            fields = listOf(
-                type.name,
-                trigger.value,
-                procedure.value,
-                verification.value,
-                boundary.value,
-                failureMode.value,
-                *schemas.sorted().toTypedArray(),
-            ),
+        val artifactHash = policyArtifactSha256(
+            type = type,
+            trigger = trigger.value,
+            procedure = procedure.value,
+            verification = verification.value,
+            boundary = boundary.value,
+            failureMode = failureMode.value,
+            applicableToolSchemas = schemas,
+            applicableModelIdentity = input.modelIdentity,
+            applicableProviderIdentity = input.producerIdentity,
+            applicableTemplateIdentity = input.applicableTemplateIdentity,
+            applicableConfigurationIdentity = input.applicableConfigurationIdentity,
+            applicableConfigurationGeneration = input.applicableConfigurationGeneration,
+            applicableCapabilityDigest = input.applicableCapabilityDigest,
+            applicableAuthorityDigest = input.applicableAuthorityDigest,
         )
         val draft = PolicyCandidateDraft(
             candidateId = PolicyCandidateIdFactory.candidateId(
@@ -137,6 +170,7 @@ object ReasoningPolicyDistiller {
                 input.modelIdentity,
                 input.promptVersion,
                 SCHEMA_VERSION,
+                input.frozenApplicability.copy(toolSchemaFingerprints = schemas),
             ),
             scope = input.scope,
             taskSignature = input.taskSignature,
@@ -148,6 +182,13 @@ object ReasoningPolicyDistiller {
             failureMode = failureMode,
             evidence = evidence,
             applicableToolSchemas = schemas,
+            applicableModelIdentity = input.modelIdentity,
+            applicableProviderIdentity = input.producerIdentity,
+            applicableTemplateIdentity = input.applicableTemplateIdentity,
+            applicableConfigurationIdentity = input.applicableConfigurationIdentity,
+            applicableConfigurationGeneration = input.applicableConfigurationGeneration,
+            applicableCapabilityDigest = input.applicableCapabilityDigest,
+            applicableAuthorityDigest = input.applicableAuthorityDigest,
             inputSetHash = inputSetHash,
             artifactHash = artifactHash,
             producerIdentity = input.producerIdentity,
@@ -163,6 +204,7 @@ object ReasoningPolicyDistiller {
                         it.lessonId
                     },
                     allowedToolSchemaFingerprints = input.toolSchemaAllowlist,
+                    expectedApplicability = input.frozenApplicability,
                 ),
             )
         ) {
@@ -213,3 +255,5 @@ object ReasoningPolicyDistiller {
     private fun reject(failure: PolicyDistillationFailure): Nothing = throw Rejection(failure)
     private class Rejection(val failure: PolicyDistillationFailure) : RuntimeException()
 }
+
+private val LOWER_DISTILLATION_SHA256 = Regex("[0-9a-f]{64}")

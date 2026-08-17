@@ -20,11 +20,17 @@ import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import me.rerere.ai.provider.EmbeddingGenerationParams
 import me.rerere.ai.provider.EmbeddingGenerationResult
+import me.rerere.ai.provider.AttestedRemoteBackgroundTextGenerationProvider
+import me.rerere.ai.provider.BackgroundProviderDispatchCallback
+import me.rerere.ai.provider.FencedTextGenerationProvider
 import me.rerere.ai.provider.ImageEditParams
 import me.rerere.ai.provider.ImageGenerationParams
 import me.rerere.ai.provider.Model
 import me.rerere.ai.provider.Provider
 import me.rerere.ai.provider.ProviderSetting
+import me.rerere.ai.provider.PreparedRemoteBackgroundTextGeneration
+import me.rerere.ai.provider.RemoteBackgroundApiFamily
+import me.rerere.ai.provider.RemoteBackgroundDispatchAttestation
 import me.rerere.ai.provider.TextGenerationParams
 import me.rerere.ai.provider.providers.openai.ChatCompletionsAPI
 import me.rerere.ai.provider.providers.openai.ModelCompatibilityResolver
@@ -72,7 +78,13 @@ private val MINIMAX_FALLBACK_MODELS = listOf(
 class OpenAIProvider(
     private val client: OkHttpClient,
     context: Context? = null
-) : Provider<ProviderSetting.OpenAI> {
+) : Provider<ProviderSetting.OpenAI>,
+    FencedTextGenerationProvider,
+    AttestedRemoteBackgroundTextGenerationProvider<ProviderSetting.OpenAI> {
+    override val cancellationFenceAbi: String =
+        RemoteBackgroundDispatchAttestation.CANCELLATION_FENCE_ABI
+    override val remoteBackgroundDispatchAbi: String =
+        RemoteBackgroundDispatchAttestation.TRANSPORT_ABI
     private val keyRoulette = if (context != null) KeyRoulette.lru(context) else KeyRoulette.default()
 
     private val chatCompletionsAPI = ChatCompletionsAPI(client = client, keyRoulette = keyRoulette)
@@ -180,6 +192,72 @@ class OpenAIProvider(
             messages = messages,
             params = params
         )
+    }
+
+    override fun prepareRemoteBackgroundTextGeneration(
+        providerSetting: ProviderSetting.OpenAI,
+        messages: List<UIMessage>,
+        params: TextGenerationParams,
+        expectedAttestation: RemoteBackgroundDispatchAttestation,
+    ): PreparedRemoteBackgroundTextGeneration {
+        val exactBaseUrl = providerSetting.baseUrl.removeSuffix("/")
+        val expectedFamily = when {
+            exactBaseUrl in setOf(
+                "https://opencode.ai/zen/go/v1",
+                "https://opencode.ai:443/zen/go/v1",
+            ) &&
+                !providerSetting.useResponseApi ->
+                RemoteBackgroundApiFamily.OPENCODE_GO_CHAT_COMPLETIONS_V1
+            exactBaseUrl in setOf(
+                "https://api.openai.com/v1",
+                "https://api.openai.com:443/v1",
+            ) && providerSetting.useResponseApi ->
+                RemoteBackgroundApiFamily.OPENAI_RESPONSES_V1
+            exactBaseUrl in setOf(
+                "https://api.openai.com/v1",
+                "https://api.openai.com:443/v1",
+            ) -> RemoteBackgroundApiFamily.OPENAI_CHAT_COMPLETIONS_V1
+            else -> error("Remote background dispatch requires an exact official API")
+        }
+        require(expectedAttestation.apiFamily == expectedFamily) {
+            "OpenAI background API family changed"
+        }
+        require(params.remoteBackgroundDispatchContext == expectedAttestation.context) {
+            "Remote background dispatch context changed"
+        }
+        require(params.stableProviderIdempotencyKey == expectedAttestation.context.providerRequestKey)
+        require(params.maxTokens == expectedAttestation.context.maxOutputTokens)
+        require(params.tools.isEmpty() && params.model.tools.isEmpty())
+        require(params.customHeaders.isEmpty() && params.customBody.isEmpty())
+        if (expectedFamily != RemoteBackgroundApiFamily.OPENAI_RESPONSES_V1) {
+            require(providerSetting.chatCompletionsPath == "/chat/completions") {
+                "Remote background chat path changed"
+            }
+        }
+        return object : PreparedRemoteBackgroundTextGeneration {
+            override val expectedAttestation: RemoteBackgroundDispatchAttestation =
+                expectedAttestation
+
+            override fun streamText(
+                onDispatchStarted: BackgroundProviderDispatchCallback,
+            ): Flow<MessageChunk> = if (providerSetting.useResponseApi) {
+                responseAPI.streamPreparedBackgroundText(
+                    providerSetting = providerSetting,
+                    messages = messages,
+                    params = params,
+                    attestation = expectedAttestation,
+                    onDispatchStarted = onDispatchStarted,
+                )
+            } else {
+                chatCompletionsAPI.streamPreparedBackgroundText(
+                    providerSetting = providerSetting,
+                    messages = messages,
+                    params = params,
+                    attestation = expectedAttestation,
+                    onDispatchStarted = onDispatchStarted,
+                )
+            }
+        }
     }
 
     override suspend fun generateText(

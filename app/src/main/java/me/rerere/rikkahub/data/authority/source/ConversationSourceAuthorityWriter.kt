@@ -17,6 +17,32 @@ data class MessageSourceRevisionTransition(
             "current=${current.sourceRevision}, state=${current.sourceState}, ids=<redacted>)"
 }
 
+/**
+ * Narrow same-transaction seam for authorities whose evidence is pinned to a message revision.
+ * Implementations must not open a nested transaction or dispatch work from this method. Returning
+ * true means that at least one durable outbox row was inserted and the owner must wake after commit.
+ */
+fun interface MessageSourceTransitionInvalidationPort {
+    suspend fun invalidateInCurrentTransaction(
+        transition: MessageSourceRevisionTransition,
+    ): Boolean
+}
+
+object NoOpMessageSourceTransitionInvalidationPort : MessageSourceTransitionInvalidationPort {
+    override suspend fun invalidateInCurrentTransaction(
+        transition: MessageSourceRevisionTransition,
+    ): Boolean = false
+}
+
+/** Initial capture gate; existing authority heads always advance so stale evidence cannot revive. */
+fun interface ConversationSourceInitialCaptureGate {
+    fun allowInitialCapture(scope: ConversationSourceScope): Boolean
+}
+
+object AllowConversationSourceInitialCapture : ConversationSourceInitialCaptureGate {
+    override fun allowInitialCapture(scope: ConversationSourceScope): Boolean = true
+}
+
 data class ConversationSourceAuthorityCommit(
     val conversation: ConversationSourceAuthorityHead,
     val previousConversation: ConversationSourceAuthorityHead?,
@@ -61,6 +87,10 @@ class ConversationSourceAuthorityWriter(
     private val store: ConversationSourceAuthorityStore,
     private val events: SourceInvalidationAuthorityEventPort =
         NoOpSourceInvalidationAuthorityEventPort,
+    private val transitionInvalidations: MessageSourceTransitionInvalidationPort =
+        NoOpMessageSourceTransitionInvalidationPort,
+    private val initialCaptureGate: ConversationSourceInitialCaptureGate =
+        AllowConversationSourceInitialCapture,
     private val maxMessagesPerConversation: Int = DEFAULT_MAX_MESSAGES_PER_CONVERSATION,
     private val maxScopesPerConversation: Int = DEFAULT_MAX_SCOPES_PER_CONVERSATION,
     private val pageSize: Int = DEFAULT_PAGE_SIZE,
@@ -193,7 +223,16 @@ class ConversationSourceAuthorityWriter(
         if (scopes.size != count || scopes.toSet().size != scopes.size) {
             throw ConversationSourceAuthorityConflictException("SOURCE_SCOPE_SNAPSHOT_COUNT_CHANGED")
         }
-        if (snapshot.scope !in scopes) scopes += snapshot.scope
+        if (snapshot.scope !in scopes) {
+            if (initialCaptureGate.allowInitialCapture(snapshot.scope)) {
+                scopes += snapshot.scope
+            } else if (scopes.isEmpty()) {
+                // OFF/consent-denied conversations remain byte-for-byte baseline in the DB. The
+                // ephemeral projection only supplies command-transaction correlation and is
+                // neither persisted nor replayable as Learning evidence.
+                return listOf(snapshot.toEphemeralAuthorityCommit())
+            }
+        }
         return scopes.map { scope ->
             reconcileInCurrentTransaction(snapshot.copy(scope = scope))
         }
@@ -206,6 +245,12 @@ class ConversationSourceAuthorityWriter(
             throw ConversationSourceAuthorityConflictException("SOURCE_MESSAGE_LIMIT_EXCEEDED")
         }
         val existingConversation = store.findConversation(snapshot.scope, snapshot.conversationId)
+        if (
+            existingConversation == null &&
+            !initialCaptureGate.allowInitialCapture(snapshot.scope)
+        ) {
+            return snapshot.toEphemeralAuthorityCommit()
+        }
         if (existingConversation?.sourceState == ConversationSourceState.TOMBSTONED &&
             !snapshot.conversationDeleted
         ) {
@@ -355,6 +400,9 @@ class ConversationSourceAuthorityWriter(
                 ),
             )
             if (inserted) insertedOutbox = true
+            if (transitionInvalidations.invalidateInCurrentTransaction(transition)) {
+                insertedOutbox = true
+            }
         }
         val previousConversation = conversationMutation.previous
         if (previousConversation != null) {
@@ -396,6 +444,16 @@ class ConversationSourceAuthorityWriter(
     /** Must be called only after the outer authority transaction returned successfully. */
     fun dispatchPostCommit(commit: ConversationSourceAuthorityCommit) {
         events.dispatchPostCommit(commit.insertedOutbox)
+    }
+
+    /**
+     * Coalesces a bounded multi-scope reconciliation into one wake. A Conversation write can
+     * project the same graph into the assistant scope plus one or more authority-subject scopes;
+     * waking once after the owning transaction commits avoids a scheduler hot spot without
+     * weakening the durable outbox contract.
+     */
+    fun dispatchPostCommit(commits: Collection<ConversationSourceAuthorityCommit>) {
+        events.dispatchPostCommit(commits.any(ConversationSourceAuthorityCommit::insertedOutbox))
     }
 
     private suspend fun loadCompleteMessageSnapshot(
@@ -563,3 +621,56 @@ class ConversationSourceAuthorityWriter(
 
 private fun scopeOrderKey(scope: ConversationSourceScope): String =
     "${scope.kind.name}\u0000${scope.id}"
+
+private fun ConversationSourceSnapshot.toEphemeralAuthorityCommit(): ConversationSourceAuthorityCommit {
+    val selected = selectedBranchMessageIds.toHashSet()
+    val messageHeads = messages.associate { message ->
+        message.messageId to MessageSourceAuthorityHead(
+            scope = scope,
+            conversationId = conversationId,
+            messageId = message.messageId,
+            messageRole = message.messageRole,
+            sourceRevision = 1L,
+            previousSourceRevision = null,
+            sourceState = if (message.messageId in selected) {
+                ConversationSourceState.ACTIVE
+            } else {
+                ConversationSourceState.SUPERSEDED
+            },
+            changeKind = ConversationSourceChangeKind.CREATED,
+            payloadIntegritySha256 = message.payloadIntegritySha256,
+            occurredAtMs = occurredAtMs,
+            updatedAtMs = occurredAtMs,
+        )
+    }
+    val branchHead = branchHeadMessageId?.let(messageHeads::get)
+    return ConversationSourceAuthorityCommit(
+        conversation = ConversationSourceAuthorityHead(
+            scope = scope,
+            conversationId = conversationId,
+            assistantIdSnapshot = assistantIdSnapshot,
+            sourceRevision = 1L,
+            previousSourceRevision = null,
+            sourceState = if (conversationDeleted) {
+                ConversationSourceState.TOMBSTONED
+            } else {
+                ConversationSourceState.ACTIVE
+            },
+            changeKind = if (conversationDeleted) {
+                ConversationSourceChangeKind.CONVERSATION_DELETED
+            } else {
+                ConversationSourceChangeKind.CREATED
+            },
+            branchHeadMessageId = branchHead?.messageId,
+            branchHeadMessageRevision = branchHead?.sourceRevision,
+            occurredAtMs = occurredAtMs,
+            updatedAtMs = occurredAtMs,
+        ),
+        previousConversation = null,
+        messagesById = messageHeads,
+        messageTransitions = emptyList(),
+        insertedInitialMessageCount = 0,
+        conversationMutated = false,
+        insertedOutbox = false,
+    )
+}

@@ -35,6 +35,9 @@ class SettingsLearningBackgroundGenerationUserPolicySource(
             backgroundWorkAuthorized = preferences.backgroundWorkAuthorized,
             authorizedModelIdentityDigests = preferences.authorizedModelIdentityDigests,
             allowRemoteReflection = preferences.allowRemoteReflection,
+            remoteReflectionProviderIdentityDigest =
+                preferences.remoteReflectionProviderIdentityDigest,
+            remoteReflectionModelIdentityDigest = preferences.remoteReflectionModelIdentityDigest,
         )
     }
 }
@@ -51,9 +54,13 @@ private fun LearningPreferencesV1.toFeatureFlags(
             reflectionShadow = preferences.reflectionShadow,
             policyCandidate = preferences.policyCandidate,
             policyRetrievalShadow = preferences.policyRetrievalShadow,
-            policyInjection = false,
-            workflowCandidate = false,
-            workflowPromotion = false,
+            policyInjection = preferences.policyInjection,
+            workflowCandidate = preferences.workflowCandidate,
+            workflowPromotion = preferences.workflowPromotion,
+            curatorUpdate = preferences.curatorUpdate,
+            curatorMerge = preferences.curatorMerge,
+            curatorSplit = preferences.curatorSplit,
+            curatorSupersede = preferences.curatorSupersede,
             vector = false,
             temporalOperational = false,
             allowRemoteReflection = preferences.allowRemoteReflection,

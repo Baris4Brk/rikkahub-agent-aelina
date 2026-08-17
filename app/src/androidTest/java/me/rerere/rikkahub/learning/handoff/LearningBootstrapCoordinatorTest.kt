@@ -13,6 +13,7 @@ import me.rerere.rikkahub.learning.storage.LearningStreamCheckpointEntity
 import me.rerere.rikkahub.learning.storage.LearningStreamResetReason
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -59,15 +60,18 @@ class LearningBootstrapCoordinatorTest {
             coverageStartMs = 10L,
             commandCoverageStartMs = 10L,
             executionCoverageStartMs = 20L,
+            sourceAuthorityCoverageStartMs = 30L,
+            feedbackCoverageStartMs = 40L,
         )
         val coordinator = LearningBootstrapCoordinator(
             database = database,
             outboxReader = reader,
-            scanner = LearningReconciliationScanner { _, _, limits ->
+            scanner = LearningReconciliationScanner { descriptor, cursorAccess, frozenNowMs, limits ->
                 assertEquals(64, limits.maxRowsPerPage)
                 assertEquals(1, limits.maxPages)
                 // Simulates an authoritative write while the bounded scanner is running.
                 reader.head = 2L
+                cursorAccess.completeFakeScan(descriptor, frozenNowMs)
                 coverage
             },
             clockMs = { 100L },
@@ -82,6 +86,8 @@ class LearningBootstrapCoordinatorTest {
         assertEquals(1L, checkpoint.lastContiguousSeq)
         assertEquals(2L, checkpoint.lastSeenHeadSeq)
         assertEquals(1L, checkpoint.bootstrapHeadSeq)
+        assertEquals(30L, checkpoint.sourceAuthorityCoverageStartMs)
+        assertEquals(40L, checkpoint.feedbackCoverageStartMs)
         assertEquals(1, database.inboxDao().listAfter(STREAM.toString(), 0L, 10).size)
     }
 
@@ -99,8 +105,9 @@ class LearningBootstrapCoordinatorTest {
         val coordinator = LearningBootstrapCoordinator(
             database = database,
             outboxReader = reader,
-            scanner = LearningReconciliationScanner { descriptor, _, _ ->
+            scanner = LearningReconciliationScanner { descriptor, cursorAccess, frozenNowMs, _ ->
                 scannerHead = descriptor.headSequence
+                cursorAccess.completeFakeScan(descriptor, frozenNowMs)
                 LearningBootstrapCoverage(null, null, null)
             },
             clockMs = { 100L },
@@ -139,7 +146,8 @@ class LearningBootstrapCoordinatorTest {
         val coordinator = LearningBootstrapCoordinator(
             database = database,
             outboxReader = reader,
-            scanner = LearningReconciliationScanner { _, _, _ ->
+            scanner = LearningReconciliationScanner { descriptor, cursorAccess, frozenNowMs, _ ->
+                cursorAccess.completeFakeScan(descriptor, frozenNowMs)
                 LearningBootstrapCoverage(null, null, null)
             },
             clockMs = { 100L },
@@ -166,7 +174,7 @@ class LearningBootstrapCoordinatorTest {
         val coordinator = LearningBootstrapCoordinator(
             database = database,
             outboxReader = MutableHeadReader(head = 2L),
-            scanner = LearningReconciliationScanner { _, _, _ ->
+            scanner = LearningReconciliationScanner { _, _, _, _ ->
                 throw CancellationException("test cancellation")
             },
             clockMs = { 100L },
@@ -192,7 +200,8 @@ class LearningBootstrapCoordinatorTest {
         val coordinator = LearningBootstrapCoordinator(
             database = database,
             outboxReader = MutableHeadReader(head = 1L),
-            scanner = LearningReconciliationScanner { _, _, _ ->
+            scanner = LearningReconciliationScanner { descriptor, cursorAccess, frozenNowMs, _ ->
+                cursorAccess.completeFakeScan(descriptor, frozenNowMs)
                 LearningBootstrapCoverage(null, null, null)
             },
             clockMs = { 100L },
@@ -213,6 +222,67 @@ class LearningBootstrapCoordinatorTest {
         )
     }
 
+    @Test
+    fun workRemainsKeepsRunningCursorAndRetryAtomicallyClearsItOnCompletion() = runBlocking {
+        database.checkpointDao().insert(checkpoint())
+        var scanCalls = 0
+        val coordinator = LearningBootstrapCoordinator(
+            database = database,
+            outboxReader = MutableHeadReader(head = 1L),
+            scanner = LearningReconciliationScanner { descriptor, cursorAccess, frozenNowMs, _ ->
+                scanCalls += 1
+                if (scanCalls == 1) {
+                    val advanced = LearningReconciliationCursorV1.initialize(
+                        streamId = descriptor.streamId.toString(),
+                        frozenHeadSequence = descriptor.headSequence,
+                        windowStartMs = 0L,
+                        windowEndMs = frozenNowMs,
+                    ).nextPhase()
+                    check(
+                        cursorAccess.compareAndSet(
+                            expectedCursorJson = cursorAccess.load(),
+                            newCursorJson = LearningReconciliationCursorV1Codec.encode(advanced),
+                        ),
+                    )
+                    throw LearningReconciliationWorkRemainsException()
+                }
+                val resumed = requireNotNull(
+                    LearningReconciliationCursorV1Codec.decode(cursorAccess.load()),
+                )
+                assertEquals(LearningReconciliationPhaseV1.EXECUTION, resumed.phase)
+                var completed = resumed
+                while (completed.phase != LearningReconciliationPhaseV1.FEEDBACK_REVISION) {
+                    completed = completed.nextPhase()
+                }
+                check(
+                    cursorAccess.compareAndSet(
+                        expectedCursorJson = cursorAccess.load(),
+                        newCursorJson = LearningReconciliationCursorV1Codec.encode(
+                            completed.complete(),
+                        ),
+                    ),
+                )
+                LearningBootstrapCoverage(null, null, null)
+            },
+            clockMs = { 100L },
+            monotonicMs = { 1L },
+        )
+
+        val firstFailure = runCatching { coordinator.bootstrap(frozenNowMs = 100L) }
+            .exceptionOrNull()
+        assertTrue(firstFailure is LearningReconciliationWorkRemainsException)
+        val running = requireNotNull(database.checkpointDao().find(STREAM.toString()))
+        assertEquals(LearningBootstrapState.RUNNING.name, running.bootstrapState)
+        assertTrue(running.reconciliationCursorV1Json != null)
+
+        coordinator.bootstrap(frozenNowMs = 100L)
+
+        val complete = requireNotNull(database.checkpointDao().find(STREAM.toString()))
+        assertEquals(LearningBootstrapState.COMPLETE.name, complete.bootstrapState)
+        assertNull(complete.reconciliationCursorV1Json)
+        assertEquals(2, scanCalls)
+    }
+
     private fun checkpoint(
         state: LearningBootstrapState = LearningBootstrapState.REQUIRED,
         lastSeenHead: Long = 1L,
@@ -230,6 +300,23 @@ class LearningBootstrapCoordinatorTest {
         executionCoverageStartMs = null,
         updatedAtMs = 0L,
     )
+
+    private suspend fun LearningReconciliationCursorAccess.completeFakeScan(
+        descriptor: LearningOutboxDescriptor,
+        frozenNowMs: Long,
+    ) {
+        var cursor = LearningReconciliationCursorV1.initialize(
+            streamId = descriptor.streamId.toString(),
+            frozenHeadSequence = descriptor.headSequence,
+            windowStartMs = 0L,
+            windowEndMs = frozenNowMs,
+        )
+        while (cursor.phase != LearningReconciliationPhaseV1.FEEDBACK_REVISION) {
+            cursor = cursor.nextPhase()
+        }
+        val completeJson = LearningReconciliationCursorV1Codec.encode(cursor.complete())
+        check(compareAndSet(load(), completeJson))
+    }
 
     private class MutableHeadReader(var head: Long) : LearningOutboxReader {
         override suspend fun inspect(): LearningOutboxDescriptor =

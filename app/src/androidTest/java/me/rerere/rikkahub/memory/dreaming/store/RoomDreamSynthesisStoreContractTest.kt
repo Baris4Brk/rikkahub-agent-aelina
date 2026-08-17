@@ -147,12 +147,7 @@ class RoomDreamSynthesisStoreContractTest {
         assertNull(db.dreamDao().getRunById(RUN_ID)?.outputTokens)
 
         val duplicate = store.commit(request) as DreamSynthesisCommitResult.Rejected
-        assertTrue(
-            duplicate.reason in setOf(
-                DreamSynthesisCommitRejection.LEASE_MISSING,
-                DreamSynthesisCommitRejection.RUN_NOT_RUNNING,
-            ),
-        )
+        assertEquals(DreamSynthesisCommitRejection.DREAM_REVISION_CONFLICT, duplicate.reason)
         assertEquals(1, db.dreamSynthesisDao().listSnapshots(SCOPE.value, 10).size)
         assertEquals(1L, db.dreamDao().getScopeState(SCOPE.value)?.dreamStateRevision)
 
@@ -281,7 +276,7 @@ class RoomDreamSynthesisStoreContractTest {
             "WITH digits(d) AS (VALUES(0),(1),(2),(3),(4),(5),(6),(7),(8),(9)), " +
                 "ids(value) AS (SELECT 1 + a.d + 10*b.d + 100*c.d + 1000*d.d " +
                 "FROM digits a CROSS JOIN digits b CROSS JOIN digits c CROSS JOIN digits d " +
-                "ORDER BY value LIMIT 8193) INSERT INTO MemoryEntity(id, assistant_id, content, " +
+                "ORDER BY 1 LIMIT 8193) INSERT INTO MemoryEntity(id, assistant_id, content, " +
                 "revision, lifecycle_status, truth_status) " +
                 "SELECT value, '${SCOPE.value}', 'bounded', 1, 'ACTIVE', 'CONFIRMED' FROM ids",
         )

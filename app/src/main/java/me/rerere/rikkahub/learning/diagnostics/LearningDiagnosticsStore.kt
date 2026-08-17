@@ -38,6 +38,11 @@ enum class LearningDiagnosticCode {
     WORKER_RUNTIME,
     RESOURCE_YIELD,
     RESTORE_STATE,
+    EPISODE_STATE,
+    REFLECTION_STATE,
+    REWARD_STATE,
+    POLICY_CANDIDATE_STATE,
+    POLICY_RETRIEVAL_SHADOW,
 }
 
 /** Allowlisted state/reason projection shared by the P0 health screen and tests. */

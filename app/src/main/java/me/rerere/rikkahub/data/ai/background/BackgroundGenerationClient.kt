@@ -4,6 +4,7 @@ import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.currentCoroutineContext
@@ -11,8 +12,10 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.isActive
+import me.rerere.ai.provider.BackgroundProviderDispatchCallback
 import me.rerere.ai.context.ProviderContextGateResult
 import me.rerere.ai.context.ProviderContextGateTrace
 import me.rerere.ai.context.ProviderContextWindowResolver
@@ -23,6 +26,7 @@ import me.rerere.ai.core.TokenUsage
 import me.rerere.ai.provider.Model
 import me.rerere.ai.provider.ModelType
 import me.rerere.ai.provider.Modality
+import me.rerere.ai.provider.RemoteBackgroundDispatchContext
 import me.rerere.ai.provider.TextGenerationParams
 import me.rerere.ai.ui.FinishCategory
 import me.rerere.ai.ui.GenerationTerminal
@@ -59,12 +63,30 @@ const val MAX_BACKGROUND_GENERATION_TIMEOUT_MS = 2L * 60_000L
  * a raw Conversation. This type is ephemeral and its string representation never exposes content.
  */
 class BoundedRedactedBackgroundPromptV1 private constructor(
-    internal val systemText: String,
-    internal val payloadText: String,
+    systemText: String,
+    payloadText: String,
     val redactionPolicyVersion: String,
     val fieldCategories: Set<LearningOutboundFieldCategory>,
     val totalUtf8Bytes: Int,
-) {
+) : AutoCloseable {
+    private val systemTextRef = AtomicReference<String?>(systemText)
+    private val payloadTextRef = AtomicReference<String?>(payloadText)
+
+    /** The provider boundary takes one short-lived copy; a closed prompt cannot be reused. */
+    internal fun providerTexts(): Pair<String, String> {
+        val system = systemTextRef.get() ?: error("Background prompt is closed")
+        val payload = payloadTextRef.get() ?: error("Background prompt is closed")
+        return system to payload
+    }
+
+    /** Drop the last request-owned references on every success, failure, timeout, or cancellation. */
+    override fun close() {
+        systemTextRef.getAndSet(null)
+        payloadTextRef.getAndSet(null)
+    }
+
+    internal fun isClosed(): Boolean = systemTextRef.get() == null && payloadTextRef.get() == null
+
     override fun toString(): String =
         "BoundedRedactedBackgroundPromptV1(policy=$redactionPolicyVersion, " +
             "fields=$fieldCategories, utf8Bytes=$totalUtf8Bytes, content=<redacted>)"
@@ -113,9 +135,13 @@ data class BackgroundGenerationRequestV1(
     /** Exact content-free identity frozen when the durable job is claimed. */
     val frozenModel: ResolvedLearningModel,
     val templateVersion: String,
+    /** Exact bounded/redacted input identity; required only for durable remote dispatch. */
+    val inputIdentitySha256: String? = null,
     val maxOutputTokens: Int,
     val maxOutputUtf8Bytes: Int = MAX_BACKGROUND_OUTPUT_UTF8_BYTES,
     val timeoutMs: Long,
+    /** Present only for a durable Learning provider job whose budget was already reserved. */
+    val providerAttemptAuthority: BackgroundProviderAttemptAuthority? = null,
 ) {
     init {
         require(schemaVersion == BACKGROUND_GENERATION_REQUEST_SCHEMA_VERSION) {
@@ -123,6 +149,9 @@ data class BackgroundGenerationRequestV1(
         }
         require(templateVersion.matches(Regex("^[A-Za-z0-9._-]{1,64}$"))) {
             "Invalid template version"
+        }
+        require(inputIdentitySha256 == null || inputIdentitySha256.isLowerSha256()) {
+            "Invalid background input identity"
         }
         require(frozenModel.providerIdentityDigest.isLowerSha256()) { "Invalid provider digest" }
         require(frozenModel.modelIdentityDigest.isLowerSha256()) { "Invalid model digest" }
@@ -134,10 +163,12 @@ data class BackgroundGenerationRequestV1(
             when (frozenModel.providerKind) {
                 LearningProviderKind.REMOTE ->
                     frozenModel.route.executionClass == LearningExecutionClass.REMOTE_NETWORK &&
-                        frozenModel.route.requiresNetwork
+                        frozenModel.route.requiresNetwork &&
+                        frozenModel.runtimeAttestationDigest == null
                 LearningProviderKind.LOCAL_LITERT ->
                     frozenModel.route.executionClass == LearningExecutionClass.LOCAL_COMPUTE &&
-                        !frozenModel.route.requiresNetwork
+                        !frozenModel.route.requiresNetwork &&
+                        frozenModel.runtimeAttestationDigest?.isLowerSha256() == true
                 LearningProviderKind.AICORE -> false
             },
         ) { "Frozen provider kind and route do not match" }
@@ -153,12 +184,32 @@ data class BackgroundGenerationRequestV1(
         require(timeoutMs in 1L..MAX_BACKGROUND_GENERATION_TIMEOUT_MS) {
             "Background generation timeout is outside policy"
         }
+        providerAttemptAuthority?.let { authority ->
+            require(
+                authority.stableProviderIdempotencyKey.matches(
+                    Regex("^learning-provider-v[0-9]+:[0-9a-f]{64}$"),
+                ),
+            ) { "Invalid stable provider request key" }
+            require(authority.expectedDispatchAttestationSha256.isLowerSha256()) {
+                "Invalid expected dispatch attestation"
+            }
+            require(
+                frozenModel.providerKind != LearningProviderKind.LOCAL_LITERT ||
+                    authority.expectedDispatchAttestationSha256 ==
+                    frozenModel.runtimeAttestationDigest
+            ) { "Attempt and frozen runtime attestation disagree" }
+            require(
+                frozenModel.providerKind != LearningProviderKind.REMOTE ||
+                    inputIdentitySha256 != null
+            ) { "Remote attempt requires a frozen input identity" }
+        }
     }
 
     override fun toString(): String =
         "BackgroundGenerationRequestV1(schema=$schemaVersion, prompt=$prompt, " +
-            "template=$templateVersion, maxOutputTokens=$maxOutputTokens, " +
-            "maxOutputUtf8Bytes=$maxOutputUtf8Bytes, timeoutMs=$timeoutMs, identity=<redacted>)"
+        "template=$templateVersion, maxOutputTokens=$maxOutputTokens, " +
+            "maxOutputUtf8Bytes=$maxOutputUtf8Bytes, timeoutMs=$timeoutMs, " +
+            "durableAttempt=${providerAttemptAuthority != null}, identity=<redacted>)"
 }
 
 enum class BackgroundBindingUnavailableReason {
@@ -290,11 +341,22 @@ class BackgroundGenerationClient(
         BackgroundGenerationAuthorizationGate.DENY_ALL,
     private val contextGate: ProviderRequestContextGate = ProviderRequestContextGate(),
 ) {
-    suspend fun generate(request: BackgroundGenerationRequestV1): BackgroundGenerationResult {
+    suspend fun generate(request: BackgroundGenerationRequestV1): BackgroundGenerationResult = try {
+        generateOpen(request)
+    } finally {
+        request.prompt.close()
+    }
+
+    private suspend fun generateOpen(
+        request: BackgroundGenerationRequestV1,
+    ): BackgroundGenerationResult {
         if (!isCurrentlyAuthorized(request.frozenModel)) {
-            return BackgroundGenerationResult.Deferred(
+            return settleDurableAttempt(
+                request,
+                BackgroundGenerationResult.Deferred(
                 BackgroundGenerationDeferral.Binding(
                     BackgroundBindingUnavailableReason.BACKGROUND_NOT_AUTHORIZED,
+                ),
                 ),
             )
         }
@@ -304,8 +366,11 @@ class BackgroundGenerationClient(
                 route = request.frozenModel.route,
             )
         ) {
-            is LearningPermitResult.Deferred -> return BackgroundGenerationResult.Deferred(
-                BackgroundGenerationDeferral.Resource(admission.reason),
+            is LearningPermitResult.Deferred -> return settleDurableAttempt(
+                request,
+                BackgroundGenerationResult.Deferred(
+                    BackgroundGenerationDeferral.Resource(admission.reason),
+                ),
             )
 
             is LearningPermitResult.Granted -> admission.permit
@@ -313,7 +378,7 @@ class BackgroundGenerationClient(
 
         val attempt = BackgroundProviderAttemptTracker()
         permit.use {
-            return try {
+            val result = try {
                 withTimeout(request.timeoutMs) {
                     generateWithPermit(request, permit, attempt)
                 }
@@ -325,6 +390,7 @@ class BackgroundGenerationClient(
                     attempt.current(),
                 )
             } catch (cancelled: CancellationException) {
+                settleCancellationBestEffort(request, attempt.current())
                 throw cancelled
             } catch (_: BackgroundOutputByteLimitException) {
                 BackgroundGenerationResult.Failure(
@@ -346,6 +412,63 @@ class BackgroundGenerationClient(
                     BackgroundGenerationFailureReason.PROVIDER_FAILURE,
                     attempt.current(),
                 )
+            }
+            return settleDurableAttempt(request, result)
+        }
+    }
+
+    private suspend fun settleDurableAttempt(
+        request: BackgroundGenerationRequestV1,
+        result: BackgroundGenerationResult,
+    ): BackgroundGenerationResult {
+        val authority = request.providerAttemptAuthority ?: return result
+        return when (result.attemptState()) {
+            BackgroundProviderAttemptState.NOT_DISPATCHED -> {
+                val released = runCatching { authority.releaseUndispatched() }.getOrDefault(false)
+                if (released) result else BackgroundGenerationResult.Failure(
+                    BackgroundGenerationFailureReason.PROVIDER_FAILURE,
+                    BackgroundProviderAttemptState.NOT_DISPATCHED,
+                )
+            }
+
+            BackgroundProviderAttemptState.DISPATCH_STARTED,
+            BackgroundProviderAttemptState.TERMINAL_OBSERVED,
+            -> {
+                val terminal = runCatching {
+                    authority.markTerminal(
+                        outcome = result.toDurableTerminalOutcome(),
+                        usage = (result as? BackgroundGenerationResult.Success)
+                            ?.usage
+                            .let(BackgroundProviderUsage::from),
+                    )
+                }.getOrDefault(false)
+                if (!terminal) {
+                    BackgroundGenerationResult.Failure(
+                        BackgroundGenerationFailureReason.PROVIDER_FAILURE,
+                        BackgroundProviderAttemptState.DISPATCH_STARTED,
+                    )
+                } else {
+                    result.withAttemptState(BackgroundProviderAttemptState.TERMINAL_OBSERVED)
+                }
+            }
+        }
+    }
+
+    private suspend fun settleCancellationBestEffort(
+        request: BackgroundGenerationRequestV1,
+        state: BackgroundProviderAttemptState,
+    ) {
+        val authority = request.providerAttemptAuthority ?: return
+        withContext(NonCancellable) {
+            runCatching {
+                if (state == BackgroundProviderAttemptState.NOT_DISPATCHED) {
+                    authority.releaseUndispatched()
+                } else {
+                    authority.markTerminal(
+                        BackgroundProviderTerminalOutcome.CANCELLED,
+                        BackgroundProviderUsage.UNKNOWN,
+                    )
+                }
             }
         }
     }
@@ -417,9 +540,10 @@ class BackgroundGenerationClient(
             trustedCapabilityTokens = trustedWindow,
             advertisedTokens = boundModel.contextLength,
         )
+        val (systemText, payloadText) = request.prompt.providerTexts()
         val providerMessages = listOf(
-            UIMessage.system(request.prompt.systemText),
-            UIMessage.user(request.prompt.payloadText),
+            UIMessage.system(systemText),
+            UIMessage.user(payloadText),
         )
         val gated = when (
             val result = contextGate.enforce(
@@ -456,6 +580,26 @@ class BackgroundGenerationClient(
             omitReasoningConfigurationWhenOff = true,
             freshConnection = false,
             providerCacheIdentity = null,
+            stableProviderIdempotencyKey = request.providerAttemptAuthority
+                ?.stableProviderIdempotencyKey,
+            remoteBackgroundDispatchContext = if (
+                request.frozenModel.providerKind == LearningProviderKind.REMOTE &&
+                request.inputIdentitySha256 != null &&
+                request.providerAttemptAuthority != null
+            ) {
+                RemoteBackgroundDispatchContext(
+                    providerIdentitySha256 = request.frozenModel.providerIdentityDigest,
+                    modelIdentitySha256 = request.frozenModel.modelIdentityDigest,
+                    configurationIdentitySha256 = request.frozenModel.configurationDigest,
+                    templateVersion = request.templateVersion,
+                    inputIdentitySha256 = request.inputIdentitySha256,
+                    providerRequestKey =
+                        request.providerAttemptAuthority.stableProviderIdempotencyKey,
+                    maxOutputTokens = gated.effectiveMaxOutputTokens,
+                )
+            } else {
+                null
+            },
             customHeaders = emptyList(),
             customBody = emptyList(),
         )
@@ -485,6 +629,7 @@ class BackgroundGenerationClient(
                     params = params,
                     maxOutputUtf8Bytes = request.maxOutputUtf8Bytes,
                     attempt = attempt,
+                    durableAttempt = request.providerAttemptAuthority,
                 )
             }
         ) {
@@ -527,12 +672,37 @@ private suspend fun collectProviderStream(
     params: TextGenerationParams,
     maxOutputUtf8Bytes: Int,
     attempt: BackgroundProviderAttemptTracker,
+    durableAttempt: BackgroundProviderAttemptAuthority?,
 ): BackgroundProviderCompletion {
     var accumulated = listOf(UIMessage.assistant(""))
     var usage: TokenUsage? = null
     val terminalTracker = GenerationTerminalTracker()
-    attempt.markDispatchStarted()
-    execution.streamText(messages, params).collect { chunk ->
+    val stream = if (execution is AttestedBackgroundGenerationExecution) {
+        execution.streamText(
+            messages = messages,
+            params = params,
+            onDispatchStarted = BackgroundProviderDispatchCallback { observed ->
+                val observedDigest = observed.opaqueDigestSha256()
+                if (
+                    durableAttempt != null &&
+                    (
+                        observedDigest != durableAttempt.expectedDispatchAttestationSha256 ||
+                            !durableAttempt.markDispatchStarted(observedDigest)
+                    )
+                ) {
+                    throw BackgroundDispatchAuthorityRejectedException()
+                }
+                attempt.markDispatchStarted()
+            },
+        )
+    } else {
+        // A durable attempt requires a provider-owned final-attestation callback. Stamping the
+        // ledger before a generic Flow is collected would misclassify prepare failures as sends.
+        if (durableAttempt != null) throw BackgroundDispatchAuthorityRejectedException()
+        attempt.markDispatchStarted()
+        execution.streamText(messages, params)
+    }
+    stream.collect { chunk ->
         terminalTracker.observe(chunk)
         if (chunk.usage != null) usage = chunk.usage
         accumulated = accumulated.handleMessageChunk(chunk, params.model)
@@ -607,6 +777,36 @@ private fun BackgroundProviderCompletion.toPublicResult(
         providerAttemptState,
     )
 }
+
+private fun BackgroundGenerationResult.attemptState(): BackgroundProviderAttemptState = when (this) {
+    is BackgroundGenerationResult.Success -> BackgroundProviderAttemptState.TERMINAL_OBSERVED
+    is BackgroundGenerationResult.Deferred -> providerAttemptState
+    is BackgroundGenerationResult.Failure -> providerAttemptState
+}
+
+private fun BackgroundGenerationResult.withAttemptState(
+    state: BackgroundProviderAttemptState,
+): BackgroundGenerationResult = when (this) {
+    is BackgroundGenerationResult.Success -> this
+    is BackgroundGenerationResult.Deferred -> copy(providerAttemptState = state)
+    is BackgroundGenerationResult.Failure -> copy(providerAttemptState = state)
+}
+
+private fun BackgroundGenerationResult.toDurableTerminalOutcome(): BackgroundProviderTerminalOutcome =
+    when (this) {
+        is BackgroundGenerationResult.Success -> BackgroundProviderTerminalOutcome.SUCCESS
+        is BackgroundGenerationResult.Deferred -> when (reason) {
+            is BackgroundGenerationDeferral.Foreground -> BackgroundProviderTerminalOutcome.CANCELLED
+            else -> BackgroundProviderTerminalOutcome.DEFERRED
+        }
+        is BackgroundGenerationResult.Failure -> when (reason) {
+            BackgroundGenerationFailureReason.PROVIDER_CANCELLED ->
+                BackgroundProviderTerminalOutcome.CANCELLED
+            BackgroundGenerationFailureReason.PROVIDER_TIMEOUT ->
+                BackgroundProviderTerminalOutcome.TIMED_OUT
+            else -> BackgroundProviderTerminalOutcome.FAILED
+        }
+    }
 
 private sealed interface BackgroundProviderRace<out T> {
     data class Completed<T>(val value: T) : BackgroundProviderRace<T>
@@ -685,3 +885,4 @@ private fun String.isLowerSha256(): Boolean =
 private class BackgroundOutputByteLimitException : IllegalStateException()
 private class BackgroundToolsNotAllowedException : IllegalStateException()
 private class BackgroundUnsupportedOutputException : IllegalStateException()
+private class BackgroundDispatchAuthorityRejectedException : IllegalStateException()

@@ -1,7 +1,5 @@
 package me.rerere.rikkahub.learning.policy
 
-import me.rerere.rikkahub.learning.model.LearningCanonicalId
-
 enum class PolicyCandidateValidationFailure {
     EVIDENCE_OUTSIDE_ALLOWLIST,
     EVIDENCE_SCOPE_MISMATCH,
@@ -12,6 +10,7 @@ enum class PolicyCandidateValidationFailure {
     POSITIVE_CANDIDATE_WITHOUT_AUTHORITATIVE_SUCCESS,
     TOOL_SCHEMA_OUTSIDE_ALLOWLIST,
     IDENTITY_MISMATCH,
+    APPLICABILITY_MISMATCH,
     UNSAFE_PERMISSION_LANGUAGE,
 }
 
@@ -23,6 +22,7 @@ sealed interface PolicyCandidateValidationResult {
 data class PolicyCandidateValidationContext(
     val allowedEvidenceById: Map<String, PolicyEvidenceHandle>,
     val allowedToolSchemaFingerprints: Set<String>,
+    val expectedApplicability: PolicyCandidateApplicabilityIdentity? = null,
     val minimumDistinctEpisodes: Int = 2,
 ) {
     init {
@@ -66,6 +66,16 @@ object PolicyCandidateValidator {
         if (draft.applicableToolSchemas.any { it !in context.allowedToolSchemaFingerprints }) {
             return rejected(PolicyCandidateValidationFailure.TOOL_SCHEMA_OUTSIDE_ALLOWLIST)
         }
+        if (draft.applicableModelIdentity != draft.modelIdentity ||
+            draft.applicableProviderIdentity != draft.producerIdentity ||
+            draft.applicableTemplateIdentity !=
+            policyApplicableTemplateIdentity(draft.promptVersion) ||
+            context.expectedApplicability?.copy(
+                toolSchemaFingerprints = draft.applicableToolSchemas,
+            )?.let { it != draft.applicabilityIdentity } == true
+        ) {
+            return rejected(PolicyCandidateValidationFailure.APPLICABILITY_MISMATCH)
+        }
         if (
             draft.type in setOf(PolicyCandidateType.AVOID, PolicyCandidateType.FAILURE_MODE) &&
             canonicalEvidence.none {
@@ -95,18 +105,23 @@ object PolicyCandidateValidator {
             modelIdentity = draft.modelIdentity,
             promptVersion = draft.promptVersion,
             schemaVersion = draft.schemaVersion,
+            applicability = draft.applicabilityIdentity,
         )
-        val expectedArtifactHash = LearningCanonicalId.digest(
-            domainVersion = "policy-artifact-v1",
-            fields = listOf(
-                draft.type.name,
-                draft.trigger.value,
-                draft.procedure.value,
-                draft.verification.value,
-                draft.boundary.value,
-                draft.failureMode.value,
-                *draft.applicableToolSchemas.sorted().toTypedArray(),
-            ),
+        val expectedArtifactHash = policyArtifactSha256(
+            type = draft.type,
+            trigger = draft.trigger.value,
+            procedure = draft.procedure.value,
+            verification = draft.verification.value,
+            boundary = draft.boundary.value,
+            failureMode = draft.failureMode.value,
+            applicableToolSchemas = draft.applicableToolSchemas,
+            applicableModelIdentity = draft.applicableModelIdentity,
+            applicableProviderIdentity = draft.applicableProviderIdentity,
+            applicableTemplateIdentity = draft.applicableTemplateIdentity,
+            applicableConfigurationIdentity = draft.applicableConfigurationIdentity,
+            applicableConfigurationGeneration = draft.applicableConfigurationGeneration,
+            applicableCapabilityDigest = draft.applicableCapabilityDigest,
+            applicableAuthorityDigest = draft.applicableAuthorityDigest,
         )
         if (
             draft.inputSetHash != inputHash ||

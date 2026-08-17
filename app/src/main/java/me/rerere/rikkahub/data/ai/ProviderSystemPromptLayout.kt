@@ -67,8 +67,12 @@ internal class ProviderSystemPromptLayout private constructor(
             volatileSystem: String,
             conversationMessages: List<UIMessage>,
             useAnchoredVolatileContext: Boolean,
+            /** Keep baseline/learned stable bytes equal when only the learned branch has data. */
+            reserveRuntimeContextEnvelope: Boolean = false,
         ): ProviderSystemPromptLayout {
-            val providerStableSystem = if (volatileSystem.isNotBlank()) {
+            val providerStableSystem = if (
+                volatileSystem.isNotBlank() || reserveRuntimeContextEnvelope
+            ) {
                 listOf(stableSystem, PROVIDER_RUNTIME_CONTEXT_POLICY)
                     .filter(String::isNotBlank)
                     .joinToString("\n\n")

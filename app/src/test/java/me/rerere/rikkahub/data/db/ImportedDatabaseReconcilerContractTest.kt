@@ -2,9 +2,7 @@ package me.rerere.rikkahub.data.db
 
 import java.io.File
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertThrows
-import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
@@ -14,15 +12,19 @@ class ImportedDatabaseReconcilerContractTest {
     val temporaryFolder = TemporaryFolder()
 
     @Test
-    fun `reconciler remains pinned to unpublished Room version 46`() {
-        assertEquals(46, ImportedDatabaseReconciler.EXPECTED_VERSION)
-        assertTrue(
-            "final P1 identity must be copied from Room's exported v46 schema",
-            ImportedDatabaseReconciler.EXPECTED_IDENTITY_HASH.matches(Regex("[0-9a-f]{32}")),
-        )
-        assertNotEquals(
-            "102b6a6fc51154abdac792d133d461a3",
+    fun `reconciler pins the exported v49 identity and exact v48 predecessor`() {
+        assertEquals(49, ImportedDatabaseReconciler.EXPECTED_VERSION)
+        assertEquals(
+            "967f2a908998f5bac733c1ae71bee5bb",
             ImportedDatabaseReconciler.EXPECTED_IDENTITY_HASH,
+        )
+        assertEquals(
+            "74be67f9e9e32264c091b1d6c4a32b17",
+            ImportedDatabaseReconciler.FINAL_V48_IDENTITY_HASH,
+        )
+        assertEquals(
+            "3208afdfb6ec01eb325a598464e56940",
+            ImportedDatabaseReconciler.FINAL_V47_IDENTITY_HASH,
         )
         assertEquals(
             "102b6a6fc51154abdac792d133d461a3",
@@ -46,9 +48,9 @@ class ImportedDatabaseReconcilerContractTest {
     }
 
     @Test
-    fun `exact P0 v46 receives only the P1 delta`() {
+    fun `exact P0 v46 follows normal 46 to 47 migration`() {
         assertEquals(
-            ImportedDatabaseReconciler.ReconcilePlan.CURRENT_V46_P1_DELTA,
+            ImportedDatabaseReconciler.ReconcilePlan.FULL_COMPATIBILITY,
             ImportedDatabaseReconciler.reconcilePlan(
                 version = 46,
                 identityHash = "102b6a6fc51154abdac792d133d461a3",
@@ -57,9 +59,9 @@ class ImportedDatabaseReconcilerContractTest {
     }
 
     @Test
-    fun `exact pre-learning v46 receives the contiguous P0 plus P1 delta`() {
+    fun `exact pre-learning v46 receives compatibility floor before 46 to 47`() {
         assertEquals(
-            ImportedDatabaseReconciler.ReconcilePlan.CURRENT_V46_P0_P1_DELTA,
+            ImportedDatabaseReconciler.ReconcilePlan.FULL_COMPATIBILITY,
             ImportedDatabaseReconciler.reconcilePlan(
                 version = 46,
                 identityHash = "8ef3ddc71d855013202bb11b0493d6e6",
@@ -69,9 +71,69 @@ class ImportedDatabaseReconcilerContractTest {
 
     @Test
     fun `unknown current schema is refused and never compatibility stamped`() {
+        listOf(46, 47, 48, 49).forEach { version ->
+            listOf(null, "", "unknown", ImportedDatabaseReconciler.EXPECTED_IDENTITY_HASH)
+                .forEach { identity ->
+                    val isExactCurrent = version == ImportedDatabaseReconciler.EXPECTED_VERSION &&
+                        identity == ImportedDatabaseReconciler.EXPECTED_IDENTITY_HASH
+                    if (!isExactCurrent) {
+                        assertEquals(
+                            ImportedDatabaseReconciler.ReconcilePlan.REFUSE_UNKNOWN_CURRENT,
+                            ImportedDatabaseReconciler.reconcilePlan(version, identity),
+                        )
+                    }
+                }
+        }
+    }
+
+    @Test
+    fun `authority UUID contract is canonical lowercase and non nil`() {
         assertEquals(
-            ImportedDatabaseReconciler.ReconcilePlan.REFUSE_UNKNOWN_CURRENT,
-            ImportedDatabaseReconciler.reconcilePlan(version = 46, identityHash = "upstream"),
+            true,
+            ImportedDatabaseReconciler.isCanonicalNonNilDatabaseUuid(
+                "80000000-0000-0000-0000-000000000008",
+            ),
+        )
+        listOf(
+            "00000000-0000-0000-0000-000000000000",
+            "A0000000-0000-0000-0000-000000000008",
+            "80000000000000000000000000000008",
+            "80000000-0000-0000-0000-00000000000z",
+            "",
+        ).forEach { malformed ->
+            assertEquals(
+                false,
+                ImportedDatabaseReconciler.isCanonicalNonNilDatabaseUuid(malformed),
+            )
+        }
+    }
+
+    @Test
+    fun `restore compares every policy grant head field with its current revision`() {
+        assertEquals(
+            setOf(
+                "grant_id",
+                "source_stream_id",
+                "policy_id",
+                "policy_revision",
+                "artifact_sha256",
+                "scope_kind",
+                "scope_id",
+                "consuming_assistant_id",
+                "actor",
+                "state",
+                "state_version",
+                "granted_at_ms",
+                "revoked_at_ms",
+                "reason_code",
+                "created_at_ms",
+                "updated_at_ms",
+            ),
+            ImportedDatabaseReconciler.V48_POLICY_GRANT_HEAD_COLUMNS.toSet(),
+        )
+        assertEquals(
+            ImportedDatabaseReconciler.V48_POLICY_GRANT_HEAD_COLUMNS.size,
+            ImportedDatabaseReconciler.V48_POLICY_GRANT_HEAD_COLUMNS.distinct().size,
         )
     }
 
@@ -96,7 +158,7 @@ class ImportedDatabaseReconcilerContractTest {
             )
         }
         assertEquals(
-            ImportedDatabaseReconciler.ReconcilePlan.SKIP,
+            ImportedDatabaseReconciler.StagedReconcilePlan.ALREADY_CURRENT,
             ImportedDatabaseReconciler.stagedReconcilePlanOrThrow(
                 version = ImportedDatabaseReconciler.EXPECTED_VERSION,
                 identityHash = ImportedDatabaseReconciler.EXPECTED_IDENTITY_HASH,
@@ -106,6 +168,83 @@ class ImportedDatabaseReconcilerContractTest {
             ImportedDatabaseReconciler.stagedReconcilePlanOrThrow(
                 version = ImportedDatabaseReconciler.EXPECTED_VERSION,
                 identityHash = ImportedDatabaseReconciler.PRE_LEARNING_V46_IDENTITY_HASH,
+            )
+        }
+    }
+
+    @Test
+    fun `cold staged restore accepts only exact frozen v46 and v47 identities`() {
+        assertEquals(
+            listOf(46 to 47, 47 to 48, 48 to 49),
+            ImportedDatabaseReconciler.STAGED_COLD_RESTORE_MIGRATIONS.map {
+                it.startVersion to it.endVersion
+            },
+        )
+        assertEquals(
+            ImportedDatabaseReconciler.StagedReconcilePlan.MIGRATE_FINAL_V48,
+            ImportedDatabaseReconciler.stagedReconcilePlanOrThrow(
+                version = 48,
+                identityHash = ImportedDatabaseReconciler.FINAL_V48_IDENTITY_HASH,
+            ),
+        )
+        assertEquals(
+            ImportedDatabaseReconciler.StagedReconcilePlan.MIGRATE_FINAL_V47,
+            ImportedDatabaseReconciler.stagedReconcilePlanOrThrow(
+                version = 47,
+                identityHash = ImportedDatabaseReconciler.FINAL_V47_IDENTITY_HASH,
+            ),
+        )
+        assertEquals(
+            ImportedDatabaseReconciler.StagedReconcilePlan.MIGRATE_FINAL_V46,
+            ImportedDatabaseReconciler.stagedReconcilePlanOrThrow(
+                version = 46,
+                identityHash = ImportedDatabaseReconciler.FINAL_V46_IDENTITY_HASH,
+            ),
+        )
+        assertEquals(
+            ImportedDatabaseReconciler.StagedReconcilePlan.MIGRATE_PRE_P1_V46,
+            ImportedDatabaseReconciler.stagedReconcilePlanOrThrow(
+                version = 46,
+                identityHash = ImportedDatabaseReconciler.PRE_P1_V46_IDENTITY_HASH,
+            ),
+        )
+        assertEquals(
+            ImportedDatabaseReconciler.StagedReconcilePlan.MIGRATE_PRE_LEARNING_V46,
+            ImportedDatabaseReconciler.stagedReconcilePlanOrThrow(
+                version = 46,
+                identityHash = ImportedDatabaseReconciler.PRE_LEARNING_V46_IDENTITY_HASH,
+            ),
+        )
+        listOf(null, "unknown-v46", ImportedDatabaseReconciler.EXPECTED_IDENTITY_HASH).forEach { identity ->
+            assertThrows(IllegalStateException::class.java) {
+                ImportedDatabaseReconciler.stagedReconcilePlanOrThrow(46, identity)
+            }
+        }
+    }
+
+    @Test
+    fun `legacy v46 descriptor cannot classify unknown or v47 identity`() {
+        assertEquals(
+            ImportedDatabaseReconciler.LegacyV46AuthorityPlan.READ_EXISTING_STREAM,
+            ImportedDatabaseReconciler.legacyV46AuthorityPlanOrThrow(
+                46,
+                ImportedDatabaseReconciler.FINAL_V46_IDENTITY_HASH,
+            ),
+        )
+        assertEquals(
+            ImportedDatabaseReconciler.LegacyV46AuthorityPlan.CREATE_STREAM,
+            ImportedDatabaseReconciler.legacyV46AuthorityPlanOrThrow(
+                46,
+                ImportedDatabaseReconciler.PRE_LEARNING_V46_IDENTITY_HASH,
+            ),
+        )
+        assertThrows(IllegalStateException::class.java) {
+            ImportedDatabaseReconciler.legacyV46AuthorityPlanOrThrow(46, "unknown-v46")
+        }
+        assertThrows(IllegalStateException::class.java) {
+            ImportedDatabaseReconciler.legacyV46AuthorityPlanOrThrow(
+                47,
+                ImportedDatabaseReconciler.EXPECTED_IDENTITY_HASH,
             )
         }
     }
@@ -149,12 +288,45 @@ class ImportedDatabaseReconcilerContractTest {
     }
 
     @Test
-    fun `final v46 identity skips raw framework reconciliation`() {
+    fun `final v49 identity skips raw framework reconciliation`() {
         assertEquals(
             ImportedDatabaseReconciler.ReconcilePlan.SKIP,
             ImportedDatabaseReconciler.reconcilePlan(
-                version = 46,
+                version = 49,
                 identityHash = ImportedDatabaseReconciler.EXPECTED_IDENTITY_HASH,
+            ),
+        )
+    }
+
+    @Test
+    fun `exact final v48 identity follows the raw 48 to 49 migration`() {
+        assertEquals(
+            ImportedDatabaseReconciler.ReconcilePlan.FULL_COMPATIBILITY,
+            ImportedDatabaseReconciler.reconcilePlan(
+                version = 48,
+                identityHash = ImportedDatabaseReconciler.FINAL_V48_IDENTITY_HASH,
+            ),
+        )
+    }
+
+    @Test
+    fun `exact final v47 identity follows the raw 47 to 49 migration`() {
+        assertEquals(
+            ImportedDatabaseReconciler.ReconcilePlan.FULL_COMPATIBILITY,
+            ImportedDatabaseReconciler.reconcilePlan(
+                version = 47,
+                identityHash = ImportedDatabaseReconciler.FINAL_V47_IDENTITY_HASH,
+            ),
+        )
+    }
+
+    @Test
+    fun `final v46 identity remains an older migration input`() {
+        assertEquals(
+            ImportedDatabaseReconciler.ReconcilePlan.FULL_COMPATIBILITY,
+            ImportedDatabaseReconciler.reconcilePlan(
+                version = 46,
+                identityHash = ImportedDatabaseReconciler.FINAL_V46_IDENTITY_HASH,
             ),
         )
     }

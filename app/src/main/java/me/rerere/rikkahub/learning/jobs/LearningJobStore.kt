@@ -36,7 +36,7 @@ internal interface LearningJobStore {
         clock: LearningJobClock,
         retryDelayMs: Long,
         errorCode: LearningJobFailureCode,
-    )
+    ): LearningJobAttemptFailureResult
 
     suspend fun failPermanently(
         lease: LearningJobLease,

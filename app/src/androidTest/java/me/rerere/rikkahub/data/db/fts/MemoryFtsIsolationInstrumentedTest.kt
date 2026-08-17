@@ -30,15 +30,17 @@ import kotlin.uuid.Uuid
 /** Emulator/disposable-device only. Never run this instrumentation test on the primary phone. */
 @RunWith(AndroidJUnit4::class)
 class MemoryFtsIsolationInstrumentedTest {
+    private lateinit var context: Context
     private lateinit var database: AppDatabase
     private lateinit var memoryFts: MemoryFtsManager
 
     @Before
     fun setUp() {
-        val context = ApplicationProvider.getApplicationContext<Context>()
-        database = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)
-            // Use the production SQLite runtime: framework SQLite does not provide the app's
-            // FTS5 simple tokenizer or jieba_query function on every Android device.
+        context = ApplicationProvider.getApplicationContext()
+        context.deleteDatabase(DATABASE_NAME)
+        database = Room.databaseBuilder(context, AppDatabase::class.java, DATABASE_NAME)
+            // A named database is intentional: the managed-device null-name/in-memory path used
+            // framework SQLite, which cannot load the app's simple-tokenizer extension.
             .openHelperFactory(createAppSQLiteOpenHelperFactory(context))
             .addCallback(object : RoomDatabase.Callback() {
                 override fun onOpen(db: SupportSQLiteDatabase) {
@@ -63,6 +65,7 @@ class MemoryFtsIsolationInstrumentedTest {
     @After
     fun tearDown() {
         database.close()
+        context.deleteDatabase(DATABASE_NAME)
     }
 
     @Test
@@ -223,6 +226,7 @@ class MemoryFtsIsolationInstrumentedTest {
         mapTo(mutableSetOf(), MemorySearchCandidate::id)
 
     private companion object {
+        const val DATABASE_NAME = "memory-fts-isolation-test.db"
         const val ASSISTANT_A = "00000000-0000-0000-0000-00000000000a"
         const val ASSISTANT_B = "00000000-0000-0000-0000-00000000000b"
         const val GLOBAL_SCOPE = "__global__"

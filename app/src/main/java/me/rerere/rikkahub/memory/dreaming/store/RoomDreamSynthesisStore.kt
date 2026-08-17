@@ -30,6 +30,7 @@ import me.rerere.rikkahub.memory.dreaming.input.DreamInputBudget
 import me.rerere.rikkahub.memory.dreaming.input.DreamInputBuildRequest
 import me.rerere.rikkahub.memory.dreaming.input.DreamInputCandidate
 import me.rerere.rikkahub.memory.dreaming.input.DreamInputCandidateOrigin
+import me.rerere.rikkahub.memory.dreaming.model.AuthorityChangeReason
 import me.rerere.rikkahub.memory.dreaming.model.AuthorityEntityKind
 import me.rerere.rikkahub.memory.dreaming.model.DreamAuthorityFingerprintV1
 import me.rerere.rikkahub.memory.dreaming.model.DreamAuthorityMemory
@@ -292,6 +293,46 @@ class RoomDreamSynthesisStore(
         }
     }
 
+    override suspend fun markProviderDispatch(
+        request: DreamProviderDispatchRequest,
+    ): DreamSynthesisStoreResult {
+        val fence = request.fence
+        if (!generationEnabled(fence.scopeId)) {
+            return DreamSynthesisStoreResult.Rejected(DreamSynthesisStoreRejection.FEATURE_DISABLED)
+        }
+        return database.withTransaction {
+            val marked = synthesisDao.markRunProviderDispatch(
+                runId = fence.runId,
+                scopeId = fence.scopeId.value,
+                leaseOwner = fence.leaseOwner,
+                promptContractVersion = request.promptContractVersion,
+                validatorVersion = request.validatorVersion,
+                inputMemoryCount = request.inputMemoryCount,
+                inputManifestHash = request.inputManifestHash.value,
+                nowMs = request.markedAtEpochMs,
+            )
+            if (marked == 1) {
+                DreamSynthesisStoreResult.Accepted
+            } else {
+                when (val owned = ownedContext(fence, request.markedAtEpochMs)) {
+                    is OwnedContextResult.Rejected -> DreamSynthesisStoreResult.Rejected(owned.storeReason)
+                    is OwnedContextResult.Ready -> {
+                        val run = owned.run
+                        if (run.promptContractVersion == request.promptContractVersion &&
+                            run.validatorVersion == request.validatorVersion &&
+                            run.inputMemoryCount == request.inputMemoryCount &&
+                            run.inputManifestHash == request.inputManifestHash.value
+                        ) {
+                            DreamSynthesisStoreResult.Accepted
+                        } else {
+                            DreamSynthesisStoreResult.Rejected(DreamSynthesisStoreRejection.STORE_CORRUPTION)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     override suspend fun commit(request: DreamSynthesisCommitRequest): DreamSynthesisCommitResult {
         if (!generationEnabled(request.fence.scopeId)) {
             return DreamSynthesisCommitResult.Rejected(DreamSynthesisCommitRejection.LEASE_MISSING)
@@ -427,21 +468,75 @@ class RoomDreamSynthesisStore(
         ) {
             abort(classifyCommitCas(fence, request.committedAtEpochMs))
         }
-        val finished = observerStore.finish(
-            FinishDreamRunRequest(
-                runId = fence.runId,
-                scopeId = fence.scopeId,
-                leaseOwner = fence.leaseOwner,
-                outcome = DreamRunFinishOutcome.SUCCEEDED,
-                nowMs = request.committedAtEpochMs,
-            ),
-        )
-        if (finished !is FinishDreamRunResult.Finished ||
-            finished.run.status != DreamRunStatus.SUCCEEDED
+        finishCommittedSynthesisRun(fence, request.committedAtEpochMs)
+        return DreamSynthesisCommitResult.Committed(snapshotId, nextDreamRevision)
+    }
+
+    /**
+     * A first FULL rebuild validates the bounded authority tables rather than an old journal that
+     * may legitimately be absent after upgrade. Only this post-snapshot path may close such a run
+     * without replaying that journal; every write remains inside the enclosing commit transaction.
+     */
+    private suspend fun finishCommittedSynthesisRun(fence: DreamSynthesisFence, nowMs: Long) {
+        if (fence.mode != DreamSynthesisMode.FULL) {
+            val finished = observerStore.finish(
+                FinishDreamRunRequest(
+                    runId = fence.runId,
+                    scopeId = fence.scopeId,
+                    leaseOwner = fence.leaseOwner,
+                    outcome = DreamRunFinishOutcome.SUCCEEDED,
+                    nowMs = nowMs,
+                ),
+            )
+            if (finished !is FinishDreamRunResult.Finished ||
+                finished.run.status != DreamRunStatus.SUCCEEDED
+            ) {
+                abort(DreamSynthesisCommitRejection.STORE_CORRUPTION)
+            }
+            return
+        }
+
+        val run = dreamDao.getRunById(fence.runId)
+            ?: abort(DreamSynthesisCommitRejection.STORE_CORRUPTION)
+        if (run.scopeId != fence.scopeId.value || run.mode != DreamRunMode.FULL.name ||
+            run.baseMemoryEpoch != fence.baseMemoryEpoch ||
+            run.baseDreamRevision != fence.baseDreamRevision ||
+            run.checkpointEpoch != fence.baseMemoryEpoch
         ) {
             abort(DreamSynthesisCommitRejection.STORE_CORRUPTION)
         }
-        return DreamSynthesisCommitResult.Committed(snapshotId, nextDreamRevision)
+        if (dreamDao.finishRunMirror(
+                runId = fence.runId,
+                scopeId = fence.scopeId.value,
+                leaseOwner = fence.leaseOwner,
+                terminalStatus = DreamRunStatus.SUCCEEDED.name,
+                failureCode = null,
+                nowMs = nowMs,
+            ) != 1
+        ) {
+            abort(DreamSynthesisCommitRejection.STORE_CORRUPTION)
+        }
+        if (dreamDao.advanceObserverCheckpoint(
+                scopeId = fence.scopeId.value,
+                runId = fence.runId,
+                expectedMemoryEpoch = fence.baseMemoryEpoch,
+                expectedCheckpointEpoch = run.baseObserverCheckpointEpoch,
+                targetCheckpointEpoch = fence.baseMemoryEpoch,
+                reasonCode = AuthorityChangeReason.OBSERVER_CHECKPOINT_ADVANCED.name,
+                nowMs = nowMs,
+            ) != 1
+        ) {
+            abort(DreamSynthesisCommitRejection.STORE_CORRUPTION)
+        }
+        if (dreamDao.releaseScopeLease(
+                scopeId = fence.scopeId.value,
+                runId = fence.runId,
+                reasonCode = AuthorityChangeReason.OBSERVER_CHECKPOINT_ADVANCED.name,
+                nowMs = nowMs,
+            ) != 1
+        ) {
+            abort(DreamSynthesisCommitRejection.STORE_CORRUPTION)
+        }
     }
 
     private suspend fun touchUnchangedActiveClaim(
@@ -756,33 +851,36 @@ class RoomDreamSynthesisStore(
         return null
     }
 
-    private fun MemoryEntity.toDreamAuthority(scopeId: DreamScopeId): DreamAuthorityMemory? = try {
-        DreamAuthorityMemory(
-            scopeId = scopeId,
-            memoryId = id.toString(),
-            revision = revision.toLong(),
-            title = title,
-            content = content,
-            kind = enumValueOf<MemoryKind>(memoryKind),
-            attribution = enumValueOf<MemoryAttribution>(attribution),
-            truthStatus = enumValueOf<MemoryTruthStatus>(truthStatus),
-            lifecycleStatus = enumValueOf<MemoryLifecycleStatus>(lifecycleStatus),
-            approvalSource = enumValueOf<MemoryApprovalSource>(approvalSource),
-            tags = json.decodeStringList(tagsJson),
-            createdAtEpochMs = createdAtMs,
-            updatedAtEpochMs = updatedAtMs,
-            occurredAtEpochMs = occurredAtMs,
-            expiresAtEpochMs = expiresAtMs,
-            originAssistantId = originAssistantId,
-            participants = json.decodeStringList(participantsJson),
-            outcome = outcome,
-            sources = json.decodeSourceIdentities(sourceIdentitiesJson).map { it.toAuthoritySource() },
-            // Hard-deleted authority has no row. Non-active rows retain their explicit lifecycle
-            // and are rejected by the active-authority projection before reaching this mapping.
-            tombstoned = false,
-        )
-    } catch (_: Exception) {
-        null
+    private fun MemoryEntity.toDreamAuthority(scopeId: DreamScopeId): DreamAuthorityMemory? {
+        val projectedUpdatedAtMs = dreamUpdatedAtEpochMsOrNull() ?: return null
+        return try {
+            DreamAuthorityMemory(
+                scopeId = scopeId,
+                memoryId = id.toString(),
+                revision = revision.toLong(),
+                title = title,
+                content = content,
+                kind = enumValueOf<MemoryKind>(memoryKind),
+                attribution = enumValueOf<MemoryAttribution>(attribution),
+                truthStatus = enumValueOf<MemoryTruthStatus>(truthStatus),
+                lifecycleStatus = enumValueOf<MemoryLifecycleStatus>(lifecycleStatus),
+                approvalSource = enumValueOf<MemoryApprovalSource>(approvalSource),
+                tags = json.decodeStringList(tagsJson),
+                createdAtEpochMs = createdAtMs,
+                updatedAtEpochMs = projectedUpdatedAtMs,
+                occurredAtEpochMs = occurredAtMs,
+                expiresAtEpochMs = expiresAtMs,
+                originAssistantId = originAssistantId,
+                participants = json.decodeStringList(participantsJson),
+                outcome = outcome,
+                sources = json.decodeSourceIdentities(sourceIdentitiesJson).map { it.toAuthoritySource() },
+                // Hard-deleted authority has no row. Non-active rows retain their explicit lifecycle
+                // and are rejected by the active-authority projection before reaching this mapping.
+                tombstoned = false,
+            )
+        } catch (_: Exception) {
+            null
+        }
     }
 
     private fun DreamAuthorityMemory.toPin() = DreamAuthorityPin(
@@ -923,6 +1021,19 @@ class RoomDreamSynthesisStore(
         return flags.allowsSynthesisGeneration()
     }
 
+}
+
+/**
+ * Pre-V2 legacy rows used `0` as the persisted `updated_at_ms` sentinel even after a real
+ * `created_at_ms` had been assigned. Preserve the authoritative row unchanged and normalize only
+ * this exact historical shape at the Dream projection boundary. Modern timestamp inversions still
+ * fail closed instead of being silently repaired.
+ */
+internal fun MemoryEntity.dreamUpdatedAtEpochMsOrNull(): Long? = when {
+    createdAtMs < 0L -> null
+    updatedAtMs >= createdAtMs -> updatedAtMs
+    sourceType == "LEGACY" && updatedAtMs == 0L && createdAtMs > 0L -> createdAtMs
+    else -> null
 }
 
 private sealed interface OwnedContextResult {

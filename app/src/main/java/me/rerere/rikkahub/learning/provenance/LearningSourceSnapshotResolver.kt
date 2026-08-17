@@ -2,6 +2,8 @@ package me.rerere.rikkahub.learning.provenance
 
 import me.rerere.rikkahub.learning.model.LearningScope
 import me.rerere.rikkahub.learning.model.LearningSourceRef
+import me.rerere.rikkahub.learning.privacy.LearningEphemeralScopeRegistry
+import me.rerere.rikkahub.learning.privacy.LearningEphemeralSnapshotHandle
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
 
@@ -80,15 +82,18 @@ class LearningEphemeralSourceSnapshot internal constructor(
     val alias: String,
     text: CharArray,
     internal val expiresAtMs: Long,
-) : AutoCloseable {
+    ephemeralRegistry: LearningEphemeralScopeRegistry? = null,
+) : AutoCloseable, LearningEphemeralSnapshotHandle {
     private val closed = AtomicBoolean(false)
     /** Ownership is transferred to this object; the resolver must not retain [text]. */
     private val characters = text
+    private var registryLease: AutoCloseable? = null
 
     init {
         require(alias.matches(Regex("E[1-9][0-9]{0,2}"))) { "Invalid evidence alias" }
         require(characters.size <= MAX_SOURCE_SNAPSHOT_CHARS) { "Source snapshot is too large" }
         require(expiresAtMs >= 0L) { "Negative source snapshot expiry" }
+        registryLease = ephemeralRegistry?.register(this)
     }
 
     internal val characterCount: Int
@@ -107,7 +112,17 @@ class LearningEphemeralSourceSnapshot internal constructor(
     }
 
     override fun close() {
-        if (closed.compareAndSet(false, true)) characters.fill('\u0000')
+        if (closed.compareAndSet(false, true)) {
+            characters.fill('\u0000')
+            registryLease?.close()
+            registryLease = null
+        }
+    }
+
+    /** Exact-scope user erase synchronously clears a live authority snapshot before Room erase. */
+    override fun clearForScope(scope: LearningScope): Boolean {
+        if (source.scope == scope) close()
+        return true
     }
 
     internal fun isClearedForTest(): Boolean = characters.all { it == '\u0000' }

@@ -18,7 +18,10 @@ internal class FakeDreamSynthesisStore(
     var beginOverride: BeginDreamSynthesisResult? = null
     var readRejection: DreamSynthesisStoreRejection? = null
     var heartbeatResult: DreamSynthesisStoreResult = DreamSynthesisStoreResult.Accepted
+    var failResult: DreamSynthesisStoreResult = DreamSynthesisStoreResult.Accepted
+    var dispatchResult: DreamSynthesisStoreResult = DreamSynthesisStoreResult.Accepted
     val commits = mutableListOf<DreamSynthesisCommitRequest>()
+    val dispatches = mutableListOf<DreamProviderDispatchRequest>()
     val conflicts = mutableListOf<DreamSynthesisCommitRejection>()
     val failures = mutableListOf<DreamSynthesisFailure>()
     var heartbeatCount: Int = 0
@@ -51,6 +54,13 @@ internal class FakeDreamSynthesisStore(
         }
     }
 
+    override suspend fun markProviderDispatch(
+        request: DreamProviderDispatchRequest,
+    ): DreamSynthesisStoreResult = transaction {
+        dispatches += request
+        dispatchResult
+    }
+
     override suspend fun commit(request: DreamSynthesisCommitRequest): DreamSynthesisCommitResult = transaction {
         commitException?.let { throw it }
         commits += request
@@ -72,7 +82,7 @@ internal class FakeDreamSynthesisStore(
         nowMs: Long,
     ): DreamSynthesisStoreResult = transaction {
         failures += failure
-        DreamSynthesisStoreResult.Accepted
+        failResult
     }
 
     private inline fun <T> transaction(block: () -> T): T {

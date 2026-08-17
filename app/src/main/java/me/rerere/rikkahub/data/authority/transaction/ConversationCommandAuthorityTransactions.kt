@@ -23,6 +23,47 @@ fun interface ConversationGraphAuthorityMutation {
     suspend fun persistInCurrentTransaction(): ConversationSourceSnapshot
 }
 
+data class TransientConversationFinalizationAuthorityCommit(
+    val sources: List<ConversationSourceAuthorityCommit>,
+) {
+    init {
+        require(sources.isNotEmpty()) {
+            "Transient Conversation finalization requires at least its default source scope"
+        }
+    }
+
+    override fun toString(): String =
+        "TransientConversationFinalizationAuthorityCommit(scopes=${sources.size}, " +
+            "mutated=${sources.count(ConversationSourceAuthorityCommit::didMutate)}, " +
+            "outbox=${sources.any(ConversationSourceAuthorityCommit::insertedOutbox)})"
+}
+
+/**
+ * Fallback finalizer for a regeneration that predates durable command authority.
+ *
+ * The graph mutation owns any legacy source invalidation that must precede persistence and returns
+ * the exact content-free snapshot of that persisted graph. Every known source-authority scope and
+ * every resulting invalidation outbox row are then reconciled before the one outer transaction can
+ * commit. Dispatch is deliberately coalesced and happens only after that transaction succeeds.
+ */
+class TransientConversationFinalizationAuthorityCoordinator(
+    private val transactions: AuthorityTransactionRunner,
+    private val sources: ConversationSourceAuthorityWriter,
+) {
+    suspend fun finish(
+        graphMutation: ConversationGraphAuthorityMutation,
+    ): TransientConversationFinalizationAuthorityCommit {
+        val commit = transactions.inTransaction {
+            val conversation = graphMutation.persistInCurrentTransaction()
+            TransientConversationFinalizationAuthorityCommit(
+                sources = sources.reconcileAllKnownScopesInCurrentTransaction(conversation),
+            )
+        }
+        sources.dispatchPostCommit(commit.sources)
+        return commit
+    }
+}
+
 /** Captures the full durable command row while exposing only its authority receipt here. */
 fun interface CommandAdmissionAuthorityMutation {
     suspend fun admitInCurrentTransaction(

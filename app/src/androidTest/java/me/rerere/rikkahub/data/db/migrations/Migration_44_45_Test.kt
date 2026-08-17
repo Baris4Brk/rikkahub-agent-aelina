@@ -31,6 +31,10 @@ class Migration_44_45_Test {
         helper.createDatabase(testDb, 44).close()
 
         val db = helper.runMigrationsAndValidate(testDb, 45, true, MIGRATION_44_45)
+        // MigrationTestHelper's custom SupportSQLite factory does not run Room's normal
+        // open-time foreign-key configuration. Exercise the declared constraints under the
+        // same PRAGMA that Room enables for the production AppDatabase connection.
+        db.execSQL("PRAGMA foreign_keys = ON")
 
         assertEquals(
             setOf("memory_scope_state", "memory_scope_changes", "dream_runs"),

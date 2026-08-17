@@ -17,17 +17,24 @@ internal class RoomPolicyShadowRetriever(
     private val database: LearningDatabase,
     private val retriever: PolicyRetriever,
     private val fts: PolicyFtsManager = PolicyFtsManager(database),
+    private val clock: () -> Long = System::currentTimeMillis,
 ) {
     suspend fun retrieve(request: PolicyRetrievalRequest): PolicyRetrievalResult {
+        val frozenNowMs = clock().coerceAtLeast(0L)
+        val freshAfterMs = (frozenNowMs -
+            me.rerere.rikkahub.learning.storage.LearningRetentionPolicyV1.DORMANT_POLICY_TTL_MS)
+            .coerceAtLeast(0L)
         val exact = database.policyDao().listShadowCandidates(
             scopeKind = request.scope.kind.name,
             scopeId = request.scope.storageId,
             taskSignature = request.taskSignature.value,
+            freshAfterMs = freshAfterMs,
             limit = MAX_POLICY_EXACT_DB_CANDIDATES,
         )
         val lexical = fts.searchEligible(
             scope = request.scope,
             query = request.query,
+            freshAfterMs = freshAfterMs,
             limit = MAX_POLICY_FTS_DB_CANDIDATES,
         )
         val ordered = LinkedHashMap<String, LearningPolicyEntity>(exact.size + lexical.size)
@@ -66,6 +73,8 @@ internal fun toShadowCandidate(entity: LearningPolicyEntity): PolicyShadowCandid
         }.take(8_192),
         estimatedTokens = estimatePolicyTokens(entity),
         updatedAtMs = entity.updatedAtMs,
+        stateVersion = entity.stateVersion,
+        contentRevision = entity.contentRevision,
     )
 
 private fun estimatePolicyTokens(entity: LearningPolicyEntity): Int {

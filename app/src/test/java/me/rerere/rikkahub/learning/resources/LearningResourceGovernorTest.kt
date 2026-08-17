@@ -109,6 +109,53 @@ class LearningResourceGovernorTest {
     }
 
     @Test
+    fun maintenanceHasOneIndependentLaneAndDoesNotRequireProviderConsent() = runBlocking {
+        val registry = LearningForegroundRegistry()
+        val conditions = MutableConditions(
+            allowedConditions().copy(userAllowsBackgroundWork = false),
+        )
+        val governor = LearningResourceGovernor(
+            foregroundRegistry = registry,
+            conditionsSource = conditions,
+            admissionWaitMs = 10,
+        )
+        val maintenanceRoute = LOCAL_ROUTE.copy(
+            requiresUserBackgroundAuthorization = false,
+        )
+
+        val maintenance = governor.acquire(
+            LearningResourceKind.MAINTENANCE,
+            maintenanceRoute,
+        ) as LearningPermitResult.Granted
+        assertEquals(
+            LearningPermitResult.Deferred(LearningYieldReason.ADMISSION_TIMEOUT),
+            governor.acquire(LearningResourceKind.MAINTENANCE, maintenanceRoute),
+        )
+        // Provider work retains its independent user-consent fence.
+        assertEquals(
+            LearningPermitResult.Deferred(LearningYieldReason.USER_DISABLED),
+            governor.acquire(LearningResourceKind.LANGUAGE_MODEL, LOCAL_ROUTE),
+        )
+        maintenance.permit.close()
+
+        conditions.value = allowedConditions().copy(
+            userAllowsBackgroundWork = false,
+            thermalState = LearningThermalState.SEVERE,
+        )
+        assertEquals(
+            LearningPermitResult.Deferred(LearningYieldReason.THERMAL_PRESSURE),
+            governor.acquire(LearningResourceKind.MAINTENANCE, maintenanceRoute),
+        )
+        conditions.value = allowedConditions().copy(userAllowsBackgroundWork = false)
+        val foreground = registry.enter(LearningForegroundWorkKind.CONVERSATION_EXECUTION)
+        assertEquals(
+            LearningPermitResult.Deferred(LearningYieldReason.FOREGROUND_ACTIVE),
+            governor.acquire(LearningResourceKind.MAINTENANCE, maintenanceRoute),
+        )
+        foreground.close()
+    }
+
+    @Test
     fun conditionsAreRecheckedAfterSemaphoreAcquisitionAndPermitIsReleasedOnRevoke() = runBlocking {
         var firstRead = true
         var current = allowedConditions().copy(userAllowsBackgroundWork = false)
@@ -223,11 +270,21 @@ class LearningResourceGovernorTest {
             providerIdentityDigest = digest,
             modelIdentityDigest = digest,
             configurationDigest = digest,
+            runtimeAttestationDigest = digest,
             userExplicitlyAuthorizedForBackground = true,
         )
         assertEquals(
             LearningModelResolution.Unavailable(LearningModelResolutionFailure.CANCELLATION_UNSAFE),
             LearningModelResolver.resolve(local, LearningModelResolutionPolicy()),
+        )
+        assertEquals(
+            LearningModelResolution.Unavailable(LearningModelResolutionFailure.INVALID_IDENTITY),
+            LearningModelResolver.resolve(
+                local.copy(runtimeAttestationDigest = null),
+                LearningModelResolutionPolicy(
+                    providerIdentityDigestsWithProvenCancellation = setOf(digest),
+                ),
+            ),
         )
         assertTrue(
             LearningModelResolver.resolve(
@@ -238,7 +295,10 @@ class LearningResourceGovernorTest {
             ) is LearningModelResolution.Resolved,
         )
 
-        val remote = local.copy(providerKind = LearningProviderKind.REMOTE)
+        val remote = local.copy(
+            providerKind = LearningProviderKind.REMOTE,
+            runtimeAttestationDigest = null,
+        )
         assertEquals(
             LearningModelResolution.Unavailable(
                 LearningModelResolutionFailure.REMOTE_REFLECTION_DISABLED,

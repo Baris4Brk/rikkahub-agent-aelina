@@ -42,6 +42,9 @@ data class PolicyShadowCandidate(
     val searchableText: String,
     val estimatedTokens: Int,
     val updatedAtMs: Long,
+    /** Exact lifecycle and immutable-content fences captured by the bounded Room read. */
+    val stateVersion: Long = 1L,
+    val contentRevision: Long = 1L,
 ) {
     init {
         require(policyId.matches(Regex("[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}")))
@@ -49,6 +52,7 @@ data class PolicyShadowCandidate(
         require(searchableText.length <= 8_192)
         require(estimatedTokens in 0..4_096)
         require(updatedAtMs >= 0L)
+        require(stateVersion > 0L && contentRevision > 0L)
     }
 
     override fun toString(): String =

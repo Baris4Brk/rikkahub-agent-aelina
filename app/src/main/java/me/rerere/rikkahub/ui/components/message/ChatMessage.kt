@@ -118,6 +118,8 @@ fun ChatMessage(
     onShare: () -> Unit,
     onDelete: () -> Unit,
     onUpdate: (MessageNode) -> Unit,
+    onHelpfulFeedback: ((UIMessage) -> Unit)? = null,
+    onNotHelpfulFeedback: ((UIMessage) -> Unit)? = null,
     isFavorite: Boolean = false,
     onToggleFavorite: (() -> Unit)? = null,
     onTranslate: ((UIMessage, Locale) -> Unit)? = null,
@@ -238,6 +240,8 @@ fun ChatMessage(
                     onOpenActionSheet = {
                         showActionsSheet = true
                     },
+                    onHelpfulFeedback = onHelpfulFeedback,
+                    onNotHelpfulFeedback = onNotHelpfulFeedback,
                     onTranslate = onTranslate,
                     onClearTranslation = onClearTranslation
                 )

@@ -31,6 +31,12 @@ data class LearningStreamCheckpointEntity(
     val executionCoverageStartMs: Long?,
     @ColumnInfo(name = "updated_at_ms")
     val updatedAtMs: Long,
+    @ColumnInfo(name = "source_authority_coverage_start_ms")
+    val sourceAuthorityCoverageStartMs: Long? = null,
+    @ColumnInfo(name = "feedback_coverage_start_ms")
+    val feedbackCoverageStartMs: Long? = null,
+    @ColumnInfo(name = "reconciliation_cursor_v1_json")
+    val reconciliationCursorV1Json: String? = null,
 ) {
     init {
         require(runCatching { Uuid.parse(streamId) }.isSuccess) { "Invalid learning stream ID" }
@@ -50,6 +56,8 @@ data class LearningStreamCheckpointEntity(
             coverageStartMs,
             commandCoverageStartMs,
             executionCoverageStartMs,
+            sourceAuthorityCoverageStartMs,
+            feedbackCoverageStartMs,
         ).forEach { value ->
             require(value >= 0L) { "Negative learning checkpoint time or sequence" }
         }

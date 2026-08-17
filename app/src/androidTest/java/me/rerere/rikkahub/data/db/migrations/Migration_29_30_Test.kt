@@ -6,6 +6,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import me.rerere.rikkahub.data.db.AppDatabase
 import me.rerere.rikkahub.data.db.createAppSQLiteOpenHelperFactory
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -77,6 +78,18 @@ class Migration_29_30_Test {
         db.query("SELECT content FROM memory_fts WHERE rowid=7").use { cursor ->
             assertTrue(cursor.moveToFirst())
             assertEquals("updated memory", cursor.getString(0))
+        }
+        db.execSQL(
+            "INSERT INTO MemoryEntity(id, assistant_id, content) VALUES (?, ?, ?)",
+            arrayOf<Any?>(8, "__global__", "inserted memory"),
+        )
+        db.query("SELECT content FROM memory_fts WHERE rowid=8").use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals("inserted memory", cursor.getString(0))
+        }
+        db.execSQL("DELETE FROM MemoryEntity WHERE id=8")
+        db.query("SELECT 1 FROM memory_fts WHERE rowid=8").use { cursor ->
+            assertFalse(cursor.moveToFirst())
         }
         db.close()
     }

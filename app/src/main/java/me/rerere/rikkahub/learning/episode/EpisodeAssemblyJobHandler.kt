@@ -13,9 +13,6 @@ import me.rerere.rikkahub.learning.task.TaskSignatureV1
 import me.rerere.rikkahub.learning.trace.TraceFeature
 
 sealed interface EpisodeAssemblyMutation {
-    /** Admission is retained in the inbox but does not create an Episode until an LLM boundary is proven. */
-    data object ObserveAdmission : EpisodeAssemblyMutation
-
     data class Admit(
         val authority: EpisodeAuthorityAnchor,
         val taskSignature: TaskSignatureV1,
@@ -46,6 +43,24 @@ sealed interface EpisodeAssemblyJobOutput : LearningJobTypedOutput {
         get() = "no-canonical-output-v1"
 
     data object NoEpisode : EpisodeAssemblyJobOutput
+
+    /**
+     * Admission is projected before the command kind is known. If that command later proves to be
+     * a fast/control path, remove the still-open placeholder rather than retaining a false LLM
+     * Episode. Storage performs an exact OPEN/revision CAS and rejects any row with derived use.
+     */
+    data class RemoveNonLlmOpenEpisode(
+        val episodeId: String,
+        val expectedRevision: Long,
+    ) : EpisodeAssemblyJobOutput {
+        init {
+            require(episodeId.isNotBlank())
+            require(expectedRevision > 0L)
+        }
+
+        override fun toString(): String =
+            "EpisodeAssemblyJobOutput.RemoveNonLlmOpenEpisode(ids=<redacted>)"
+    }
 
     data class Snapshot(
         val snapshot: EpisodeSnapshot,
@@ -86,9 +101,6 @@ class EpisodeAssemblyJobHandler(
             return LearningJobHandlerResult.Retry(LearningJobFailureCode.SOURCE_MISSING, RETRY_DELAY_MS)
         } ?: return LearningJobHandlerResult.DeadLetter(LearningJobFailureCode.SOURCE_MISSING)
         return when (mutation) {
-            EpisodeAssemblyMutation.ObserveAdmission -> LearningJobHandlerResult.Success(
-                EpisodeAssemblyJobOutput.NoEpisode,
-            )
             is EpisodeAssemblyMutation.Admit -> LearningJobHandlerResult.Success(
                 EpisodeAssemblyJobOutput.Snapshot(
                     snapshot = EpisodeAssembler.admit(
@@ -102,11 +114,19 @@ class EpisodeAssemblyJobHandler(
                 ),
             )
             is EpisodeAssemblyMutation.Complete -> {
+                if (mutation.completionKind in NON_LLM_COMPLETIONS) {
+                    return LearningJobHandlerResult.Success(
+                        mutation.current?.let {
+                            EpisodeAssemblyJobOutput.RemoveNonLlmOpenEpisode(
+                                episodeId = it.authority.episodeId.value,
+                                expectedRevision = it.revision,
+                            )
+                        } ?: EpisodeAssemblyJobOutput.NoEpisode,
+                    )
+                }
                 if (
                     mutation.current == null &&
                     mutation.completionKind in setOf(
-                        LearningCompletionKind.FAST_PATH_HANDLED,
-                        LearningCompletionKind.CONTROL_ONLY,
                         LearningCompletionKind.CENSORED_CANCELLED,
                         LearningCompletionKind.SUPERSEDED_REGENERATE,
                     )
@@ -151,5 +171,9 @@ class EpisodeAssemblyJobHandler(
 
     private companion object {
         const val RETRY_DELAY_MS = 5L * 60L * 1_000L
+        val NON_LLM_COMPLETIONS = setOf(
+            LearningCompletionKind.FAST_PATH_HANDLED,
+            LearningCompletionKind.CONTROL_ONLY,
+        )
     }
 }

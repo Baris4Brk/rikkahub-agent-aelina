@@ -144,6 +144,31 @@ interface LearningInboxDao {
         "DELETE FROM learning_inbox_events WHERE scope_kind = :scopeKind AND scope_id = :scopeId",
     )
     suspend fun deleteByScope(scopeKind: String, scopeId: String): Int
+
+    /**
+     * Deletes only fully consumed, known, ordinary events without active derived work. Source
+     * lifecycle rows, unknown schemas and STREAM_INIT remain as the minimal replay/audit floor.
+     */
+    @Query(
+        "DELETE FROM learning_inbox_events WHERE rowid IN (" +
+            "SELECT i.rowid FROM learning_inbox_events i " +
+            "WHERE i.stream_id = :streamId AND i.replay_generation = :replayGeneration " +
+            "AND i.outbox_seq <= :throughContiguousSeq AND i.ingested_at_ms < :ingestedBeforeMs " +
+            "AND i.decode_state = 'KNOWN' AND i.event_type_code != 'STREAM_INIT' " +
+            "AND i.source_state IS NULL AND NOT EXISTS (" +
+            "SELECT 1 FROM learning_jobs j WHERE j.stream_id = i.stream_id " +
+            "AND j.replay_generation = i.replay_generation " +
+            "AND j.source_event_id = i.event_id " +
+            "AND j.state IN ('PENDING','RETRY','RUNNING','DEAD_LETTER')) " +
+            "ORDER BY i.outbox_seq ASC LIMIT :limit)",
+    )
+    suspend fun deleteExpiredConsumedPage(
+        streamId: String,
+        replayGeneration: Long,
+        throughContiguousSeq: Long,
+        ingestedBeforeMs: Long,
+        limit: Int,
+    ): Int
 }
 
 @Dao
@@ -156,6 +181,48 @@ interface LearningCheckpointDao {
 
     @Query("SELECT * FROM learning_stream_checkpoints")
     suspend fun listAll(): List<LearningStreamCheckpointEntity>
+
+    @Query(
+        "SELECT reconciliation_cursor_v1_json FROM learning_stream_checkpoints " +
+            "WHERE stream_id = :streamId AND replay_generation = :replayGeneration LIMIT 1",
+    )
+    suspend fun findReconciliationCursor(
+        streamId: String,
+        replayGeneration: Long,
+    ): String?
+
+    /**
+     * Exact durable-page CAS. SQLite `IS` deliberately makes a null expected cursor comparable,
+     * so first-page publication and process-death resume use the same fenced primitive.
+     */
+    @Query(
+        "UPDATE learning_stream_checkpoints SET " +
+            "reconciliation_cursor_v1_json = :newCursorJson, updated_at_ms = :updatedAtMs " +
+            "WHERE stream_id = :streamId AND replay_generation = :replayGeneration " +
+            "AND reconciliation_cursor_v1_json IS :expectedCursorJson " +
+            "AND updated_at_ms <= :updatedAtMs",
+    )
+    suspend fun compareAndSetReconciliationCursor(
+        streamId: String,
+        replayGeneration: Long,
+        expectedCursorJson: String?,
+        newCursorJson: String?,
+        updatedAtMs: Long,
+    ): Int
+
+    @Query(
+        "UPDATE learning_stream_checkpoints SET " +
+            "reconciliation_cursor_v1_json = NULL, updated_at_ms = :updatedAtMs " +
+            "WHERE stream_id = :streamId AND replay_generation = :replayGeneration " +
+            "AND reconciliation_cursor_v1_json IS :expectedCursorJson " +
+            "AND updated_at_ms <= :updatedAtMs",
+    )
+    suspend fun clearReconciliationCursor(
+        streamId: String,
+        replayGeneration: Long,
+        expectedCursorJson: String,
+        updatedAtMs: Long,
+    ): Int
 
     @Query("SELECT MAX(replay_generation) FROM learning_stream_checkpoints")
     suspend fun maxReplayGeneration(): Long?
@@ -208,9 +275,14 @@ interface LearningCheckpointDao {
             "last_seen_head_seq = :observedHeadSeq, " +
             "coverage_start_ms = :coverageStartMs, " +
             "command_coverage_start_ms = :commandCoverageStartMs, " +
-            "execution_coverage_start_ms = :executionCoverageStartMs, updated_at_ms = :updatedAtMs " +
+            "execution_coverage_start_ms = :executionCoverageStartMs, " +
+            "source_authority_coverage_start_ms = :sourceAuthorityCoverageStartMs, " +
+            "feedback_coverage_start_ms = :feedbackCoverageStartMs, " +
+            "reconciliation_cursor_v1_json = NULL, " +
+            "updated_at_ms = :updatedAtMs " +
             "WHERE stream_id = :streamId AND replay_generation = :replayGeneration " +
             "AND bootstrap_state = 'RUNNING' AND bootstrap_head_seq = :expectedBootstrapHeadSeq " +
+            "AND reconciliation_cursor_v1_json IS :expectedReconciliationCursorJson " +
             "AND last_contiguous_seq = :expectedBootstrapHeadSeq " +
             "AND :observedHeadSeq >= :expectedBootstrapHeadSeq " +
             "AND :observedHeadSeq >= last_seen_head_seq " +
@@ -224,6 +296,9 @@ interface LearningCheckpointDao {
         coverageStartMs: Long?,
         commandCoverageStartMs: Long?,
         executionCoverageStartMs: Long?,
+        sourceAuthorityCoverageStartMs: Long?,
+        feedbackCoverageStartMs: Long?,
+        expectedReconciliationCursorJson: String,
         updatedAtMs: Long,
     ): Int
 

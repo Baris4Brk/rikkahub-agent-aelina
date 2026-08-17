@@ -68,4 +68,22 @@ class LearningJobRunnerBudgetTest {
             ),
         )
     }
+
+    @Test
+    fun synchronousEpisodeCatchUpCannotClaimAnyOtherReadyStage() {
+        val ready = setOf(
+            LearningJobType.ASSEMBLE_EPISODE_SHADOW,
+            LearningJobType.REFLECT_EPISODE_V1,
+            LearningJobType.CLOSE_REWARD_WINDOW_V1,
+            LearningJobType.INVALIDATE_SOURCE_V1,
+        )
+
+        assertEquals(
+            setOf(LearningJobType.ASSEMBLE_EPISODE_SHADOW),
+            restrictReadyLearningJobTypes(
+                readyTypes = ready,
+                allowedJobTypes = setOf(LearningJobType.ASSEMBLE_EPISODE_SHADOW),
+            ),
+        )
+    }
 }

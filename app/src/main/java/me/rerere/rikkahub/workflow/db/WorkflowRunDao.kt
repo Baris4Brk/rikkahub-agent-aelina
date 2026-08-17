@@ -4,12 +4,31 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Transaction
 
 @Dao
 interface WorkflowRunDao {
 
     @Insert(onConflict = OnConflictStrategy.ABORT)
-    suspend fun insert(entity: WorkflowRunEntity): Long
+    suspend fun insertRaw(entity: WorkflowRunEntity): Long
+
+    @Query("""
+        SELECT COUNT(*) FROM workflows
+        WHERE id = :workflowId
+          AND (origin != 'LEARNED' OR staleReason IS NULL OR staleReason NOT IN (
+            'learning_scope_erased_definition_v1',
+            'learning_scope_erased_claim_v1'
+          ))
+    """)
+    suspend fun canRecordRun(workflowId: String): Int
+
+    /**
+     * Serializes with the AppDatabase erase transaction. An in-flight fire either records fully
+     * before erase (and is then removed) or observes the permanent tombstone and records nothing.
+     */
+    @Transaction
+    suspend fun insert(entity: WorkflowRunEntity): Long =
+        if (canRecordRun(entity.workflowId) == 1) insertRaw(entity) else RUN_REJECTED
 
     @Query("""
         SELECT * FROM workflow_runs
@@ -51,3 +70,5 @@ interface WorkflowRunDao {
     @Query("SELECT firedAtMs FROM workflow_runs WHERE workflowId = :workflowId AND status IN ('SUCCESS', 'FAILED') ORDER BY firedAtMs DESC LIMIT 1")
     suspend fun lastActualFireAtMs(workflowId: String): Long?
 }
+
+private const val RUN_REJECTED = -1L

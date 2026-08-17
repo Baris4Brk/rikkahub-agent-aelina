@@ -142,6 +142,36 @@ class ProviderSystemPromptLayoutTest {
     }
 
     @Test
+    fun `reserved runtime envelope keeps baseline and learned stable bytes identical`() {
+        val baseline = ProviderSystemPromptLayout.create(
+            stableSystem = "stable instructions",
+            volatileSystem = "",
+            conversationMessages = listOf(UIMessage.user("question")),
+            useAnchoredVolatileContext = true,
+            reserveRuntimeContextEnvelope = true,
+        )
+        val learned = ProviderSystemPromptLayout.create(
+            stableSystem = "stable instructions",
+            volatileSystem = "policy advice",
+            conversationMessages = listOf(UIMessage.user("question")),
+            useAnchoredVolatileContext = true,
+            reserveRuntimeContextEnvelope = true,
+        )
+
+        // UIMessage carries random persistence/UI identity that is not serialized to the
+        // provider.  Cache-prefix equality is the exact ordered role + part projection.
+        assertEquals(
+            baseline.initialMessages.map { it.role to it.parts },
+            learned.initialMessages.map { it.role to it.parts },
+        )
+        assertEquals("question", baseline.applyVolatileContext(baseline.initialMessages).last().toText())
+        assertTrue(
+            learned.applyVolatileContext(learned.initialMessages).last().toText()
+                .contains("policy advice"),
+        )
+    }
+
+    @Test
     fun `runtime context falls back to a provider-only user turn when none exists`() {
         val layout = ProviderSystemPromptLayout.create(
             stableSystem = "stable instructions",

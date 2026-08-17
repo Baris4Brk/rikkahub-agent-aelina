@@ -69,6 +69,24 @@ data class LearningRewardWindowEntity(
     val closedAtMs: Long?,
     @ColumnInfo(name = "updated_at_ms")
     val updatedAtMs: Long,
+    @ColumnInfo(name = "revision", defaultValue = "1")
+    val revision: Long = 1L,
+    @ColumnInfo(name = "signal_set_sha256", defaultValue = EMPTY_REWARD_SIGNAL_SET_SQL_DEFAULT)
+    val signalSetSha256: String = EMPTY_REWARD_SIGNAL_SET_SHA256,
+    @ColumnInfo(name = "authority_outcome", defaultValue = UNKNOWN_REWARD_AUTHORITY_SQL_DEFAULT)
+    val authorityOutcome: String = if (state == LearningRewardWindowState.OPEN.name) {
+        LearningRewardAuthorityOutcome.PENDING.name
+    } else {
+        LearningRewardAuthorityOutcome.UNKNOWN.name
+    },
+    @ColumnInfo(name = "last_signal_at_ms")
+    val lastSignalAtMs: Long? = null,
+    @ColumnInfo(name = "goal_signal_kind")
+    val goalSignalKind: String? = null,
+    @ColumnInfo(name = "process_signal_kind")
+    val processSignalKind: String? = null,
+    @ColumnInfo(name = "user_signal_kind")
+    val userSignalKind: String? = null,
 ) {
     init {
         requireLearningStorageId(id, "reward window ID")
@@ -97,10 +115,84 @@ data class LearningRewardWindowEntity(
             "Reward window state and closure disagree"
         }
         require(closedAtMs == null || closedAtMs >= openedAtMs) { "Reward closes before opening" }
+        require(revision > 0L) { "Invalid reward window revision" }
+        requireSha256(signalSetSha256, "reward signal set identity")
+        require(LearningRewardAuthorityOutcome.entries.any { it.name == authorityOutcome }) {
+            "Invalid reward authority outcome"
+        }
+        require(lastSignalAtMs == null || lastSignalAtMs in 0L..updatedAtMs) {
+            "Invalid reward signal clock"
+        }
+        listOfNotNull(goalSignalKind, processSignalKind, userSignalKind).forEach { kind ->
+            require(LearningRewardSignalKind.entries.any { it.name == kind }) {
+                "Invalid reward window signal kind"
+            }
+        }
+        if (authorityOutcome == LearningRewardAuthorityOutcome.PENDING.name) {
+            require(signalSetSha256 == EMPTY_REWARD_SIGNAL_SET_SHA256 && lastSignalAtMs == null) {
+                "Pending reward window cannot claim an authority signal set"
+            }
+            require(goalSignalKind == null && processSignalKind == null && userSignalKind == null) {
+                "Pending reward window cannot claim a signal kind"
+            }
+        }
+        require(
+            (authorityOutcome == LearningRewardAuthorityOutcome.PENDING.name) ==
+                (
+                    state == LearningRewardWindowState.OPEN.name &&
+                        signalSetSha256 == EMPTY_REWARD_SIGNAL_SET_SHA256
+                    )
+        ) { "Only an empty open reward window may have pending authority" }
+        require(
+            (signalSetSha256 == EMPTY_REWARD_SIGNAL_SET_SHA256) == (lastSignalAtMs == null)
+        ) { "Reward signal set identity and last-signal clock disagree" }
+        if (
+            authorityOutcome == LearningRewardAuthorityOutcome.SUCCESS.name ||
+            authorityOutcome == LearningRewardAuthorityOutcome.FAILURE.name
+        ) {
+            require(
+                (
+                    goalKnowledge == LearningRewardKnowledge.KNOWN.name &&
+                        goalSignalKind != null
+                    ) ||
+                    (
+                        userKnowledge == LearningRewardKnowledge.KNOWN.name &&
+                            userSignalKind != null
+                        )
+            ) { "Success/failure reward authority requires known goal or user evidence" }
+            require(signalSetSha256 != EMPTY_REWARD_SIGNAL_SET_SHA256 && lastSignalAtMs != null) {
+                "Success/failure reward authority requires a non-empty signal set"
+            }
+        }
+        if (authorityOutcome == LearningRewardAuthorityOutcome.CONFLICT.name) {
+            require(
+                signalSetSha256 != EMPTY_REWARD_SIGNAL_SET_SHA256 && lastSignalAtMs != null &&
+                    (
+                        goalKnowledge == LearningRewardKnowledge.KNOWN.name ||
+                            userKnowledge == LearningRewardKnowledge.KNOWN.name
+                        )
+            ) { "Conflicting reward authority requires known goal/user signals" }
+        }
     }
 
     override fun toString(): String =
         "LearningRewardWindowEntity(state=$state, goal=$goalKnowledge, process=$processKnowledge, user=$userKnowledge, ids=<redacted>)"
+}
+
+/** Canonical LearningCanonicalId.digest("reward-signal-set-v1", emptyList()). */
+const val EMPTY_REWARD_SIGNAL_SET_SHA256: String =
+    "fbfce8b1c00064b9a80e735a23b52f9f24cec559e34f824b1cf28c9f0adc4f9f"
+private const val EMPTY_REWARD_SIGNAL_SET_SQL_DEFAULT: String =
+    "'fbfce8b1c00064b9a80e735a23b52f9f24cec559e34f824b1cf28c9f0adc4f9f'"
+private const val UNKNOWN_REWARD_AUTHORITY_SQL_DEFAULT: String = "'UNKNOWN'"
+
+enum class LearningRewardAuthorityOutcome {
+    PENDING,
+    SUCCESS,
+    FAILURE,
+    UNKNOWN,
+    CONFLICT,
+    CENSORED,
 }
 
 private fun validateComponent(

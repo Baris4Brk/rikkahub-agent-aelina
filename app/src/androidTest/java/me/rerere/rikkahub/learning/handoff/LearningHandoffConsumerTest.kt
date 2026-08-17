@@ -12,6 +12,11 @@ import me.rerere.rikkahub.learning.model.LearningEventCode
 import me.rerere.rikkahub.learning.model.LearningScope
 import me.rerere.rikkahub.learning.model.LearningSourceKind
 import me.rerere.rikkahub.learning.model.LearningSourceRef
+import me.rerere.rikkahub.learning.privacy.DurableLearnedWorkflowPrivacyPort
+import me.rerere.rikkahub.learning.privacy.DurableLearnedWorkflowResetReceipt
+import me.rerere.rikkahub.learning.privacy.DurableScopeLearnedWorkflowEraseReceipt
+import me.rerere.rikkahub.learning.privacy.ExactScopeLearnedWorkflowEraseBatchReceipt
+import me.rerere.rikkahub.learning.privacy.ExactScopeLearnedWorkflowErasePort
 import me.rerere.rikkahub.learning.storage.LearningBootstrapState
 import me.rerere.rikkahub.learning.storage.LearningDatabase
 import me.rerere.rikkahub.learning.storage.LearningStreamCheckpointEntity
@@ -64,7 +69,7 @@ class LearningHandoffConsumerTest {
             ): List<LearningHandoffEvent> = listOf(unknownEvent(STREAM_A, 3L))
         }
 
-        val result = LearningHandoffConsumer(database, reader).consumeOnce(frozenNowMs = 100L)
+        val result = resetCapableConsumer(reader).consumeOnce(frozenNowMs = 100L)
 
         assertEquals(
             LearningStreamResetReason.NEW_STREAM,
@@ -92,7 +97,7 @@ class LearningHandoffConsumerTest {
             ): List<LearningHandoffEvent> = listOf(unknownEvent(STREAM_A, 3L))
         }
 
-        val result = LearningHandoffConsumer(database, reader).consumeOnce(frozenNowMs = 100L)
+        val result = resetCapableConsumer(reader).consumeOnce(frozenNowMs = 100L)
 
         assertEquals(
             LearningStreamResetReason.HEAD_REWIND,
@@ -167,6 +172,68 @@ class LearningHandoffConsumerTest {
         assertEquals(2L, database.checkpointDao().find(STREAM_A.toString())?.lastContiguousSeq)
         assertTrue(database.inboxDao().find(STREAM_A.toString(), "future-event-2") != null)
         assertNull(database.inboxDao().find(STREAM_A.toString(), "future-event-3"))
+    }
+
+    @Test
+    fun resetWithoutAppDatabasePrivacyPortsFailsBeforeDeletingLearningState() = runBlocking {
+        database.checkpointDao().insert(checkpoint(STREAM_A))
+        val reader = object : LearningOutboxReader {
+            override suspend fun inspect() = LearningOutboxDescriptor(STREAM_B, 1L)
+
+            override suspend fun readAfterThrough(
+                descriptor: LearningOutboxDescriptor,
+                afterSequence: Long,
+                limit: Int,
+            ): List<LearningHandoffEvent> = emptyList()
+        }
+
+        val failure = runCatching {
+            LearningHandoffConsumer(database, reader).consumeOnce(frozenNowMs = 100L)
+        }.exceptionOrNull()
+
+        assertTrue(failure is IllegalStateException)
+        assertEquals(
+            "derived_reset_candidate_fence_unconfigured",
+            failure?.message,
+        )
+        assertEquals(STREAM_A.toString(), database.checkpointDao().listAll().single().streamId)
+    }
+
+    @Test
+    fun incompleteDurableResetReceiptFailsBeforeDeletingLearningState() = runBlocking {
+        database.checkpointDao().insert(checkpoint(STREAM_A))
+        val reader = object : LearningOutboxReader {
+            override suspend fun inspect() = LearningOutboxDescriptor(STREAM_B, 1L)
+
+            override suspend fun readAfterThrough(
+                descriptor: LearningOutboxDescriptor,
+                afterSequence: Long,
+                limit: Int,
+            ): List<LearningHandoffEvent> = emptyList()
+        }
+        val consumer = LearningHandoffConsumer(
+            database = database,
+            outboxReader = reader,
+            learnedWorkflowErasePort = ExactScopeLearnedWorkflowErasePort { ids, _ ->
+                ExactScopeLearnedWorkflowEraseBatchReceipt(ids.size, 0, ids.size)
+            },
+            durableLearnedWorkflowPrivacyPort = object : DurableLearnedWorkflowPrivacyPort {
+                override suspend fun redactExactScope(
+                    scope: LearningScope,
+                    frozenNowMs: Long,
+                ) = DurableScopeLearnedWorkflowEraseReceipt(0, 0, 0, 0)
+
+                override suspend fun redactAllForDerivedReset(
+                    frozenNowMs: Long,
+                ) = DurableLearnedWorkflowResetReceipt(0, 0, complete = false)
+            },
+        )
+
+        val failure = runCatching { consumer.consumeOnce(frozenNowMs = 100L) }.exceptionOrNull()
+
+        assertTrue(failure is IllegalStateException)
+        assertEquals("derived_reset_orphan_quarantine_incomplete", failure?.message)
+        assertEquals(STREAM_A.toString(), database.checkpointDao().listAll().single().streamId)
     }
 
     @Test
@@ -255,6 +322,28 @@ class LearningHandoffConsumerTest {
         ),
         correlation = LearningCorrelation(),
         createdAtMs = 10L,
+    )
+
+    private fun resetCapableConsumer(reader: LearningOutboxReader) = LearningHandoffConsumer(
+        database = database,
+        outboxReader = reader,
+        learnedWorkflowErasePort = ExactScopeLearnedWorkflowErasePort { ids, _ ->
+            ExactScopeLearnedWorkflowEraseBatchReceipt(
+                fencedCandidateIds = ids.size,
+                redactedWorkflowDefinitions = 0,
+                insertedFenceClaims = ids.size,
+            )
+        },
+        durableLearnedWorkflowPrivacyPort = object : DurableLearnedWorkflowPrivacyPort {
+            override suspend fun redactExactScope(
+                scope: LearningScope,
+                frozenNowMs: Long,
+            ) = DurableScopeLearnedWorkflowEraseReceipt(0, 0, 0, 0)
+
+            override suspend fun redactAllForDerivedReset(
+                frozenNowMs: Long,
+            ) = DurableLearnedWorkflowResetReceipt(0, 0, complete = true)
+        },
     )
 
     private companion object {

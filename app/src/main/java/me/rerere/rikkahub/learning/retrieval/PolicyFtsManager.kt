@@ -1,12 +1,15 @@
 package me.rerere.rikkahub.learning.retrieval
 
+import android.content.Context
 import androidx.sqlite.db.SupportSQLiteDatabase
 import java.text.Normalizer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import me.rerere.rikkahub.data.db.fts.SimpleDictManager
 import me.rerere.rikkahub.learning.model.LearningScope
 import me.rerere.rikkahub.learning.storage.LearningDatabase
 import me.rerere.rikkahub.learning.storage.LearningPolicyEntity
+import me.rerere.rikkahub.learning.storage.VALID_POLICY_EVIDENCE_PREDICATE
 
 data class BoundedPolicyQuery(
     val normalized: String,
@@ -31,9 +34,11 @@ class PolicyFtsManager(
     suspend fun searchEligible(
         scope: LearningScope,
         query: String,
+        freshAfterMs: Long,
         limit: Int,
     ): List<LearningPolicyEntity> = withContext(Dispatchers.IO) {
         require(limit in 1..MAX_POLICY_FTS_DB_CANDIDATES)
+        require(freshAfterMs >= 0L)
         val prepared = prepareQuery(query)
         if (prepared.terms.isEmpty()) return@withContext emptyList()
         val ids = mutableListOf<String>()
@@ -43,6 +48,7 @@ class PolicyFtsManager(
                 prepared.normalized,
                 scope.kind.name,
                 scope.storageId,
+                freshAfterMs,
                 limit,
             ),
         ).use { cursor ->
@@ -54,13 +60,23 @@ class PolicyFtsManager(
             scopeKind = scope.kind.name,
             scopeId = scope.storageId,
             policyIds = distinctIds,
+            freshAfterMs = freshAfterMs,
         ).associateBy(LearningPolicyEntity::id)
         distinctIds.mapNotNull(byId::get)
     }
 
     /** Privacy erase must remove the rebuildable text projection in the same derived-DB fence. */
     suspend fun eraseScope(scope: LearningScope) = withContext(Dispatchers.IO) {
-        database.openHelper.writableDatabase.execSQL(
+        val writable = database.openHelper.writableDatabase
+        // Direct Room test/erase callers do not necessarily pass through the runtime onOpen
+        // callback. If the rebuildable projection was never created, there is no FTS payload to
+        // erase. Do not try to create it here: the default framework SQLite used by small Room
+        // tests does not load the production `simple`/jieba extension.
+        val projectionExists = writable.query(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'policy_fts' LIMIT 1",
+        ).use { it.moveToFirst() }
+        if (!projectionExists) return@withContext
+        writable.execSQL(
             "DELETE FROM policy_fts WHERE scope_kind = ? AND scope_id = ?",
             arrayOf(scope.kind.name, scope.storageId),
         )
@@ -123,7 +139,12 @@ internal val POLICY_FTS_TRIGGER_SQL: List<String> = listOf(
     """
     CREATE TRIGGER policy_fts_ai AFTER INSERT ON learning_policies
     WHEN new.status IN ('CANDIDATE', 'SHADOW')
-      AND new.source_valid = 1 AND new.schema_valid = 1 BEGIN
+      AND new.source_valid = 1 AND new.schema_valid = 1
+      AND substr(new.applicable_model_identity_wire, 1, 9) = 'EXACT_V1:'
+      AND substr(new.applicable_provider_identity_wire, 1, 9) = 'EXACT_V1:'
+      AND new.applicable_template_identity IS NOT NULL
+      AND new.applicable_configuration_identity IS NOT NULL
+      AND new.applicable_configuration_generation > 0 BEGIN
         INSERT INTO policy_fts(
             trigger_summary, procedure_summary, verification_summary, boundary_summary,
             failure_mode_summary, policy_id, scope_kind, scope_id
@@ -136,7 +157,10 @@ internal val POLICY_FTS_TRIGGER_SQL: List<String> = listOf(
     """
     CREATE TRIGGER policy_fts_au AFTER UPDATE OF
         trigger_summary, procedure_summary, verification_summary, boundary_summary,
-        failure_mode_summary, scope_kind, scope_id, status, source_valid, schema_valid
+        failure_mode_summary, scope_kind, scope_id, status, source_valid, schema_valid,
+        applicable_model_identity_wire, applicable_provider_identity_wire,
+        applicable_template_identity, applicable_configuration_identity,
+        applicable_configuration_generation
     ON learning_policies BEGIN
         DELETE FROM policy_fts WHERE policy_id = old.id;
         INSERT INTO policy_fts(
@@ -146,7 +170,12 @@ internal val POLICY_FTS_TRIGGER_SQL: List<String> = listOf(
             new.trigger_summary, new.procedure_summary, new.verification_summary,
             new.boundary_summary, new.failure_mode_summary, new.id, new.scope_kind, new.scope_id
         WHERE new.status IN ('CANDIDATE', 'SHADOW')
-            AND new.source_valid = 1 AND new.schema_valid = 1;
+            AND new.source_valid = 1 AND new.schema_valid = 1
+            AND substr(new.applicable_model_identity_wire, 1, 9) = 'EXACT_V1:'
+            AND substr(new.applicable_provider_identity_wire, 1, 9) = 'EXACT_V1:'
+            AND new.applicable_template_identity IS NOT NULL
+            AND new.applicable_configuration_identity IS NOT NULL
+            AND new.applicable_configuration_generation > 0;
     END
     """.trimIndent(),
     """
@@ -166,6 +195,11 @@ internal const val POLICY_FTS_BACKFILL_MISSING_SQL = """
     FROM learning_policies AS p
     WHERE p.status IN ('CANDIDATE', 'SHADOW')
       AND p.source_valid = 1 AND p.schema_valid = 1
+      AND substr(p.applicable_model_identity_wire, 1, 9) = 'EXACT_V1:'
+      AND substr(p.applicable_provider_identity_wire, 1, 9) = 'EXACT_V1:'
+      AND p.applicable_template_identity IS NOT NULL
+      AND p.applicable_configuration_identity IS NOT NULL
+      AND p.applicable_configuration_generation > 0
       AND NOT EXISTS (SELECT 1 FROM policy_fts AS f WHERE f.policy_id = p.id)
 """
 
@@ -180,6 +214,11 @@ internal const val POLICY_FTS_DELETE_INELIGIBLE_SQL = """
         SELECT id FROM learning_policies
         WHERE status NOT IN ('CANDIDATE', 'SHADOW')
            OR source_valid != 1 OR schema_valid != 1
+           OR substr(applicable_model_identity_wire, 1, 9) != 'EXACT_V1:'
+           OR substr(applicable_provider_identity_wire, 1, 9) != 'EXACT_V1:'
+           OR applicable_template_identity IS NULL
+           OR applicable_configuration_identity IS NULL
+           OR applicable_configuration_generation <= 0
     )
 """
 
@@ -190,36 +229,25 @@ internal const val POLICY_FTS_SEARCH_SQL = """
     WHERE policy_fts MATCH jieba_query(?)
       AND p.scope_kind = ? AND p.scope_id = ?
       AND p.status IN ('CANDIDATE', 'SHADOW')
+      AND p.updated_at_ms >= ?
       AND p.source_valid = 1 AND p.schema_valid = 1
+      AND substr(p.applicable_model_identity_wire, 1, 9) = 'EXACT_V1:'
+      AND substr(p.applicable_provider_identity_wire, 1, 9) = 'EXACT_V1:'
+      AND p.applicable_template_identity IS NOT NULL
+      AND p.applicable_configuration_identity IS NOT NULL
+      AND p.applicable_configuration_generation > 0
       AND EXISTS (
           SELECT 1 FROM policy_evidence pe
           JOIN learning_episodes ep ON ep.id = pe.episode_id
-          JOIN learning_episode_lessons l ON l.episode_id = pe.episode_id
-              AND l.lesson_version = pe.lesson_version AND l.state = 'VALID'
-          JOIN learning_source_validity sv ON sv.stream_id = ep.stream_id
+          LEFT JOIN learning_episode_lessons l ON l.episode_id = pe.episode_id
+              AND l.lesson_version = pe.lesson_version
+          LEFT JOIN learning_source_validity sv ON sv.stream_id = ep.stream_id
               AND sv.replay_generation = ep.replay_generation
               AND sv.scope_kind = ep.scope_kind AND sv.scope_id = ep.scope_id
               AND sv.source_type = pe.source_type AND sv.source_id = pe.source_id
               AND sv.source_revision = pe.source_revision
-              AND sv.state = 'VALID' AND sv.integrity_sha256 = pe.source_integrity_sha256
           WHERE pe.policy_id = p.id
-            AND EXISTS (
-                SELECT 1 FROM learning_trace_features any_t
-                WHERE any_t.episode_id = ep.id
-                  AND any_t.source_type = 'CONVERSATION_MESSAGE'
-            )
-            AND NOT EXISTS (
-                SELECT 1 FROM learning_trace_features t
-                LEFT JOIN learning_source_validity all_sv
-                  ON all_sv.stream_id = ep.stream_id
-                 AND all_sv.replay_generation = ep.replay_generation
-                 AND all_sv.scope_kind = ep.scope_kind AND all_sv.scope_id = ep.scope_id
-                 AND all_sv.source_type = t.source_type AND all_sv.source_id = t.source_id
-                 AND all_sv.source_revision = t.source_revision
-                WHERE t.episode_id = ep.id AND t.source_type = 'CONVERSATION_MESSAGE'
-                  AND (t.source_revision IS NULL OR all_sv.source_id IS NULL
-                       OR all_sv.state != 'VALID' OR all_sv.integrity_sha256 IS NULL)
-            )
+            AND ($VALID_POLICY_EVIDENCE_PREDICATE)
       )
       AND NOT EXISTS (
           SELECT 1 FROM policy_evidence pe
@@ -231,27 +259,8 @@ internal const val POLICY_FTS_SEARCH_SQL = """
               AND sv.scope_kind = ep.scope_kind AND sv.scope_id = ep.scope_id
               AND sv.source_type = pe.source_type AND sv.source_id = pe.source_id
               AND sv.source_revision = pe.source_revision
-          WHERE pe.policy_id = p.id AND (
-              l.episode_id IS NULL OR l.state != 'VALID' OR sv.source_id IS NULL
-              OR sv.state != 'VALID' OR sv.integrity_sha256 IS NULL
-              OR sv.integrity_sha256 != pe.source_integrity_sha256
-              OR NOT EXISTS (
-                  SELECT 1 FROM learning_trace_features t
-                  WHERE t.episode_id = ep.id AND t.source_type = 'CONVERSATION_MESSAGE'
-              )
-              OR EXISTS (
-                  SELECT 1 FROM learning_trace_features t
-                  LEFT JOIN learning_source_validity all_sv
-                    ON all_sv.stream_id = ep.stream_id
-                   AND all_sv.replay_generation = ep.replay_generation
-                   AND all_sv.scope_kind = ep.scope_kind AND all_sv.scope_id = ep.scope_id
-                   AND all_sv.source_type = t.source_type AND all_sv.source_id = t.source_id
-                   AND all_sv.source_revision = t.source_revision
-                  WHERE t.episode_id = ep.id AND t.source_type = 'CONVERSATION_MESSAGE'
-                    AND (t.source_revision IS NULL OR all_sv.source_id IS NULL
-                         OR all_sv.state != 'VALID' OR all_sv.integrity_sha256 IS NULL)
-              )
-          )
+          WHERE pe.policy_id = p.id
+            AND NOT ($VALID_POLICY_EVIDENCE_PREDICATE)
       )
     ORDER BY bm25(policy_fts), p.updated_at_ms DESC, p.id ASC
     LIMIT ?
@@ -266,6 +275,25 @@ internal fun ensurePolicyFtsSchema(db: SupportSQLiteDatabase) {
     db.execSQL(POLICY_FTS_DELETE_INELIGIBLE_SQL.trimIndent())
     db.execSQL(POLICY_FTS_DELETE_DUPLICATES_SQL.trimIndent())
     db.execSQL(POLICY_FTS_BACKFILL_MISSING_SQL.trimIndent())
+}
+
+/**
+ * Initializes the exact bundled SQLite/Jieba surface before installing the derived Policy FTS
+ * projection. Both the production LearningRuntimeFacade and disposable-emulator evaluation call
+ * this function; a test-only tokenizer substitute would not prove the production retrieval path.
+ */
+internal fun initializePolicyFtsRuntime(
+    context: Context,
+    db: SupportSQLiteDatabase,
+) {
+    val dictionary = SimpleDictManager.extractDict(context.applicationContext)
+    db.query("SELECT jieba_dict(?)", arrayOf(dictionary.absolutePath)).use { cursor ->
+        check(cursor.moveToFirst()) { "policy_fts_dictionary_result_missing" }
+        check(
+            cursor.getString(0)?.trimEnd('/') == dictionary.absolutePath.trimEnd('/'),
+        ) { "policy_fts_dictionary_initialization_failed" }
+    }
+    ensurePolicyFtsSchema(db)
 }
 
 private val POLICY_FTS_TRIGGER_NAMES = listOf("policy_fts_ai", "policy_fts_au", "policy_fts_ad")

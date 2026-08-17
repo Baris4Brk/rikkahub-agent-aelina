@@ -7,69 +7,79 @@ import org.junit.Test
 
 class P1ProviderExecutionSafetyTest {
     @Test
-    fun localLiteRtNeedsAllExplicitSafetyGates() {
+    fun localLiteRtNeedsRuntimeManifestAndDurableAttemptFacts() {
         assertFalse(
             isP1ProviderExecutionAuthorized(
                 providerKind = LearningProviderKind.LOCAL_LITERT,
-                remoteFlagEnabled = false,
+                capabilities = P1ProviderExecutionCapabilities(
+                    runtimeAttestationSha256 = null,
+                    exactManifestValidated = true,
+                    durableAttemptAuthorityPresent = true,
+                ),
             ),
         )
         assertTrue(
             isP1ProviderExecutionAuthorized(
                 providerKind = LearningProviderKind.LOCAL_LITERT,
-                remoteFlagEnabled = false,
-                localRuntimeAttestationReady = true,
-                durableProviderBudgetReady = true,
-                frozenProviderInputReady = true,
+                capabilities = P1ProviderExecutionCapabilities(
+                    runtimeAttestationSha256 = "a".repeat(64),
+                    exactManifestValidated = true,
+                    durableAttemptAuthorityPresent = true,
+                ),
             ),
         )
     }
 
     @Test
-    fun remoteNeedsConsentIdempotencyBudgetAndFrozenInput() {
-        assertFalse(
-            isP1ProviderExecutionAuthorized(
-                providerKind = LearningProviderKind.REMOTE,
-                remoteFlagEnabled = true,
-            ),
-        )
+    fun remoteNeedsExactConsentInAdditionToDispatchManifestAndAttemptFacts() {
         assertTrue(
             isP1ProviderExecutionAuthorized(
                 providerKind = LearningProviderKind.REMOTE,
-                remoteFlagEnabled = true,
-                remoteTransportIdempotencyReady = true,
-                durableProviderBudgetReady = true,
-                frozenProviderInputReady = true,
-            ),
-        )
-    }
-
-    @Test
-    fun exactProviderIdentityStillNeedsDurableBatchTokenAndCostBudget() {
-        assertFalse(
-            isP1ProviderExecutionAuthorized(
-                providerKind = LearningProviderKind.LOCAL_LITERT,
-                remoteFlagEnabled = false,
-                localRuntimeAttestationReady = true,
+                capabilities = P1ProviderExecutionCapabilities(
+                    runtimeAttestationSha256 = "a".repeat(64),
+                    exactManifestValidated = true,
+                    durableAttemptAuthorityPresent = true,
+                    exactRemoteConsent = true,
+                ),
             ),
         )
         assertFalse(
             isP1ProviderExecutionAuthorized(
                 providerKind = LearningProviderKind.REMOTE,
-                remoteFlagEnabled = true,
-                remoteTransportIdempotencyReady = true,
+                capabilities = P1ProviderExecutionCapabilities(
+                    runtimeAttestationSha256 = "a".repeat(64),
+                    exactManifestValidated = true,
+                    durableAttemptAuthorityPresent = true,
+                    exactRemoteConsent = false,
+                ),
             ),
         )
     }
 
     @Test
-    fun providerCannotRunUntilEveryPromptInputCohortIsDurablyFrozen() {
+    fun localRuntimeDigestMustBeCanonicalLowerSha256() {
         assertFalse(
             isP1ProviderExecutionAuthorized(
                 providerKind = LearningProviderKind.LOCAL_LITERT,
-                remoteFlagEnabled = false,
-                localRuntimeAttestationReady = true,
-                durableProviderBudgetReady = true,
+                capabilities = P1ProviderExecutionCapabilities(
+                    runtimeAttestationSha256 = "A".repeat(64),
+                    exactManifestValidated = true,
+                    durableAttemptAuthorityPresent = true,
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun exactManifestAloneCannotSubstituteDurableAttemptAuthority() {
+        assertFalse(
+            isP1ProviderExecutionAuthorized(
+                providerKind = LearningProviderKind.LOCAL_LITERT,
+                capabilities = P1ProviderExecutionCapabilities(
+                    runtimeAttestationSha256 = "a".repeat(64),
+                    exactManifestValidated = true,
+                    durableAttemptAuthorityPresent = false,
+                ),
             ),
         )
     }
@@ -79,8 +89,11 @@ class P1ProviderExecutionSafetyTest {
         assertFalse(
             isP1ProviderExecutionAuthorized(
                 providerKind = LearningProviderKind.AICORE,
-                remoteFlagEnabled = true,
-                remoteTransportIdempotencyReady = true,
+                capabilities = P1ProviderExecutionCapabilities(
+                    runtimeAttestationSha256 = "a".repeat(64),
+                    exactManifestValidated = true,
+                    durableAttemptAuthorityPresent = true,
+                ),
             ),
         )
     }

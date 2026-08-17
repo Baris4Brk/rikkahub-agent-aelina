@@ -63,6 +63,9 @@ import me.rerere.rikkahub.data.db.migrations.MIGRATION_42_43
 import me.rerere.rikkahub.data.db.migrations.MIGRATION_43_44
 import me.rerere.rikkahub.data.db.migrations.MIGRATION_44_45
 import me.rerere.rikkahub.data.db.migrations.MIGRATION_45_46
+import me.rerere.rikkahub.data.db.migrations.MIGRATION_46_47
+import me.rerere.rikkahub.data.db.migrations.MIGRATION_47_48
+import me.rerere.rikkahub.data.db.migrations.MIGRATION_48_49
 import me.rerere.rikkahub.data.repository.MemorySearchIndex
 import me.rerere.rikkahub.data.repository.MemoryRetriever
 import me.rerere.rikkahub.memory.AndroidMemoryWorkScheduler
@@ -105,6 +108,7 @@ import me.rerere.rikkahub.memory.dreaming.runtime.DreamSynthesisSchedulingStore
 import me.rerere.rikkahub.memory.dreaming.runtime.DreamSynthesisRuntime
 import me.rerere.rikkahub.memory.dreaming.runtime.DeviceDreamInitialSourceTimezoneSource
 import me.rerere.rikkahub.memory.dreaming.runtime.ProcessLifecycleDreamAppIdleTracker
+import me.rerere.rikkahub.memory.dreaming.runtime.SharedPreferencesDreamAppIdleStateStore
 import me.rerere.rikkahub.memory.dreaming.runtime.RoomDreamSnapshotProjectionReader
 import me.rerere.rikkahub.memory.dreaming.runtime.SettingsDreamingPreferencesSource
 import me.rerere.rikkahub.memory.dreaming.store.RoomDreamSynthesisSchedulingStore
@@ -197,6 +201,9 @@ val dataSourceModule = module {
                 MIGRATION_43_44,
                 MIGRATION_44_45,
                 MIGRATION_45_46,
+                MIGRATION_46_47,
+                MIGRATION_47_48,
+                MIGRATION_48_49,
             )
             .addCallback(object : RoomDatabase.Callback() {
                 override fun onCreate(db: SupportSQLiteDatabase) {
@@ -205,6 +212,7 @@ val dataSourceModule = module {
                         streamId = UUID.randomUUID().toString(),
                         createdAtMs = System.currentTimeMillis(),
                     )
+                    me.rerere.rikkahub.data.db.migrations.requireHealthyLearningOutboxV47(db)
                 }
 
                 override fun onOpen(db: SupportSQLiteDatabase) {
@@ -237,6 +245,7 @@ val dataSourceModule = module {
         LearningCommandAuthorityEventPort(
             appender = get(),
             featureFlags = get(),
+            scopeConsent = get(),
         )
     }
     single {
@@ -261,10 +270,49 @@ val dataSourceModule = module {
     }
     single { get<AppDatabase>().learningOutboxDao() }
     single { get<AppDatabase>().learningSourceAuthorityDao() }
+    single { get<AppDatabase>().rewardFeedbackAuthorityDao() }
+    single<me.rerere.rikkahub.data.authority.reward.RewardFeedbackAuthorityStore> {
+        me.rerere.rikkahub.data.authority.reward.RoomRewardFeedbackAuthorityStore(
+            database = get(),
+        )
+    }
+    single<me.rerere.rikkahub.data.authority.reward.RewardFeedbackAuthorityJournalSource> {
+        me.rerere.rikkahub.data.authority.reward.RoomRewardFeedbackAuthorityJournalSource(
+            dao = get(),
+        )
+    }
+    single<me.rerere.rikkahub.data.authority.reward.RewardFeedbackAuthorityEventPort> {
+        val scheduler = get<me.rerere.rikkahub.learning.jobs.LearningWorkScheduler>()
+        me.rerere.rikkahub.learning.handoff.LearningRewardFeedbackAuthorityEventPort(
+            appender = get(),
+            featureFlags = get(),
+            scopeConsent = get(),
+            postCommitWake = {
+                scheduler.wake(me.rerere.rikkahub.learning.jobs.LearningDrainMode.DRAIN_ONLY)
+            },
+        )
+    }
+    single {
+        me.rerere.rikkahub.data.authority.reward.RewardFeedbackAuthorityRepository(
+            store = get(),
+            events = get(),
+            featureFlags = get(),
+            scopeConsent = get(),
+        )
+    }
+    single<me.rerere.rikkahub.data.authority.source.MessageSourceTransitionInvalidationPort> {
+        get<me.rerere.rikkahub.data.authority.reward.RewardFeedbackAuthorityRepository>()
+    }
     single {
         me.rerere.rikkahub.data.authority.source.RoomConversationSourceAuthorityStore(
             dao = get(),
             isInAuthorityTransaction = { get<AppDatabase>().inTransaction() },
+        )
+    }
+    single<me.rerere.rikkahub.data.authority.source.ConversationSourceInitialCaptureGate> {
+        me.rerere.rikkahub.learning.model.LearningConversationSourceInitialCaptureGate(
+            flags = get(),
+            consent = get(),
         )
     }
     single<me.rerere.rikkahub.data.authority.source.SourceInvalidationAuthorityEventPort> {
@@ -281,7 +329,16 @@ val dataSourceModule = module {
         me.rerere.rikkahub.data.authority.source.ConversationSourceAuthorityWriter(
             store = get<me.rerere.rikkahub.data.authority.source.RoomConversationSourceAuthorityStore>(),
             events = get(),
+            transitionInvalidations = get(),
+            initialCaptureGate = get(),
         )
+    }
+    single {
+        me.rerere.rikkahub.data.authority.transaction
+            .TransientConversationFinalizationAuthorityCoordinator(
+                transactions = get(),
+                sources = get(),
+            )
     }
     single { me.rerere.rikkahub.data.authority.transaction.CommandStateAdmissionAuthorityAdapter(get()) }
     single<me.rerere.rikkahub.data.authority.transaction.CommandCompletionAuthorityPort> {
@@ -315,6 +372,7 @@ val dataSourceModule = module {
             conversations = get(),
             messageNodes = get(),
             featureFlags = get(),
+            ephemeralRegistry = get(),
         )
     }
     single<me.rerere.rikkahub.learning.provenance.LearningSourceSnapshotResolver> {
@@ -322,6 +380,10 @@ val dataSourceModule = module {
     }
     single<me.rerere.rikkahub.learning.jobs.LearningSourceIntegrityResolver> {
         get<me.rerere.rikkahub.learning.provenance.RoomConversationLearningSourceSnapshotResolver>()
+    }
+    single<me.rerere.rikkahub.learning.policy.runtime.PolicyOutcomeLinkedObserverFactory> {
+        me.rerere.rikkahub.learning.policy.runtime
+            .ProductionPolicyOutcomeLinkedObserverFactory
     }
     single<me.rerere.rikkahub.learning.jobs.P1LearningRuntimeDependencyFactory> {
         me.rerere.rikkahub.learning.jobs.ProductionP1LearningRuntimeDependencyFactory(
@@ -331,6 +393,8 @@ val dataSourceModule = module {
                 me.rerere.rikkahub.data.ai.background.SettingsBackedBackgroundGenerationHost
             >(),
             mainDatabase = get(),
+            manifestKeyer = get(),
+            policyOutcomeObserverFactory = get(),
         )
     }
     single { me.rerere.rikkahub.owner.OwnerOperationBootRecovery(get<AppDatabase>().hostOperationDao()) }
@@ -416,7 +480,12 @@ val dataSourceModule = module {
         )
     }
     single<DreamInitialSourceTimezoneSource> { DeviceDreamInitialSourceTimezoneSource }
-    single<DreamAppIdleTracker> { ProcessLifecycleDreamAppIdleTracker(clock = get()) }
+    single<DreamAppIdleTracker>(createdAtStart = true) {
+        ProcessLifecycleDreamAppIdleTracker(
+            clock = get(),
+            stateStore = SharedPreferencesDreamAppIdleStateStore(context = get()),
+        )
+    }
     single<DreamSourceReader> { RoomDreamSourceReader(database = get()) }
     single { DreamInputBuilder(sourceReader = get()) }
     single<DreamSynthesizer> { ProviderDreamSynthesizer(settingsStore = get(), providerManager = get()) }
@@ -467,7 +536,12 @@ val dataSourceModule = module {
             clock = get(),
             config = DreamSynthesisOrchestratorConfig(
                 compilerRevision = "dream-snapshot-compiler-v1",
-                maxOutputTokens = 2_048,
+                // Dream output is strict JSON, but reasoning-capable OpenCode/DeepSeek V4 models
+                // cannot actually disable reasoning: LOW/OFF normalize to the provider's `high`
+                // effort. 2k can therefore be exhausted by reasoning before a JSON answer is
+                // emitted. Keep the larger allowance scoped to Dream rather than changing normal
+                // chat or Memory extraction behavior.
+                maxOutputTokens = 4_096,
                 leaseDurationMs = 15L * 60_000L,
                 heartbeatIntervalMs = 2L * 60_000L,
             ),
@@ -646,8 +720,18 @@ val dataSourceModule = module {
             capabilities = me.rerere.rikkahub.learning.model.LearningFeatureCapabilities(
                 schemaReady = true,
                 typedJobExecutionReady = true,
+                reviewedPolicyInjectionReady = true,
+                workflowCandidateReady = true,
+                workflowPromotionReady = true,
+                curatorV1Ready = true,
             ),
         )
+    }
+    single<me.rerere.rikkahub.learning.model.LearningPositiveMutationGate> {
+        me.rerere.rikkahub.learning.model.FeatureFlagLearningPositiveMutationGate(get())
+    }
+    single<me.rerere.rikkahub.learning.model.LearningScopeConsentSource> {
+        me.rerere.rikkahub.learning.model.SettingsLearningScopeConsentSource(get())
     }
     single { me.rerere.rikkahub.learning.resources.LearningForegroundRegistry() }
     single<me.rerere.rikkahub.learning.resources.LearningDeviceConditionsSource> {
@@ -730,13 +814,47 @@ val dataSourceModule = module {
         )
     }
     single {
+        me.rerere.rikkahub.learning.model.LearningRolloutController(
+            settingsStore = get(),
+            workScheduler = get(),
+        )
+    }
+    single {
         me.rerere.rikkahub.learning.handoff.LearningOutboxAppender(database = get())
     }
     single<me.rerere.rikkahub.learning.handoff.LearningOutboxReader> {
         me.rerere.rikkahub.learning.handoff.RoomLearningOutboxReader(database = get())
     }
+    single<me.rerere.rikkahub.learning.retention.LearningPrimaryOutboxRetentionPort> {
+        me.rerere.rikkahub.learning.retention.RoomLearningPrimaryOutboxRetentionPort(
+            database = get<AppDatabase>(),
+        )
+    }
+    single<me.rerere.rikkahub.learning.grant.PolicyGrantAuthoritySource> {
+        me.rerere.rikkahub.data.authority.policy.RoomPolicyGrantAuthoritySource(database = get())
+    }
+    single<me.rerere.rikkahub.learning.grant.PolicyGrantService> {
+        me.rerere.rikkahub.data.authority.policy.RoomPolicyGrantService(database = get())
+    }
+    single<me.rerere.rikkahub.assistant.SecondUserPolicyGrantRevocationPort> {
+        me.rerere.rikkahub.data.authority.policy.RoomSecondUserPolicyGrantRevocationPort(
+            database = get(),
+        )
+    }
+    single<me.rerere.rikkahub.assistant.SecondUserDerivedAuthorityInvalidationPort> {
+        get<me.rerere.rikkahub.learning.runtime.LearningRuntimeFacade>()
+    }
+    single {
+        me.rerere.rikkahub.assistant.SecondUserLearningAuthorityRevocationSaga(
+            grants = get(),
+            derived = get(),
+        )
+    }
     single<me.rerere.rikkahub.learning.handoff.LearningReconciliationScanner> {
-        me.rerere.rikkahub.learning.handoff.RoomLearningReconciliationScanner(database = get())
+        me.rerere.rikkahub.learning.handoff.RoomLearningReconciliationScanner(
+            database = get(),
+            scopeConsent = get(),
+        )
     }
     single {
         me.rerere.rikkahub.learning.diagnostics.LearningDiagnosticsStore(
@@ -750,12 +868,17 @@ val dataSourceModule = module {
     }
     single<me.rerere.rikkahub.learning.runtime.LearningRuntimeFacade> {
         val flags = get<me.rerere.rikkahub.learning.model.LearningFeatureFlagSource>()
+        val applicationContext = get<Context>().applicationContext
         me.rerere.rikkahub.learning.runtime.LearningRuntimeFacade(
-            context = get(),
+            context = applicationContext,
             isEnabled = {
-                flags.current().let { resolved ->
+                val rolloutEnabled = flags.current().let { resolved ->
                     resolved.isValid && resolved.effective.handoff
                 }
+                // Once derived state exists, privacy/retention remains operable after rollout off.
+                rolloutEnabled || applicationContext.getDatabasePath(
+                    me.rerere.rikkahub.learning.storage.LearningDatabase.FILE_NAME,
+                ).isFile
             },
             initializer = me.rerere.rikkahub.learning.runtime.LearningRuntimeInitializer {
                     database, _, frozenNowMs ->
@@ -771,6 +894,11 @@ val dataSourceModule = module {
             policyOpaqueIds = me.rerere.rikkahub.learning.retrieval.KeystorePolicyOpaqueIdFactory(
                 get(),
             ),
+            learningFeatureFlags = flags,
+            policyGrantAuthority = get(),
+            primaryOutboxRetention = get(),
+            learnedWorkflowErasePort = get(),
+            durableLearnedWorkflowPrivacyPort = get(),
             sqliteOpenHelperFactory = me.rerere.rikkahub.data.db.createAppSQLiteOpenHelperFactory(
                 get(),
             ),
@@ -779,20 +907,221 @@ val dataSourceModule = module {
     single<me.rerere.rikkahub.learning.runtime.LearningRuntimeMaintenancePort> {
         get<me.rerere.rikkahub.learning.runtime.LearningRuntimeFacade>()
     }
+    single<me.rerere.rikkahub.learning.retention.LearningRetentionMaintenancePort> {
+        get<me.rerere.rikkahub.learning.runtime.LearningRuntimeFacade>()
+    }
+    single<me.rerere.rikkahub.learning.curator.CuratorReviewRuntimeStore> {
+        get<me.rerere.rikkahub.learning.runtime.LearningRuntimeFacade>()
+    }
+    single<me.rerere.rikkahub.learning.curator.CuratorCandidateProductionStore> {
+        get<me.rerere.rikkahub.learning.runtime.LearningRuntimeFacade>()
+    }
+    single {
+        me.rerere.rikkahub.learning.curator.CuratorCandidateProductionCoordinator(
+            store = get(),
+            positiveMutations = get(),
+        )
+    }
+    single {
+        me.rerere.rikkahub.learning.curator.CuratorReviewRuntimeCoordinator(
+            store = get(),
+            positiveMutations = get(),
+        )
+    }
+    single<me.rerere.rikkahub.learning.curator.CuratorApplyRuntimeStore> {
+        get<me.rerere.rikkahub.learning.runtime.LearningRuntimeFacade>()
+    }
+    single {
+        me.rerere.rikkahub.learning.curator.CuratorApplyRuntimeCoordinator(
+            store = get(),
+            positiveMutations = get(),
+        )
+    }
+    single<me.rerere.rikkahub.learning.retention.LearningRetentionPreferencesSource> {
+        me.rerere.rikkahub.learning.model.SettingsLearningRetentionPreferencesSource(get())
+    }
+    single {
+        me.rerere.rikkahub.learning.retention.LearningRetentionMaintenanceCoordinator(
+            runtime = get(),
+            preferences = get(),
+            resources = get(),
+        )
+    }
     single<me.rerere.rikkahub.learning.retrieval.PolicyShadowRuntimePort> {
         get<me.rerere.rikkahub.learning.runtime.LearningRuntimeFacade>()
     }
+    single<me.rerere.rikkahub.learning.retrieval.LearnedPolicySource> {
+        get<me.rerere.rikkahub.learning.runtime.LearningRuntimeFacade>()
+    }
+    single<me.rerere.rikkahub.learning.exposure.PolicyExposureRuntimeAnchorSource> {
+        get<me.rerere.rikkahub.learning.runtime.LearningRuntimeFacade>()
+    }
+    single<me.rerere.rikkahub.learning.exposure.PolicyExposureStore> {
+        get<me.rerere.rikkahub.learning.runtime.LearningRuntimeFacade>()
+    }
+    single<me.rerere.rikkahub.learning.policy.runtime.ObservedUtilityMatchedAssignmentIntentPort> {
+        get<me.rerere.rikkahub.learning.runtime.LearningRuntimeFacade>()
+    }
+    single<me.rerere.rikkahub.learning.grant.PolicyGrantLifecycleProjector> {
+        get<me.rerere.rikkahub.learning.runtime.LearningRuntimeFacade>()
+    }
+    single<me.rerere.rikkahub.learning.grant.PolicyGrantReviewCoordinator> {
+        me.rerere.rikkahub.learning.grant.AppFirstPolicyGrantReviewCoordinator(
+            authority = get(),
+            lifecycle = get(),
+            positiveMutations = get(),
+        )
+    }
+    single<me.rerere.rikkahub.learning.review.PolicyReviewRuntimePort> {
+        get<me.rerere.rikkahub.learning.runtime.LearningRuntimeFacade>()
+    }
+    single<me.rerere.rikkahub.learning.workflow.review.WorkflowReviewRuntimePort> {
+        get<me.rerere.rikkahub.learning.runtime.LearningRuntimeFacade>()
+    }
+    single<me.rerere.rikkahub.learning.workflow.runtime.WorkflowCandidateSubmissionRuntime> {
+        get<me.rerere.rikkahub.learning.runtime.LearningRuntimeFacade>()
+    }
+    single<me.rerere.rikkahub.learning.workflow.runtime.WorkflowRolloutGate> {
+        me.rerere.rikkahub.learning.workflow.runtime.FeatureFlagWorkflowRolloutGate(
+            positiveMutations = get(),
+        )
+    }
+    single<me.rerere.rikkahub.learning.workflow.runtime.WorkflowCandidateRuntimeStore> {
+        get<me.rerere.rikkahub.learning.workflow.runtime.WorkflowCandidateSubmissionRuntime>()
+    }
+    single<me.rerere.rikkahub.learning.workflow.runtime.WorkflowSubmissionAuthorityPort> {
+        me.rerere.rikkahub.learning.workflow.runtime.ProductionWorkflowSubmissionAuthority(
+            settingsStore = get(),
+            localTools = get(),
+            grants = get(),
+        )
+    }
+    single<me.rerere.rikkahub.learning.workflow.runtime.HostWorkflowFixtureProvider> {
+        me.rerere.rikkahub.learning.workflow.runtime.ProductionHostWorkflowFixtureProvider
+    }
+    single<me.rerere.rikkahub.learning.workflow.runtime.LearnedWorkflowSubmissionService> {
+        val rolloutGate = get<me.rerere.rikkahub.learning.workflow.runtime.WorkflowRolloutGate>()
+        me.rerere.rikkahub.learning.workflow.runtime.GatedLearnedWorkflowSubmissionService(
+            delegate = me.rerere.rikkahub.learning.workflow.runtime
+                .LearnedWorkflowSubmissionOrchestrator(
+                    authority = get(),
+                    candidates = get(),
+                    fixtureProvider = get(),
+                    rolloutFence = rolloutGate::candidateEnabled,
+                ),
+            gate = rolloutGate,
+        )
+    }
+    single<me.rerere.rikkahub.learning.workflow.runtime.ReviewedPolicyWorkflowSourceRuntimePort> {
+        get<me.rerere.rikkahub.learning.runtime.LearningRuntimeFacade>()
+    }
+    single<me.rerere.rikkahub.learning.workflow.runtime.ReviewedPolicyWorkflowProposalPort> {
+        me.rerere.rikkahub.learning.workflow.runtime.ProductionReviewedPolicyWorkflowProposalPort(
+            runtime = get(),
+            grants = get(),
+            workflowAuthority = get(),
+        )
+    }
+    single<me.rerere.rikkahub.learning.workflow.runtime.UserReviewedPolicyWorkflowSubmissionService> {
+        me.rerere.rikkahub.learning.workflow.runtime
+            .UserReviewedPolicyWorkflowSubmissionCoordinator(
+                proposals = get(),
+                submissions = get(),
+            )
+    }
+    single<me.rerere.rikkahub.learning.promotion.WorkflowPromotionCandidateRuntime> {
+        get<me.rerere.rikkahub.learning.runtime.LearningRuntimeFacade>()
+    }
+    single<me.rerere.rikkahub.learning.promotion.LearnedWorkflowSourceAuthorityPort> {
+        get<me.rerere.rikkahub.learning.runtime.LearningRuntimeFacade>()
+    }
+    single<me.rerere.rikkahub.learning.promotion.WorkflowPromotionCandidateStore> {
+        me.rerere.rikkahub.learning.promotion.RuntimeWorkflowPromotionCandidateStore(get())
+    }
+    single<me.rerere.rikkahub.learning.promotion.PromotedWorkflowStore> {
+        me.rerere.rikkahub.learning.promotion.RepositoryPromotedWorkflowStore(get())
+    }
+    single<me.rerere.rikkahub.learning.promotion.WorkflowPromotionRevalidator> {
+        me.rerere.rikkahub.learning.promotion.ProductionWorkflowPromotionRevalidator(get())
+    }
+    single<me.rerere.rikkahub.learning.promotion.WorkflowPromotionValidationContextSource> {
+        me.rerere.rikkahub.learning.promotion.ProductionWorkflowPromotionValidationContextSource(
+            settingsStore = get(),
+            localTools = get(),
+            grantAuthority = get(),
+            sourceAuthority = get(),
+        )
+    }
+    single<me.rerere.rikkahub.workflow.execution.LearnedWorkflowAuthorityValidator> {
+        me.rerere.rikkahub.learning.promotion.ProductionLearnedWorkflowAuthorityValidator(
+            candidates = get(),
+            grants = get(),
+            revalidator = get(),
+            rolloutGate = get(),
+            sourceAuthority = get(),
+        )
+    }
+    single<me.rerere.rikkahub.learning.promotion.LearnedWorkflowPromotionService> {
+        val rolloutGate = get<me.rerere.rikkahub.learning.workflow.runtime.WorkflowRolloutGate>()
+        me.rerere.rikkahub.learning.promotion.GatedLearnedWorkflowPromotionService(
+            delegate = me.rerere.rikkahub.learning.promotion.LearnedWorkflowPromotionSaga(
+                candidates = get(),
+                workflows = get(),
+                revalidator = get(),
+                rolloutFence = rolloutGate::promotionEnabled,
+            ),
+            gate = rolloutGate,
+        )
+    }
+    single<me.rerere.rikkahub.learning.workflow.review.WorkflowReviewRepository> {
+        me.rerere.rikkahub.learning.workflow.review.ProductionWorkflowReviewRepository(
+            runtime = get(),
+            grantAuthority = get(),
+            promotion = get(),
+            workflows = get(),
+            metadataSource = get(),
+        )
+    }
+    single<me.rerere.rikkahub.learning.workflow.review.WorkflowReviewToolMetadataSource> {
+        me.rerere.rikkahub.learning.workflow.review.ProductionWorkflowReviewToolMetadataSource(
+            settingsStore = get(),
+            localTools = get(),
+        )
+    }
     single { me.rerere.rikkahub.learning.privacy.LearningEphemeralScopeRegistry() }
+    single<me.rerere.rikkahub.workflow.repository.AppDatabaseExactScopeLearnedWorkflowErasePort> {
+        me.rerere.rikkahub.workflow.repository.AppDatabaseExactScopeLearnedWorkflowErasePort(
+            database = get<AppDatabase>(),
+        )
+    }
+    single<me.rerere.rikkahub.learning.privacy.ExactScopeLearnedWorkflowErasePort> {
+        get<me.rerere.rikkahub.workflow.repository.AppDatabaseExactScopeLearnedWorkflowErasePort>()
+    }
+    single<me.rerere.rikkahub.learning.privacy.DurableLearnedWorkflowPrivacyPort> {
+        get<me.rerere.rikkahub.workflow.repository.AppDatabaseExactScopeLearnedWorkflowErasePort>()
+    }
     single<me.rerere.rikkahub.learning.privacy.LearningDerivedEraseStore> {
         me.rerere.rikkahub.learning.runtime.FacadeLearningDerivedEraseStore(
             runtime = get(),
             ephemeralEraser = get<me.rerere.rikkahub.learning.privacy.LearningEphemeralScopeRegistry>(),
+            learnedWorkflowErasePort = get(),
+            durableLearnedWorkflowPrivacyPort = get(),
         )
     }
     single {
         me.rerere.rikkahub.learning.privacy.LearningDerivedEraseService(
             store = get(),
             ephemeralRegistry = get(),
+        )
+    }
+    single<me.rerere.rikkahub.learning.review.LearningPolicyReviewRepository> {
+        me.rerere.rikkahub.learning.review.ProductionLearningPolicyReviewRepository(
+            runtime = get(),
+            grantDao = get<AppDatabase>().learningPolicyGrantDao(),
+            grantCoordinator = get(),
+            grantService = get(),
+            eraseService = get(),
+            positiveMutations = get(),
         )
     }
     single<me.rerere.rikkahub.learning.jobs.LearningDrainCoordinator> {
@@ -811,6 +1140,7 @@ val dataSourceModule = module {
             metrics = get(),
             learningOutboxAppender = get(),
             learningFeatureFlags = get(),
+            learningScopeConsent = get(),
             learningPostCommitWake = {
                 learningScheduler.wake(
                     me.rerere.rikkahub.learning.jobs.LearningDrainMode.DRAIN_ONLY,
@@ -993,6 +1323,12 @@ val dataSourceModule = module {
             dreamSnapshotProjectionReader = get(),
             dreamRuntimeUsageRecorder = get(),
             dreamRuntimeDiagnosticsSink = get(),
+            learnedPolicySource = get(),
+            policyShadowRuntime = get(),
+            policyExposureAnchorSource = get(),
+            policyExposureStore = get(),
+            observedUtilityAssignments = get(),
+            policyApplicabilityIdentityFactory = get(),
         )
     }
 

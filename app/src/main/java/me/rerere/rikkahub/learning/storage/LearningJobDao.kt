@@ -35,6 +35,34 @@ interface LearningJobDao {
         jobType: String,
     ): List<LearningJobEntity>
 
+    /**
+     * Content-free final-dispatch barrier for authority loss which has not committed its derived
+     * projection. The bounded subquery deliberately returns only an existence count. A
+     * DEAD_LETTER/CANCELLED job is still non-DONE: silently ignoring it could expose Policy bytes
+     * derived from a source or feedback revision whose invalidation never reached LearningDB.
+     *
+     * SOURCE_INVALIDATED has a dedicated exact job type. Feedback is an invalidation only for an
+     * adjacent revision (including an ACTIVE replacement or TOMBSTONED retraction), proved by the
+     * exact source event's non-null previous revision; an unprocessed initial feedback does not
+     * suppress unrelated existing Policy.
+     */
+    @Query(
+        "SELECT COUNT(*) FROM (SELECT j.id FROM learning_jobs j " +
+            "WHERE j.stream_id = :streamId AND j.replay_generation = :replayGeneration " +
+            "AND j.state != 'DONE' AND (j.job_type = 'INVALIDATE_SOURCE_V1' OR (" +
+            "j.job_type = 'APPLY_REWARD_AUTHORITY_V1' AND EXISTS (" +
+            "SELECT 1 FROM learning_inbox_events i WHERE i.stream_id = j.stream_id " +
+            "AND i.event_id = j.source_event_id " +
+            "AND i.replay_generation = j.replay_generation " +
+            "AND i.event_type_code = 'USER_FEEDBACK_RECORDED' " +
+            "AND i.event_schema_version = 3 AND i.previous_source_revision IS NOT NULL))) " +
+            "ORDER BY j.created_at_ms ASC, j.id ASC LIMIT 1)",
+    )
+    suspend fun countNonDoneAuthorityInvalidationBarrier(
+        streamId: String,
+        replayGeneration: Long,
+    ): Int
+
     @Query("SELECT MAX(replay_generation) FROM learning_jobs")
     suspend fun maxReplayGeneration(): Long?
 
@@ -70,7 +98,12 @@ interface LearningJobDao {
             "AND updated_at_ms <= :nowMs AND (" +
             "(state IN ('PENDING', 'RETRY') AND not_before_ms <= :nowMs) OR " +
             "(state = 'RUNNING' AND lease_until_ms IS NOT NULL AND lease_until_ms <= :nowMs)" +
-            ") ORDER BY priority DESC, not_before_ms ASC, created_at_ms ASC, id ASC LIMIT 1",
+            ") ORDER BY priority DESC, not_before_ms ASC, " +
+            "COALESCE((SELECT i.outbox_seq FROM learning_inbox_events i " +
+            "WHERE i.stream_id = learning_jobs.stream_id " +
+            "AND i.event_id = learning_jobs.source_event_id " +
+            "AND i.replay_generation = learning_jobs.replay_generation LIMIT 1), " +
+            "9223372036854775807) ASC, created_at_ms ASC, id ASC LIMIT 1",
     )
     suspend fun findClaimCandidate(
         nowMs: Long,
@@ -153,6 +186,23 @@ interface LearningJobDao {
     ): Int
 
     @Query(
+        "UPDATE learning_jobs SET state = 'RETRY', not_before_ms = :notBeforeMs, " +
+            "lease_generation = lease_generation + 1, last_error_code = :errorCode, " +
+            "updated_at_ms = :nowMs, finished_at_ms = NULL " +
+            "WHERE id = :id AND lease_generation = :expectedGeneration " +
+            "AND state IN ('PENDING', 'RETRY') AND not_before_ms <= :nowMs " +
+            "AND updated_at_ms = :expectedUpdatedAtMs AND :notBeforeMs > :nowMs",
+    )
+    suspend fun deferUnclaimedFenced(
+        id: String,
+        expectedGeneration: Long,
+        expectedUpdatedAtMs: Long,
+        nowMs: Long,
+        notBeforeMs: Long,
+        errorCode: LearningJobErrorCode,
+    ): Int
+
+    @Query(
         "UPDATE learning_jobs SET state = 'DEAD_LETTER', lease_process_session_id = NULL, " +
             "lease_worker_id = NULL, lease_until_ms = NULL, lease_generation = lease_generation + 1, " +
             "last_error_code = :errorCode, updated_at_ms = :nowMs, finished_at_ms = :nowMs " +
@@ -180,6 +230,26 @@ interface LearningJobDao {
     suspend fun deadLetterAllExhausted(
         nowMs: Long,
         errorCode: LearningJobErrorCode,
+    ): Int
+
+    /**
+     * Mandatory negative-authority work is provider-free and idempotent. A prior build could
+     * exhaust these rows when adjacent source revisions were claimed out of outbox order; startup
+     * repairs only that exact terminal shape so the durable invalidation barrier can converge.
+     */
+    @Query(
+        "UPDATE learning_jobs SET state = 'RETRY', attempts = 0, not_before_ms = :notBeforeMs, " +
+            "lease_process_session_id = NULL, lease_worker_id = NULL, lease_until_ms = NULL, " +
+            "lease_generation = lease_generation + 1, updated_at_ms = :nowMs, " +
+            "finished_at_ms = NULL WHERE id IN (SELECT id FROM learning_jobs " +
+            "WHERE job_type = 'INVALIDATE_SOURCE_V1' AND state = 'DEAD_LETTER' " +
+            "AND last_error_code = 'ATTEMPTS_EXHAUSTED' ORDER BY updated_at_ms ASC, id ASC " +
+            "LIMIT :limit)",
+    )
+    suspend fun requeueExhaustedMandatorySourceInvalidations(
+        nowMs: Long,
+        notBeforeMs: Long,
+        limit: Int,
     ): Int
 
     @Query(
@@ -228,4 +298,32 @@ interface LearningJobDao {
 
     @Query("DELETE FROM learning_jobs WHERE scope_kind = :scopeKind AND scope_id = :scopeId")
     suspend fun deleteByScope(scopeKind: String, scopeId: String): Int
+
+    /** DONE receipts are pruned only after the caller's frozen outbound-receipt cutoff. */
+    @Query(
+        "DELETE FROM learning_jobs WHERE id IN (SELECT id FROM learning_jobs " +
+            "WHERE state = 'DONE' AND finished_at_ms IS NOT NULL " +
+            "AND finished_at_ms < :finishedBeforeMs ORDER BY finished_at_ms ASC, id ASC " +
+            "LIMIT :limit)",
+    )
+    suspend fun deleteDonePage(finishedBeforeMs: Long, limit: Int): Int
+
+    /** Explicit user/admin recovery; ordinary maintenance never retries a DEAD_LETTER. */
+    @Query(
+        "UPDATE learning_jobs SET state = 'RETRY', attempts = 0, " +
+            "not_before_ms = :notBeforeMs, lease_generation = lease_generation + 1, " +
+            "lease_process_session_id = NULL, lease_worker_id = NULL, lease_until_ms = NULL, " +
+            "last_error_code = 'MANUAL_REQUEUE', updated_at_ms = :updatedAtMs, " +
+            "finished_at_ms = NULL WHERE id = :id AND state = 'DEAD_LETTER' " +
+            "AND lease_generation = :expectedLeaseGeneration " +
+            "AND updated_at_ms = :expectedUpdatedAtMs " +
+            "AND :updatedAtMs >= :expectedUpdatedAtMs AND :notBeforeMs >= :updatedAtMs",
+    )
+    suspend fun requeueDeadLetterIfCurrent(
+        id: String,
+        expectedLeaseGeneration: Long,
+        expectedUpdatedAtMs: Long,
+        notBeforeMs: Long,
+        updatedAtMs: Long,
+    ): Int
 }

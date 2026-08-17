@@ -83,6 +83,16 @@ data class LearningOutboxEntity(
     val messageId: String?,
     @ColumnInfo(name = "message_revision")
     val messageRevision: Long? = null,
+    /** Typed reward metadata; no feedback text or reconstructed model content is persisted. */
+    @ColumnInfo(name = "reward_dimension")
+    val rewardDimension: String? = null,
+    @ColumnInfo(name = "reward_signal_kind")
+    val rewardSignalKind: String? = null,
+    @ColumnInfo(name = "reward_value_milli")
+    val rewardValueMilli: Int? = null,
+    /** Reserved v3 execution verification proof state; existing v1/v2 writers remain null. */
+    @ColumnInfo(name = "execution_verification_state")
+    val executionVerificationState: String? = null,
     @ColumnInfo(name = "occurred_at_ms")
     val occurredAtMs: Long?,
     @ColumnInfo(name = "created_at_ms")
@@ -105,6 +115,9 @@ data class LearningOutboxEntity(
             missingRevisionReason,
             scopeKind,
             completionKind,
+            rewardDimension,
+            rewardSignalKind,
+            executionVerificationState,
         ).forEach { code ->
             require(code.isSafeLearningStorageCode()) { "Invalid learning outbox code" }
         }
@@ -144,6 +157,9 @@ data class LearningOutboxEntity(
         require(messageRevision == null || messageRevision > 0L) {
             "Invalid message revision"
         }
+        require(rewardValueMilli == null || rewardValueMilli in -1000..1000) {
+            "Invalid reward value"
+        }
         require((toolName == null) == (toolSchemaFingerprint == null)) {
             "Outbox tool identity requires a name/fingerprint pair"
         }
@@ -154,7 +170,8 @@ data class LearningOutboxEntity(
     override fun toString(): String =
         "LearningOutboxEntity(seq=$seq, schema=$eventSchemaVersion, " +
             "terminal=${terminalState != null}, source=${sourceId != null}, " +
-            "scope=${scopeKind != null}, codes-and-ids=<redacted>)"
+            "scope=${scopeKind != null}, reward=${rewardDimension != null}, " +
+            "codes-and-ids=<redacted>)"
 }
 
 private const val MAX_EVENT_ID_CHARS = 160

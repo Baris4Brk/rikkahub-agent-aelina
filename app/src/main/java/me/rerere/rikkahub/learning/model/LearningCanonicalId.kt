@@ -38,6 +38,10 @@ object LearningCanonicalId {
         previousSourceRevision: Long? = null,
         sourceStateCode: String? = null,
         correlation: LearningCorrelation? = null,
+        rewardDimensionCode: String? = null,
+        rewardSignalKindCode: String? = null,
+        rewardValueMilli: Int? = null,
+        executionVerificationStateCode: String? = null,
     ): String {
         require(isSafeLearningIdentifier(sourceId, 256)) { "Invalid source identifier" }
         require(eventSchemaVersion > 0) { "Invalid event schema version" }
@@ -49,6 +53,10 @@ object LearningCanonicalId {
             "Invalid terminal state"
         }
         if (eventSchemaVersion == 1) {
+            require(
+                rewardDimensionCode == null && rewardSignalKindCode == null &&
+                    rewardValueMilli == null && executionVerificationStateCode == null,
+            ) { "Schema v1 cannot carry v3 metadata" }
             return "learning-event-v1:" + digest(
                 domainVersion = "learning-event-v1",
                 fields = listOf(
@@ -65,9 +73,7 @@ object LearningCanonicalId {
         require(eventSchemaVersion >= 2) { "Unsupported canonical event schema" }
         require(previousSourceRevision == null || previousSourceRevision > 0L)
         require(sourceStateCode == null || sourceStateCode.matches(Regex("[A-Z][A-Z0-9_]{0,63}")))
-        return "learning-event-v2:" + digest(
-            domainVersion = "learning-event-v2",
-            fields = listOf(
+        val v2Fields = listOf(
                 streamId.toString(),
                 eventType.name,
                 eventSchemaVersion.toString(),
@@ -92,6 +98,30 @@ object LearningCanonicalId {
                 correlation?.toolSchemaFingerprint,
                 correlation?.messageId,
                 correlation?.messageRevision?.toString(),
+            )
+        if (eventSchemaVersion == 2) {
+            require(
+                rewardDimensionCode == null && rewardSignalKindCode == null &&
+                    rewardValueMilli == null && executionVerificationStateCode == null,
+            ) { "Schema v2 cannot carry v3 metadata" }
+            return "learning-event-v2:" + digest(
+                domainVersion = "learning-event-v2",
+                fields = v2Fields,
+            )
+        }
+        listOfNotNull(
+            rewardDimensionCode,
+            rewardSignalKindCode,
+            executionVerificationStateCode,
+        ).forEach { require(it.matches(Regex("[A-Z][A-Z0-9_]{0,63}"))) }
+        require(rewardValueMilli == null || rewardValueMilli in -1000..1000)
+        return "learning-event-v3:" + digest(
+            domainVersion = "learning-event-v3",
+            fields = v2Fields + listOf(
+                rewardDimensionCode,
+                rewardSignalKindCode,
+                rewardValueMilli?.toString(),
+                executionVerificationStateCode,
             ),
         )
     }

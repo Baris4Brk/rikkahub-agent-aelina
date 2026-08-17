@@ -1,5 +1,6 @@
 package me.rerere.rikkahub.memory.dreaming.synthesis
 
+import java.net.URI
 import java.security.MessageDigest
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
@@ -7,6 +8,8 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeout
 import me.rerere.ai.context.ProviderContextWindowResolver
 import me.rerere.ai.context.ProviderRequestTokenEstimator
+import me.rerere.ai.provider.Model
+import me.rerere.ai.provider.ModelAbility
 import me.rerere.ai.provider.ProviderManager
 import me.rerere.ai.provider.ProviderSetting
 import me.rerere.ai.provider.TextGenerationParams
@@ -68,20 +71,29 @@ class ProviderDreamSynthesizer(
             advertisedTokens = model.contextLength,
         ).effectiveTokens
         val estimatedInputTokens = tokenEstimator.estimate(messages).totalInputTokens
+        val effectiveOutputTokens = dreamProviderOutputTokenBudget(
+            providerSetting = providerSetting,
+            model = model,
+            requestedOutputTokens = request.maxOutputTokens,
+        )
+        val synthesisTimeoutMs = dreamProviderTimeoutMs(
+            providerSetting = providerSetting,
+            model = model,
+        )
         val response = when (val admitted = withDreamProviderAdmission(
             inputUtf8Bytes = inputUtf8Bytes,
             estimatedInputTokens = estimatedInputTokens,
-            requestedOutputTokens = request.maxOutputTokens,
+            requestedOutputTokens = effectiveOutputTokens,
             enforcedWindowTokens = enforcedWindow,
         ) {
-            withTimeout(DREAM_SYNTHESIS_TIMEOUT_MS) {
+            withTimeout(synthesisTimeoutMs) {
                 provider.generateText(
                     providerSetting = providerSetting,
                     messages = messages,
                     params = TextGenerationParams(
                         model = model,
                         temperature = 0.1f,
-                        maxTokens = request.maxOutputTokens,
+                        maxTokens = effectiveOutputTokens,
                         tools = emptyList(),
                         reasoningLevel = memoryExtractionReasoningLevel(model),
                         omitReasoningConfigurationWhenOff = true,
@@ -190,6 +202,48 @@ internal suspend fun <T> withDreamProviderAdmission(
     return DreamProviderAdmissionResult.Admitted(generate())
 }
 
+/**
+ * DeepSeek V4 on OpenCode exposes only high/max reasoning effort, so even the app's LOW/OFF
+ * structured-task policy is normalized to the provider's high reasoning mode. A small completion
+ * budget can therefore be exhausted by hidden reasoning before the compact Dream JSON is emitted.
+ * Promote only that known provider/model pairing to the larger local Dream ceiling; every other
+ * model keeps the caller-owned baseline unchanged.
+ */
+internal fun dreamProviderOutputTokenBudget(
+    providerSetting: ProviderSetting,
+    model: Model,
+    requestedOutputTokens: Int,
+): Int {
+    return if (isOpenCodeDeepSeekV4Reasoning(providerSetting, model)) {
+        OPEN_CODE_DEEPSEEK_V4_DREAM_OUTPUT_TOKENS
+    } else {
+        requestedOutputTokens
+    }
+}
+
+internal fun dreamProviderTimeoutMs(
+    providerSetting: ProviderSetting,
+    model: Model,
+): Long = if (isOpenCodeDeepSeekV4Reasoning(providerSetting, model)) {
+    OPEN_CODE_DEEPSEEK_V4_DREAM_TIMEOUT_MS
+} else {
+    DREAM_SYNTHESIS_TIMEOUT_MS
+}
+
+private fun isOpenCodeDeepSeekV4Reasoning(
+    providerSetting: ProviderSetting,
+    model: Model,
+): Boolean = providerSetting is ProviderSetting.OpenAI &&
+    providerSetting.baseUrl.isOpenCodeHost() &&
+    ModelAbility.REASONING in model.abilities &&
+    "deepseek-v4-" in model.modelId.lowercase()
+
+private fun String.isOpenCodeHost(): Boolean = runCatching {
+    URI(this).host?.lowercase()?.let { host ->
+        host == "opencode.ai" || host.endsWith(".opencode.ai")
+    } == true
+}.getOrDefault(false)
+
 private fun ProviderSetting.dreamProviderKind(): String = when (this) {
     is ProviderSetting.OpenAI -> "openai"
     is ProviderSetting.Google -> "google"
@@ -229,8 +283,10 @@ private fun dreamModelIdentityDigest(
 }
 
 private const val DREAM_SYNTHESIS_TIMEOUT_MS = 2L * 60_000L
+private const val OPEN_CODE_DEEPSEEK_V4_DREAM_TIMEOUT_MS = 12L * 60_000L
 private const val DREAM_MODEL_IDENTITY_DOMAIN = "rikkahub.dream-model-identity.v1"
 private const val MAX_DREAM_PROVIDER_INPUT_UTF8_BYTES = 128_000L
 private const val MAX_DREAM_PROVIDER_OUTPUT_UTF8_BYTES = 128_000
-private const val MAX_DREAM_PROVIDER_OUTPUT_TOKENS = 8_192
+private const val OPEN_CODE_DEEPSEEK_V4_DREAM_OUTPUT_TOKENS = 81_920
+private const val MAX_DREAM_PROVIDER_OUTPUT_TOKENS = 81_920
 private const val DREAM_PROVIDER_SAFETY_TOKENS = 256

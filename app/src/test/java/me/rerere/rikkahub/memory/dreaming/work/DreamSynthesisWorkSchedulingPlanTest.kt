@@ -80,6 +80,10 @@ class DreamSynthesisWorkSchedulingPlanTest {
             ExistingWorkPolicy.APPEND_OR_REPLACE,
             dreamSynthesisScanExistingPolicy(DreamSynthesisScanReason.FOLLOW_UP),
         )
+        assertEquals(
+            ExistingWorkPolicy.APPEND_OR_REPLACE,
+            dreamSynthesisScanExistingPolicy(DreamSynthesisScanReason.APP_IDLE_RECHECK),
+        )
     }
 
     @Test

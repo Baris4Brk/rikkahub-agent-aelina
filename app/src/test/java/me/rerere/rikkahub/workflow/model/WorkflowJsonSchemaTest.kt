@@ -225,12 +225,12 @@ class WorkflowJsonSchemaTest {
         assertEquals(setOf("tool.show_toast"), current.definition.capabilitySnapshot)
     }
 
-    @Test fun `new-format empty capability snapshot fails closed while legacy row remains readable`() {
+    @Test fun `empty capability snapshot is tolerated only for non-learned compatibility rows`() {
         val legacy = """{"id":"legacy","name":"X","trigger":{"type":"manual"},"actions":[{"tool":"show_toast","args":{}}]}"""
         val emptyCurrent = """{"id":"current","name":"X","trigger":{"type":"manual"},"actions":[{"tool":"show_toast","args":{}}],"capability_snapshot":[]}"""
 
         assertNotNull(WorkflowJson.parseStored(legacy))
-        assertNull(WorkflowJson.parseStored(emptyCurrent))
+        assertNotNull(WorkflowJson.parseStored(emptyCurrent))
         assertNull(
             WorkflowJson.parseStoredWithCompatibility(emptyCurrent)!!
                 .learnedExecutionCapabilitiesOrNull(),
@@ -281,15 +281,10 @@ class WorkflowJsonSchemaTest {
         assertEquals(longName, def!!.name)
     }
 
-    @Test fun `parseStored tolerates a forward-compat unknown key on a trigger spec`() {
-        // A future build adds a field to battery_below; an older build (or a downgrade) must
-        // still load the row instead of dropping the trigger and tearing the workflow down.
-        // The lenient stored decoder ignores the unknown key; the strict create path would
-        // (correctly) still reject it as a repair signal.
+    @Test fun `parseStored rejects unknown key on a trigger spec`() {
         val raw = """{"id":"abc","name":"X","trigger":{"type":"battery_below","params":{"threshold_percent":20,"future_field":"v2"}},"actions":[{"tool":"show_toast","args":{}}]}"""
         val def = WorkflowJson.parseStored(raw)
-        assertNotNull("parseStored must tolerate unknown forward-compat keys", def)
-        assertEquals(20, (def!!.trigger as TriggerSpec.BatteryBelow).thresholdPercent)
+        assertNull("stored permission-bearing definitions are strict", def)
     }
 
     // ------- Trigger / condition param-shape leniency (regression) ------

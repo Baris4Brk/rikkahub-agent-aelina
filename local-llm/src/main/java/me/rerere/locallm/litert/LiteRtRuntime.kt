@@ -46,8 +46,18 @@ const val ROLE_ASSISTANT = "assistant"
 
 internal const val LITERT_PROMPT_RENDERER_ABI = "rikkahub-litert-render-v2"
 internal const val LITERT_NATIVE_TOOL_ABI = "rikkahub-run-tool-v1"
+internal const val LITERT_BACKGROUND_RUNTIME_ABI = "rikkahub-litert-background-v1"
 private const val TURN_FINGERPRINT_DOMAIN = "rikkahub-litert-turn-v2"
 private const val MODEL_FINGERPRINT_BUFFER_BYTES = 1024 * 1024
+private val LOWER_SHA256 = Regex("^[0-9a-f]{64}$")
+
+/** Canonical label for the backend the current SDK actually constructs. */
+internal fun canonicalLiteRtAccelerator(label: String?): String = when (label?.uppercase()) {
+    "QNN", "NPU", "TPU" -> "NPU"
+    "GPU" -> "GPU"
+    // LiteRT-LM 0.11 exposes no NNAPI Backend; the existing runtime maps it to CPU.
+    else -> "CPU"
+}
 
 /**
  * Strong, content-derived signature for one conversation turn. Fields are length-prefixed before
@@ -93,6 +103,48 @@ internal fun computeModelArtifactSha256(file: File): String {
         (byte.toInt() and 0xff).toString(16).padStart(2, '0')
     }
 }
+
+/**
+ * Runtime-owned seal used between LiteRT background attestation and one native attempt.
+ * [canonicalModelPath] never crosses the provider boundary or enters durable Learning storage.
+ */
+internal data class LiteRtBackgroundRuntimeSeal(
+    val canonicalModelPath: String,
+    val artifactSha256: String,
+    val sdkAbi: String,
+    val accelerator: String,
+) {
+    init {
+        require(canonicalModelPath.isNotBlank())
+        require(LOWER_SHA256.matches(artifactSha256))
+        require(sdkAbi.isNotBlank())
+        require(accelerator.matches(Regex("^[A-Za-z0-9._-]{1,64}$")))
+    }
+}
+
+/** Exact text-only request passed to the isolated background Conversation. */
+internal data class LiteRtPreparedBackgroundRuntime(
+    val seal: LiteRtBackgroundRuntimeSeal,
+    val maxNumTokens: Int,
+    val systemInstructionText: String?,
+    val topK: Int,
+    val topP: Double,
+    val temperature: Double,
+    val promptRendererAbi: String = LITERT_PROMPT_RENDERER_ABI,
+    val nativeToolAbi: String = LITERT_NATIVE_TOOL_ABI,
+) {
+    init {
+        require(maxNumTokens > 0)
+        require(topK > 0)
+        require(topP.isFinite() && topP > 0.0 && topP <= 1.0)
+        require(temperature.isFinite() && temperature >= 0.0)
+        require(promptRendererAbi == LITERT_PROMPT_RENDERER_ABI)
+        require(nativeToolAbi == LITERT_NATIVE_TOOL_ABI)
+    }
+}
+
+internal class LiteRtBackgroundRuntimeMismatchException(message: String) :
+    IllegalStateException(message)
 
 /**
  * One rendered conversation turn handed from [LiteRtProvider] to [LiteRtRuntime].
@@ -503,14 +555,15 @@ class LiteRtRuntime(private val context: Context) {
     private suspend fun resolveModelArtifactSha256(modelPath: String): String =
         artifactFingerprintMutex.withLock {
             val file = File(modelPath)
-            val canonicalPath = withContext(Dispatchers.IO) { file.canonicalPath }
+            val canonicalFile = withContext(Dispatchers.IO) { file.canonicalFile }
+            val canonicalPath = canonicalFile.path
             val before = withContext(Dispatchers.IO) { readModelArtifactStat(canonicalPath) }
             artifactFingerprints[canonicalPath]?.let { cached ->
                 if (cached.stat == before) {
                     return@withLock cached.sha256
                 }
             }
-            val sha256 = withContext(Dispatchers.IO) { computeModelArtifactSha256(file) }
+            val sha256 = withContext(Dispatchers.IO) { computeModelArtifactSha256(canonicalFile) }
             val after = withContext(Dispatchers.IO) { readModelArtifactStat(canonicalPath) }
             require(after == before) {
                 "Model artifact changed while its cache identity was being computed"
@@ -520,6 +573,37 @@ class LiteRtRuntime(private val context: Context) {
                 sha256 = sha256,
             )
             sha256
+        }
+
+    /**
+     * Resolve the exact artifact and accelerator identity without loading or sending the model.
+     * The expensive SHA is cached only behind inode/ctime/size/mtime validation. This method and
+     * [streamIsolatedBackground] share [mutex], while the provider additionally holds its global
+     * inference mutex from final preparation through the complete native attempt.
+     */
+    internal suspend fun attestBackgroundRuntime(
+        modelPath: String,
+        preferredAccel: String?,
+        forceCpu: Boolean,
+    ): LiteRtBackgroundRuntimeSeal = mutex.withLock {
+        val canonicalPath = withContext(Dispatchers.IO) { File(modelPath).canonicalPath }
+        LiteRtBackgroundRuntimeSeal(
+            canonicalModelPath = canonicalPath,
+            artifactSha256 = resolveModelArtifactSha256(canonicalPath),
+            sdkAbi = LocalRuntimePreferences.LITERTLM_SDK_VERSION,
+            accelerator = canonicalLiteRtAccelerator(
+                selectAccelerator(preferredAccel, forceCpu),
+            ),
+        )
+    }
+
+    private fun selectAccelerator(preferredAccel: String?, forceCpu: Boolean): String =
+        if (forceCpu) {
+            "CPU"
+        } else {
+            sessionFallbackAccelerator
+                ?: preferredAccel
+                ?: AcceleratorProbe.probeLiteRt(context)
         }
 
     /**
@@ -580,10 +664,7 @@ class LiteRtRuntime(private val context: Context) {
         val modelArtifactSha256 = resolveModelArtifactSha256(modelPath)
         // Use in-session fallback if a prior GPU→CPU retry already succeeded this session.
         // forceCpu wins over a non-null preferredAccel.
-        val accel = if (forceCpu) "CPU"
-        else sessionFallbackAccelerator
-            ?: preferredAccel
-            ?: AcceleratorProbe.probeLiteRt(context)
+        val accel = selectAccelerator(preferredAccel, forceCpu)
 
         // Probe the file for speculative-decoding support BEFORE building the engine.
         val supportsSpeculativeDecoding = try {
@@ -955,6 +1036,143 @@ class LiteRtRuntime(private val context: Context) {
             spec = instance.conversationSpec,
         )
     }
+
+    /**
+     * Execute one text-only background request in a request-owned Conversation.
+     *
+     * The provider must first load the engine with the exact values in [prepared] while holding
+     * its process-wide inference mutex. This method then holds [mutex] from artifact revalidation
+     * through `sendMessageAsync` and terminal cleanup. The SDK accepts only a filesystem path (no
+     * fd/handle overload), so the last `stat -> cached/full SHA -> send` sequence necessarily has
+     * a tiny external-writer TOCTOU boundary. Installed artifacts live in app-private storage;
+     * inode+ctime checks detect atomic replacement and in-place writes before native dispatch.
+     *
+     * The normal chat Conversation is never used. The isolated Conversation and its KV state are
+     * closed in `finally` on success, provider failure, timeout, and coroutine cancellation.
+     */
+    internal fun streamIsolatedBackground(
+        prepared: LiteRtPreparedBackgroundRuntime,
+        coldBlob: String,
+        onDispatchStarted: suspend () -> Unit,
+    ): Flow<String> = callbackFlow {
+        require(coldBlob.isNotBlank()) { "Background LiteRT input must not be blank" }
+        var isolatedConversation: Conversation? = null
+        var epoch: InferenceEpochFence.Token? = null
+        try {
+            mutex.withLock {
+                try {
+                val instance = loaded
+                    ?: throw LiteRtBackgroundRuntimeMismatchException(
+                        "Background LiteRT engine was not prepared",
+                    )
+                val key = instance.engineKey
+                if (
+                    key.modelPath != prepared.seal.canonicalModelPath ||
+                    key.modelArtifactSha256 != prepared.seal.artifactSha256 ||
+                    key.sdkAbi != prepared.seal.sdkAbi ||
+                    key.accelerator != prepared.seal.accelerator ||
+                    key.maxNumTokens != prepared.maxNumTokens ||
+                    key.supportImage ||
+                    key.supportAudio ||
+                    key.speculativeDecoding
+                ) {
+                    throw LiteRtBackgroundRuntimeMismatchException(
+                        "Prepared LiteRT engine no longer matches its frozen attestation",
+                    )
+                }
+                if (
+                    prepared.promptRendererAbi != LITERT_PROMPT_RENDERER_ABI ||
+                    prepared.nativeToolAbi != LITERT_NATIVE_TOOL_ABI
+                ) {
+                    throw LiteRtBackgroundRuntimeMismatchException(
+                        "Prepared LiteRT prompt/native ABI changed",
+                    )
+                }
+
+                val conversationSpec = ConversationSpec(
+                    systemInstruction = prepared.systemInstructionText
+                        ?.takeIf(String::isNotBlank)
+                        ?.let { Contents.of(it) },
+                    tools = emptyList(),
+                    constrainedDecoding = false,
+                    topK = prepared.topK,
+                    topP = prepared.topP,
+                    temperature = prepared.temperature,
+                )
+                val conversation = createConversationWithFlags(
+                    engine = instance.engine,
+                    backend = acceleratorToBackend(key.accelerator),
+                    spec = conversationSpec,
+                )
+                isolatedConversation = conversation
+                val active = ActiveInference(
+                    instance = instance,
+                    conversation = conversation,
+                    closeStream = {
+                        close(CancellationException("LiteRT background inference stopped"))
+                    },
+                )
+                val localEpoch = inferenceEpochs.begin(active)
+                epoch = localEpoch
+
+                try {
+                    // This is the final filesystem identity check. A changed stat forces a full
+                    // SHA pass; no native provider bytes are sent after a mismatch.
+                    val dispatchSha = resolveModelArtifactSha256(prepared.seal.canonicalModelPath)
+                    if (dispatchSha != prepared.seal.artifactSha256) {
+                        throw LiteRtBackgroundRuntimeMismatchException(
+                            "LiteRT artifact changed before background dispatch",
+                        )
+                    }
+                    // The durable attempt fence is the final suspending operation before native
+                    // send. Failure/cancellation here exits through cleanup without provider bytes.
+                    onDispatchStarted()
+                    val sent = inferenceEpochs.guard(localEpoch) {
+                        conversation.sendMessageAsync(
+                            Contents.of(listOf(Content.Text(coldBlob))),
+                            object : MessageCallback {
+                                override fun onMessage(message: Message) {
+                                    if (!inferenceEpochs.guard(localEpoch) {
+                                            val text = message.toString()
+                                            if (text.isNotEmpty()) trySend(text)
+                                        }
+                                    ) return
+                                }
+
+                                override fun onDone() {
+                                    if (inferenceEpochs.finish(localEpoch) {}) close()
+                                }
+
+                                override fun onError(throwable: Throwable) {
+                                    val accepted = inferenceEpochs.finish(localEpoch) {}
+                                    if (accepted) {
+                                        if (throwable is CancellationException) close()
+                                        else close(throwable)
+                                    }
+                                }
+                            },
+                            emptyMap(),
+                        )
+                    }
+                    if (!sent) {
+                        throw CancellationException("LiteRT background inference was revoked")
+                    }
+                    awaitClose { cancelInference(localEpoch) }
+                } catch (throwable: Throwable) {
+                    cancelInference(localEpoch)
+                    throw throwable
+                }
+                } finally {
+                    epoch?.let(::cancelInference)
+                    try { isolatedConversation?.close() } catch (_: Throwable) {}
+                }
+            }
+        } finally {
+            // Background must not pin a multi-GB Engine forever merely because it bypasses the
+            // ordinary chat stream's finally block.
+            armIdleTeardown()
+        }
+    }.flowOn(Dispatchers.IO)
 
     /**
      * Stream one assistant response.

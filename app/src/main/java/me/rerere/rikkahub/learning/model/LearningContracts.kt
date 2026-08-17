@@ -133,7 +133,7 @@ enum class LearningEventType(val firstSchemaVersion: Int, val producesP0Job: Boo
     COMMAND_WAITING_APPROVAL(1, true),
     COMMAND_TERMINAL(1, true),
     EXECUTION_TERMINAL(1, true),
-    USER_FEEDBACK_RECORDED(1, false),
+    USER_FEEDBACK_RECORDED(1, true),
     SOURCE_INVALIDATED(2, true),
     TOOL_SCHEMA_CHANGED(1, false),
     WORKFLOW_TRIAL_TERMINAL(1, false),
@@ -167,14 +167,16 @@ data class LearningEventCode(
         }
 
     val producesJob: Boolean
-        get() = decodeState == LearningEventDecodeState.KNOWN && knownType?.producesP0Job == true
+        get() = decodeState == LearningEventDecodeState.KNOWN &&
+            knownType?.producesP0Job == true &&
+            (knownType != LearningEventType.USER_FEEDBACK_RECORDED || schemaVersion >= 3)
 
     override fun toString(): String =
         "LearningEventCode(type=$knownType, schema=$schemaVersion, decode=$decodeState, " +
             "raw=<redacted>)"
 
     companion object {
-        const val CURRENT_LEARNING_EVENT_SCHEMA_VERSION = 2
+        const val CURRENT_LEARNING_EVENT_SCHEMA_VERSION = 3
     }
 }
 

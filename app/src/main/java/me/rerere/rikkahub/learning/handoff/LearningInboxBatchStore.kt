@@ -85,6 +85,10 @@ data class LearningInboxAuthoritativeEvent(
     val scopeKindCode: String?,
     val scopeId: String?,
     val correlation: LearningCorrelation,
+    val rewardDimensionCode: String? = null,
+    val rewardSignalKindCode: String? = null,
+    val rewardValueMilli: Int? = null,
+    val executionVerificationStateCode: String? = null,
     val occurredAtMs: Long?,
     val createdAtMs: Long,
     val replayGeneration: Long,
@@ -142,7 +146,7 @@ object CurrentLearningReinterpretedJobFactory : LearningReinterpretedJobFactory 
         reinterpretedAtMs: Long,
     ): LearningJobEntity? {
         val eventType = event.eventCode.knownType ?: return null
-        if (!eventType.producesP0Job) return null
+        if (!event.eventCode.producesJob) return null
         val scopeKind = event.scopeKindCode ?: return null
         val scopeId = event.scopeId ?: return null
         if (LearningScope.parseOrNull(scopeKind, scopeId) == null) return null
@@ -306,7 +310,7 @@ class LearningInboxReinterpreter(
             ) { "An unknown event code cannot be interpreted as KNOWN" }
             val createsP0Job =
                 newDecodeState == LearningEventDecodeState.KNOWN &&
-                    authority.eventCode.knownType?.producesP0Job == true &&
+                    authority.eventCode.producesJob &&
                     authority.sourceTypeCode != null &&
                     LearningSourceKind.entries.any {
                         it != LearningSourceKind.UNKNOWN &&
@@ -396,26 +400,44 @@ class LearningInboxReinterpreter(
  */
 class LearningDerivedStateResetter(
     private val database: LearningDatabase,
+    private val learnedWorkflowErasePort:
+        me.rerere.rikkahub.learning.privacy.ExactScopeLearnedWorkflowErasePort,
+    private val durableLearnedWorkflowPrivacyPort:
+        me.rerere.rikkahub.learning.privacy.DurableLearnedWorkflowPrivacyPort,
 ) {
     suspend fun reset(
         streamId: Uuid,
         observedHeadSeq: Long,
         reason: LearningStreamResetReason,
         frozenNowMs: Long,
-    ): LearningStreamCheckpointEntity = database.withTransaction {
+    ): LearningStreamCheckpointEntity {
         require(observedHeadSeq > 0L) { "A reset requires the authoritative stream sentinel" }
         require(frozenNowMs >= 0L) { "Negative reset time" }
+        fenceLearnedWorkflowsBeforeCandidateDelete(frozenNowMs)
+        return database.withTransaction {
         val highestExistingGeneration = listOfNotNull(
             database.checkpointDao().maxReplayGeneration(),
             database.inboxDao().maxReplayGeneration(),
             database.jobDao().maxReplayGeneration(),
             database.episodeDao().maxEpisodeReplayGeneration(),
             database.episodeDao().maxSourceValidityReplayGeneration(),
+            database.policyExposureDao().maxReplayGeneration(),
+            database.observedUtilityDao().maxReplayGeneration(),
         ).maxOrNull() ?: -1L
         val nextGeneration = Math.addExact(highestExistingGeneration, 1L)
         // Policy rows point at Episodes and at one another. Delete the complete derived graph in
         // dependency order before resetting transport state; otherwise a restore/head rewind can
         // retain evidence from the future authority timeline or fail on a foreign-key fence.
+        database.observedUtilityDao().deleteAllEvaluationReceipts()
+        database.observedUtilityDao().deleteAllOutcomes()
+        database.observedUtilityDao().deleteAllAssignments()
+        database.policyExposureDao().deleteAllItems()
+        database.policyExposureDao().deleteAllExposures()
+        database.policyShadowObservationDao().deleteAll()
+        // Curator candidates are independent roots. Their revisions/lineage cascade from this
+        // delete; leaving the roots behind would carry reviewed content across replay generations.
+        database.curatorDeltaDao().deleteAllCandidatesForDerivedReset()
+        database.learnedWorkflowCandidateDao().deleteAll()
         database.policyDao().deleteAllLineage()
         database.policyDao().deleteAllEvidence()
         database.policyDao().deleteAllRevisions()
@@ -426,6 +448,9 @@ class LearningDerivedStateResetter(
         database.episodeDao().deleteAllEpisodes()
         database.episodeDao().deleteAllSourceValidity()
         database.jobDao().deleteAll()
+        // Job deletion cascades manifests/attempts. Cohorts are RESTRICT roots and therefore must
+        // be removed only after those receipts have gone.
+        database.providerExecutionDao().deleteUnreferencedConfigCohorts()
         database.inboxDao().deleteAll()
         database.checkpointDao().deleteAll()
         val checkpoint = LearningStreamCheckpointEntity(
@@ -443,6 +468,36 @@ class LearningDerivedStateResetter(
         )
         database.checkpointDao().insert(checkpoint)
         checkpoint
+        }
+    }
+
+    /**
+     * AppDatabase commits first. A crash leaves Learning candidates available for identical
+     * replay; only after every candidate has a permanent claim/definition tombstone and every
+     * pre-existing orphan LEARNED row is redacted may the LearningDatabase roots disappear.
+     */
+    private suspend fun fenceLearnedWorkflowsBeforeCandidateDelete(frozenNowMs: Long) {
+        // First remove every definition that already exists. Candidate claims below then close
+        // the only remaining race: a promotion that read its candidate before this reset.
+        val durableReceipt =
+            durableLearnedWorkflowPrivacyPort.redactAllForDerivedReset(frozenNowMs)
+        check(durableReceipt.complete) { "derived_reset_orphan_quarantine_incomplete" }
+        var afterIdExclusive = ""
+        while (true) {
+            val ids = database.learnedWorkflowCandidateDao().listAllIdsForDerivedReset(
+                afterIdExclusive = afterIdExclusive,
+                limit = me.rerere.rikkahub.learning.privacy
+                    .MAX_EXACT_SCOPE_WORKFLOW_ERASE_BATCH,
+            )
+            check(ids == ids.distinct().sorted())
+            if (ids.isEmpty()) break
+            val receipt = learnedWorkflowErasePort.redactAndFence(ids, frozenNowMs)
+            check(receipt.fencedCandidateIds == ids.size)
+            afterIdExclusive = ids.last()
+            if (ids.size < me.rerere.rikkahub.learning.privacy
+                    .MAX_EXACT_SCOPE_WORKFLOW_ERASE_BATCH
+            ) break
+        }
     }
 }
 
@@ -489,29 +544,30 @@ private fun createStructuralJob(
             LearningJobType.INVALIDATE_SOURCE_V1
         }
 
+        LearningEventType.USER_FEEDBACK_RECORDED -> {
+            require(eventSchemaVersion >= 3) { "Legacy feedback has no typed reward authority" }
+            LearningJobType.APPLY_REWARD_AUTHORITY_V1
+        }
+
         LearningEventType.STREAM_INIT,
-        LearningEventType.USER_FEEDBACK_RECORDED,
         LearningEventType.TOOL_SCHEMA_CHANGED,
         LearningEventType.WORKFLOW_TRIAL_TERMINAL,
         -> throw IllegalArgumentException("Event type does not produce a P0 job")
     }
-    val executionSpec = if (type == LearningJobType.INVALIDATE_SOURCE_V1) {
-        LearningJobExecutionSpecV1(
-            jobType = type,
-            jobSchemaVersion = 1,
+    val executionSpec = when (type) {
+        LearningJobType.INVALIDATE_SOURCE_V1 -> providerFreeExecutionSpec(
+            type = type,
             algorithmIdentity = "source-invalidation-v1",
-            promptIdentity = "no-provider-prompt-v1",
-            providerKindIdentity = LearningJobProviderKindIdentity.NONE.wireCode,
-            modelIdentity = "no-provider-model-v1",
-            providerIdentity = "no-provider-v1",
-            providerConfigurationIdentity = "no-provider-configuration-v1",
-            providerConfigGeneration = 0L,
             sourceSchemaIdentity = "learning-source-invalidation-event-v2",
-            toolsetIdentity = "authority-event-only-v1",
             outputSchemaIdentity = "learning-source-validity-output-v1",
         )
-    } else {
-        LearningJobExecutionSpecs.forNewP0Job(type)
+        LearningJobType.APPLY_REWARD_AUTHORITY_V1 -> providerFreeExecutionSpec(
+            type = type,
+            algorithmIdentity = "reward-authority-fold-v1",
+            sourceSchemaIdentity = "learning-user-feedback-event-v3",
+            outputSchemaIdentity = "reward-authority-output-v1",
+        )
+        else -> LearningJobExecutionSpecs.forNewP0Job(type)
     }
     val digest = LearningCanonicalId.digest(
         domainVersion = P0_JOB_ID_DOMAIN,
@@ -593,6 +649,26 @@ private fun createStructuralJob(
     )
 }
 
+private fun providerFreeExecutionSpec(
+    type: LearningJobType,
+    algorithmIdentity: String,
+    sourceSchemaIdentity: String,
+    outputSchemaIdentity: String,
+): LearningJobExecutionSpecV1 = LearningJobExecutionSpecV1(
+    jobType = type,
+    jobSchemaVersion = 1,
+    algorithmIdentity = algorithmIdentity,
+    promptIdentity = "no-provider-prompt-v1",
+    providerKindIdentity = LearningJobProviderKindIdentity.NONE.wireCode,
+    modelIdentity = "no-provider-model-v1",
+    providerIdentity = "no-provider-v1",
+    providerConfigurationIdentity = "no-provider-configuration-v1",
+    providerConfigGeneration = 0L,
+    sourceSchemaIdentity = sourceSchemaIdentity,
+    toolsetIdentity = "authority-event-only-v1",
+    outputSchemaIdentity = outputSchemaIdentity,
+)
+
 private const val P0_JOB_ID_DOMAIN = "learning-job-v1"
 private fun LearningJobEntity.hasSameImmutableIdentityAs(other: LearningJobEntity): Boolean =
     normalizedForImmutableComparison() == other.normalizedForImmutableComparison()
@@ -653,6 +729,10 @@ private fun LearningInboxEventEntity.toAuthoritativeEvent(): LearningInboxAuthor
             messageId = messageId,
             messageRevision = messageRevision,
         ),
+        rewardDimensionCode = rewardDimension,
+        rewardSignalKindCode = rewardSignalKind,
+        rewardValueMilli = rewardValueMilli,
+        executionVerificationStateCode = executionVerificationState,
         occurredAtMs = occurredAtMs,
         createdAtMs = createdAtMs,
         replayGeneration = replayGeneration,
@@ -688,6 +768,10 @@ private fun LearningInboxAuthoritativeEvent.toValidatedHandoffEvent(): LearningH
         missingRevisionReasonCode = missingRevisionReasonCode,
         terminalStateCode = terminalStateCode,
         correlation = correlation,
+        rewardDimensionCode = rewardDimensionCode,
+        rewardSignalKindCode = rewardSignalKindCode,
+        rewardValueMilli = rewardValueMilli,
+        executionVerificationStateCode = executionVerificationStateCode,
         createdAtMs = createdAtMs,
     )
 }

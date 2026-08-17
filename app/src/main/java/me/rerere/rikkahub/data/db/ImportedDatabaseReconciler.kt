@@ -28,6 +28,19 @@ import me.rerere.rikkahub.data.db.migrations.LEARNING_V46_P1_AUTHORITY_INDEX_SQL
 import me.rerere.rikkahub.data.db.migrations.LEARNING_V46_SENTINEL_PAYLOAD_COLUMNS
 import me.rerere.rikkahub.data.db.migrations.LEARNING_V46_SOURCE_AUTHORITY_TABLE_AND_INDEX_SQL
 import me.rerere.rikkahub.data.db.migrations.LEARNING_V46_STREAM_INIT_EVENT_ID
+import me.rerere.rikkahub.data.db.migrations.LEARNING_V47_SENTINEL_PAYLOAD_COLUMNS
+import me.rerere.rikkahub.data.db.migrations.LEARNING_V47_OUTBOX_COLUMNS
+import me.rerere.rikkahub.data.db.migrations.LEARNING_V47_REWARD_FEEDBACK_AUTHORITY_TABLE_SQL
+import me.rerere.rikkahub.data.db.migrations.LEARNING_V47_REWARD_FEEDBACK_INDEX_SQL
+import me.rerere.rikkahub.data.db.migrations.LEARNING_V47_REWARD_FEEDBACK_REVISIONS_TABLE_SQL
+import me.rerere.rikkahub.data.db.migrations.LEARNING_V48_POLICY_GRANTS_TABLE_SQL
+import me.rerere.rikkahub.data.db.migrations.LEARNING_V48_POLICY_GRANT_INDEX_SQL
+import me.rerere.rikkahub.data.db.migrations.LEARNING_V48_POLICY_GRANT_REVISIONS_TABLE_SQL
+import me.rerere.rikkahub.data.db.migrations.MIGRATION_46_47
+import me.rerere.rikkahub.data.db.migrations.MIGRATION_47_48
+import me.rerere.rikkahub.data.db.migrations.MIGRATION_48_49
+import me.rerere.rikkahub.data.db.migrations.WORKFLOW_V49_COLUMNS
+import me.rerere.rikkahub.data.db.migrations.workflowV49Backfill
 
 /**
  * Reconciles a database file that was just restored from a backup so Room can open it.
@@ -67,54 +80,98 @@ object ImportedDatabaseReconciler {
     private const val TAG = "DbReconciler"
     private const val DB_NAME = "rikka_hub"
 
-    /**
-     * Room's schema version and identity hash for [AppDatabase]. Both are copied verbatim
-     * from app/schemas/me.rerere.rikkahub.data.db.AppDatabase/46.json. When the schema
-     * version is bumped, update BOTH constants (and the table DDL below if the fork-only
-     * tables changed) or this reconciliation will silently stop matching.
-     */
-    internal const val EXPECTED_VERSION = 46
-    internal const val EXPECTED_IDENTITY_HASH = "670bbac26f583e5c08349fe9a950570b"
+    /** Room schema version and exact identity exported from AppDatabase/49.json. */
+    internal const val EXPECTED_VERSION = 49
+    internal const val EXPECTED_IDENTITY_HASH = "967f2a908998f5bac733c1ae71bee5bb"
+    internal const val FINAL_V48_IDENTITY_HASH = "74be67f9e9e32264c091b1d6c4a32b17"
+    internal const val FINAL_V47_IDENTITY_HASH = "3208afdfb6ec01eb325a598464e56940"
+    internal const val FINAL_V46_IDENTITY_HASH = "670bbac26f583e5c08349fe9a950570b"
     internal const val PRE_P1_V46_IDENTITY_HASH = "102b6a6fc51154abdac792d133d461a3"
     internal const val PRE_LEARNING_V46_IDENTITY_HASH = "8ef3ddc71d855013202bb11b0493d6e6"
+    internal const val WORKFLOW_DEFINITION_TOMBSTONE =
+        "learning_scope_erased_definition_v1"
+    internal const val WORKFLOW_CLAIM_TOMBSTONE = "learning_scope_erased_claim_v1"
+    internal const val WORKFLOW_REDACTED_NAME = "Erased learned workflow"
+    internal val STAGED_COLD_RESTORE_MIGRATIONS =
+        listOf(MIGRATION_46_47, MIGRATION_47_48, MIGRATION_48_49)
+
+    /** Canonical database identities are lowercase UUIDs and never the nil sentinel. */
+    internal fun isCanonicalNonNilDatabaseUuid(value: String): Boolean =
+        value != NIL_UUID && runCatching { UUID.fromString(value).toString() == value }
+            .getOrDefault(false)
 
     internal enum class ReconcilePlan {
         SKIP,
-        CURRENT_V46_P1_DELTA,
-        CURRENT_V46_P0_P1_DELTA,
         FULL_COMPATIBILITY,
         REFUSE_UNKNOWN_CURRENT,
     }
 
-    /**
-     * Same-version development builds cannot use a Room migration. Only the exact frozen
-     * Dream-only and P0-Learning v46 identities may receive their monotonic, additive deltas.
-     * Any other current-version identity is refused rather than guessed compatible and stamped.
-     */
+    /** v46+ inputs are exact-only; older schemas still receive their normal Room migration path. */
     internal fun reconcilePlan(version: Int, identityHash: String?): ReconcilePlan = when {
         version > EXPECTED_VERSION -> ReconcilePlan.SKIP
         version == EXPECTED_VERSION && identityHash == EXPECTED_IDENTITY_HASH ->
             ReconcilePlan.SKIP
-        version == EXPECTED_VERSION && identityHash == PRE_P1_V46_IDENTITY_HASH ->
-            ReconcilePlan.CURRENT_V46_P1_DELTA
-        version == EXPECTED_VERSION && identityHash == PRE_LEARNING_V46_IDENTITY_HASH ->
-            ReconcilePlan.CURRENT_V46_P0_P1_DELTA
         version == EXPECTED_VERSION -> ReconcilePlan.REFUSE_UNKNOWN_CURRENT
+        version == 48 && identityHash == FINAL_V48_IDENTITY_HASH ->
+            ReconcilePlan.FULL_COMPATIBILITY
+        version == 48 -> ReconcilePlan.REFUSE_UNKNOWN_CURRENT
+        version == 47 && identityHash == FINAL_V47_IDENTITY_HASH ->
+            ReconcilePlan.FULL_COMPATIBILITY
+        version == 47 -> ReconcilePlan.REFUSE_UNKNOWN_CURRENT
+        version == 46 && identityHash in setOf(
+            FINAL_V46_IDENTITY_HASH,
+            PRE_P1_V46_IDENTITY_HASH,
+            PRE_LEARNING_V46_IDENTITY_HASH,
+        ) -> ReconcilePlan.FULL_COMPATIBILITY
+        version == 46 -> ReconcilePlan.REFUSE_UNKNOWN_CURRENT
         else -> ReconcilePlan.FULL_COMPATIBILITY
+    }
+
+    internal enum class StagedReconcilePlan {
+        ALREADY_CURRENT,
+        MIGRATE_FINAL_V48,
+        MIGRATE_FINAL_V47,
+        MIGRATE_FINAL_V46,
+        MIGRATE_PRE_P1_V46,
+        MIGRATE_PRE_LEARNING_V46,
+    }
+
+    internal enum class LegacyV46AuthorityPlan {
+        READ_EXISTING_STREAM,
+        CREATE_STREAM,
     }
 
     /** Pure fail-closed gate shared by the staged-file API and its local JVM contract tests. */
     internal fun stagedReconcilePlanOrThrow(
         version: Int,
         identityHash: String?,
-    ): ReconcilePlan {
-        check(version == EXPECTED_VERSION) {
-            "Staged cold restore requires the current database version"
-        }
-        return reconcilePlan(version, identityHash).also { plan ->
-            check(plan == ReconcilePlan.SKIP) {
-                "Staged database does not have the final current-version identity"
-            }
+    ): StagedReconcilePlan = when {
+        version == EXPECTED_VERSION && identityHash == EXPECTED_IDENTITY_HASH ->
+            StagedReconcilePlan.ALREADY_CURRENT
+        version == 48 && identityHash == FINAL_V48_IDENTITY_HASH ->
+            StagedReconcilePlan.MIGRATE_FINAL_V48
+        version == 47 && identityHash == FINAL_V47_IDENTITY_HASH ->
+            StagedReconcilePlan.MIGRATE_FINAL_V47
+        version == 46 && identityHash == FINAL_V46_IDENTITY_HASH ->
+            StagedReconcilePlan.MIGRATE_FINAL_V46
+        version == 46 && identityHash == PRE_P1_V46_IDENTITY_HASH ->
+            StagedReconcilePlan.MIGRATE_PRE_P1_V46
+        version == 46 && identityHash == PRE_LEARNING_V46_IDENTITY_HASH ->
+            StagedReconcilePlan.MIGRATE_PRE_LEARNING_V46
+        else -> error("Staged database identity is outside the exact cold-restore allowlist")
+    }
+
+    internal fun legacyV46AuthorityPlanOrThrow(
+        version: Int,
+        identityHash: String?,
+    ): LegacyV46AuthorityPlan {
+        check(version == 46) { "Legacy authority archive is not v46" }
+        return when (identityHash) {
+            FINAL_V46_IDENTITY_HASH,
+            PRE_P1_V46_IDENTITY_HASH,
+            -> LegacyV46AuthorityPlan.READ_EXISTING_STREAM
+            PRE_LEARNING_V46_IDENTITY_HASH -> LegacyV46AuthorityPlan.CREATE_STREAM
+            else -> error("Legacy v46 identity is outside the exact allowlist")
         }
     }
 
@@ -528,6 +585,40 @@ object ImportedDatabaseReconciler {
         MEMORY_V46_SYNTHESIS_TABLE_AND_INDEX_SQL.forEach(db::execSQL)
     }
 
+    /**
+     * Exact v46 floor required before Room can run 46 -> 47 on an upstream/same-version import.
+     * It never stamps v46 or v47 and never repairs an existing malformed/mixed outbox.
+     */
+    private fun ensureLearningV46SchemaForUpgrade(
+        db: SQLiteDatabase,
+        newStreamId: String? = null,
+    ) {
+        ensureColumns(db, "pending_chat_commands", LEARNING_V46_COMMAND_AUTHORITY_COLUMNS)
+        ensureColumns(db, "execution_records", LEARNING_V46_EXECUTION_SCOPE_COLUMNS)
+        db.execSQL(LEARNING_V46_OUTBOX_TABLE_SQL)
+        ensureColumns(db, "learning_outbox", LEARNING_V46_OUTBOX_P1_COLUMNS)
+        LEARNING_V46_P1_AUTHORITY_INDEX_SQL.forEach(db::execSQL)
+        LEARNING_V46_OUTBOX_INDEX_SQL.forEach(db::execSQL)
+        LEARNING_V46_SOURCE_AUTHORITY_TABLE_AND_INDEX_SQL.forEach(db::execSQL)
+        val rowCount = db.rawQuery("SELECT COUNT(*) FROM `learning_outbox`", null).use { cursor ->
+            check(cursor.moveToFirst())
+            cursor.getLong(0)
+        }
+        if (rowCount == 0L) {
+            insertLearningOutboxStreamSentinel(
+                db = db,
+                streamId = newStreamId ?: UUID.randomUUID().toString(),
+                createdAtMs = System.currentTimeMillis(),
+            )
+        } else {
+            check(newStreamId == null) {
+                "Pre-Learning staged database unexpectedly contains Learning authority rows"
+            }
+        }
+        requireHealthyLearningOutbox(db, LEARNING_V46_SENTINEL_PAYLOAD_COLUMNS)
+        requireP1LearningAuthoritySchema(db)
+    }
+
     private fun tableExists(db: SQLiteDatabase, table: String): Boolean =
         db.rawQuery(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
@@ -606,8 +697,338 @@ object ImportedDatabaseReconciler {
         }
     }
 
+    private fun requireV47RewardAuthoritySchema(db: SQLiteDatabase) {
+        val expectedTables = mapOf(
+            "learning_reward_feedback_authority" to setOf(
+                "feedback_id", "scope_kind", "scope_id", "conversation_id",
+                "conversation_source_revision", "command_id", "command_revision", "lineage_id",
+                "branch_anchor_message_id", "branch_anchor_message_revision",
+                "target_assistant_message_id", "target_assistant_message_revision", "dimension",
+                "signal_kind", "value_milli", "source_state", "source_revision",
+                "previous_source_revision", "integrity_sha256", "created_at_ms", "updated_at_ms",
+            ),
+            "learning_reward_feedback_revisions" to setOf(
+                "feedback_id", "scope_kind", "scope_id", "conversation_id",
+                "conversation_source_revision", "command_id", "command_revision", "lineage_id",
+                "branch_anchor_message_id", "branch_anchor_message_revision",
+                "target_assistant_message_id", "target_assistant_message_revision", "dimension",
+                "signal_kind", "value_milli", "source_state", "source_revision",
+                "previous_source_revision", "integrity_sha256", "created_at_ms", "updated_at_ms",
+            ),
+        )
+        expectedTables.forEach { (table, expectedColumns) ->
+            check(tableExists(db, table)) { "Missing v47 reward authority table" }
+            val actualColumns = db.rawQuery("PRAGMA table_info(`$table`)", null).use { cursor ->
+                val name = cursor.getColumnIndexOrThrow("name")
+                buildSet { while (cursor.moveToNext()) add(cursor.getString(name)) }
+            }
+            check(actualColumns == expectedColumns) { "Invalid v47 reward authority columns" }
+        }
+        val outboxColumns = db.rawQuery("PRAGMA table_info(`learning_outbox`)", null).use { cursor ->
+            val name = cursor.getColumnIndexOrThrow("name")
+            buildSet { while (cursor.moveToNext()) add(cursor.getString(name)) }
+        }
+        check(outboxColumns.containsAll(LEARNING_V47_OUTBOX_COLUMNS.map { it.first })) {
+            "Missing v47 reward handoff columns"
+        }
+        LEARNING_V47_REWARD_FEEDBACK_INDEX_SQL.mapNotNull { statement ->
+            Regex("`([^`]+)`").find(statement)?.groupValues?.get(1)
+        }.forEach { index ->
+            val present = db.rawQuery(
+                "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ? LIMIT 1",
+                arrayOf(index),
+            ).use { cursor -> cursor.moveToFirst() }
+            check(present) { "Missing v47 reward authority index" }
+        }
+    }
+
+    private fun requireV48PolicyGrantSchema(db: SQLiteDatabase) {
+        val headColumns = V48_POLICY_GRANT_HEAD_COLUMNS.toSet()
+        val expectedTables = mapOf(
+            "learning_policy_grants" to headColumns,
+            "learning_policy_grant_revisions" to headColumns.plus(
+                setOf("previous_state_version", "changed_at_ms"),
+            ),
+        )
+        expectedTables.forEach { (table, expectedColumns) ->
+            check(tableExists(db, table)) { "Missing v48 policy grant table" }
+            val actualColumns = db.rawQuery("PRAGMA table_info(`$table`)", null).use { cursor ->
+                val name = cursor.getColumnIndexOrThrow("name")
+                buildSet { while (cursor.moveToNext()) add(cursor.getString(name)) }
+            }
+            check(actualColumns == expectedColumns) { "Invalid v48 policy grant columns" }
+        }
+        LEARNING_V48_POLICY_GRANT_INDEX_SQL.mapNotNull { statement ->
+            Regex("`([^`]+)`").find(statement)?.groupValues?.get(1)
+        }.forEach { index ->
+            val present = db.rawQuery(
+                "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ? LIMIT 1",
+                arrayOf(index),
+            ).use { cursor -> cursor.moveToFirst() }
+            check(present) { "Missing v48 policy grant index" }
+        }
+        db.rawQuery("PRAGMA foreign_key_list(`learning_policy_grant_revisions`)", null).use {
+            cursor ->
+            val table = cursor.getColumnIndexOrThrow("table")
+            val from = cursor.getColumnIndexOrThrow("from")
+            val to = cursor.getColumnIndexOrThrow("to")
+            val onDelete = cursor.getColumnIndexOrThrow("on_delete")
+            check(
+                cursor.moveToFirst() &&
+                    cursor.getString(table) == "learning_policy_grants" &&
+                    cursor.getString(from) == "grant_id" && cursor.getString(to) == "grant_id" &&
+                    cursor.getString(onDelete).equals("CASCADE", ignoreCase = true) &&
+                    !cursor.moveToNext(),
+            ) { "Invalid v48 policy grant revision authority" }
+        }
+        val invalidHeadPredicate =
+            "typeof(grant_id) != 'text' OR typeof(source_stream_id) != 'text' OR " +
+                "typeof(policy_id) != 'text' OR typeof(artifact_sha256) != 'text' OR " +
+                "typeof(scope_kind) != 'text' OR typeof(scope_id) != 'text' OR " +
+                "typeof(consuming_assistant_id) != 'text' OR typeof(actor) != 'text' OR " +
+                "typeof(state) != 'text' OR typeof(reason_code) != 'text' OR " +
+                "typeof(policy_revision) != 'integer' OR typeof(state_version) != 'integer' OR " +
+                "typeof(granted_at_ms) != 'integer' OR " +
+                "(revoked_at_ms IS NOT NULL AND typeof(revoked_at_ms) != 'integer') OR " +
+                "typeof(created_at_ms) != 'integer' OR typeof(updated_at_ms) != 'integer' OR " +
+                "grant_id = '' OR length(grant_id) > 256 OR " +
+                "grant_id GLOB '*[^A-Za-z0-9_.:@-]*' OR " +
+                "policy_id = '' OR length(policy_id) > 256 OR " +
+                "policy_id GLOB '*[^A-Za-z0-9_.:@-]*' OR scope_id = '' OR " +
+                "${invalidCanonicalUuidSql("source_stream_id")} OR " +
+                "${invalidCanonicalUuidSql("consuming_assistant_id")} OR " +
+                "(scope_kind = 'ASSISTANT' AND scope_id != consuming_assistant_id) OR " +
+                "policy_revision <= 0 OR length(artifact_sha256) != 64 OR " +
+                "artifact_sha256 GLOB '*[^0-9a-f]*' OR " +
+                "scope_kind NOT IN ('ASSISTANT', 'AUTHORITY_SUBJECT') OR " +
+                "actor NOT IN ('USER_REVIEW', 'AUTHORITY_REVOCATION') OR " +
+                "state NOT IN ('GRANTED', 'REVOKED') OR " +
+                "state_version <= 0 OR (state_version = 1 AND state != 'GRANTED') OR " +
+                "(state = 'GRANTED' AND revoked_at_ms IS NOT NULL) OR " +
+                "(state = 'REVOKED' AND " +
+                "(revoked_at_ms IS NULL OR revoked_at_ms < granted_at_ms OR " +
+                "updated_at_ms < revoked_at_ms)) OR " +
+                "granted_at_ms < 0 OR created_at_ms < 0 OR updated_at_ms < created_at_ms OR " +
+                "reason_code NOT IN (" +
+                "'USER_APPROVED_CONTEXTUAL_ADVICE', " +
+                "'USER_REVIEWED_POLICY_UPDATE', " +
+                "'USER_RESTORED_POLICY_REVISION', " +
+                "'USER_REVOKED_CONTEXTUAL_ADVICE', " +
+                "'SECOND_USER_AUTHORITY_REVOKED') OR " +
+                "(state = 'REVOKED' AND reason_code NOT IN " +
+                "('USER_REVOKED_CONTEXTUAL_ADVICE', 'SECOND_USER_AUTHORITY_REVOKED')) OR " +
+                "(state = 'GRANTED' AND reason_code IN " +
+                "('USER_REVOKED_CONTEXTUAL_ADVICE', 'SECOND_USER_AUTHORITY_REVOKED')) OR " +
+                "(actor = 'AUTHORITY_REVOCATION' AND (scope_kind != 'AUTHORITY_SUBJECT' OR " +
+                "state != 'REVOKED' OR reason_code != 'SECOND_USER_AUTHORITY_REVOKED')) OR " +
+                "(actor = 'USER_REVIEW' AND reason_code = 'SECOND_USER_AUTHORITY_REVOKED') OR " +
+                "(state_version = 1 AND reason_code NOT IN (" +
+                "'USER_APPROVED_CONTEXTUAL_ADVICE', 'USER_RESTORED_POLICY_REVISION')) OR " +
+                "(state_version = 1 AND actor != 'USER_REVIEW')"
+        listOf("learning_policy_grants", "learning_policy_grant_revisions").forEach { table ->
+            val invalid = db.rawQuery(
+                "SELECT 1 FROM `$table` WHERE $invalidHeadPredicate LIMIT 1",
+                null,
+            ).use { cursor -> cursor.moveToFirst() }
+            check(!invalid) { "Invalid v48 policy grant authority row" }
+        }
+        val invalidRevision = db.rawQuery(
+            "SELECT 1 FROM `learning_policy_grant_revisions` WHERE " +
+                "(typeof(changed_at_ms) != 'integer' OR " +
+                "(previous_state_version IS NOT NULL AND " +
+                "typeof(previous_state_version) != 'integer') OR " +
+                "(state_version = 1 AND previous_state_version IS NOT NULL) OR " +
+                "(state_version > 1 AND (previous_state_version IS NULL OR " +
+                "previous_state_version != state_version - 1)) OR " +
+                "changed_at_ms != updated_at_ms) LIMIT 1",
+            null,
+        ).use { cursor -> cursor.moveToFirst() }
+        check(!invalidRevision) { "Invalid v48 policy grant revision row" }
+
+        // A restored authority head is trusted only when its complete current snapshot is also
+        // present in the append-only journal. The null-safe revoked_at comparison is deliberate.
+        val currentRevisionEquality = V48_POLICY_GRANT_HEAD_COLUMNS.joinToString(" AND ") { column ->
+            val valueEquality = if (column == "revoked_at_ms") {
+                "revision.`$column` IS head.`$column`"
+            } else {
+                "revision.`$column` = head.`$column`"
+            }
+            "(typeof(revision.`$column`) = typeof(head.`$column`) AND $valueEquality)"
+        }
+        val missingExactCurrentRevision = db.rawQuery(
+            "SELECT 1 FROM `learning_policy_grants` AS head WHERE NOT EXISTS (" +
+                "SELECT 1 FROM `learning_policy_grant_revisions` AS revision WHERE " +
+                "revision.`grant_id` = head.`grant_id` AND " +
+                "revision.`state_version` = head.`state_version` AND " +
+                currentRevisionEquality + ") LIMIT 1",
+            null,
+        ).use { cursor -> cursor.moveToFirst() }
+        check(!missingExactCurrentRevision) {
+            "Policy grant head has no byte-exact current audit revision"
+        }
+
+        // PK(grant_id,state_version) supplies uniqueness. Count/min/max plus the per-row previous
+        // fence prove a complete 1..head.state_version journal rather than accepting a lone latest
+        // row that merely claims an unavailable predecessor.
+        val incompleteRevisionJournal = db.rawQuery(
+            "SELECT 1 FROM `learning_policy_grants` AS head LEFT JOIN (" +
+                "SELECT `grant_id`, COUNT(*) AS revision_count, " +
+                "MIN(`state_version`) AS minimum_version, " +
+                "MAX(`state_version`) AS maximum_version " +
+                "FROM `learning_policy_grant_revisions` GROUP BY `grant_id`" +
+                ") AS journal ON journal.`grant_id` = head.`grant_id` WHERE " +
+                "journal.revision_count IS NULL OR " +
+                "journal.revision_count != head.`state_version` OR " +
+                "journal.minimum_version != 1 OR " +
+                "journal.maximum_version != head.`state_version` LIMIT 1",
+            null,
+        ).use { cursor -> cursor.moveToFirst() }
+        check(!incompleteRevisionJournal) { "Policy grant audit revision journal is incomplete" }
+
+        val invalidRevisionTransition = db.rawQuery(
+            "SELECT 1 FROM `learning_policy_grant_revisions` AS current " +
+                "LEFT JOIN `learning_policy_grant_revisions` AS previous ON " +
+                "previous.`grant_id` = current.`grant_id` AND " +
+                "previous.`state_version` = current.`previous_state_version` WHERE " +
+                "(current.`state_version` = 1 AND (" +
+                "current.`state` != 'GRANTED' OR " +
+                "current.`granted_at_ms` != current.`created_at_ms` OR " +
+                "current.`updated_at_ms` != current.`created_at_ms`)) OR " +
+                "(current.`state_version` > 1 AND (" +
+                "previous.`grant_id` IS NULL OR " +
+                "current.`updated_at_ms` < previous.`updated_at_ms` OR " +
+                "((current.`policy_revision` = previous.`policy_revision`) != " +
+                "(current.`artifact_sha256` = previous.`artifact_sha256`)) OR " +
+                "(previous.`state` = 'GRANTED' AND current.`state` = 'GRANTED' AND (" +
+                "current.`reason_code` NOT IN (" +
+                "'USER_REVIEWED_POLICY_UPDATE', 'USER_RESTORED_POLICY_REVISION') OR " +
+                "current.`granted_at_ms` != previous.`granted_at_ms`)) OR " +
+                "(previous.`state` = 'GRANTED' AND current.`state` = 'REVOKED' AND (" +
+                "current.`policy_revision` != previous.`policy_revision` OR " +
+                "current.`artifact_sha256` != previous.`artifact_sha256` OR " +
+                "current.`granted_at_ms` != previous.`granted_at_ms` OR " +
+                "current.`revoked_at_ms` != current.`updated_at_ms`)) OR " +
+                "(previous.`actor` = 'AUTHORITY_REVOCATION' AND " +
+                "current.`state` = 'GRANTED') OR " +
+                "(previous.`state` = 'REVOKED' AND current.`state` = 'GRANTED' AND (" +
+                "current.`reason_code` NOT IN (" +
+                "'USER_APPROVED_CONTEXTUAL_ADVICE', 'USER_RESTORED_POLICY_REVISION') OR " +
+                "current.`granted_at_ms` != current.`updated_at_ms`)) OR " +
+                "(previous.`state` = 'REVOKED' AND current.`state` = 'REVOKED'))) LIMIT 1",
+            null,
+        ).use { cursor -> cursor.moveToFirst() }
+        check(!invalidRevisionTransition) { "Policy grant audit revision transition is invalid" }
+
+        // Stream/scope/consumer/policy identify one immutable approval authority. Policy content,
+        // state, reason and timestamps may advance, but an old revision may never be re-parented
+        // under a different authority head during import or restore.
+        val changedBaseIdentity = db.rawQuery(
+            "SELECT 1 FROM `learning_policy_grant_revisions` AS revision " +
+                "JOIN `learning_policy_grants` AS head " +
+                "ON head.`grant_id` = revision.`grant_id` WHERE " +
+                listOf(
+                    "source_stream_id",
+                    "policy_id",
+                    "scope_kind",
+                    "scope_id",
+                    "consuming_assistant_id",
+                    "actor",
+                    "created_at_ms",
+                ).joinToString(" OR ") { column ->
+                    "revision.`$column` != head.`$column`"
+                } + " LIMIT 1",
+            null,
+        ).use { cursor -> cursor.moveToFirst() }
+        check(!changedBaseIdentity) { "Policy grant audit revision changed its base identity" }
+    }
+
+    private fun requireV49WorkflowSchema(db: SQLiteDatabase) {
+        check(tableExists(db, "workflows")) { "Missing v49 workflow table" }
+        val actualColumns = db.rawQuery("PRAGMA table_info(`workflows`)", null).use { cursor ->
+            val name = cursor.getColumnIndexOrThrow("name")
+            buildSet { while (cursor.moveToNext()) add(cursor.getString(name)) }
+        }
+        val required = setOf(
+            "stateVersion", "origin", "sourceCandidateId", "sourceArtifactHash",
+            "grantDigest", "authoringAssistantId", "capabilitySnapshotJson",
+            "toolSchemaFingerprintsJson", "staleReason",
+        )
+        check(actualColumns.containsAll(required)) { "Missing v49 workflow authority columns" }
+        val invalid = db.rawQuery(
+            "SELECT 1 FROM `workflows` WHERE `stateVersion` < 1 OR " +
+                "`origin` NOT IN ('USER', 'LEARNED') OR " +
+                "`capabilitySnapshotJson` IS NULL OR `toolSchemaFingerprintsJson` IS NULL OR " +
+                "(`origin` = 'USER' AND (`sourceCandidateId` IS NOT NULL OR " +
+                "`sourceArtifactHash` IS NOT NULL OR `grantDigest` IS NOT NULL)) OR " +
+                "(`origin` = 'LEARNED' AND CASE WHEN `staleReason` IN (" +
+                "'$WORKFLOW_DEFINITION_TOMBSTONE', '$WORKFLOW_CLAIM_TOMBSTONE') THEN (" +
+                "`enabled` != 0 OR `name` != '$WORKFLOW_REDACTED_NAME' OR " +
+                "`description` IS NOT NULL OR `definitionJson` != '{}' OR " +
+                "`createdAtMs` != 0 OR `lastRunAtMs` IS NOT NULL OR " +
+                "`lastRunStatus` IS NOT NULL OR `lastRunError` IS NOT NULL OR " +
+                "`runsTodayCount` != 0 OR `runsTodayDate` != '' OR " +
+                "`sourceArtifactHash` IS NOT NULL OR `grantDigest` IS NOT NULL OR " +
+                "`authoringAssistantId` IS NOT NULL OR `capabilitySnapshotJson` != '[]' OR " +
+                "`toolSchemaFingerprintsJson` != '[]') ELSE (" +
+                "`sourceCandidateId` IS NULL OR `sourceArtifactHash` IS NULL OR " +
+                "`grantDigest` IS NULL OR `authoringAssistantId` IS NULL) END) LIMIT 1",
+            null,
+        ).use { cursor -> cursor.moveToFirst() }
+        check(!invalid) { "Invalid v49 workflow authority row" }
+    }
+
+    /** Atomic staged-file fail-closed quarantine; identifiers never leave SQLite. */
+    private fun quarantineStagedLearnedWorkflowsOrThrow(databaseFile: File) {
+        requireSafeStagedFile(databaseFile)
+        SQLiteDatabase.openDatabase(
+            databaseFile.absolutePath,
+            null,
+            SQLiteDatabase.OPEN_READWRITE,
+        ).use { db ->
+            check(
+                db.version == EXPECTED_VERSION &&
+                    readRoomIdentityHash(db) == EXPECTED_IDENTITY_HASH,
+            ) { "Staged workflow quarantine requires the exact current schema" }
+            db.beginTransaction()
+            try {
+                db.execSQL(
+                    "DELETE FROM `workflow_runs` WHERE `workflowId` IN (" +
+                        "SELECT `id` FROM `workflows` WHERE `origin` = 'LEARNED')",
+                )
+                db.execSQL(
+                    "UPDATE `workflows` SET " +
+                        "`name` = '$WORKFLOW_REDACTED_NAME', `description` = NULL, " +
+                        "`enabled` = 0, `definitionJson` = '{}', `createdAtMs` = 0, " +
+                        "`updatedAtMs` = 0, `lastRunAtMs` = NULL, `lastRunStatus` = NULL, " +
+                        "`lastRunError` = NULL, `runsTodayCount` = 0, `runsTodayDate` = '', " +
+                        "`stateVersion` = `stateVersion` + 1, `sourceArtifactHash` = NULL, " +
+                        "`grantDigest` = NULL, `authoringAssistantId` = NULL, " +
+                        "`capabilitySnapshotJson` = '[]', `toolSchemaFingerprintsJson` = '[]', " +
+                        "`staleReason` = '$WORKFLOW_DEFINITION_TOMBSTONE' " +
+                        "WHERE `origin` = 'LEARNED' AND (`staleReason` IS NULL OR " +
+                        "`staleReason` NOT IN ('$WORKFLOW_DEFINITION_TOMBSTONE', " +
+                        "'$WORKFLOW_CLAIM_TOMBSTONE'))",
+                )
+                requireV49WorkflowSchema(db)
+                db.setTransactionSuccessful()
+            } finally {
+                db.endTransaction()
+            }
+        }
+    }
+
+    private fun invalidCanonicalUuidSql(column: String): String =
+        "length(`$column`) != 36 OR lower(`$column`) != `$column` OR " +
+            "substr(`$column`, 9, 1) != '-' OR substr(`$column`, 14, 1) != '-' OR " +
+            "substr(`$column`, 19, 1) != '-' OR substr(`$column`, 24, 1) != '-' OR " +
+            "length(replace(`$column`, '-', '')) != 32 OR " +
+            "replace(`$column`, '-', '') GLOB '*[^0-9a-f]*' OR `$column` = '$NIL_UUID'"
+
     /** Framework-SQLite mirror of the runtime reader's bounded stream integrity checks. */
-    private fun requireHealthyLearningOutbox(db: SQLiteDatabase) {
+    private fun requireHealthyLearningOutbox(
+        db: SQLiteDatabase,
+        payloadColumns: List<String> = LEARNING_V47_SENTINEL_PAYLOAD_COLUMNS,
+    ) {
         val summary = db.rawQuery(
             "SELECT COUNT(*), " +
                 "SUM(CASE WHEN `event_type` = 'STREAM_INIT' THEN 1 ELSE 0 END), " +
@@ -620,7 +1041,7 @@ object ImportedDatabaseReconciler {
         check(summary.first > 0L) { "Learning outbox has no stream sentinel" }
         check(summary.second == 1L) { "Learning outbox must have exactly one stream sentinel" }
         check(summary.third == 1L) { "Learning outbox contains mixed streams" }
-        val payloadProjection = LEARNING_V46_SENTINEL_PAYLOAD_COLUMNS.joinToString(", ") {
+        val payloadProjection = payloadColumns.joinToString(", ") {
             "`$it`"
         }
         db.rawQuery(
@@ -631,7 +1052,7 @@ object ImportedDatabaseReconciler {
         ).use { cursor ->
             check(cursor.moveToFirst()) { "Learning outbox sentinel disappeared" }
             check(cursor.getLong(0) > 0L) { "Learning outbox sentinel has invalid sequence" }
-            check(runCatching { UUID.fromString(cursor.getString(1)) }.isSuccess) {
+            check(isCanonicalNonNilDatabaseUuid(cursor.getString(1))) {
                 "Learning outbox sentinel has invalid stream ID"
             }
             check(cursor.getString(2) == LEARNING_V46_STREAM_INIT_EVENT_ID) {
@@ -650,7 +1071,7 @@ object ImportedDatabaseReconciler {
         streamId: String,
         createdAtMs: Long,
     ) {
-        require(runCatching { UUID.fromString(streamId) }.isSuccess)
+        require(isCanonicalNonNilDatabaseUuid(streamId))
         require(createdAtMs >= 0L)
         db.execSQL(
             "INSERT INTO `learning_outbox` (" +
@@ -658,6 +1079,26 @@ object ImportedDatabaseReconciler {
                 "`created_at_ms`) VALUES (?, ?, 'STREAM_INIT', 1, ?)",
             arrayOf<Any>(streamId, LEARNING_V46_STREAM_INIT_EVENT_ID, createdAtMs),
         )
+    }
+
+    private fun requireExactAuthorityStream(
+        db: SQLiteDatabase,
+        expectedStreamId: String,
+        expectedHeadSeq: Long,
+    ) {
+        db.rawQuery(
+            "SELECT COUNT(*), MIN(`seq`), MAX(`seq`), COUNT(DISTINCT `seq`), " +
+                "COUNT(DISTINCT `stream_id`) FROM `learning_outbox` WHERE `stream_id` = ?",
+            arrayOf(expectedStreamId),
+        ).use { cursor ->
+            check(cursor.moveToFirst()) { "Authority stream query returned no row" }
+            val count = cursor.getLong(0)
+            check(
+                count == expectedHeadSeq && cursor.getLong(1) == 1L &&
+                    cursor.getLong(2) == expectedHeadSeq && cursor.getLong(3) == count &&
+                    cursor.getLong(4) == 1L
+            ) { "Staged v46 authority stream does not match the archive descriptor" }
+        }
     }
 
     private fun ensureBrowserV34Schema(db: SQLiteDatabase) {
@@ -867,58 +1308,18 @@ object ImportedDatabaseReconciler {
         ).use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
     }.getOrNull()
 
-    private fun stampCurrentIdentity(db: SQLiteDatabase) {
+    private fun stampIdentity(
+        db: SQLiteDatabase,
+        identityHash: String,
+    ) {
         db.execSQL(
-            "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY, identity_hash TEXT)",
+            "CREATE TABLE IF NOT EXISTS room_master_table " +
+                "(id INTEGER PRIMARY KEY, identity_hash TEXT)",
         )
         db.execSQL(
             "INSERT OR REPLACE INTO room_master_table (id, identity_hash) VALUES (42, ?)",
-            arrayOf(EXPECTED_IDENTITY_HASH),
+            arrayOf(identityHash),
         )
-    }
-
-    private fun reconcileCurrentV46LearningDelta(
-        db: SQLiteDatabase,
-        includeP0Delta: Boolean,
-        newStreamId: String = UUID.randomUUID().toString(),
-    ) {
-        db.beginTransaction()
-        try {
-            check(!tableExists(db, "learning_conversation_source_authority") &&
-                !tableExists(db, "learning_message_source_authority")
-            ) {
-                "Pre-P1 v46 identity unexpectedly contains Learning source authority tables"
-            }
-            if (includeP0Delta) {
-                check(!tableExists(db, "learning_outbox")) {
-                    "Pre-Learning v46 identity unexpectedly contains a Learning outbox"
-                }
-            } else {
-                check(tableExists(db, "learning_outbox")) {
-                    "Pre-P1 v46 identity is missing its Learning outbox"
-                }
-            }
-            ensureColumns(db, "pending_chat_commands", LEARNING_V46_COMMAND_AUTHORITY_COLUMNS)
-            ensureColumns(db, "execution_records", LEARNING_V46_EXECUTION_SCOPE_COLUMNS)
-            db.execSQL(LEARNING_V46_OUTBOX_TABLE_SQL)
-            ensureColumns(db, "learning_outbox", LEARNING_V46_OUTBOX_P1_COLUMNS)
-            LEARNING_V46_P1_AUTHORITY_INDEX_SQL.forEach(db::execSQL)
-            LEARNING_V46_OUTBOX_INDEX_SQL.forEach(db::execSQL)
-            LEARNING_V46_SOURCE_AUTHORITY_TABLE_AND_INDEX_SQL.forEach(db::execSQL)
-            if (includeP0Delta) {
-                insertLearningOutboxStreamSentinel(
-                    db = db,
-                    streamId = newStreamId,
-                    createdAtMs = System.currentTimeMillis(),
-                )
-            }
-            requireHealthyLearningOutbox(db)
-            requireP1LearningAuthoritySchema(db)
-            stampCurrentIdentity(db)
-            db.setTransactionSuccessful()
-        } finally {
-            db.endTransaction()
-        }
     }
 
     /**
@@ -954,48 +1355,223 @@ object ImportedDatabaseReconciler {
             null,
             SQLiteDatabase.OPEN_READONLY,
         ).use { db ->
-            val version = db.version
-            check(version == EXPECTED_VERSION) {
-                "Staged cold restore requires the current database version"
-            }
-            reconcilePlan(version, readRoomIdentityHash(db)).also { resolved ->
-                check(resolved == ReconcilePlan.SKIP ||
-                    resolved == ReconcilePlan.CURRENT_V46_P1_DELTA ||
-                    resolved == ReconcilePlan.CURRENT_V46_P0_P1_DELTA
-                ) {
-                    "Staged database identity is outside the exact cold-restore allowlist"
-                }
-            }
+            stagedReconcilePlanOrThrow(db.version, readRoomIdentityHash(db))
         }
         when (plan) {
-            ReconcilePlan.CURRENT_V46_P0_P1_DELTA -> {
+            StagedReconcilePlan.ALREADY_CURRENT -> Unit
+            StagedReconcilePlan.MIGRATE_FINAL_V48 ->
+                migrateExactStagedToV49(
+                    databaseFile = databaseFile,
+                    expectedStreamId = expectedStreamId,
+                    expectedHeadSeq = expectedHeadSeq,
+                    expectedStartVersion = 48,
+                    expectedStartIdentity = FINAL_V48_IDENTITY_HASH,
+                )
+            StagedReconcilePlan.MIGRATE_FINAL_V47 ->
+                migrateExactStagedToV49(
+                    databaseFile = databaseFile,
+                    expectedStreamId = expectedStreamId,
+                    expectedHeadSeq = expectedHeadSeq,
+                    expectedStartVersion = 47,
+                    expectedStartIdentity = FINAL_V47_IDENTITY_HASH,
+                )
+            StagedReconcilePlan.MIGRATE_FINAL_V46 ->
+                migrateExactStagedToV49(
+                    databaseFile = databaseFile,
+                    expectedStreamId = expectedStreamId,
+                    expectedHeadSeq = expectedHeadSeq,
+                    expectedStartVersion = 46,
+                    expectedStartIdentity = FINAL_V46_IDENTITY_HASH,
+                )
+            StagedReconcilePlan.MIGRATE_PRE_P1_V46 ->
+                migrateExactStagedToV49(
+                    databaseFile = databaseFile,
+                    expectedStreamId = expectedStreamId,
+                    expectedHeadSeq = expectedHeadSeq,
+                    expectedStartVersion = 46,
+                    expectedStartIdentity = PRE_P1_V46_IDENTITY_HASH,
+                    includeP1Floor = true,
+                )
+            StagedReconcilePlan.MIGRATE_PRE_LEARNING_V46 -> {
                 check(expectedHeadSeq == 1L) {
                     "A pre-Learning staged database can only create its stream sentinel"
                 }
-                SQLiteDatabase.openDatabase(
-                    databaseFile.absolutePath,
-                    null,
-                    SQLiteDatabase.OPEN_READWRITE,
-                ).use { db ->
-                    reconcileCurrentV46LearningDelta(
-                        db = db,
-                        includeP0Delta = true,
-                        newStreamId = expectedStreamId,
-                    )
-                }
+                migrateExactStagedToV49(
+                    databaseFile = databaseFile,
+                    expectedStreamId = expectedStreamId,
+                    expectedHeadSeq = expectedHeadSeq,
+                    expectedStartVersion = 46,
+                    expectedStartIdentity = PRE_LEARNING_V46_IDENTITY_HASH,
+                    includeP1Floor = true,
+                    createStream = true,
+                )
             }
-            ReconcilePlan.CURRENT_V46_P1_DELTA ->
-                SQLiteDatabase.openDatabase(
-                    databaseFile.absolutePath,
-                    null,
-                    SQLiteDatabase.OPEN_READWRITE,
-                ).use { db ->
-                    reconcileCurrentV46LearningDelta(db = db, includeP0Delta = false)
-                }
-            else -> reconcileFile(databaseFile, swallowFailures = false)
         }
+        // The LearningDatabase is quarantined by the following cold swap. Any promoted
+        // definition in this staged AppDatabase would lose its candidate/review authority, so
+        // redact all LEARNED rows before the file can become live. USER rows are untouched.
+        quarantineStagedLearnedWorkflowsOrThrow(databaseFile)
         normalizeStagedToSingleFileOrThrow(databaseFile)
         validateStagedFileOrThrow(databaseFile, expectedStreamId, expectedHeadSeq)
+    }
+
+    /** Exact-identity migration of the private cold-restore candidate; never accepts a live path. */
+    private fun migrateExactStagedToV49(
+        databaseFile: File,
+        expectedStreamId: String,
+        expectedHeadSeq: Long,
+        expectedStartVersion: Int,
+        expectedStartIdentity: String,
+        includeP1Floor: Boolean = false,
+        createStream: Boolean = false,
+    ) {
+        requireSafeStagedFile(databaseFile)
+        SQLiteDatabase.openDatabase(
+            databaseFile.absolutePath,
+            null,
+            SQLiteDatabase.OPEN_READWRITE,
+        ).use { db ->
+            check(db.version == expectedStartVersion) {
+                "Staged database version changed before migration"
+            }
+            check(readRoomIdentityHash(db) == expectedStartIdentity) {
+                "Staged database identity changed before migration"
+            }
+            db.beginTransaction()
+            try {
+                when (expectedStartVersion) {
+                    46 -> {
+                        if (includeP1Floor) {
+                            ensureMemoryV46Schema(db)
+                            ensureLearningV46SchemaForUpgrade(
+                                db = db,
+                                newStreamId = expectedStreamId.takeIf { createStream },
+                            )
+                        } else {
+                            requireHealthyLearningOutbox(
+                                db,
+                                LEARNING_V46_SENTINEL_PAYLOAD_COLUMNS,
+                            )
+                            requireP1LearningAuthoritySchema(db)
+                        }
+                    }
+                    47 -> {
+                        check(!includeP1Floor && !createStream)
+                        requireHealthyLearningOutbox(db)
+                        requireP1LearningAuthoritySchema(db)
+                        requireV47RewardAuthoritySchema(db)
+                    }
+                    48 -> {
+                        check(!includeP1Floor && !createStream)
+                        requireHealthyLearningOutbox(db)
+                        requireP1LearningAuthoritySchema(db)
+                        requireV47RewardAuthoritySchema(db)
+                        requireV48PolicyGrantSchema(db)
+                    }
+                    else -> error("Unsupported staged migration start version")
+                }
+                requireExactAuthorityStream(db, expectedStreamId, expectedHeadSeq)
+                STAGED_COLD_RESTORE_MIGRATIONS
+                    .dropWhile { it.startVersion < expectedStartVersion }
+                    .forEach { migration ->
+                        check(db.version == migration.startVersion) {
+                            "Staged cold-restore migration chain is discontinuous"
+                        }
+                        when (migration) {
+                            MIGRATION_46_47 -> migrateV46ToV47Raw(db)
+                            MIGRATION_47_48 -> migrateV47ToV48Raw(db)
+                            MIGRATION_48_49 -> migrateV48ToV49Raw(db)
+                            else -> error(
+                                "Staged cold-restore migration chain contains an unsupported migration",
+                            )
+                        }
+                    }
+                check(db.version == EXPECTED_VERSION) {
+                    "Staged cold-restore migration did not reach the current version"
+                }
+                db.setTransactionSuccessful()
+            } finally {
+                db.endTransaction()
+            }
+        }
+    }
+
+    /** Raw-SQL adapter for the exact DDL exported by [MIGRATION_46_47]. */
+    private fun migrateV46ToV47Raw(db: SQLiteDatabase) {
+        check(db.version == 46) { "Raw 46 -> 47 migration received the wrong version" }
+        requireHealthyLearningOutbox(db, LEARNING_V46_SENTINEL_PAYLOAD_COLUMNS)
+        ensureColumns(db, "learning_outbox", LEARNING_V47_OUTBOX_COLUMNS)
+        db.execSQL(LEARNING_V47_REWARD_FEEDBACK_AUTHORITY_TABLE_SQL)
+        db.execSQL(LEARNING_V47_REWARD_FEEDBACK_REVISIONS_TABLE_SQL)
+        LEARNING_V47_REWARD_FEEDBACK_INDEX_SQL.forEach(db::execSQL)
+        requireHealthyLearningOutbox(db, LEARNING_V47_SENTINEL_PAYLOAD_COLUMNS)
+        requireV47RewardAuthoritySchema(db)
+        db.version = 47
+        stampIdentity(db, FINAL_V47_IDENTITY_HASH)
+    }
+
+    /** Raw-SQL adapter for the exact DDL exported by [MIGRATION_47_48]. */
+    private fun migrateV47ToV48Raw(db: SQLiteDatabase) {
+        check(db.version == 47) { "Raw 47 -> 48 migration received the wrong version" }
+        requireHealthyLearningOutbox(db)
+        requireP1LearningAuthoritySchema(db)
+        requireV47RewardAuthoritySchema(db)
+        db.execSQL(LEARNING_V48_POLICY_GRANTS_TABLE_SQL)
+        db.execSQL(LEARNING_V48_POLICY_GRANT_REVISIONS_TABLE_SQL)
+        LEARNING_V48_POLICY_GRANT_INDEX_SQL.forEach(db::execSQL)
+        requireV48PolicyGrantSchema(db)
+        db.version = 48
+        stampIdentity(db, FINAL_V48_IDENTITY_HASH)
+    }
+
+    /** Raw-SQL mirror of [MIGRATION_48_49], including Kotlin row-wise JSON backfill. */
+    private fun migrateV48ToV49Raw(db: SQLiteDatabase) {
+        check(db.version == 48) { "Raw 48 -> 49 migration received the wrong version" }
+        requireHealthyLearningOutbox(db)
+        requireP1LearningAuthoritySchema(db)
+        requireV47RewardAuthoritySchema(db)
+        requireV48PolicyGrantSchema(db)
+        ensureColumns(db, "workflows", WORKFLOW_V49_COLUMNS)
+        backfillWorkflowV49RowsRaw(db)
+        requireV49WorkflowSchema(db)
+        db.version = EXPECTED_VERSION
+        stampIdentity(db, EXPECTED_IDENTITY_HASH)
+    }
+
+    private fun backfillWorkflowV49RowsRaw(db: SQLiteDatabase) {
+        val rows = db.rawQuery(
+            "SELECT `id`, `definitionJson`, `enabled` FROM `workflows`",
+            null,
+        ).use { cursor ->
+            val idIndex = cursor.getColumnIndexOrThrow("id")
+            val definitionIndex = cursor.getColumnIndexOrThrow("definitionJson")
+            val enabledIndex = cursor.getColumnIndexOrThrow("enabled")
+            buildList {
+                while (cursor.moveToNext()) {
+                    workflowV49Backfill(
+                        definitionJson = cursor.getString(definitionIndex),
+                        projectedEnabled = cursor.getInt(enabledIndex) != 0,
+                    )?.let { backfill ->
+                        add(cursor.getString(idIndex) to backfill)
+                    }
+                }
+            }
+        }
+        val statement = db.compileStatement(
+            "UPDATE `workflows` SET `definitionJson` = ?, `origin` = 'USER', " +
+                "`sourceCandidateId` = NULL, `sourceArtifactHash` = NULL, `grantDigest` = NULL, " +
+                "`authoringAssistantId` = ?, `capabilitySnapshotJson` = ?, " +
+                "`toolSchemaFingerprintsJson` = '[]', `staleReason` = NULL WHERE `id` = ?",
+        )
+        rows.forEach { (id, backfill) ->
+            statement.clearBindings()
+            statement.bindString(1, backfill.definitionJson)
+            backfill.authoringAssistantId?.let { statement.bindString(2, it) }
+                ?: statement.bindNull(2)
+            statement.bindString(3, backfill.capabilitySnapshotJson)
+            statement.bindString(4, id)
+            check(statement.executeUpdateDelete() == 1) { "Workflow v49 raw backfill lost row" }
+        }
     }
 
     /** Reopens a reconciled candidate read-only and throws unless its identity is safe to swap. */
@@ -1063,6 +1639,9 @@ object ImportedDatabaseReconciler {
             }
             requireHealthyLearningOutbox(db)
             requireP1LearningAuthoritySchema(db)
+            requireV47RewardAuthoritySchema(db)
+            requireV48PolicyGrantSchema(db)
+            requireV49WorkflowSchema(db)
             db.rawQuery(
                 "SELECT `seq` FROM `learning_outbox` " +
                     "WHERE `stream_id` = ? AND `event_type` = 'STREAM_INIT'",
@@ -1095,7 +1674,7 @@ object ImportedDatabaseReconciler {
         expectedStreamId: String,
         expectedHeadSeq: Long,
     ) {
-        require(UUID.fromString(expectedStreamId).toString() == expectedStreamId) {
+        require(isCanonicalNonNilDatabaseUuid(expectedStreamId)) {
             "Expected authority stream ID is not canonical"
         }
         require(expectedHeadSeq > 0L) { "Expected authority stream head is invalid" }
@@ -1164,31 +1743,25 @@ object ImportedDatabaseReconciler {
                         }
                         return
                     }
-                    ReconcilePlan.CURRENT_V46_P1_DELTA -> {
-                        reconcileCurrentV46LearningDelta(db, includeP0Delta = false)
-                        Log.i(TAG, "reconcile: applied exact pre-P1 v46 delta")
-                        return
-                    }
-                    ReconcilePlan.CURRENT_V46_P0_P1_DELTA -> {
-                        reconcileCurrentV46LearningDelta(db, includeP0Delta = true)
-                        Log.i(TAG, "reconcile: applied exact pre-Learning v46 P0+P1 delta")
-                        return
-                    }
                     ReconcilePlan.REFUSE_UNKNOWN_CURRENT -> {
                         Log.e(
                             TAG,
-                            "reconcile: refusing unknown current-v46 identity; left untouched",
+                            "reconcile: refusing unknown v46+ identity; left untouched",
                         )
                         return
                     }
                     ReconcilePlan.FULL_COMPATIBILITY -> Unit
                 }
 
-                // A lower-version import normally has no Learning table and reaches it through
-                // 45 -> 46. If a preview/foreign table is already present, verify it before any
-                // compatibility writes; never repair a missing sentinel or merge two streams.
-                if (tableExists(db, "learning_outbox")) {
-                    requireHealthyLearningOutbox(db)
+                // A pre-v46 import normally has no Learning table and reaches it through 45 -> 46.
+                // If a preview table is already present, verify it before compatibility writes.
+                // v46 is handled transactionally below: columns are brought to the exact final-v46
+                // floor and then its sentinel/mixed-stream invariants are checked before commit.
+                if (tableExists(db, "learning_outbox") && version < 46) {
+                    requireHealthyLearningOutbox(
+                        db,
+                        LEARNING_V46_SENTINEL_PAYLOAD_COLUMNS,
+                    )
                 }
 
                 db.beginTransaction()
@@ -1230,18 +1803,37 @@ object ImportedDatabaseReconciler {
                     if (version >= 43) ensureMemoryV43Schema(db)
                     if (version >= 44) ensureMemoryV44Schema(db)
                     if (version >= 45) ensureMemoryV45Schema(db)
-                    if (version >= 46) ensureMemoryV46Schema(db)
+                    if (version >= 46) {
+                        ensureMemoryV46Schema(db)
+                        ensureLearningV46SchemaForUpgrade(db)
+                    }
 
-                    // Older backups must keep their original user_version so Room can run
+                    when (version) {
+                        46 -> {
+                            migrateV46ToV47Raw(db)
+                            migrateV47ToV48Raw(db)
+                            migrateV48ToV49Raw(db)
+                        }
+                        47 -> {
+                            migrateV47ToV48Raw(db)
+                            migrateV48ToV49Raw(db)
+                        }
+                        48 -> migrateV48ToV49Raw(db)
+                    }
+
+                    // Pre-v46 backups must keep their original user_version so Room can run
                     // every real migration (including 28→29). Precreating fork-only tables
                     // makes upstream backups compatible, but stamping the current version here
-                    // would silently skip migrations and risk losing schema changes. Only a
-                    // database already at the current Room version receives the fork identity
-                    // hash, because Room will not run a migration in that case.
-                    check(version != EXPECTED_VERSION) {
-                        "Unknown current schema must never be compatibility-stamped"
+                    // would silently skip migrations and risk losing schema changes. Exact v46
+                    // and v47/v48 inputs use the explicit raw migration chain above.
+                    if (version < 46) {
+                        Log.i(TAG, "reconcile: kept older user_version=$version for Room migrations")
+                    } else {
+                        check(db.version == EXPECTED_VERSION) {
+                            "Exact v46+ raw migration did not reach the current version"
+                        }
+                        Log.i(TAG, "reconcile: migrated exact v$version input to v$EXPECTED_VERSION")
                     }
-                    Log.i(TAG, "reconcile: kept older user_version=$version for Room migrations")
                     db.setTransactionSuccessful()
                 } finally {
                     db.endTransaction()
@@ -1301,4 +1893,24 @@ object ImportedDatabaseReconciler {
     private val STAGED_DATABASE_FILE =
         Regex("\\.rikka_hub\\.restore_[0-9a-f]{32}\\.ready")
     private const val INSTALLED_DATABASE_FILE = "rikka_hub"
+    private const val NIL_UUID = "00000000-0000-0000-0000-000000000000"
+    /** Shared head fields compared one-for-one with the current audit revision on restore. */
+    internal val V48_POLICY_GRANT_HEAD_COLUMNS = listOf(
+        "grant_id",
+        "source_stream_id",
+        "policy_id",
+        "policy_revision",
+        "artifact_sha256",
+        "scope_kind",
+        "scope_id",
+        "consuming_assistant_id",
+        "actor",
+        "state",
+        "state_version",
+        "granted_at_ms",
+        "revoked_at_ms",
+        "reason_code",
+        "created_at_ms",
+        "updated_at_ms",
+    )
 }

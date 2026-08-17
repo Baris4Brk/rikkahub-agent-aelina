@@ -5,7 +5,7 @@ import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
 
-/** Canonical P1 policy candidate/shadow artifact. P1 cannot represent an active policy. */
+/** Canonical derived Policy artifact. Durable user authority remains in AppDatabase grants. */
 @Entity(
     tableName = "learning_policies",
     indices = [
@@ -47,6 +47,13 @@ data class LearningPolicyEntity(
     val failureModeSummary: String,
     @ColumnInfo(name = "state_version")
     val stateVersion: Long,
+    /**
+     * Revision of the canonical Policy content, independent from lifecycle/evidence mutations.
+     * Durable approval grants bind this value together with [artifactSha256]; changing status must
+     * never invalidate an otherwise exact grant merely by incrementing [stateVersion].
+     */
+    @ColumnInfo(name = "content_revision")
+    val contentRevision: Long,
     @ColumnInfo(name = "artifact_sha256")
     val artifactSha256: String,
     @ColumnInfo(name = "compiler_abi")
@@ -56,6 +63,29 @@ data class LearningPolicyEntity(
     val sourceValid: Boolean,
     @ColumnInfo(name = "schema_valid")
     val schemaValid: Boolean,
+    /**
+     * Canonical, lossless applicability captured from PolicyCandidateDraft.applicableToolSchemas.
+     * `EXACT_V1:` followed by a sorted comma-separated SHA-256 set is the only live encoding.
+     * `UNPROVEN_V5` exists solely for fail-closed pre-v6 rows and is never written by P2.
+     */
+    @ColumnInfo(name = "applicable_tool_schemas_wire")
+    val applicableToolSchemasWire: String,
+    /** Exact final-provider/model applicability. ANY_V1 is migration/audit-only and never live. */
+    @ColumnInfo(name = "applicable_model_identity_wire")
+    val applicableModelIdentityWire: String,
+    /** Exact final-provider/model applicability. ANY_V1 is migration/audit-only and never live. */
+    @ColumnInfo(name = "applicable_provider_identity_wire")
+    val applicableProviderIdentityWire: String,
+    @ColumnInfo(name = "applicable_template_identity")
+    val applicableTemplateIdentity: String?,
+    @ColumnInfo(name = "applicable_configuration_identity")
+    val applicableConfigurationIdentity: String?,
+    @ColumnInfo(name = "applicable_configuration_generation")
+    val applicableConfigurationGeneration: Long?,
+    @ColumnInfo(name = "applicable_capability_digest")
+    val applicableCapabilityDigest: String?,
+    @ColumnInfo(name = "applicable_authority_digest")
+    val applicableAuthorityDigest: String?,
     @ColumnInfo(name = "stale_reason")
     val staleReason: String?,
     @ColumnInfo(name = "distinct_episode_support")
@@ -105,28 +135,82 @@ data class LearningPolicyEntity(
         requireBoundedRedactedText(boundarySummary, "policy boundary")
         requireBoundedRedactedText(failureModeSummary, "policy failure mode")
         require(stateVersion > 0L) { "Invalid policy state version" }
+        require(contentRevision > 0L) { "Invalid policy content revision" }
         requireSha256(artifactSha256, "policy artifact")
         requireLearningIdentity(compilerAbi, "policy compiler ABI")
-        require(StoredLearningPolicyStatus.entries.any { it.name == status }) { "Invalid P1 policy status" }
-        require((status == StoredLearningPolicyStatus.STALE.name) == (staleReason != null)) {
-            "Policy stale reason disagrees with status"
+        require(StoredLearningPolicyStatus.entries.any { it.name == status }) {
+            "Invalid policy status"
+        }
+        val reasonRequired = status in setOf(
+            StoredLearningPolicyStatus.SUSPENDED.name,
+            StoredLearningPolicyStatus.SUSPENDED_PENDING_REVIEW.name,
+            StoredLearningPolicyStatus.STALE_SCHEMA.name,
+            StoredLearningPolicyStatus.STALE_SOURCE.name,
+            StoredLearningPolicyStatus.STALE_AUTHORITY.name,
+        )
+        require(reasonRequired == (staleReason != null)) {
+            "Policy reason disagrees with status"
         }
         staleReason?.let { requireLearningCode(it, "policy stale reason") }
-        if (status == StoredLearningPolicyStatus.CANDIDATE.name || status == StoredLearningPolicyStatus.SHADOW.name) {
+        if (status in setOf(
+                StoredLearningPolicyStatus.CANDIDATE.name,
+                StoredLearningPolicyStatus.SHADOW.name,
+                StoredLearningPolicyStatus.PROBATION.name,
+                StoredLearningPolicyStatus.ACTIVE.name,
+            )
+        ) {
             require(sourceValid && schemaValid) { "Retrievable policy is source/schema stale" }
         }
-        if (status == StoredLearningPolicyStatus.STALE.name) {
-            require(!sourceValid || !schemaValid) { "STALE policy has no invalid dependency" }
+        if (status == StoredLearningPolicyStatus.STALE_SOURCE.name) {
+            require(!sourceValid) { "STALE_SOURCE policy has a valid source" }
+        }
+        if (status == StoredLearningPolicyStatus.STALE_SCHEMA.name) {
+            require(!schemaValid) { "STALE_SCHEMA policy has a valid schema" }
+        }
+        val decodedToolApplicability = PolicyApplicabilityWire.decodeToolSchemasOrNull(
+            applicableToolSchemasWire,
+        )
+        if (decodedToolApplicability == null) {
+            require(
+                !schemaValid && status !in POLICY_SCHEMA_RETRIEVABLE_STATUSES
+            ) { "Unproven legacy Policy applicability is not fail-closed" }
+        }
+        val modelApplicability = PolicyApplicabilityWire.decodeIdentity(applicableModelIdentityWire)
+        val providerApplicability = PolicyApplicabilityWire.decodeIdentity(applicableProviderIdentityWire)
+        applicableTemplateIdentity?.let {
+            requireSha256(it, "Policy applicability template")
+        }
+        require((applicableConfigurationIdentity == null) ==
+            (applicableConfigurationGeneration == null))
+        applicableConfigurationIdentity?.let {
+            requireSha256(it, "Policy applicability configuration")
+        }
+        applicableConfigurationGeneration?.let {
+            require(it > 0L) { "Invalid Policy applicability configuration generation" }
+        }
+        applicableCapabilityDigest?.let { requireSha256(it, "Policy capability baseline") }
+        applicableAuthorityDigest?.let { requireSha256(it, "Policy authority baseline") }
+        if (status in POLICY_SCHEMA_RETRIEVABLE_STATUSES) {
+            require(modelApplicability is PolicyIdentityApplicability.Exact &&
+                providerApplicability is PolicyIdentityApplicability.Exact &&
+                applicableTemplateIdentity != null &&
+                applicableConfigurationIdentity != null &&
+                applicableConfigurationGeneration != null
+            ) { "Retrievable Policy has wildcard/unproven applicability" }
         }
         require(
             distinctEpisodeSupport >= 0L &&
                 positiveEpisodeCount >= 0L &&
                 negativeEpisodeCount >= 0L
         ) { "Negative policy evidence count" }
-        require(usageCount == 0L) { "P1 policy usage must remain zero" }
+        require(usageCount >= 0L) { "Negative policy usage" }
         require(confidence.isFinite() && confidence in 0.0..1.0) { "Invalid policy confidence" }
-        require(observedUtilityDelta == null && utilityUncertainty == null) {
-            "P1 policy utility must remain UNKNOWN"
+        require((observedUtilityDelta == null) == (utilityUncertainty == null)) {
+            "Policy utility and uncertainty must be recorded together"
+        }
+        observedUtilityDelta?.let { require(it.isFinite()) { "Invalid policy utility" } }
+        utilityUncertainty?.let {
+            require(it.isFinite() && it >= 0.0) { "Invalid policy utility uncertainty" }
         }
         listOf(
             producerModelIdentity,
@@ -144,9 +228,94 @@ data class LearningPolicyEntity(
         requireSha256(producerConfigurationIdentity, "policy configuration identity")
         require(producerConfigGeneration >= 0L) { "Negative policy config generation" }
         require(createdAtMs >= 0L && updatedAtMs >= createdAtMs) { "Invalid policy clock" }
-        require(lastUsedAtMs == null) { "P1 policy last_used must remain empty" }
+        require((usageCount == 0L) == (lastUsedAtMs == null)) {
+            "Policy usage and last-used clock disagree"
+        }
+        lastUsedAtMs?.let { require(it in createdAtMs..updatedAtMs) { "Invalid last-used clock" } }
     }
 
     override fun toString(): String =
-        "LearningPolicyEntity(status=$status, revision=$stateVersion, support=$distinctEpisodeSupport, text=<redacted>, ids=<redacted>)"
+        "LearningPolicyEntity(status=$status, stateVersion=$stateVersion, " +
+            "contentRevision=$contentRevision, support=$distinctEpisodeSupport, " +
+            "text=<redacted>, ids=<redacted>)"
 }
+
+/** In-memory result of parsing an explicit model/provider applicability wire. */
+sealed interface PolicyIdentityApplicability {
+    data object Any : PolicyIdentityApplicability
+
+    data class Exact(val identity: String) : PolicyIdentityApplicability {
+        init {
+            requireLearningIdentity(identity, "Policy applicability identity")
+        }
+    }
+}
+
+/**
+ * Single canonical codec for durable Policy applicability. This deliberately avoids JSON parser
+ * leniency: ordering, duplicates, casing and bounds are part of the storage contract.
+ */
+object PolicyApplicabilityWire {
+    fun encodeToolSchemas(schemas: Set<String>): String {
+        require(schemas.size <= MAX_POLICY_APPLICABLE_TOOL_SCHEMAS) {
+            "Too many applicable Policy tool schemas"
+        }
+        require(schemas.all(LOWER_SHA256::matches)) { "Invalid applicable Policy tool schema" }
+        return POLICY_TOOL_APPLICABILITY_EXACT_PREFIX + schemas.sorted().joinToString(",")
+    }
+
+    /** Returns null only for the v5 migration sentinel; malformed encodings are rejected. */
+    fun decodeToolSchemasOrNull(wire: String): Set<String>? {
+        if (wire == POLICY_TOOL_APPLICABILITY_UNPROVEN_V5) return null
+        require(wire.startsWith(POLICY_TOOL_APPLICABILITY_EXACT_PREFIX)) {
+            "Unknown Policy tool applicability wire"
+        }
+        val payload = wire.removePrefix(POLICY_TOOL_APPLICABILITY_EXACT_PREFIX)
+        val ordered = if (payload.isEmpty()) emptyList() else payload.split(',')
+        require(ordered.size <= MAX_POLICY_APPLICABLE_TOOL_SCHEMAS) {
+            "Too many applicable Policy tool schemas"
+        }
+        require(ordered.all(LOWER_SHA256::matches)) { "Invalid applicable Policy tool schema" }
+        require(ordered == ordered.sorted() && ordered.distinct().size == ordered.size) {
+            "Non-canonical applicable Policy tool schema set"
+        }
+        val decoded = ordered.toCollection(linkedSetOf())
+        require(encodeToolSchemas(decoded) == wire) { "Non-canonical Policy tool applicability wire" }
+        return decoded
+    }
+
+    fun encodeExactIdentity(identity: String): String {
+        requireLearningIdentity(identity, "Policy applicability identity")
+        return POLICY_IDENTITY_APPLICABILITY_EXACT_PREFIX + identity
+    }
+
+    fun decodeIdentity(wire: String): PolicyIdentityApplicability = when {
+        wire == POLICY_IDENTITY_APPLICABILITY_ANY -> PolicyIdentityApplicability.Any
+        wire.startsWith(POLICY_IDENTITY_APPLICABILITY_EXACT_PREFIX) -> {
+            val identity = wire.removePrefix(POLICY_IDENTITY_APPLICABILITY_EXACT_PREFIX)
+            require(identity.isNotEmpty()) { "Empty exact Policy applicability identity" }
+            val decoded = PolicyIdentityApplicability.Exact(identity)
+            require(encodeExactIdentity(decoded.identity) == wire) {
+                "Non-canonical Policy identity applicability wire"
+            }
+            decoded
+        }
+        else -> throw IllegalArgumentException("Unknown Policy identity applicability wire")
+    }
+}
+
+const val POLICY_TOOL_APPLICABILITY_EXACT_PREFIX: String = "EXACT_V1:"
+const val POLICY_TOOL_APPLICABILITY_UNPROVEN_V5: String = "UNPROVEN_V5"
+const val POLICY_IDENTITY_APPLICABILITY_ANY: String = "ANY_V1"
+const val POLICY_IDENTITY_APPLICABILITY_EXACT_PREFIX: String = "EXACT_V1:"
+const val POLICY_APPLICABILITY_UNPROVEN_V5_REASON: String = "P2_APPLICABILITY_UNPROVEN_V5"
+const val POLICY_APPLICABILITY_UNPROVEN_V7_REASON: String = "P2_APPLICABILITY_UNPROVEN_V7"
+const val MAX_POLICY_APPLICABLE_TOOL_SCHEMAS: Int = 16
+
+private val LOWER_SHA256 = Regex("[0-9a-f]{64}")
+private val POLICY_SCHEMA_RETRIEVABLE_STATUSES = setOf(
+    StoredLearningPolicyStatus.CANDIDATE.name,
+    StoredLearningPolicyStatus.SHADOW.name,
+    StoredLearningPolicyStatus.PROBATION.name,
+    StoredLearningPolicyStatus.ACTIVE.name,
+)

@@ -7,6 +7,18 @@ import androidx.room.Query
 
 @Dao
 interface LearningEpisodeDao {
+    @Query("SELECT COUNT(*) FROM learning_episodes")
+    suspend fun countEpisodes(): Long
+
+    @Query("SELECT COUNT(*) FROM learning_episode_lessons WHERE state = 'VALID'")
+    suspend fun countValidLessons(): Long
+
+    @Query(
+        "SELECT COUNT(*) FROM learning_reward_windows " +
+            "WHERE authority_outcome IN ('SUCCESS', 'FAILURE')",
+    )
+    suspend fun countKnownAuthorityRewardWindows(): Long
+
     @Query("SELECT MAX(replay_generation) FROM learning_episodes")
     suspend fun maxEpisodeReplayGeneration(): Long?
 
@@ -18,6 +30,29 @@ interface LearningEpisodeDao {
 
     @Query("SELECT * FROM learning_episodes WHERE id = :episodeId LIMIT 1")
     suspend fun findEpisode(episodeId: String): LearningEpisodeEntity?
+
+    @Query(
+        "DELETE FROM learning_episodes WHERE id = :id AND stream_id = :streamId " +
+            "AND replay_generation = :replayGeneration AND scope_kind = :scopeKind " +
+            "AND scope_id = :scopeId AND lineage_id = :lineageId " +
+            "AND branch_anchor_message_id = :branchAnchorMessageId AND status = 'OPEN' " +
+            "AND revision = :expectedRevision " +
+            "AND NOT EXISTS (SELECT 1 FROM learning_trace_features t WHERE t.episode_id = :id) " +
+            "AND NOT EXISTS (SELECT 1 FROM learning_episode_lessons l WHERE l.episode_id = :id) " +
+            "AND NOT EXISTS (SELECT 1 FROM learning_reward_windows r WHERE r.episode_id = :id) " +
+            "AND NOT EXISTS (SELECT 1 FROM policy_evidence p WHERE p.episode_id = :id) " +
+            "AND NOT EXISTS (SELECT 1 FROM learning_policy_exposures x WHERE x.episode_id = :id)",
+    )
+    suspend fun deleteExactUnusedOpenEpisode(
+        id: String,
+        streamId: String,
+        replayGeneration: Long,
+        scopeKind: String,
+        scopeId: String,
+        lineageId: String,
+        branchAnchorMessageId: String,
+        expectedRevision: Long,
+    ): Int
 
     @Query(
         "SELECT * FROM learning_episodes WHERE stream_id = :streamId " +
@@ -67,9 +102,8 @@ interface LearningEpisodeDao {
             "WHERE e.scope_kind = :scopeKind AND e.scope_id = :scopeId " +
             "AND e.finalized_at_ms IS NOT NULL AND e.finalized_at_ms <= :frozenAtMs " +
             "AND l.updated_at_ms <= :frozenAtMs AND r.updated_at_ms <= :frozenAtMs " +
-            "AND (r.goal_knowledge = 'KNOWN' OR r.process_knowledge = 'KNOWN' " +
-            "OR r.user_knowledge = 'KNOWN') " +
-            "AND e.task_signature = :taskSignature AND e.status IN ('SUCCESS', 'FAILURE') " +
+            "AND r.authority_outcome IN ('SUCCESS', 'FAILURE') " +
+            "AND e.task_signature = :taskSignature " +
             "AND EXISTS (SELECT 1 FROM learning_trace_features t WHERE t.episode_id = e.id " +
             "AND t.source_type = 'CONVERSATION_MESSAGE') " +
             "AND NOT EXISTS (SELECT 1 FROM learning_trace_features t " +
@@ -176,6 +210,11 @@ interface LearningEpisodeDao {
 
     @Query(
         "UPDATE learning_episode_lessons SET state = 'STALE_SOURCE', " +
+            "trigger_summary = '[SOURCE_ERASED]', " +
+            "observation_summary = '[SOURCE_ERASED]', " +
+            "lesson_summary = '[SOURCE_ERASED]', " +
+            "boundary_summary = '[SOURCE_ERASED]', " +
+            "artifact_sha256 = '4337a7cc59142919cbbb5af77323269e33cdc79e68e85aa289571c1af2136143', " +
             "updated_at_ms = MAX(updated_at_ms, :updatedAtMs) " +
             "WHERE rowid IN (SELECT l.rowid FROM learning_episode_lessons l " +
             "WHERE l.episode_id IN (SELECT DISTINCT t.episode_id FROM learning_trace_features t " +
@@ -238,6 +277,11 @@ interface LearningEpisodeDao {
 
     @Query(
         "UPDATE learning_episode_lessons SET state = 'STALE_SOURCE', " +
+            "trigger_summary = '[SOURCE_ERASED]', " +
+            "observation_summary = '[SOURCE_ERASED]', " +
+            "lesson_summary = '[SOURCE_ERASED]', " +
+            "boundary_summary = '[SOURCE_ERASED]', " +
+            "artifact_sha256 = '4337a7cc59142919cbbb5af77323269e33cdc79e68e85aa289571c1af2136143', " +
             "updated_at_ms = MAX(updated_at_ms, :updatedAtMs) " +
             "WHERE rowid IN (SELECT l.rowid FROM learning_episode_lessons l " +
             "JOIN learning_episodes e ON e.id = l.episode_id " +
@@ -313,7 +357,8 @@ interface LearningEpisodeDao {
     ): LearningSourceValidityEntity?
 
     @Query(
-        "UPDATE learning_source_validity SET state = :newState, integrity_sha256 = :integritySha256, " +
+        "UPDATE learning_source_validity SET previous_source_revision = :previousSourceRevision, " +
+            "state = :newState, integrity_sha256 = :integritySha256, " +
             "invalidation_reason = :invalidationReason, authority_event_id = :authorityEventId, " +
             "occurred_at_ms = :occurredAtMs, updated_at_ms = :updatedAtMs " +
             "WHERE stream_id = :streamId AND replay_generation = :replayGeneration " +
@@ -330,10 +375,41 @@ interface LearningEpisodeDao {
         sourceType: String,
         sourceId: String,
         sourceRevision: Long,
+        previousSourceRevision: Long?,
         expectedState: String,
         newState: String,
         integritySha256: String?,
         invalidationReason: String?,
+        authorityEventId: String,
+        occurredAtMs: Long,
+        updatedAtMs: Long,
+    ): Int
+
+    /**
+     * A current authority head proves that every lower revision is stale, including revisions
+     * skipped while handoff was disabled. This bulk fence makes re-enable reconciliation safe
+     * without inventing a historical authority journal.
+     */
+    @Query(
+        "UPDATE learning_source_validity SET state = :newState, " +
+            "invalidation_reason = :invalidationReason, authority_event_id = :authorityEventId, " +
+            "occurred_at_ms = :occurredAtMs, updated_at_ms = :updatedAtMs " +
+            "WHERE stream_id = :streamId AND replay_generation = :replayGeneration " +
+            "AND scope_kind = :scopeKind AND scope_id = :scopeId " +
+            "AND source_type = :sourceType AND source_id = :sourceId " +
+            "AND source_revision < :currentRevision AND state IN ('VALID', 'UNKNOWN') " +
+            "AND updated_at_ms <= :updatedAtMs",
+    )
+    suspend fun invalidateAllEarlierSourceRevisions(
+        streamId: String,
+        replayGeneration: Long,
+        scopeKind: String,
+        scopeId: String,
+        sourceType: String,
+        sourceId: String,
+        currentRevision: Long,
+        newState: String,
+        invalidationReason: String,
         authorityEventId: String,
         occurredAtMs: Long,
         updatedAtMs: Long,
@@ -417,6 +493,8 @@ interface LearningEpisodeDao {
             "AND NOT EXISTS (SELECT 1 FROM learning_episode_lessons l WHERE l.episode_id = e.id) " +
             "AND NOT EXISTS (SELECT 1 FROM learning_reward_windows r WHERE r.episode_id = e.id) " +
             "AND NOT EXISTS (SELECT 1 FROM policy_evidence p WHERE p.episode_id = e.id) " +
+            "AND NOT EXISTS (SELECT 1 FROM learning_policy_exposures x " +
+            "WHERE x.episode_id = e.id) " +
             "AND NOT EXISTS (SELECT 1 FROM learning_jobs j " +
             "JOIN learning_inbox_events i ON i.stream_id = j.stream_id " +
             "AND i.event_id = j.source_event_id WHERE j.state IN ('PENDING', 'RETRY', 'RUNNING') " +

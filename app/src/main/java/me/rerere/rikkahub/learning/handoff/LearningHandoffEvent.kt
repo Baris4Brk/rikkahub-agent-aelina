@@ -27,6 +27,10 @@ data class LearningHandoffEvent(
     val missingRevisionReasonCode: String? = source?.missingRevisionReason?.name,
     val terminalStateCode: String? = null,
     val correlation: LearningCorrelation,
+    val rewardDimensionCode: String? = null,
+    val rewardSignalKindCode: String? = null,
+    val rewardValueMilli: Int? = null,
+    val executionVerificationStateCode: String? = null,
     val createdAtMs: Long,
 ) {
     init {
@@ -46,6 +50,10 @@ data class LearningHandoffEvent(
             missingRevisionReasonCode = missingRevisionReasonCode,
             terminalStateCode = terminalStateCode,
             correlation = correlation,
+            rewardDimensionCode = rewardDimensionCode,
+            rewardSignalKindCode = rewardSignalKindCode,
+            rewardValueMilli = rewardValueMilli,
+            executionVerificationStateCode = executionVerificationStateCode,
         )
 
         val knownType = eventCode.knownType
@@ -64,6 +72,10 @@ data class LearningHandoffEvent(
                 previousSourceRevision = correlation.previousSourceRevision,
                 sourceStateCode = correlation.sourceStateCode,
                 correlation = correlation,
+                rewardDimensionCode = rewardDimensionCode,
+                rewardSignalKindCode = rewardSignalKindCode,
+                rewardValueMilli = rewardValueMilli,
+                executionVerificationStateCode = executionVerificationStateCode,
             )
             require(eventId == expectedId) { "Learning event canonical identity mismatch" }
         }
@@ -105,6 +117,10 @@ data class LearningHandoffEvent(
             toolSchemaFingerprint = correlation.toolSchemaFingerprint,
             messageId = correlation.messageId,
             messageRevision = correlation.messageRevision,
+            rewardDimension = rewardDimensionCode,
+            rewardSignalKind = rewardSignalKindCode,
+            rewardValueMilli = rewardValueMilli,
+            executionVerificationState = executionVerificationStateCode,
             occurredAtMs = source?.occurredAtMs,
             createdAtMs = createdAtMs,
             ingestedAtMs = ingestedAtMs,
@@ -134,7 +150,8 @@ internal fun LearningInboxEventEntity.hasSameAuthoritativeIdentityAs(
 internal fun LearningInboxEventEntity.isSafeToCreateJob(): Boolean =
     interpretationVersion == CURRENT_LEARNING_EVENT_INTERPRETATION_VERSION &&
         decodeState == LearningEventDecodeState.KNOWN.name &&
-        LearningEventType.entries.firstOrNull { it.name == eventTypeCode }?.producesP0Job == true &&
+        runCatching { LearningEventCode(eventTypeCode, eventSchemaVersion).producesJob }
+            .getOrDefault(false) &&
         scopeKind != null &&
         scopeId != null &&
         sourceType != null &&

@@ -47,12 +47,14 @@ object DreamProposalParser {
         if (raw.toByteArray(StandardCharsets.UTF_8).size > MAX_DREAM_PROPOSAL_UTF8_BYTES) {
             return DreamProposalParseResult.Rejected(DreamProposalParseFailure.TOO_LARGE)
         }
+        val document = unwrapSingleDreamJsonDocument(raw)
+            ?: return DreamProposalParseResult.Rejected(DreamProposalParseFailure.INVALID_JSON)
         try {
-            requireDreamValidUnicode(raw)
+            requireDreamValidUnicode(document)
         } catch (_: IllegalArgumentException) {
             return DreamProposalParseResult.Rejected(DreamProposalParseFailure.INVALID_UNICODE)
         }
-        val duplicateScan = StrictJsonKeyScanner.scan(raw)
+        val duplicateScan = StrictJsonKeyScanner.scan(document)
         if (duplicateScan == StrictJsonKeyScanner.Result.DUPLICATE) {
             return DreamProposalParseResult.Rejected(DreamProposalParseFailure.DUPLICATE_KEY)
         }
@@ -60,7 +62,7 @@ object DreamProposalParser {
             return DreamProposalParseResult.Rejected(DreamProposalParseFailure.INVALID_JSON)
         }
         val root = try {
-            json.parseToJsonElement(raw)
+            json.parseToJsonElement(document)
         } catch (_: Exception) {
             return DreamProposalParseResult.Rejected(DreamProposalParseFailure.INVALID_JSON)
         }
@@ -264,6 +266,20 @@ object DreamProposalParser {
     private fun fail(failure: DreamProposalParseFailure): Nothing = throw ProposalParseException(failure)
 
     private class ProposalParseException(val failure: DreamProposalParseFailure) : RuntimeException()
+}
+
+/** Allows only one transport fence; prose and nested/trailing fences remain invalid. */
+private fun unwrapSingleDreamJsonDocument(raw: String): String? {
+    val trimmed = raw.trim()
+    if (!trimmed.startsWith("```")) return trimmed
+    val firstLineEnd = trimmed.indexOf('\n')
+    if (firstLineEnd < 0) return null
+    val header = trimmed.substring(0, firstLineEnd).trimEnd('\r')
+    if (header != "```" && !header.equals("```json", ignoreCase = true)) return null
+    val closingStart = trimmed.lastIndexOf("```")
+    if (closingStart <= firstLineEnd || closingStart + 3 != trimmed.length) return null
+    val body = trimmed.substring(firstLineEnd + 1, closingStart).trim()
+    return body.takeIf { it.isNotEmpty() && !it.contains("```") }
 }
 
 /** Detects semantic duplicate keys, including `"a"` versus `"\u0061"`, before Json decoding. */

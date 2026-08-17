@@ -8,19 +8,49 @@ import org.junit.Test
 
 class P1ShadowIsolationTest {
     @Test
-    fun p1PolicyAndRetrievalAreNotImportedIntoProviderRequestCompiler() {
+    fun stageDShadowNeverBecomesProviderRecallAndStageERequiresReviewOptIn() {
         val root = appRoot()
         val handler = Files.readString(
             root.resolve("src/main/java/me/rerere/rikkahub/data/ai/GenerationHandler.kt"),
         )
-        val forbidden = listOf(
-            "learning.policy",
-            "learning.retrieval",
-            "learning.reflection",
+        val facade = Files.readString(
+            root.resolve("src/main/java/me/rerere/rikkahub/learning/runtime/LearningRuntimeFacade.kt"),
+        )
+        val chatService = Files.readString(
+            root.resolve("src/main/java/me/rerere/rikkahub/service/ChatService.kt"),
+        )
+        val shadowBlock = handler.substringAfter("// Stage D is content-free observation only")
+            .substringBefore("val policyRetrieval = if")
+        val forbiddenInShadow = listOf(
+            "LearnedPolicySource",
+            "compileRecallPrompt",
+            "createSystemPromptLayout",
             "PolicyRetriever",
             "PolicyCandidateDraft",
         )
-        forbidden.forEach { token -> assertFalse("P1 shadow leaked into provider path: $token", token in handler) }
+        forbiddenInShadow.forEach { token ->
+            assertFalse("Stage-D shadow leaked into provider projection: $token", token in shadowBlock)
+        }
+        assertTrue("Stage D must explicitly remain content-free", "The result never enters Recall" in shadowBlock)
+        assertTrue(
+            "Stage E must require the exact assistant's reviewed-policy opt-in",
+            "assistantPolicyOptIn = assistant.reviewedPolicyInjectionEnabled" in handler,
+        )
+        val stageDAuthorityBlock = chatService
+            .substringAfter("// Stage D needs the exact command authority")
+            .substringBefore("var memoryRetrievalTraceId")
+        assertFalse(
+            "Stage-D authority identity must not depend on the Stage-E review opt-in",
+            "reviewedPolicyInjectionEnabled" in stageDAuthorityBlock,
+        )
+        assertTrue(
+            "Stage D must fence the authoritative branch revision",
+            "branchAnchorMessageRevision = branchAnchorRevision" in stageDAuthorityBlock,
+        )
+        assertTrue(
+            "Feature-off construction must fail closed",
+            "if (!flagsSource.policyInjectionEnabledFailClosed()) return empty()" in facade,
+        )
     }
 
     @Test

@@ -1788,7 +1788,10 @@ class ConversationRuntime(
             }
         }
         lateinit var control: GenerationRunControl
-        control = GenerationRunControl(Uuid.random()) { transition ->
+        // A durable command ID is also its stable logical run ID. This lets the Learning
+        // admission projection create an exact OPEN Episode before the first provider dispatch
+        // and keeps watchdog attempts beneath one process-independent run identity.
+        control = GenerationRunControl(envelope.id) { transition ->
             val latestStates = control.steeringStates()
             val latestState = latestStates[transition.commandId] ?: transition.state
             val latestHistoryMode = control.steeringNotes()[transition.commandId]?.historyMode

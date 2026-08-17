@@ -64,7 +64,14 @@ class HardlineInWorkflowTest {
     private val toastTool = Tool(
         name = "show_toast",
         description = "show",
-        parameters = { InputSchema.Obj(properties = buildJsonObject {}) },
+        parameters = {
+            InputSchema.Obj(
+                properties = buildJsonObject {
+                    put("text", buildJsonObject { put("type", "string") })
+                },
+                required = listOf("text"),
+            )
+        },
         execute = { listOf(UIMessagePart.Text("ok")) },
     )
 
@@ -129,7 +136,14 @@ class HardlineInWorkflowTest {
         val ssh = Tool(
             name = "ssh_exec",
             description = "",
-            parameters = { InputSchema.Obj(properties = buildJsonObject {}) },
+            parameters = {
+                InputSchema.Obj(
+                    properties = buildJsonObject {
+                        put("command", buildJsonObject { put("type", "string") })
+                    },
+                    required = listOf("command"),
+                )
+            },
             execute = { listOf(UIMessagePart.Text("ok")) },
         )
         val actions = listOf(
@@ -141,6 +155,33 @@ class HardlineInWorkflowTest {
         )
         val result = runner().run(actions, listOf(ssh), invocation)
         assertTrue("uname -a must not be hardline-blocked", result.success)
+    }
+
+    @Test fun `runtime rollout fence is rechecked before every action`() = runBlocking {
+        var bodyCalls = 0
+        var fenceCalls = 0
+        val tool = Tool(
+            name = "fenced_tool",
+            description = "",
+            parameters = { InputSchema.Obj(properties = buildJsonObject {}) },
+            execute = {
+                bodyCalls++
+                listOf(UIMessagePart.Text("ignored"))
+            },
+        )
+        val result = runner().run(
+            actions = listOf(
+                WorkflowAction("fenced_tool", buildJsonObject {}, 10),
+                WorkflowAction("fenced_tool", buildJsonObject {}, 10),
+            ),
+            availableTools = listOf(tool),
+            invocation = invocation,
+            beforeAction = { ++fenceCalls == 1 },
+        )
+        assertFalse(result.success)
+        assertEquals(WorkflowFailureCode.ACTION_RUNTIME_FENCE_REJECTED, result.error)
+        assertEquals(2, fenceCalls)
+        assertEquals(1, bodyCalls)
     }
 
     private companion object {

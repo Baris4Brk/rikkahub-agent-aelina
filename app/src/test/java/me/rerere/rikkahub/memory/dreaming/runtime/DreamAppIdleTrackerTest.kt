@@ -53,4 +53,29 @@ class DreamAppIdleTrackerTest {
             (tracker.decisionAt(2_000, 15) as DreamAppIdleDecision.Deferred).reason,
         )
     }
+
+    @Test
+    fun `persisted background timestamp survives a headless process restart`() {
+        assertEquals(
+            1_000L,
+            restoredDreamBackgroundSince(
+                PersistedDreamAppVisibility.Background(1_000L),
+                nowEpochMs = 901_000L,
+            ),
+        )
+        assertEquals(
+            901_000L,
+            restoredDreamBackgroundSince(
+                PersistedDreamAppVisibility.Foreground,
+                nowEpochMs = 901_000L,
+            ),
+        )
+        assertEquals(
+            901_000L,
+            restoredDreamBackgroundSince(
+                PersistedDreamAppVisibility.Background(901_001L),
+                nowEpochMs = 901_000L,
+            ),
+        )
+    }
 }

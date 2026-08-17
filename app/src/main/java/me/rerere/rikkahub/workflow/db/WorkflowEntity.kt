@@ -34,6 +34,23 @@ data class WorkflowEntity(
     /** ISO local-date "yyyy-MM-dd" for daily-cap rollover. Empty string = never run. */
     @ColumnInfo(defaultValue = "''")
     val runsTodayDate: String = "",
+    /** Optimistic-lock version for definition/enabled/provenance mutations. */
+    @ColumnInfo(defaultValue = "1")
+    val stateVersion: Long = 1L,
+    /** USER or LEARNED. Never infer this authority boundary from the id prefix. */
+    @ColumnInfo(defaultValue = "'USER'")
+    val origin: String = "USER",
+    val sourceCandidateId: String? = null,
+    val sourceArtifactHash: String? = null,
+    val grantDigest: String? = null,
+    val authoringAssistantId: String? = null,
+    /** Canonical sorted JSON projections checked against definitionJson on every load. */
+    @ColumnInfo(defaultValue = "'[]'")
+    val capabilitySnapshotJson: String = "[]",
+    @ColumnInfo(defaultValue = "'[]'")
+    val toolSchemaFingerprintsJson: String = "[]",
+    /** Stable fail-closed reason set when a learned workflow becomes stale. */
+    val staleReason: String? = null,
 )
 
 /**

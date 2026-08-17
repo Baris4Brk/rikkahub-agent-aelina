@@ -95,6 +95,10 @@ object LearningOutboxRowDecoder {
                 row.toolName == null &&
                 row.toolSchemaFingerprint == null &&
                 row.messageRevision == null &&
+                row.rewardDimension == null &&
+                row.rewardSignalKind == null &&
+                row.rewardValueMilli == null &&
+                row.executionVerificationState == null &&
                 row.occurredAtMs == null &&
                 correlation == LearningCorrelation()
             if (!isCleanSentinel) {
@@ -165,6 +169,10 @@ object LearningOutboxRowDecoder {
                 missingRevisionReasonCode = row.missingRevisionReason,
                 terminalStateCode = row.terminalState,
                 correlation = correlation,
+                rewardDimensionCode = row.rewardDimension,
+                rewardSignalKindCode = row.rewardSignalKind,
+                rewardValueMilli = row.rewardValueMilli,
+                executionVerificationStateCode = row.executionVerificationState,
             ) != null
         ) {
             return LearningOutboxDecodeResult.Invalid(
@@ -184,6 +192,10 @@ object LearningOutboxRowDecoder {
                 previousSourceRevision = row.previousSourceRevision,
                 sourceStateCode = row.sourceState,
                 correlation = correlation,
+                rewardDimensionCode = row.rewardDimension,
+                rewardSignalKindCode = row.rewardSignalKind,
+                rewardValueMilli = row.rewardValueMilli,
+                executionVerificationStateCode = row.executionVerificationState,
             ) }.getOrNull() ?: return LearningOutboxDecodeResult.Invalid(
                 LearningOutboxDecodeError.EVENT_ID_MISMATCH,
             )
@@ -204,6 +216,10 @@ object LearningOutboxRowDecoder {
                 missingRevisionReasonCode = row.missingRevisionReason,
                 terminalStateCode = row.terminalState,
                 correlation = correlation,
+                rewardDimensionCode = row.rewardDimension,
+                rewardSignalKindCode = row.rewardSignalKind,
+                rewardValueMilli = row.rewardValueMilli,
+                executionVerificationStateCode = row.executionVerificationState,
                 createdAtMs = row.createdAtMs,
             )
         }.getOrNull()

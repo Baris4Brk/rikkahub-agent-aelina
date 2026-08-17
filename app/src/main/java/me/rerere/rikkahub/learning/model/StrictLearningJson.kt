@@ -1,5 +1,25 @@
 package me.rerere.rikkahub.learning.model
 
+/**
+ * Transport-only normalization for providers that wrap an otherwise exact JSON document in one
+ * Markdown fence. Prose, multiple fences, trailing text, and non-JSON fence labels stay rejected.
+ */
+internal object StrictLearningJsonEnvelope {
+    fun unwrapSingleDocument(raw: String): String? {
+        val trimmed = raw.trim()
+        if (!trimmed.startsWith("```")) return trimmed
+        val firstLineEnd = trimmed.indexOf('\n')
+        if (firstLineEnd < 0) return null
+        val header = trimmed.substring(0, firstLineEnd).trimEnd('\r')
+        if (header != "```" && !header.equals("```json", ignoreCase = true)) return null
+        val closingStart = trimmed.lastIndexOf("```")
+        if (closingStart <= firstLineEnd || closingStart + 3 != trimmed.length) return null
+        val body = trimmed.substring(firstLineEnd + 1, closingStart).trim()
+        if (body.isEmpty() || body.contains("```")) return null
+        return body
+    }
+}
+
 /** Duplicate-key preflight shared by every Learning model-output parser. */
 internal object StrictLearningJsonKeyScanner {
     enum class Result { VALID, DUPLICATE, INVALID }

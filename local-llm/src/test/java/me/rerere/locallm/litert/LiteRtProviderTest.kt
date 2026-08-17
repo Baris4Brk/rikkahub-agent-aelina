@@ -1,6 +1,8 @@
 package me.rerere.locallm.litert
 
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -16,6 +18,64 @@ import org.junit.Test
  * is still `true` at the moment of the doomed first load).
  */
 class LiteRtProviderTest {
+
+    @Test
+    fun `prepared background execution can be claimed only once`() {
+        val gate = LiteRtSingleUseBackgroundGate()
+
+        assertTrue(gate.claim())
+        assertFalse(gate.claim())
+    }
+
+    @Test
+    fun `background attestation freezes every exact text-only runtime dimension`() {
+        val attestation = liteRtBackgroundAttestation(
+            artifactSha256 = "a".repeat(64),
+            forceCpu = true,
+            accelerator = "CPU",
+            contextWindowTokens = 4_096,
+            topK = 64,
+            topP = 0.95,
+            temperature = 1.0,
+        )
+
+        assertEquals(LITERT_BACKGROUND_RUNTIME_ABI, attestation.providerRuntimeAbi)
+        assertEquals("a".repeat(64), attestation.artifactSha256)
+        assertTrue(attestation.forceCpu)
+        assertEquals("CPU", attestation.accelerator)
+        assertEquals(4_096, attestation.contextWindowTokens)
+        assertTrue(attestation.textOnly)
+        assertTrue(attestation.toolsEmpty)
+        assertTrue(attestation.providerCacheDisabled)
+        assertFalse(attestation.constrainedDecoding)
+        assertFalse(attestation.speculativeDecoding)
+        assertEquals(LITERT_PROMPT_RENDERER_ABI, attestation.promptRendererAbi)
+        assertEquals(LITERT_NATIVE_TOOL_ABI, attestation.nativeToolAbi)
+    }
+
+    @Test
+    fun `artifact accelerator context and sampler drift all change attestation`() {
+        fun exact(
+            artifact: String = "a".repeat(64),
+            accelerator: String = "CPU",
+            context: Int = 4_096,
+            topK: Int = 64,
+        ) = liteRtBackgroundAttestation(
+            artifactSha256 = artifact,
+            forceCpu = true,
+            accelerator = accelerator,
+            contextWindowTokens = context,
+            topK = topK,
+            topP = 0.95,
+            temperature = 1.0,
+        )
+
+        val baseline = exact()
+        assertNotEquals(baseline, exact(artifact = "b".repeat(64)))
+        assertNotEquals(baseline, exact(accelerator = "GPU"))
+        assertNotEquals(baseline, exact(context = 8_192))
+        assertNotEquals(baseline, exact(topK = 32))
+    }
 
     @Test
     fun `forwards images when vision is live post-load`() {

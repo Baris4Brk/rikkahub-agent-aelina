@@ -26,6 +26,11 @@ class LearningSourceInvalidationAuthorityEventPort(
     override suspend fun appendInCurrentTransaction(event: SourceInvalidationAuthorityEvent): Boolean {
         val flags = featureFlags.current()
         if (!flags.isValid || !flags.effective.handoff) return false
+        // Every value reaching this port is an adjacent, non-CREATED authority transition.
+        // Consent may prevent capturing a new source, but it must never suppress invalidation of
+        // an already captured revision. In particular UPDATED keeps the new head ACTIVE while
+        // superseding the old revision, so filtering ACTIVE here would resurrect stale evidence.
+        check(shouldProjectSourceInvalidationAuthorityTransition(event))
         val result = appender.appendInCurrentAuthorityTransaction { streamId ->
             event.toLearningOutboxDraft(streamId)
         }
@@ -36,6 +41,11 @@ class LearningSourceInvalidationAuthorityEventPort(
         if (insertedOutbox) runCatching(postCommitWake)
     }
 }
+
+internal fun shouldProjectSourceInvalidationAuthorityTransition(
+    event: SourceInvalidationAuthorityEvent,
+): Boolean = event.changeKind !=
+    me.rerere.rikkahub.data.authority.source.ConversationSourceChangeKind.CREATED
 
 internal fun SourceInvalidationAuthorityEvent.toLearningOutboxDraft(
     streamId: Uuid,

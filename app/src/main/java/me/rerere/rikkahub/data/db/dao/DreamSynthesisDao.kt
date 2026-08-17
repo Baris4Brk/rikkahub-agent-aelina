@@ -534,6 +534,35 @@ interface DreamSynthesisDao {
     suspend fun countDerivedSnapshotsForScope(scopeId: String): Int
 
     @Query(
+        "UPDATE dream_runs SET " +
+            "prompt_contract_version = COALESCE(prompt_contract_version, :promptContractVersion), " +
+            "validator_version = COALESCE(validator_version, :validatorVersion), " +
+            "input_memory_count = COALESCE(input_memory_count, :inputMemoryCount), " +
+            "input_manifest_hash = COALESCE(input_manifest_hash, :inputManifestHash), " +
+            "updated_at_ms = MAX(updated_at_ms, :nowMs) " +
+            "WHERE run_id = :runId AND scope_id = :scopeId AND status = 'RUNNING' " +
+            "AND lease_owner = :leaseOwner AND lease_until_ms > :nowMs " +
+            "AND :inputMemoryCount >= 0 " +
+            "AND (prompt_contract_version IS NULL OR prompt_contract_version = :promptContractVersion) " +
+            "AND (validator_version IS NULL OR validator_version = :validatorVersion) " +
+            "AND (input_memory_count IS NULL OR input_memory_count = :inputMemoryCount) " +
+            "AND (input_manifest_hash IS NULL OR input_manifest_hash = :inputManifestHash) " +
+            "AND EXISTS (SELECT 1 FROM memory_scope_state s WHERE s.scope_id = :scopeId " +
+            "AND s.active_run_id = :runId AND s.active_run_lease_until_ms > :nowMs " +
+            "AND s.active_run_lease_until_ms = dream_runs.lease_until_ms)",
+    )
+    suspend fun markRunProviderDispatch(
+        runId: String,
+        scopeId: String,
+        leaseOwner: String,
+        promptContractVersion: String,
+        validatorVersion: String,
+        inputMemoryCount: Int,
+        inputManifestHash: String,
+        nowMs: Long,
+    ): Int
+
+    @Query(
         "UPDATE dream_runs SET model_identity_digest = :modelIdentityDigest, " +
             "provider_kind = :providerKind, prompt_contract_version = :promptContractVersion, " +
             "validator_version = :validatorVersion, input_memory_count = :inputMemoryCount, " +

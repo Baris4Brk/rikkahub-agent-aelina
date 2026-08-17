@@ -9,12 +9,18 @@ class DreamProposalParserTest {
     fun `accepts exactly one strict proposal object`() {
         val result = DreamProposalParser.parse(validNoOp())
         assertTrue(result is DreamProposalParseResult.Parsed)
+        assertTrue(
+            DreamProposalParser.parse("```json\n${validNoOp()}\n```") is
+                DreamProposalParseResult.Parsed,
+        )
     }
 
     @Test
     fun `rejects prose fences unknown keys enums and semantic duplicate keys`() {
         val cases = listOf(
             "prefix ${validNoOp()}" to DreamProposalParseFailure.INVALID_JSON,
+            "```json\n${validNoOp()}\n```\ntrailing" to DreamProposalParseFailure.INVALID_JSON,
+            "```json\n```json\n${validNoOp()}\n```\n```" to DreamProposalParseFailure.INVALID_JSON,
             validNoOp().replaceFirst("{", "{\"extra\":1,") to DreamProposalParseFailure.UNKNOWN_FIELD,
             validNoOp().replace("\"INCREMENTAL\"", "\"incremental\"") to DreamProposalParseFailure.UNKNOWN_ENUM,
             validNoOp().replace("\"schema_version\":1", "\"schema_version\":1,\"schema_\\u0076ersion\":1") to

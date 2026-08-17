@@ -5,6 +5,7 @@ import kotlinx.coroutines.runBlocking
 import me.rerere.rikkahub.learning.model.LearningScope
 import me.rerere.rikkahub.learning.model.LearningSourceKind
 import me.rerere.rikkahub.learning.model.LearningSourceRef
+import me.rerere.rikkahub.learning.privacy.LearningEphemeralScopeRegistry
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -234,6 +235,23 @@ class LearningSourceSnapshotResolverTest {
 
         assertTrue(failure is CancellationException)
         assertTrue(requireNotNull(snapshot).isClearedForTest())
+    }
+
+    @Test
+    fun productionRegistryClearsLiveSnapshotForExactScopeAndUnregistersOnClose() {
+        val registry = LearningEphemeralScopeRegistry()
+        val snapshot = LearningEphemeralSourceSnapshot(
+            source = SOURCE,
+            alias = "E1",
+            text = "sensitive".toCharArray(),
+            expiresAtMs = 100L,
+            ephemeralRegistry = registry,
+        )
+
+        assertTrue(registry.clearForScope(SCOPE))
+        assertTrue(snapshot.isClearedForTest())
+        // The snapshot unregisters itself; a repeated exact erase remains idempotent.
+        assertTrue(registry.clearForScope(SCOPE))
     }
 
     @Test(expected = IllegalArgumentException::class)

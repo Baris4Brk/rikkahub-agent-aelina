@@ -12,6 +12,20 @@ import org.junit.Test
 
 class ReflectionParserTest {
     @Test
+    fun promptPublishesEveryStrictOutputFieldAndVersion() {
+        val input = input()
+        val prompt = ReflectionPrompt.create(input)
+        val system = prompt.providerTexts().first
+        prompt.close()
+
+        assertEquals("reflection-v3", ReflectionPrompt.TEMPLATE_VERSION)
+        listOf(
+            "schema_version", "input_id", "op", "lesson_type", "trigger",
+            "observation", "lesson", "boundary", "evidence_aliases", "quality",
+        ).forEach { field -> assertTrue(system.contains(field)) }
+    }
+
+    @Test
     fun strictLessonAcceptsOnlyAllowlistedEvidenceAndRedactsToString() {
         val input = input()
         val result = ReflectionParser.parse(
@@ -69,10 +83,32 @@ class ReflectionParserTest {
         )
     }
 
+    @Test
+    fun singleJsonFenceIsTransportNormalizedButProseAndMultipleFencesStayRejected() {
+        val input = input()
+        val abstain = """
+            ```json
+            {"schema_version":1,"input_id":"${input.inputId}","op":"ABSTAIN"}
+            ```
+        """.trimIndent()
+        assertTrue(ReflectionParser.parse(abstain, input) is ReflectionParseResult.Abstained)
+
+        listOf(
+            "Here is JSON: $abstain",
+            "$abstain\ntrailing prose",
+            "```json\n$abstain\n```",
+        ).forEach { raw ->
+            assertEquals(
+                ReflectionParseFailure.INVALID_JSON,
+                (ReflectionParser.parse(raw, input) as ReflectionParseResult.Rejected).failure,
+            )
+        }
+    }
+
     private fun input(): ReflectionInputBundle {
         val episodeId = EpisodeIdFactory.create(Uuid.random(), Uuid.random(), Uuid.random())
         return ReflectionInputBundle(
-            inputId = "reflection-input-v1:${"a".repeat(64)}",
+            inputId = "reflection-input-v2:${"a".repeat(64)}",
             episodeId = episodeId,
             allowedEvidence = linkedMapOf("E1" to source()),
             payloadJson = "{}",

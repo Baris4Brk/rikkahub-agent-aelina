@@ -30,7 +30,9 @@ import me.rerere.rikkahub.data.db.dao.MessageNodeDAO
 import me.rerere.rikkahub.data.db.dao.LearningOutboxDao
 import me.rerere.rikkahub.data.db.dao.LearningReconciliationAuthorityDao
 import me.rerere.rikkahub.data.db.dao.LearningSourceAuthorityDao
+import me.rerere.rikkahub.data.db.dao.LearningPolicyGrantDao
 import me.rerere.rikkahub.data.db.dao.PendingChatCommandDao
+import me.rerere.rikkahub.data.db.dao.RewardFeedbackAuthorityDao
 import me.rerere.rikkahub.data.db.dao.PetDialogueDao
 import me.rerere.rikkahub.data.db.dao.ScheduledJobDao
 import me.rerere.rikkahub.data.db.dao.ScheduledJobRunDao
@@ -71,7 +73,11 @@ import me.rerere.rikkahub.data.db.entity.MessageNodeEntity
 import me.rerere.rikkahub.data.db.entity.LearningOutboxEntity
 import me.rerere.rikkahub.data.db.entity.LearningConversationSourceAuthorityEntity
 import me.rerere.rikkahub.data.db.entity.LearningMessageSourceAuthorityEntity
+import me.rerere.rikkahub.data.db.entity.LearningPolicyGrantEntity
+import me.rerere.rikkahub.data.db.entity.LearningPolicyGrantRevisionEntity
 import me.rerere.rikkahub.data.db.entity.PendingChatCommandEntity
+import me.rerere.rikkahub.data.db.entity.RewardFeedbackAuthorityEntity
+import me.rerere.rikkahub.data.db.entity.RewardFeedbackAuthorityRevisionEntity
 import me.rerere.rikkahub.data.db.entity.PetDialogueRevisionEntity
 import me.rerere.rikkahub.data.db.entity.PetDialogueSessionEntity
 import me.rerere.rikkahub.data.db.entity.PetDialogueTurnEntity
@@ -153,10 +159,14 @@ import me.rerere.rikkahub.owner.db.HostOperationEventEntity
         LearningOutboxEntity::class,
         LearningConversationSourceAuthorityEntity::class,
         LearningMessageSourceAuthorityEntity::class,
+        LearningPolicyGrantEntity::class,
+        LearningPolicyGrantRevisionEntity::class,
+        RewardFeedbackAuthorityEntity::class,
+        RewardFeedbackAuthorityRevisionEntity::class,
     ],
-    // v33 freezes the conversation-context limit with each queued capture so changing the
-    // setting later cannot split or enlarge a batch that has already been accepted.
-    version = 46,
+    // v49 makes workflow capability/provenance authority durable. Learned artifacts remain
+    // disabled until an explicit cross-database promotion completes.
+    version = 49,
     autoMigrations = [
         AutoMigration(from = 1, to = 2),
         AutoMigration(from = 2, to = 3),
@@ -248,6 +258,10 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun learningReconciliationAuthorityDao(): LearningReconciliationAuthorityDao
 
     abstract fun learningSourceAuthorityDao(): LearningSourceAuthorityDao
+
+    abstract fun learningPolicyGrantDao(): LearningPolicyGrantDao
+
+    abstract fun rewardFeedbackAuthorityDao(): RewardFeedbackAuthorityDao
 }
 
 object TokenUsageConverter {

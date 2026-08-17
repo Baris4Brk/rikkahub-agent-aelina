@@ -13,6 +13,9 @@ import me.rerere.rikkahub.learning.reward.RewardJobHandler
 import me.rerere.rikkahub.learning.reward.RewardJobMaterialResolver
 import me.rerere.rikkahub.data.ai.background.BackgroundGenerationClient
 import me.rerere.rikkahub.learning.reward.RewardWindowJobOutput
+import me.rerere.rikkahub.learning.reward.RewardAuthorityJobHandler
+import me.rerere.rikkahub.learning.reward.RewardAuthorityJobMaterialResolver
+import me.rerere.rikkahub.learning.reward.RewardAuthorityJobOutput
 import me.rerere.rikkahub.learning.storage.LearningDatabase
 import me.rerere.rikkahub.learning.storage.LearningJobType
 import me.rerere.rikkahub.learning.trace.ExecutionTraceJobHandler
@@ -25,6 +28,7 @@ internal data class P1LearningRuntimeHandlers(
     val executionTrace: ExecutionTraceJobHandler? = null,
     val reflection: ReflectionJobHandler? = null,
     val reward: RewardJobHandler? = null,
+    val rewardAuthority: RewardAuthorityJobHandler? = null,
     val policyDistillation: PolicyDistillationJobHandler? = null,
     val sourceInvalidation: SourceInvalidationJobHandler? = null,
 )
@@ -36,6 +40,7 @@ internal data class P1LearningRuntimeDependencies(
     val reflectionResolver: ReflectionJobMaterialResolver? = null,
     val backgroundGenerationClient: BackgroundGenerationClient? = null,
     val rewardResolver: RewardJobMaterialResolver? = null,
+    val rewardAuthorityResolver: RewardAuthorityJobMaterialResolver? = null,
     val policyDistillationResolver: PolicyDistillationMaterialResolver? = null,
     val sourceInvalidationResolver: SourceInvalidationJobMaterialResolver? = null,
     val sourceIntegrityResolver: LearningSourceIntegrityResolver =
@@ -59,6 +64,7 @@ internal data class P1LearningRuntimeReadiness(
     val executionTrace: LearningJobHandlerReadinessProbe = waitingProbe(),
     val reflection: LearningJobHandlerReadinessProbe = waitingProbe(),
     val reward: LearningJobHandlerReadinessProbe = waitingProbe(),
+    val rewardAuthority: LearningJobHandlerReadinessProbe = waitingProbe(),
     val policyDistillation: LearningJobHandlerReadinessProbe = waitingProbe(),
     val sourceInvalidation: LearningJobHandlerReadinessProbe = waitingProbe(),
 )
@@ -90,6 +96,7 @@ internal object P1LearningRuntimeBindings {
                 null
             },
             reward = dependencies.rewardResolver?.let(::RewardJobHandler),
+            rewardAuthority = dependencies.rewardAuthorityResolver?.let(::RewardAuthorityJobHandler),
             policyDistillation = if (
                 dependencies.policyDistillationResolver != null &&
                 dependencies.backgroundGenerationClient != null
@@ -147,6 +154,14 @@ internal object P1LearningRuntimeBindings {
                 handlers.reward ?: waitingHandler<RewardWindowJobOutput>(),
                 RewardWindowJobOutputCommitter(derivedJobEnqueuer),
                 readiness = handlers.reward?.let { readiness.reward } ?: waitingProbe(),
+                heartbeatRequired = false,
+            )
+            .register(
+                LearningJobType.APPLY_REWARD_AUTHORITY_V1,
+                handlers.rewardAuthority ?: waitingHandler<RewardAuthorityJobOutput>(),
+                RewardAuthorityJobOutputCommitter(derivedJobEnqueuer),
+                readiness = handlers.rewardAuthority?.let { readiness.rewardAuthority }
+                    ?: waitingProbe(),
                 heartbeatRequired = false,
             )
             .register(

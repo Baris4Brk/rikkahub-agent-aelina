@@ -15,6 +15,7 @@ import me.rerere.rikkahub.data.ai.tools.ToolExecutionContext
 import me.rerere.rikkahub.data.db.entity.LearningOutboxEntity
 import me.rerere.rikkahub.learning.handoff.LEARNING_STREAM_INIT_EVENT_ID
 import me.rerere.rikkahub.learning.handoff.LearningOutboxAppender
+import me.rerere.rikkahub.learning.model.LearningFeatureCapabilities
 import me.rerere.rikkahub.learning.model.LearningFeatureFlagPolicy
 import me.rerere.rikkahub.learning.model.LearningFeatureFlagSource
 import me.rerere.rikkahub.learning.model.LearningFeatureFlags
@@ -311,7 +312,7 @@ class ExecutionRecordDaoTest {
                 context = ToolExecutionContext(
                     runId = runId,
                     conversationId = Uuid.random(),
-                    assistantId = "assistant",
+                    assistantId = "00000000-0000-0000-0000-000000000013",
                     callOrigin = ToolCallOrigin.SystemAssistant,
                     toolCallId = "call-1",
                 ),
@@ -422,9 +423,11 @@ class ExecutionRecordDaoTest {
         learningFeatureFlags = LearningFeatureFlagSource {
             LearningFeatureFlagPolicy.resolve(
                 LearningFeatureFlags(schemaReady = true, handoff = true),
+                LearningFeatureCapabilities(schemaReady = true),
             )
         },
         learningPostCommitWake = wake,
+        learningScopeConsent = me.rerere.rikkahub.learning.model.AllowAllLearningScopeConsentSource,
     )
 
     private fun learningExecutionDraft(id: String) = ExecutionRecordDraft(

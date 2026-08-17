@@ -7,11 +7,16 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import java.util.concurrent.atomic.AtomicBoolean
 import me.rerere.ai.core.InputSchema
 import me.rerere.ai.core.Tool
 import me.rerere.ai.core.MessageRole
+import me.rerere.ai.provider.AttestedBackgroundTextGenerationProvider
+import me.rerere.ai.provider.BackgroundProviderDispatchCallback
+import me.rerere.ai.provider.BackgroundRuntimeAttestation
 import me.rerere.ai.provider.ImageGenerationParams
 import me.rerere.ai.provider.Model
+import me.rerere.ai.provider.PreparedBackgroundTextGeneration
 import me.rerere.ai.provider.Provider
 import me.rerere.ai.provider.FencedTextGenerationProvider
 import me.rerere.ai.provider.ProviderSetting
@@ -30,6 +35,7 @@ import com.google.ai.edge.litertlm.tool as litertTool
 import com.google.ai.edge.litertlm.ToolProvider
 
 private const val TAG = "LiteRtProvider"
+private const val LITERT_CANCELLATION_FENCE_ABI = "litert-inference-epoch-v1"
 private val liteRtProviderInferenceMutex = Mutex()
 private val liteRtCacheIdentityJson = Json {
     encodeDefaults = true
@@ -50,6 +56,42 @@ internal fun computeLiteRtToolAuthorizationFingerprint(tools: List<Tool>): Strin
         }
     }
     return strongFingerprint("rikkahub-litert-tool-authorization-v1", fields)
+}
+
+/** Pure canonical constructor kept separate so the complete background identity is JVM-testable. */
+internal fun liteRtBackgroundAttestation(
+    artifactSha256: String,
+    forceCpu: Boolean,
+    accelerator: String,
+    contextWindowTokens: Int,
+    topK: Int,
+    topP: Double,
+    temperature: Double,
+): BackgroundRuntimeAttestation = BackgroundRuntimeAttestation(
+    providerRuntimeAbi = LITERT_BACKGROUND_RUNTIME_ABI,
+    sdkAbi = LocalRuntimePreferences.LITERTLM_SDK_VERSION,
+    cancellationFenceAbi = LITERT_CANCELLATION_FENCE_ABI,
+    artifactSha256 = artifactSha256,
+    forceCpu = forceCpu,
+    accelerator = accelerator,
+    contextWindowTokens = contextWindowTokens,
+    topK = topK,
+    topP = topP,
+    temperature = temperature,
+    promptRendererAbi = LITERT_PROMPT_RENDERER_ABI,
+    nativeToolAbi = LITERT_NATIVE_TOOL_ABI,
+    textOnly = true,
+    toolsEmpty = true,
+    constrainedDecoding = false,
+    speculativeDecoding = false,
+    providerCacheDisabled = true,
+)
+
+/** Collection-time gate: creating multiple cold Flows still permits exactly one execution. */
+internal class LiteRtSingleUseBackgroundGate {
+    private val consumed = AtomicBoolean(false)
+
+    fun claim(): Boolean = consumed.compareAndSet(false, true)
 }
 
 /**
@@ -105,18 +147,118 @@ class LiteRtProvider(
     private val runtime: LiteRtRuntime,
     private val prefs: LocalRuntimePreferences,
     private val settingsUpdater: suspend (transform: (List<ProviderSetting>) -> List<ProviderSetting>) -> Unit,
-) : Provider<ProviderSetting.LiteRtLocal>, FencedTextGenerationProvider {
+) : Provider<ProviderSetting.LiteRtLocal>,
+    FencedTextGenerationProvider,
+    AttestedBackgroundTextGenerationProvider<ProviderSetting.LiteRtLocal> {
 
     /**
      * [LiteRtRuntime]'s monotonic inference epoch is revoked before `cancelProcess()`. Every
      * callback is guarded by that epoch, so a late native callback cannot publish after cancel.
      */
-    override val cancellationFenceAbi: String = "litert-inference-epoch-v1"
+    override val cancellationFenceAbi: String = LITERT_CANCELLATION_FENCE_ABI
+    override val backgroundRuntimeAttestationAbi: String = LITERT_BACKGROUND_RUNTIME_ABI
 
     /** Singleton bridge — one ToolSet for the lifetime of this provider. Its @Tool
      *  method reads the per-request tool list from [LiteRtToolBridgeRegistry]. */
     private val toolBridge = LiteRtToolBridge()
     private val toolProvider: ToolProvider = litertTool(toolBridge)
+
+    private data class BackgroundSnapshot(
+        val seal: LiteRtBackgroundRuntimeSeal,
+        val forceCpu: Boolean,
+        val contextWindowTokens: Int,
+        val config: LiteRtModelConfig,
+        val attestation: BackgroundRuntimeAttestation,
+    )
+
+    override suspend fun attestBackgroundRuntime(
+        providerSetting: ProviderSetting.LiteRtLocal,
+        model: Model,
+    ): BackgroundRuntimeAttestation {
+        liteRtProviderInferenceMutex.lock()
+        return try {
+            resolveBackgroundSnapshotLocked(providerSetting, model).attestation
+        } finally {
+            liteRtProviderInferenceMutex.unlock()
+        }
+    }
+
+    override fun prepareBackgroundTextGeneration(
+        providerSetting: ProviderSetting.LiteRtLocal,
+        messages: List<UIMessage>,
+        params: TextGenerationParams,
+        expectedAttestation: BackgroundRuntimeAttestation,
+    ): PreparedBackgroundTextGeneration {
+        require(expectedAttestation.providerRuntimeAbi == backgroundRuntimeAttestationAbi) {
+            "Unexpected LiteRT background runtime ABI"
+        }
+        val singleUse = LiteRtSingleUseBackgroundGate()
+        return object : PreparedBackgroundTextGeneration {
+            override val expectedAttestation: BackgroundRuntimeAttestation = expectedAttestation
+
+            override fun streamText(
+                onDispatchStarted: BackgroundProviderDispatchCallback,
+            ): Flow<MessageChunk> = flow {
+                // Guard collection, not merely Flow creation: a cold Flow can otherwise be
+                // retained and collected twice after one successful preparation.
+                check(singleUse.claim()) {
+                    "A prepared LiteRT background execution is single-use"
+                }
+                streamTextInternal(
+                    providerSetting = providerSetting,
+                    messages = messages,
+                    params = params,
+                    expectedBackgroundAttestation = expectedAttestation,
+                    backgroundDispatchCallback = onDispatchStarted,
+                ).collect { chunk -> emit(chunk) }
+            }
+        }
+    }
+
+    /** Caller holds [liteRtProviderInferenceMutex]. */
+    private suspend fun resolveBackgroundSnapshotLocked(
+        providerSetting: ProviderSetting.LiteRtLocal,
+        model: Model,
+    ): BackgroundSnapshot {
+        check(providerSetting.enabled) { "LiteRT provider is disabled" }
+        check(providerSetting.models.any { it.id == model.id && it.modelId == model.modelId }) {
+            "LiteRT background model is not present in the frozen provider"
+        }
+        val modelPath = prefs.installedModels(LocalRuntime.LiteRT)[model.modelId]
+            ?: throw IllegalStateException("Model ${model.modelId} not installed")
+        check(java.io.File(modelPath).isFile) {
+            "LiteRT background artifact is unavailable"
+        }
+        val preferredAccel = prefs.acceleratorFlow(LocalRuntime.LiteRT).first()
+        val forceCpu = prefs.forceCpu(LocalRuntime.LiteRT)
+        val config = LiteRtModelDefaults.forModelFile(model.modelId)
+        val contextWindowTokens = (
+            prefs.maxNumTokensOverride(LocalRuntime.LiteRT)
+                ?: config.maxContextLength
+                ?: config.maxTokens
+            ).coerceAtLeast(1)
+        val seal = runtime.attestBackgroundRuntime(
+            modelPath = modelPath,
+            preferredAccel = preferredAccel,
+            forceCpu = forceCpu,
+        )
+        val attestation = liteRtBackgroundAttestation(
+            artifactSha256 = seal.artifactSha256,
+            forceCpu = forceCpu,
+            accelerator = seal.accelerator,
+            contextWindowTokens = contextWindowTokens,
+            topK = config.topK,
+            topP = config.topP,
+            temperature = config.temperature,
+        )
+        return BackgroundSnapshot(
+            seal = seal,
+            forceCpu = forceCpu,
+            contextWindowTokens = contextWindowTokens,
+            config = config,
+            attestation = attestation,
+        )
+    }
 
     override suspend fun resolveTrustedContextWindowTokens(
         providerSetting: ProviderSetting.LiteRtLocal,
@@ -227,11 +369,50 @@ class LiteRtProvider(
         providerSetting: ProviderSetting.LiteRtLocal,
         messages: List<UIMessage>,
         params: TextGenerationParams,
+    ): Flow<MessageChunk> = streamTextInternal(
+        providerSetting = providerSetting,
+        messages = messages,
+        params = params,
+        expectedBackgroundAttestation = null,
+        backgroundDispatchCallback = BackgroundProviderDispatchCallback.NO_OP,
+    )
+
+    private fun streamTextInternal(
+        providerSetting: ProviderSetting.LiteRtLocal,
+        messages: List<UIMessage>,
+        params: TextGenerationParams,
+        expectedBackgroundAttestation: BackgroundRuntimeAttestation?,
+        backgroundDispatchCallback: BackgroundProviderDispatchCallback,
     ): Flow<MessageChunk> = flow {
         liteRtProviderInferenceMutex.lock()
         try {
-        val installed = prefs.installedModels(LocalRuntime.LiteRT)
-        val modelPath = installed[params.model.modelId]
+        if (expectedBackgroundAttestation != null) {
+            check(params.tools.isEmpty()) { "LiteRT background execution cannot expose tools" }
+            check(params.providerCacheIdentity == null) {
+                "LiteRT background execution cannot reuse provider cache state"
+            }
+            check(messages.none { message ->
+                message.parts.any { part ->
+                    part is UIMessagePart.Image || part is UIMessagePart.Audio
+                }
+            }) { "LiteRT background execution is text-only" }
+        }
+        val backgroundSnapshot = expectedBackgroundAttestation?.let { expected ->
+            resolveBackgroundSnapshotLocked(providerSetting, params.model).also { current ->
+                if (current.attestation != expected) {
+                    throw LiteRtBackgroundRuntimeMismatchException(
+                        "LiteRT background runtime changed after it was frozen",
+                    )
+                }
+            }
+        }
+        val installed = if (backgroundSnapshot == null) {
+            prefs.installedModels(LocalRuntime.LiteRT)
+        } else {
+            emptyMap()
+        }
+        val modelPath = backgroundSnapshot?.seal?.canonicalModelPath
+            ?: installed[params.model.modelId]
             ?: throw IllegalStateException("Model ${params.model.modelId} not installed")
 
         // Guard against a stale DataStore entry (file registered but later deleted by the user,
@@ -248,15 +429,18 @@ class LiteRtProvider(
         // Pass the cached accelerator so ensureLoaded does not re-probe on every turn.
         // Probe runs once at install/re-detect time and is persisted; reading it here
         // avoids the System.loadLibrary("qnn_delegate_jni") call on every generation.
-        val cachedAccel = prefs.acceleratorFlow(LocalRuntime.LiteRT).first()
+        val cachedAccel = backgroundSnapshot?.seal?.accelerator
+            ?: prefs.acceleratorFlow(LocalRuntime.LiteRT).first()
         // Honor the per-runtime force-CPU override. Default true after the LiteRT-LM
         // 0.11.0 GPU/NNAPI native crashes; users opt back in via the settings toggle.
-        val forceCpu = prefs.forceCpu(LocalRuntime.LiteRT)
+        val forceCpu = backgroundSnapshot?.forceCpu
+            ?: prefs.forceCpu(LocalRuntime.LiteRT)
 
         // Per-model defaults curated to mirror Gallery's `model_allowlists/1_0_13.json`
         // (topK / topP / temperature / maxTokens / multimodal flags / speculative decoding).
         // For HF-pasted models that aren't in the table, this returns the FALLBACK config.
-        val config = LiteRtModelDefaults.forModelFile(params.model.modelId)
+        val config = backgroundSnapshot?.config
+            ?: LiteRtModelDefaults.forModelFile(params.model.modelId)
         // Note: the old pre-flight refusal here (multimodal + forceCpu = throw) has been
         // removed. With the runtime's vision-encoder fallback path (see
         // [LiteRtRuntime.LoadOutcome.visionFellBackToTextOnly]) and the per-model
@@ -269,11 +453,16 @@ class LiteRtProvider(
         // User-set max-context override. Lets capable models (Gemma 4 E2B = 32k) use more
         // than Gallery's curated default; the underlying KV cache size still caps it
         // (Qwen `ekv4096` cannot exceed 4096 regardless of this setting).
-        val maxNumTokensOverride = prefs.maxNumTokensOverride(LocalRuntime.LiteRT)
+        val maxNumTokensOverride = if (backgroundSnapshot == null) {
+            prefs.maxNumTokensOverride(LocalRuntime.LiteRT)
+        } else {
+            null
+        }
         // EngineConfig.maxNumTokens is input + output (the KV-cache size), not an output cap.
-        val effectiveEngineContextTokens = (maxNumTokensOverride
-            ?: config.maxContextLength
-            ?: config.maxTokens).coerceAtLeast(1)
+        val effectiveEngineContextTokens = backgroundSnapshot?.contextWindowTokens
+            ?: (maxNumTokensOverride
+                ?: config.maxContextLength
+                ?: config.maxTokens).coerceAtLeast(1)
         // LiteRT-LM 0.11.0 exposes EngineConfig.maxNumTokens (total KV/context capacity),
         // but no independent Conversation output-token parameter. Never substitute
         // params.maxTokens here: the app gate reserves that requested output separately, while
@@ -376,14 +565,19 @@ class LiteRtProvider(
         // text-only on this device, skip the GPU vision attempt entirely — saves ~1 s of
         // doomed engine init per cold load. The user can clear the flag via Settings →
         // Local · LiteRT if they update GPU drivers or move to a capable device.
-        val visionPersistentlyUnavailable = runCatching {
-            prefs.isVisionUnavailable(LocalRuntime.LiteRT, params.model.modelId)
-        }.getOrDefault(false)
+        val visionPersistentlyUnavailable = if (backgroundSnapshot != null) {
+            true
+        } else {
+            runCatching {
+                prefs.isVisionUnavailable(LocalRuntime.LiteRT, params.model.modelId)
+            }.getOrDefault(false)
+        }
         // Also honor the per-model config field [LiteRtModelConfig.visionAccelerator] —
         // when null we never try the GPU vision backend even if the model file contains
         // vision tensors. Today this is set to null for Gemma-3n entries and to "gpu"
         // for Gemma-4 entries; treat null as "skip vision regardless".
-        val effectiveSupportImage = config.supportsImage &&
+        val effectiveSupportImage = backgroundSnapshot == null &&
+            config.supportsImage &&
             config.visionAccelerator != null &&
             !visionPersistentlyUnavailable
 
@@ -395,7 +589,7 @@ class LiteRtProvider(
                 forceCpu = forceCpu,
                 maxNumTokens = effectiveEngineContextTokens,
                 supportImage = effectiveSupportImage,
-                supportAudio = config.supportsAudio,
+                supportAudio = backgroundSnapshot == null && config.supportsAudio,
                 // Match Google AI Edge Gallery: speculative decoding is an explicit user
                 // opt-in (their `ConfigKeys.ENABLE_SPECULATIVE_DECODING` defaults to false).
                 // Forcing it on whenever the model file supports it has been a candidate
@@ -404,19 +598,33 @@ class LiteRtProvider(
                 // toggle and the user explicitly opts in.
                 speculativeDecoding = false,
                 visionAccelerator = config.visionAccelerator ?: "gpu",
-                systemInstructionText = combinedSystem.ifBlank { null },
-                tools = nativeTools,
+                // A background request gets its own Conversation below. Keep the engine's
+                // ordinary shared Conversation neutral so request bytes/KV cannot survive.
+                systemInstructionText = if (backgroundSnapshot == null) {
+                    combinedSystem.ifBlank { null }
+                } else {
+                    null
+                },
+                tools = if (backgroundSnapshot == null) nativeTools else emptyList(),
                 // Constrained decoding ON when this turn carries tools — matches Gallery's
                 // tool-task behaviour. The SDK projects the model's output into the @Tool
                 // call grammar so Gemma actually invokes runTool(...) via the bridge
                 // instead of producing free-form "I can't do that" text. OFF for plain
                 // chat turns to avoid biasing normal language.
-                constrainedDecoding = params.tools.isNotEmpty(),
+                constrainedDecoding = backgroundSnapshot == null && params.tools.isNotEmpty(),
                 topK = config.topK,
                 topP = config.topP,
                 temperature = config.temperature,
-                providerCacheIdentity = params.providerCacheIdentity,
-                toolAuthorizationFingerprint = toolAuthorizationFingerprint,
+                providerCacheIdentity = if (backgroundSnapshot == null) {
+                    params.providerCacheIdentity
+                } else {
+                    null
+                },
+                toolAuthorizationFingerprint = if (backgroundSnapshot == null) {
+                    toolAuthorizationFingerprint
+                } else {
+                    ""
+                },
             )
         } catch (corrupt: LiteRtModelCorruptException) {
             handleCorruptModel(corrupt)
@@ -424,6 +632,14 @@ class LiteRtProvider(
             throw translateSdkError(t, effectiveEngineContextTokens)
         }
         val resolvedAccel = outcome.accelerator
+        if (
+            backgroundSnapshot != null &&
+            resolvedAccel != backgroundSnapshot.attestation.accelerator
+        ) {
+            throw LiteRtBackgroundRuntimeMismatchException(
+                "LiteRT accelerator changed while preparing background execution",
+            )
+        }
         // Persist whatever the runtime actually used. Without this, the in-runtime
         // GPU -> CPU fallback only sticks for the current process: every cold start
         // re-probes the (known-broken-on-this-device) GPU and wastes ~1 s before
@@ -534,12 +750,32 @@ class LiteRtProvider(
 
         try {
             try {
-                runtime.streamTurns(
-                    history = turns,
-                    coldBlob = coldBlob,
-                    images = turnImages,
-                    audioClips = turnAudio,
-                ).collect { cumulative ->
+                val runtimeStream = if (backgroundSnapshot == null) {
+                    runtime.streamTurns(
+                        history = turns,
+                        coldBlob = coldBlob,
+                        images = turnImages,
+                        audioClips = turnAudio,
+                    )
+                } else {
+                    runtime.streamIsolatedBackground(
+                        prepared = LiteRtPreparedBackgroundRuntime(
+                            seal = backgroundSnapshot.seal,
+                            maxNumTokens = backgroundSnapshot.contextWindowTokens,
+                            systemInstructionText = combinedSystem.ifBlank { null },
+                            topK = backgroundSnapshot.config.topK,
+                            topP = backgroundSnapshot.config.topP,
+                            temperature = backgroundSnapshot.config.temperature,
+                        ),
+                        coldBlob = coldBlob,
+                        onDispatchStarted = {
+                            backgroundDispatchCallback.onDispatchStarted(
+                                backgroundSnapshot.attestation,
+                            )
+                        },
+                    )
+                }
+                runtimeStream.collect { cumulative ->
                     // Defensive: if the SDK ever emits a non-monotonic cumulative (e.g. after
                     // an internal retry or template re-tokenisation), treat the new payload as a
                     // fresh start — emit it whole as the delta rather than computing a negative-
@@ -590,7 +826,7 @@ class LiteRtProvider(
         // timings and character counts. Persist it per-model so the Settings page can
         // render "Last gen: 12.4 tok/s prefill, 2.7 tok/s decode" without re-running
         // inference. Best-effort: a write failure must never break the user's reply.
-        runtime.lastTelemetry?.let { tele ->
+        if (backgroundSnapshot == null) runtime.lastTelemetry?.let { tele ->
             // Only persist samples with non-trivial timings — a zero-decode case would
             // be the SDK emitting no tokens, which is already a bug we want to see
             // elsewhere; persisting tps=0 muddies the rolling average.

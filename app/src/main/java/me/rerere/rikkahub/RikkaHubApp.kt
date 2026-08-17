@@ -126,13 +126,24 @@ class RikkaHubApp : Application() {
             modules(appModule, viewModelModule, dataSourceModule, repositoryModule)
         }
         dependencyGraphStarted = true
-        // Scheduling is flag-gated and content-free. With the production-default flags disabled
-        // this only reconciles stale Learning work identities; it never opens Learning Room.
+        // Privacy maintenance is content-free and may be armed immediately. Persisted Learning
+        // rollout flags, however, are unavailable until DataStore replaces Settings.dummy(). If
+        // the flag-gated scheduler samples that dummy value it cancels every drain/recovery chain
+        // and a previously enabled installation remains stuck until the user toggles the stage.
         runCatching {
             get<me.rerere.rikkahub.learning.jobs.LearningWorkScheduler>()
-                .scheduleStartupAndRecovery()
+                .scheduleMaintenance()
         }.onFailure { error ->
             Log.w(TAG, "Learning maintenance scheduling unavailable", error)
+        }
+        get<AppScope>().launch(Dispatchers.IO) {
+            runCatching {
+                get<SettingsStore>().settingsFlow.first { settings -> !settings.init }
+                get<me.rerere.rikkahub.learning.jobs.LearningWorkScheduler>()
+                    .scheduleStartupAndRecovery()
+            }.onFailure { error ->
+                Log.w(TAG, "Learning startup/recovery scheduling unavailable", error)
+            }
         }
         get<AppScope>().launch(Dispatchers.IO) {
             runCatching {

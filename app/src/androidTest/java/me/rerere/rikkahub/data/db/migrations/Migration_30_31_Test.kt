@@ -6,6 +6,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import me.rerere.rikkahub.data.db.AppDatabase
 import me.rerere.rikkahub.data.db.createAppSQLiteOpenHelperFactory
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -97,6 +98,49 @@ class Migration_30_31_Test {
             assertEquals("Coffee", cursor.getString(2))
             assertEquals("legacy coffee preference", cursor.getString(3))
             assertEquals("", cursor.getString(4))
+        }
+
+        db.query("PRAGMA table_info(`memory_fts`)").use { cursor ->
+            val nameIndex = cursor.getColumnIndexOrThrow("name")
+            val columns = buildSet {
+                while (cursor.moveToNext()) add(cursor.getString(nameIndex))
+            }
+            assertEquals(
+                setOf(
+                    "title",
+                    "content",
+                    "tags_search",
+                    "memory_id",
+                    "assistant_id",
+                    "updated_at_ms",
+                    "importance",
+                    "lifecycle_status",
+                    "expires_at_ms",
+                ),
+                columns,
+            )
+        }
+
+        db.execSQL(
+            "INSERT INTO MemoryEntity(id, assistant_id, content) VALUES (?, ?, ?)",
+            arrayOf<Any?>(8, "__global__", "inserted memory"),
+        )
+        db.query("SELECT content FROM memory_fts WHERE rowid=8").use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals("inserted memory", cursor.getString(0))
+        }
+        db.execSQL(
+            "UPDATE MemoryEntity SET content=?, tags_search=? WHERE id=7",
+            arrayOf<Any?>("updated legacy memory", "updated"),
+        )
+        db.query("SELECT content, tags_search FROM memory_fts WHERE rowid=7").use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals("updated legacy memory", cursor.getString(0))
+            assertEquals("updated", cursor.getString(1))
+        }
+        db.execSQL("DELETE FROM MemoryEntity WHERE id=8")
+        db.query("SELECT 1 FROM memory_fts WHERE rowid=8").use { cursor ->
+            assertFalse(cursor.moveToFirst())
         }
         db.close()
     }

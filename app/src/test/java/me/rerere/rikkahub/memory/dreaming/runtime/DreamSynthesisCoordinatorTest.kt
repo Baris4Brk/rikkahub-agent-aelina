@@ -114,6 +114,7 @@ class DreamSynthesisCoordinatorTest {
         assertEquals(listOf(PRIVATE_SCOPE), recovered.scheduledScopes)
         assertEquals(1, store.createdRequests.size)
         assertEquals(durableRunId, recoveredScheduler.enqueuedScopes.single().runId)
+        assertTrue(recoveredScheduler.enqueuedScopes.single().replaceExisting)
     }
 
     @Test
@@ -206,6 +207,19 @@ class DreamSynthesisCoordinatorTest {
 
         assertEquals(DreamSynthesisScanReason.COST_POLICY_CHANGED, scheduler.scans.single().first)
         assertTrue(scheduler.enqueuedScopes.single().replaceExisting)
+    }
+
+    @Test
+    fun `exact idle recheck does not apply the full idle delay a second time`() = runBlocking {
+        val scheduler = RecordingScheduler()
+
+        val result = coordinator(
+            FakeSchedulingStore(mutableListOf(dirty(PRIVATE_SCOPE))),
+            scheduler,
+        ).scanDirtyScopes(DreamSynthesisScanReason.APP_IDLE_RECHECK)
+
+        assertEquals(listOf(PRIVATE_SCOPE), result.scheduledScopes)
+        assertTrue(scheduler.enqueuedScopes.single().idleDeadlineAlreadyObserved)
     }
 
     @Test
@@ -379,6 +393,7 @@ class DreamSynthesisCoordinatorTest {
             val runId: String,
             val policy: DreamingCostPolicy,
             val replaceExisting: Boolean,
+            val idleDeadlineAlreadyObserved: Boolean,
         )
 
         val enqueuedScopes = mutableListOf<EnqueuedScope>()
@@ -396,7 +411,29 @@ class DreamSynthesisCoordinatorTest {
             replaceExisting: Boolean,
         ) {
             if (throwOnScopeEnqueue) throw ExpectedEnqueueFailure()
-            enqueuedScopes += EnqueuedScope(scopeId, runId, policy, replaceExisting)
+            enqueuedScopes += EnqueuedScope(
+                scopeId,
+                runId,
+                policy,
+                replaceExisting,
+                idleDeadlineAlreadyObserved = false,
+            )
+        }
+
+        override fun enqueueScopeAfterIdleRecheck(
+            scopeId: DreamScopeId,
+            runId: String,
+            policy: DreamingCostPolicy,
+            replaceExisting: Boolean,
+        ) {
+            if (throwOnScopeEnqueue) throw ExpectedEnqueueFailure()
+            enqueuedScopes += EnqueuedScope(
+                scopeId,
+                runId,
+                policy,
+                replaceExisting,
+                idleDeadlineAlreadyObserved = true,
+            )
         }
 
         override fun cancelScope(scopeId: DreamScopeId) {

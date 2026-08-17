@@ -21,7 +21,7 @@ class LearningJobCoordinator(
     private val maxLeaseDurationMs: Long = DEFAULT_MAX_LEASE_DURATION_MS,
     private val maxRetryDelayMs: Long = DEFAULT_MAX_RETRY_DELAY_MS,
 ) : LearningJobExecutionCoordinator {
-    private val store: LearningJobStore = RoomLearningJobStore(database)
+    private val store: LearningJobStore = RoomLearningJobStore(database, clock)
 
     init {
         require(processSessionId.toString() != NIL_UUID) { "Process session UUID cannot be nil" }
@@ -83,9 +83,9 @@ class LearningJobCoordinator(
         lease: LearningJobLease,
         retryDelayMs: Long,
         errorCode: LearningJobFailureCode,
-    ) {
+    ): LearningJobAttemptFailureResult {
         requireRetryDelay(retryDelayMs)
-        store.failAttempt(
+        return store.failAttempt(
             lease = lease,
             clock = clock,
             retryDelayMs = retryDelayMs,
@@ -102,7 +102,7 @@ class LearningJobCoordinator(
         errorCode = errorCode,
     )
 
-    /** One startup transaction: dead-letter exhausted rows, then fence old/expired owners. */
+    /** One startup transaction: recover provider facts, then fence exhausted/old/expired jobs. */
     suspend fun recoverOnStartup(
         retryDelayMs: Long = 0L,
     ): LearningJobStartupRecoveryResult {

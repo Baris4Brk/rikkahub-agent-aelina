@@ -8,6 +8,8 @@ import me.rerere.rikkahub.learning.model.LearningEventCode
 import me.rerere.rikkahub.learning.model.LearningEventType
 import me.rerere.rikkahub.learning.model.LearningFeatureFlagSource
 import me.rerere.rikkahub.learning.model.LearningScope
+import me.rerere.rikkahub.learning.model.LearningScopeConsentSource
+import me.rerere.rikkahub.learning.model.DisabledLearningScopeConsentSource
 import me.rerere.rikkahub.learning.model.LearningSourceKind
 import me.rerere.rikkahub.learning.model.LearningSourceRef
 import me.rerere.rikkahub.service.chat.CommandAuthorityEvent
@@ -28,6 +30,7 @@ class RoomCommandTransactionRunner(
 class LearningCommandAuthorityEventPort(
     private val appender: LearningOutboxAppender,
     private val featureFlags: LearningFeatureFlagSource = DisabledLearningFeatureFlagSource,
+    private val scopeConsent: LearningScopeConsentSource = DisabledLearningScopeConsentSource,
 ) : CommandAuthorityEventPort {
     override suspend fun appendInCurrentTransaction(event: CommandAuthorityEvent): Boolean {
         val isCombinedV2 = event.conversationSourceRevision != null &&
@@ -41,6 +44,9 @@ class LearningCommandAuthorityEventPort(
         if (event.kind == CommandAuthorityEventKind.WAITING_APPROVAL && !isCombinedV2) return false
         val flags = featureFlags.current()
         if (!flags.isValid || !flags.effective.handoff) return false
+        val learningScope = event.authoritySubjectId?.let { LearningScope.AuthoritySubject(it) }
+            ?: LearningScope.Assistant(event.lineage.assistantIdSnapshot)
+        if (!scopeConsent.captureAllowed(learningScope)) return false
         val result = appender.appendInCurrentAuthorityTransaction { streamId ->
             val eventType = event.kind.toLearningEventType()
             LearningOutboxDraft(
@@ -55,8 +61,7 @@ class LearningCommandAuthorityEventPort(
                     sourceRevision = event.stateVersion,
                     missingRevisionReason = null,
                     databaseStreamId = streamId,
-                    scope = event.authoritySubjectId?.let { LearningScope.AuthoritySubject(it) }
-                        ?: LearningScope.Assistant(event.lineage.assistantIdSnapshot),
+                    scope = learningScope,
                     occurredAtMs = event.occurredAtMs,
                 ),
                 correlation = LearningCorrelation(
@@ -68,6 +73,10 @@ class LearningCommandAuthorityEventPort(
                     branchAnchorMessageRevision = event.lineage.branchAnchorMessageRevision,
                     conversationSourceRevision = event.conversationSourceRevision,
                     completionKindCode = event.completion?.kind?.name,
+                    // A normal durable command is the stable logical generation run. Runtime
+                    // uses the same UUID, so admission can create the exact OPEN Episode before
+                    // provider dispatch without inventing a post-admission identity.
+                    generationRunId = event.commandId.toString(),
                     messageId = event.completion?.resultMessage?.messageId,
                     messageRevision = event.completion?.resultMessage?.messageRevision,
                 ),

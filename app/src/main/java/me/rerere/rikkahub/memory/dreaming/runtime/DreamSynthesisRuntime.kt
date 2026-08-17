@@ -3,6 +3,7 @@ package me.rerere.rikkahub.memory.dreaming.runtime
 import java.time.ZoneId
 import kotlinx.coroutines.CancellationException
 import me.rerere.rikkahub.data.db.dao.DreamDao
+import me.rerere.rikkahub.data.db.entity.DreamRunEntity
 import me.rerere.rikkahub.memory.dreaming.model.DreamRunMode
 import me.rerere.rikkahub.memory.dreaming.model.DreamScopeId
 import me.rerere.rikkahub.memory.dreaming.model.DreamSynthesisMode
@@ -10,6 +11,7 @@ import me.rerere.rikkahub.memory.dreaming.model.DreamingFeatureFlags
 import me.rerere.rikkahub.memory.dreaming.model.requireCanonicalDreamRunId
 import me.rerere.rikkahub.memory.dreaming.orchestration.DreamEpochClock
 import me.rerere.rikkahub.memory.dreaming.orchestration.DreamSynthesisOrchestrator
+import me.rerere.rikkahub.memory.dreaming.orchestration.DreamSynthesisRetryReason
 import me.rerere.rikkahub.memory.dreaming.orchestration.DreamSynthesisRunResult
 import me.rerere.rikkahub.memory.dreaming.store.BeginDreamSynthesisRequest
 import me.rerere.rikkahub.memory.dreaming.store.DreamSynthesisFailure
@@ -52,7 +54,10 @@ enum class DreamWorkerDeferralReason {
 sealed interface DreamSynthesisWorkerDirective {
     data object Complete : DreamSynthesisWorkerDirective
     data object Fail : DreamSynthesisWorkerDirective
-    data class Retry(val retryLimit: Int) : DreamSynthesisWorkerDirective
+    data class Retry(
+        val retryLimit: Int,
+        val reason: DreamSynthesisRetryReason,
+    ) : DreamSynthesisWorkerDirective
     data class Deferred(
         val reason: DreamWorkerDeferralReason,
         val retryAtEpochMs: Long?,
@@ -113,7 +118,7 @@ class DreamSynthesisRuntime(
             scopeId = scopeId,
             runId = runId,
             flags = flags,
-            firstProviderAttempt = workAttempt == 0,
+            terminalizeRetryableModelFailure = workAttempt >= policy.retryLimit,
         ).toWorkerDirective(policy.retryLimit)
     }
 
@@ -123,14 +128,14 @@ class DreamSynthesisRuntime(
         val flags = readFlags(scopeId)
             ?: return DreamSynthesisRunResult.Failed(DreamSynthesisFailure.STORE_FAILURE)
         if (!flags.allowsSynthesisGeneration()) return DreamSynthesisRunResult.Disabled
-        return synthesizeWithFlags(scopeId, runId, flags, firstProviderAttempt = true)
+        return synthesizeWithFlags(scopeId, runId, flags, terminalizeRetryableModelFailure = false)
     }
 
     private suspend fun synthesizeWithFlags(
         scopeId: DreamScopeId,
         runId: String,
         flags: DreamingFeatureFlags,
-        firstProviderAttempt: Boolean,
+        terminalizeRetryableModelFailure: Boolean,
     ): DreamSynthesisRunResult {
         val existing = try {
             dreamDao.getRunById(runId)
@@ -176,7 +181,10 @@ class DreamSynthesisRuntime(
                 sourceTimezoneId = timezoneId,
                 mode = mode,
             ),
-            firstProviderAttempt = firstProviderAttempt,
+            // WorkManager/run attempts begin before input construction. Only the durable dispatch
+            // marker proves that this run crossed the provider accounting boundary.
+            firstProviderAttempt = existing?.hasDurableProviderDispatchEvidence() != true,
+            terminalizeRetryableModelFailure = terminalizeRetryableModelFailure,
         )
     }
 
@@ -196,6 +204,10 @@ class DreamSynthesisRuntime(
         null
     }
 }
+
+private fun DreamRunEntity.hasDurableProviderDispatchEvidence(): Boolean =
+    promptContractVersion != null && validatorVersion != null &&
+        inputMemoryCount != null && inputManifestHash != null
 
 internal fun DreamWorkerEnvironment.deferralFor(
     policy: DreamingCostPolicy,
@@ -225,8 +237,15 @@ internal fun DreamSynthesisRunResult.toWorkerDirective(
             reason,
         )
 
-        is DreamSynthesisRunResult.Retry -> DreamSynthesisWorkerDirective.Retry(retryLimit)
-        is DreamSynthesisRunResult.Failed -> DreamSynthesisWorkerDirective.Fail
+        is DreamSynthesisRunResult.Retry -> DreamSynthesisWorkerDirective.Retry(retryLimit, reason)
+        is DreamSynthesisRunResult.Failed -> if (reason == DreamSynthesisFailure.STORE_FAILURE) {
+            DreamSynthesisWorkerDirective.Retry(
+                retryLimit,
+                DreamSynthesisRetryReason.STORE_TEMPORARY_FAILURE,
+            )
+        } else {
+            DreamSynthesisWorkerDirective.Fail
+        }
     }
 }
 

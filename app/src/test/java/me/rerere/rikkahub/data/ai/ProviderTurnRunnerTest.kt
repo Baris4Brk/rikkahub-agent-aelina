@@ -244,6 +244,79 @@ class ProviderTurnRunnerTest {
     }
 
     @Test
+    fun `rejected pre-dispatch fence sends zero provider calls`() = runBlocking {
+        var providerCalls = 0
+        var usageCallbacks = 0
+        val failure = runCatching {
+            DefaultProviderTurnRunner(runControl = null).run(
+                ProviderTurnRequest(
+                    stream = true,
+                    preDispatchFence = { ordinal, retry -> ordinal == 2 && retry },
+                    afterAdapterInvocation = { usageCallbacks += 1 },
+                    streamCall = {
+                        providerCalls += 1
+                        flowOf(textChunk("stream", "content"))
+                    },
+                    singleCall = { error("single call must not run") },
+                    onChunk = {},
+                ),
+            )
+        }.exceptionOrNull()
+
+        assertTrue(failure is IllegalStateException)
+        assertEquals(0, providerCalls)
+        assertEquals(0, usageCallbacks)
+    }
+
+    @Test
+    fun `rejected primary learned fence dispatches baseline exactly once`() = runBlocking {
+        val calls = mutableListOf<String>()
+        val delivered = mutableListOf<MessageChunk>()
+
+        val outcome = DefaultProviderTurnRunner(runControl = null).run(
+            ProviderTurnRequest(
+                stream = true,
+                preDispatchFence = { _, _ -> false },
+                streamCall = {
+                    calls += "learned"
+                    flowOf(textChunk("learned", "learned"))
+                },
+                singleCall = { error("single call must not run") },
+                primaryFallback = ProviderPrimaryFallback(
+                    streamCall = {
+                        calls += "baseline"
+                        flowOf(textChunk("baseline", "baseline"))
+                    },
+                    singleCall = { error("fallback single call must not run") },
+                ),
+                onChunk = delivered::add,
+            ),
+        )
+
+        assertEquals(ProviderTurnOutcome.Completed, outcome)
+        assertEquals(listOf("baseline"), calls)
+        assertEquals(listOf("baseline"), delivered.map(MessageChunk::id))
+    }
+
+    @Test
+    fun `adapter invocation precedes usage boundary`() = runBlocking {
+        val events = mutableListOf<String>()
+        DefaultProviderTurnRunner(runControl = null).run(
+            ProviderTurnRequest(
+                stream = true,
+                afterAdapterInvocation = { events += "usage" },
+                streamCall = {
+                    events += "adapter"
+                    flowOf(textChunk("stream", "content"))
+                },
+                singleCall = { error("single call must not run") },
+                onChunk = {},
+            ),
+        )
+        assertEquals(listOf("adapter", "usage"), events)
+    }
+
+    @Test
     fun `provider failure reports failed terminal`() = runBlocking {
         val terminals = mutableListOf<ProviderAttemptTimingOutcome>()
 
@@ -505,6 +578,58 @@ class ProviderTurnRunnerTest {
         assertTrue(error is ProviderStreamStalledException)
         assertEquals(2, calls)
         assertEquals(1, rollbacks)
+    }
+
+    @Test
+    fun `durable observer sees provider boundary milestones in order`() = runBlocking {
+        val events = mutableListOf<ProviderAttemptEvent>()
+
+        val outcome = DefaultProviderTurnRunner(runControl = null).run(
+            ProviderTurnRequest(
+                stream = false,
+                streamCall = { error("stream call must not run") },
+                singleCall = { textChunk("single", "meaningful") },
+                onChunk = {},
+                attemptObserver = ProviderAttemptObserver { event -> events.add(event) },
+            ),
+        )
+
+        assertEquals(ProviderTurnOutcome.Completed, outcome)
+        assertEquals(
+            listOf(
+                ProviderAttemptEvent.HostDispatched(1, stream = false),
+                ProviderAttemptEvent.FirstProgress(1, ProviderProgressKind.FULL_RESPONSE),
+                ProviderAttemptEvent.ResponseFinished(1),
+                ProviderAttemptEvent.Terminal(1, ProviderAttemptTerminalOutcome.COMPLETED),
+            ),
+            events,
+        )
+    }
+
+    @Test
+    fun `observer storage failure does not dispatch a fallback request`() = runBlocking {
+        var providerCalls = 0
+        var observerCalls = 0
+
+        val outcome = DefaultProviderTurnRunner(runControl = null).run(
+            ProviderTurnRequest(
+                stream = false,
+                streamCall = { error("stream call must not run") },
+                singleCall = {
+                    providerCalls += 1
+                    textChunk("single", "meaningful")
+                },
+                onChunk = {},
+                attemptObserver = ProviderAttemptObserver {
+                    observerCalls += 1
+                    error("attribution store unavailable")
+                },
+            ),
+        )
+
+        assertEquals(ProviderTurnOutcome.Completed, outcome)
+        assertEquals(1, providerCalls)
+        assertTrue(observerCalls >= 1)
     }
 
     private fun testWatchdog(

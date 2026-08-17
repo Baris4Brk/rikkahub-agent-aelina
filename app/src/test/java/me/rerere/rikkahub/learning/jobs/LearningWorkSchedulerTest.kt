@@ -13,6 +13,8 @@ class LearningWorkSchedulerTest {
         NoOpLearningWorkScheduler.wake()
         NoOpLearningWorkScheduler.wake(LearningDrainMode.RECONCILE_AND_DRAIN)
         NoOpLearningWorkScheduler.scheduleStartupAndRecovery()
+        NoOpLearningWorkScheduler.wakeMaintenance()
+        NoOpLearningWorkScheduler.scheduleMaintenance()
         NoOpLearningWorkScheduler.cancelAll()
     }
 
@@ -63,5 +65,25 @@ class LearningWorkSchedulerTest {
             ),
             learningWorkNamesToCancel(),
         )
+        assertTrue(
+            learningWorkNamesToCancel().intersect(
+                setOf(
+                    learningRetentionSchedulePlan().oneTimeUniqueWorkName,
+                    learningRetentionSchedulePlan().periodicUniqueWorkName,
+                ),
+            ).isEmpty(),
+        )
+    }
+
+    @Test
+    fun retentionHasIndependentContentFreeLowFrequencySchedule() {
+        val plan = learningRetentionSchedulePlan()
+
+        assertEquals("agent_learning_retention_v1", plan.oneTimeUniqueWorkName)
+        assertEquals("agent_learning_retention_periodic_v1", plan.periodicUniqueWorkName)
+        assertEquals(ExistingPeriodicWorkPolicy.KEEP, plan.periodicPolicy)
+        assertEquals(24L, plan.repeatIntervalHours)
+        assertFalse(plan.oneTimeUniqueWorkName.contains("scope"))
+        assertFalse(plan.periodicUniqueWorkName.contains("policy"))
     }
 }

@@ -3,6 +3,7 @@ package me.rerere.rikkahub.learning.jobs
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import me.rerere.rikkahub.data.ai.background.BackgroundProviderAttemptAuthority
 import me.rerere.rikkahub.learning.storage.LearningDatabase
 import me.rerere.rikkahub.learning.storage.LearningJobEntity
 import me.rerere.rikkahub.learning.storage.LearningJobType
@@ -21,7 +22,38 @@ class LearningJobExecutionInputV1 internal constructor(
     val attempt: Int,
     val stableProviderIdempotencyKey: String,
     val executionSpec: LearningJobExecutionSpecV1,
+    /** Opaque durable permit; provider-backed handlers must pass it through unchanged. */
+    val providerAttemptAuthority: BackgroundProviderAttemptAuthority? = null,
+    /** Content-free manifest/cap/audit receipt admitted in the same transaction as this attempt. */
+    val providerManifestReceipt: LearningProviderManifestReceipt? = null,
 ) {
+    init {
+        val providerBackedJob = executionSpec.isProviderEffectJob()
+        require((providerAttemptAuthority != null) == providerBackedJob) {
+            "Durable provider authority does not match the execution spec"
+        }
+        require((providerManifestReceipt != null) == providerBackedJob) {
+            "Provider manifest receipt does not match the execution spec"
+        }
+        providerManifestReceipt?.let { receipt ->
+            val authority = requireNotNull(providerAttemptAuthority)
+            require(receipt.providerKind == executionSpec.providerKindIdentity)
+            require(receipt.providerIdentitySha256 == executionSpec.providerIdentity)
+            require(receipt.modelIdentitySha256 == executionSpec.modelIdentity)
+            require(
+                receipt.configurationIdentitySha256 ==
+                    executionSpec.providerConfigurationIdentity,
+            )
+            require(receipt.configurationGeneration == executionSpec.providerConfigGeneration)
+            require(receipt.providerRequestKey == stableProviderIdempotencyKey)
+            require(authority.stableProviderIdempotencyKey == stableProviderIdempotencyKey)
+            require(
+                authority.expectedDispatchAttestationSha256 ==
+                    receipt.dispatchAttestationSha256,
+            )
+        }
+    }
+
     override fun toString(): String =
         "LearningJobExecutionInputV1(type=${executionSpec.jobType}, attempt=$attempt, " +
             "scope=$scopeKind, ids=<redacted>)"
@@ -184,6 +216,8 @@ class LearningJobHandlerRegistry private constructor(
         job: LearningJobEntity,
         monotonicDeadlineMs: Long,
         monotonicMs: () -> Long,
+        providerAttemptAuthority: BackgroundProviderAttemptAuthority? = null,
+        providerManifestReceipt: LearningProviderManifestReceipt? = null,
     ): LearningJobDispatchResult {
         val type = LearningJobType.entries.firstOrNull { it.name == job.jobType }
             ?: return LearningJobDispatchResult.DeadLetter(LearningJobFailureCode.INVALID_JOB_SPEC)
@@ -192,7 +226,7 @@ class LearningJobHandlerRegistry private constructor(
                 LearningJobFailureCode.WAITING_CONFIGURATION,
                 DEFAULT_CONFIGURATION_RETRY_DELAY_MS,
             )
-        val input = job.toExecutionInput()
+        val input = job.toExecutionInput(providerAttemptAuthority, providerManifestReceipt)
             ?: return LearningJobDispatchResult.DeadLetter(LearningJobFailureCode.INVALID_JOB_SPEC)
         return binding.dispatch(
             input = input,
@@ -268,8 +302,21 @@ private class TypedLearningJobHandlerBinding<O : LearningJobTypedOutput>(
     }
 }
 
-private fun LearningJobEntity.toExecutionInput(): LearningJobExecutionInputV1? {
+private fun LearningJobEntity.toExecutionInput(
+    providerAttemptAuthority: BackgroundProviderAttemptAuthority?,
+    providerManifestReceipt: LearningProviderManifestReceipt?,
+): LearningJobExecutionInputV1? {
     val spec = LearningJobExecutionSpecs.resolve(this) ?: return null
+    val providerBackedJob = spec.isProviderEffectJob()
+    if (
+        (providerAttemptAuthority != null) != providerBackedJob ||
+        (providerManifestReceipt != null) != providerBackedJob
+    ) return null
+    if (
+        providerManifestReceipt != null &&
+        providerManifestReceipt.providerRequestKey !=
+        providerAttemptAuthority?.stableProviderIdempotencyKey
+    ) return null
     return LearningJobExecutionInputV1(
         jobId = id,
         sourceEventId = sourceEventId,
@@ -279,8 +326,11 @@ private fun LearningJobEntity.toExecutionInput(): LearningJobExecutionInputV1? {
         replayGeneration = replayGeneration,
         createdAtMs = createdAtMs,
         attempt = attempts,
-        stableProviderIdempotencyKey = learningProviderIdempotencyKey(id),
+        stableProviderIdempotencyKey = providerManifestReceipt?.providerRequestKey
+            ?: learningProviderIdempotencyKey(id),
         executionSpec = spec,
+        providerAttemptAuthority = providerAttemptAuthority,
+        providerManifestReceipt = providerManifestReceipt,
     )
 }
 
@@ -295,12 +345,17 @@ private fun LearningJobExecutionInputV1.matches(job: LearningJobEntity): Boolean
         attempt == job.attempts &&
         executionSpec == LearningJobExecutionSpecs.resolve(job)
 
-private fun learningProviderIdempotencyKey(jobId: String): String {
+internal fun learningProviderIdempotencyKey(jobId: String): String {
     val digest = java.security.MessageDigest.getInstance("SHA-256")
         .digest("learning-provider-idempotency-v1\u0000$jobId".toByteArray(Charsets.UTF_8))
         .joinToString("") { byte -> (byte.toInt() and 0xff).toString(16).padStart(2, '0') }
     return "learning-provider-v1:$digest"
 }
+
+private fun LearningJobExecutionSpecV1.isProviderEffectJob(): Boolean =
+    providerKindIdentity in setOf("local_litert", "remote") &&
+        (jobType == LearningJobType.REFLECT_EPISODE_V1 ||
+            jobType == LearningJobType.DISTILL_POLICY_V1)
 
 private const val MAX_HANDLER_RETRY_DELAY_MS = 24L * 60L * 60L * 1_000L
 internal const val DEFAULT_CONFIGURATION_RETRY_DELAY_MS = 6L * 60L * 60L * 1_000L

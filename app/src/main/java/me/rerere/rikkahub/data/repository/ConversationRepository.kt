@@ -32,6 +32,8 @@ import me.rerere.rikkahub.data.authority.source.ConversationSourceScope
 import me.rerere.rikkahub.data.authority.source.ConversationSourceScopeKind
 import me.rerere.rikkahub.data.authority.source.ConversationSourceSnapshot
 import me.rerere.rikkahub.data.authority.source.ConversationSourceSnapshotFactory
+import me.rerere.rikkahub.data.authority.transaction.ConversationGraphAuthorityMutation
+import me.rerere.rikkahub.data.authority.transaction.TransientConversationFinalizationAuthorityCoordinator
 import me.rerere.rikkahub.memory.MemorySourceVersion
 import me.rerere.rikkahub.memory.MemoryScopeSourceInvalidation
 import me.rerere.rikkahub.memory.MemorySourceInvalidationBatch
@@ -51,6 +53,7 @@ class ConversationRepository(
     private val deletionPolicy: ConversationDeletionPolicy,
     private val memoryRepository: MemoryRepository,
     private val sourceAuthorityWriter: ConversationSourceAuthorityWriter,
+    private val transientFinalizationAuthority: TransientConversationFinalizationAuthorityCoordinator,
 ) {
     companion object {
         private const val TAG = "ConversationRepository"
@@ -424,56 +427,61 @@ class ConversationRepository(
         if (normalizedBaselineScopeId.isEmpty()) {
             return ConversationUpdateResult.RetainedSecondUser(conversation.id)
         }
-        val stored = getConversationById(conversation.id)
-            ?: return ConversationUpdateResult.Missing(conversation.id)
-        // Regeneration is never an ownership mutation. If another writer moved the conversation,
-        // fail this finalization instead of moving it back under a stale assistant snapshot.
-        if (stored.assistantId != conversation.assistantId) {
-            return ConversationUpdateResult.RetainedSecondUser(stored.id)
-        }
-
-        var missingDuringCommit = false
-        var ownerChangedDuringCommit = false
-        database.withTransaction {
-            val authoritativeEntity = conversationDAO.getConversationById(conversation.id.toString())
-            if (authoritativeEntity == null) {
-                missingDuringCommit = true
-                return@withTransaction
+        try {
+            transientFinalizationAuthority.finish(
+                graphMutation = ConversationGraphAuthorityMutation {
+                    val conversationId = conversation.id.toString()
+                    val authoritativeEntity = conversationDAO.getConversationById(conversationId)
+                        ?: throw TransientConversationFinalizationRejected(
+                            TransientConversationFinalizationRejection.CONVERSATION_MISSING,
+                        )
+                    // Regeneration is never an ownership mutation. Check both the final graph and
+                    // its durable pre-regeneration owner under the same write transaction.
+                    if (authoritativeEntity.assistantId != conversation.assistantId.toString() ||
+                        authoritativeEntity.assistantId != normalizedBaselineScopeId
+                    ) {
+                        throw TransientConversationFinalizationRejected(
+                            TransientConversationFinalizationRejection.OWNER_CHANGED,
+                        )
+                    }
+                    val nextSources = conversation.selectedMemorySourceVersions()
+                    val plan = planConversationSourceInvalidation(
+                        previousAssistantScopeId = normalizedBaselineScopeId,
+                        nextAssistantScopeId = conversation.assistantId.toString(),
+                        previousSelectedMessageIds = baselineSelectedMessageIds.toSet(),
+                        nextSelectedMessageIds = nextSources.messageIds(),
+                        previousSelectedSourceVersions = baselineSelectedSourceVersions.toSet(),
+                        nextSelectedSourceVersions = nextSources,
+                    )
+                    applySourceInvalidationPlan(
+                        conversationId = conversationId,
+                        plan = plan,
+                        nowMs = sourceInvalidationNowMs,
+                    )
+                    persistAuthorityGraphInCurrentTransaction(
+                        conversation = conversation,
+                        scope = ConversationSourceScope(
+                            kind = ConversationSourceScopeKind.ASSISTANT,
+                            id = normalizedBaselineScopeId,
+                        ),
+                        insert = false,
+                        sourceInvalidationMode =
+                            ConversationSourceInvalidationMode.SKIP_TRANSIENT_WRITE,
+                        sourceInvalidationNowMs = sourceInvalidationNowMs,
+                    )
+                },
+            )
+        } catch (rejected: TransientConversationFinalizationRejected) {
+            return when (rejected.reason) {
+                TransientConversationFinalizationRejection.CONVERSATION_MISSING ->
+                    ConversationUpdateResult.Missing(conversation.id)
+                TransientConversationFinalizationRejection.OWNER_CHANGED ->
+                    ConversationUpdateResult.RetainedSecondUser(conversation.id)
             }
-            if (authoritativeEntity.assistantId != conversation.assistantId.toString() ||
-                authoritativeEntity.assistantId != normalizedBaselineScopeId
-            ) {
-                ownerChangedDuringCommit = true
-                return@withTransaction
-            }
-            val nextSources = conversation.selectedMemorySourceVersions()
-            val plan = planConversationSourceInvalidation(
-                previousAssistantScopeId = normalizedBaselineScopeId,
-                nextAssistantScopeId = conversation.assistantId.toString(),
-                previousSelectedMessageIds = baselineSelectedMessageIds.toSet(),
-                nextSelectedMessageIds = nextSources.messageIds(),
-                previousSelectedSourceVersions = baselineSelectedSourceVersions.toSet(),
-                nextSelectedSourceVersions = nextSources,
-            )
-            applySourceInvalidationPlan(
-                conversationId = conversation.id.toString(),
-                plan = plan,
-                nowMs = sourceInvalidationNowMs,
-            )
-            persistConversationInCurrentTransaction(
-                conversation = conversation,
-                insert = false,
-                sourceInvalidationMode =
-                    ConversationSourceInvalidationMode.SKIP_TRANSIENT_WRITE,
-                sourceInvalidationNowMs = sourceInvalidationNowMs,
-            )
-        }
-        if (missingDuringCommit) return ConversationUpdateResult.Missing(conversation.id)
-        if (ownerChangedDuringCommit) {
-            return ConversationUpdateResult.RetainedSecondUser(conversation.id)
         }
         // The authority transaction is already committed. A derived FTS failure or cancellation
-        // must not make the caller restore the old graph after source tombstones became durable.
+        // must not make the caller restore the old graph after source tombstones and the exact
+        // ALR source-authority/outbox transitions became durable together.
         try {
             messageFtsManager.indexConversation(conversation)
         } catch (error: Exception) {
@@ -774,6 +782,15 @@ enum class ConversationSourceInvalidationMode {
     APPLY,
     SKIP_TRANSIENT_WRITE,
 }
+
+private enum class TransientConversationFinalizationRejection {
+    CONVERSATION_MISSING,
+    OWNER_CHANGED,
+}
+
+private class TransientConversationFinalizationRejected(
+    val reason: TransientConversationFinalizationRejection,
+) : IllegalStateException(reason.name)
 
 internal data class ConversationSourceInvalidationPlan(
     val invalidateWholeScopeIds: Set<String>,

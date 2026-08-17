@@ -2,6 +2,8 @@ package me.rerere.ai.provider.providers.openai
 
 import android.util.Log
 import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.serialization.json.Json
@@ -24,10 +26,12 @@ import me.rerere.ai.core.MessageRole
 import me.rerere.ai.core.ReasoningLevel
 import me.rerere.ai.core.TokenUsage
 import me.rerere.ai.provider.BuiltInTools
+import me.rerere.ai.provider.BackgroundProviderDispatchCallback
 import me.rerere.ai.provider.Modality
 import me.rerere.ai.provider.Model
 import me.rerere.ai.provider.ModelAbility
 import me.rerere.ai.provider.ProviderSetting
+import me.rerere.ai.provider.RemoteBackgroundDispatchAttestation
 import me.rerere.ai.provider.ProviderLogPrivacy
 import me.rerere.ai.provider.TextGenerationParams
 import me.rerere.ai.provider.ToolReplayArguments
@@ -58,6 +62,7 @@ import me.rerere.common.http.jsonObjectOrNull
 import me.rerere.common.http.jsonPrimitiveOrNull
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.ConnectionPool
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -65,9 +70,18 @@ import okhttp3.Response
 import okhttp3.sse.EventSource
 import okhttp3.sse.EventSourceListener
 import okhttp3.sse.EventSources
+import java.util.concurrent.TimeUnit
 import kotlin.time.Clock
 
 private const val TAG = "ResponseAPI"
+
+private fun OkHttpClient.forPreparedResponseBackgroundAttempt(): OkHttpClient =
+    newBuilder()
+        .retryOnConnectionFailure(false)
+        .followRedirects(false)
+        .followSslRedirects(false)
+        .connectionPool(ConnectionPool(0, 1, TimeUnit.NANOSECONDS))
+        .build()
 
 class ResponseAPI(
     private val client: OkHttpClient,
@@ -116,7 +130,37 @@ class ResponseAPI(
         providerSetting: ProviderSetting.OpenAI,
         messages: List<UIMessage>,
         params: TextGenerationParams
+    ): Flow<MessageChunk> = streamProviderText(
+        providerSetting = providerSetting,
+        messages = messages,
+        params = params,
+        attestation = null,
+        onDispatchStarted = BackgroundProviderDispatchCallback.NO_OP,
+    )
+
+    fun streamPreparedBackgroundText(
+        providerSetting: ProviderSetting.OpenAI,
+        messages: List<UIMessage>,
+        params: TextGenerationParams,
+        attestation: RemoteBackgroundDispatchAttestation,
+        onDispatchStarted: BackgroundProviderDispatchCallback,
+    ): Flow<MessageChunk> = streamProviderText(
+        providerSetting = providerSetting,
+        messages = messages,
+        params = params,
+        attestation = attestation,
+        onDispatchStarted = onDispatchStarted,
+    )
+
+    private fun streamProviderText(
+        providerSetting: ProviderSetting.OpenAI,
+        messages: List<UIMessage>,
+        params: TextGenerationParams,
+        attestation: RemoteBackgroundDispatchAttestation?,
+        onDispatchStarted: BackgroundProviderDispatchCallback,
     ): Flow<MessageChunk> = callbackFlow {
+        val attemptClient = if (attestation == null) client else
+            client.forPreparedResponseBackgroundAttempt()
         val requestBody = buildRequestBody(
             providerSetting = providerSetting,
             messages = messages,
@@ -124,7 +168,10 @@ class ResponseAPI(
             stream = true,
         )
         val request = Request.Builder()
-            .url("${providerSetting.baseUrl}/responses")
+            .url(
+                attestation?.let { it.apiFamily.canonicalOrigin + it.apiFamily.canonicalPath }
+                    ?: "${providerSetting.baseUrl}/responses",
+            )
             .headers(params.customHeaders.toHeaders())
             .post(json.encodeToString(requestBody).toRequestBody("application/json".toMediaType()))
             .addHeader(
@@ -195,11 +242,22 @@ class ResponseAPI(
             }
         }
 
-        val eventSource = EventSources.createFactory(client)
+        if (attestation != null) {
+            check(requestBody["stream"]?.jsonPrimitive?.content == "true")
+            check(requestBody["store"]?.jsonPrimitive?.content == "false")
+            check(requestBody["tools"] == null)
+            check(requestBody["model"]?.jsonPrimitive?.content == params.model.modelId)
+            check(params.maxTokens == attestation.context.maxOutputTokens)
+            onDispatchStarted.onDispatchStarted(attestation)
+            currentCoroutineContext().ensureActive()
+        }
+
+        val eventSource = EventSources.createFactory(attemptClient)
             .newEventSource(request, listener)
 
         awaitClose {
             eventSource.cancel()
+            if (attemptClient !== client) attemptClient.connectionPool.evictAll()
         }
     }.bufferProviderStream()
 

@@ -23,6 +23,7 @@ enum class TraceSanitizationFailure {
     URL_LIKE,
     ABSOLUTE_PATH_LIKE,
     PROMPT_OVERRIDE_LIKE,
+    RAW_STRUCTURED_OR_TOOL_MATERIAL,
 }
 
 sealed interface TraceSanitizationResult {
@@ -59,6 +60,11 @@ object TraceSanitizer {
         if (PROMPT_OVERRIDE_PATTERNS.any { it.containsMatchIn(normalized) }) {
             return TraceSanitizationResult.Rejected(TraceSanitizationFailure.PROMPT_OVERRIDE_LIKE)
         }
+        if (RAW_STRUCTURED_OR_TOOL_PATTERNS.any { it.containsMatchIn(normalized) }) {
+            return TraceSanitizationResult.Rejected(
+                TraceSanitizationFailure.RAW_STRUCTURED_OR_TOOL_MATERIAL,
+            )
+        }
         return TraceSanitizationResult.Accepted(SanitizedTraceSummary.create(normalized))
     }
 }
@@ -82,8 +88,15 @@ private fun String.hasUnpairedSurrogate(): Boolean {
 private val WHITESPACE_RUN = Regex("\\s+")
 private val URL_PATTERN = Regex("(?i)(?:https?|ftp|file|data)://|www\\.")
 private val CREDENTIAL_PATTERNS = listOf(
-    Regex("(?i)\\b(?:api[_-]?key|access[_-]?token|authorization|password|passwd|secret)\\s*[:=]"),
+    Regex(
+        "(?i)\\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|" +
+            "proxy[_-]?authorization|password|passwd|secret|cookie|set[_-]?cookie)\\s*[:=]",
+    ),
     Regex("\\bsk-[A-Za-z0-9_-]{12,}"),
+    Regex("\\b(?:AKIA|ASIA)[A-Z0-9]{16}\\b"),
+    Regex("\\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\\b"),
+    Regex("\\bxox[baprs]-[A-Za-z0-9-]{12,}\\b"),
+    Regex("\\beyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\b"),
     Regex("(?i)\\bBearer\\s+[A-Za-z0-9._~+/=-]{8,}"),
     Regex("-----BEGIN [A-Z ]+PRIVATE KEY-----"),
 )
@@ -94,6 +107,17 @@ private val ABSOLUTE_PATH_PATTERNS = listOf(
 )
 private val PROMPT_OVERRIDE_PATTERNS = listOf(
     Regex("(?i)ignore (?:all |the )?(?:previous|prior|system) instructions"),
+    Regex("(?i)disregard (?:all |the )?(?:previous|prior|system|developer) instructions"),
     Regex("(?i)(?:system|developer)\\s*(?:prompt|message)\\s*[:=]"),
     Regex("(?i)reveal (?:the )?(?:system prompt|hidden instructions|chain of thought)"),
+)
+private val RAW_STRUCTURED_OR_TOOL_PATTERNS = listOf(
+    Regex("(?s)^\\s*[\\[{].*[\\]}]\\s*$"),
+    Regex("(?is)<\\s*/?\\s*[a-z][a-z0-9:_-]*(?:\\s+[^>]*)?/?>|<\\?xml"),
+    Regex(
+        "(?i)\\b(?:tool[ _-]?(?:args?|arguments?|output|result)|" +
+            "tool[ _-]?(?:call|call[ _-]?id)|function[ _-]?(?:call|arguments?)|" +
+            "raw[ _-]?(?:input|output|prompt|response)|" +
+            "chain[ _-]?of[ _-]?thought|private[ _-]?reasoning)\\b\\s*[:=]",
+    ),
 )

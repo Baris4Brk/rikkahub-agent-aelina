@@ -20,6 +20,8 @@ data class LearningBootstrapCoverage(
     val coverageStartMs: Long?,
     val commandCoverageStartMs: Long?,
     val executionCoverageStartMs: Long?,
+    val sourceAuthorityCoverageStartMs: Long? = null,
+    val feedbackCoverageStartMs: Long? = null,
 )
 
 enum class LearningBootstrapFailureCode {
@@ -36,6 +38,10 @@ enum class LearningBootstrapFailureCode {
 class LearningBootstrapException(
     val code: LearningBootstrapFailureCode,
 ) : IllegalStateException("Learning bootstrap failed: $code")
+
+/** A durable reconciliation cursor was advanced, but this bounded invocation used its page budget. */
+class LearningReconciliationWorkRemainsException :
+    IllegalStateException("Learning reconciliation work remains")
 
 data class LearningBootstrapScanLimits(
     val maxRowsPerPage: Int,
@@ -61,9 +67,20 @@ data class LearningBootstrapScanLimits(
 fun interface LearningReconciliationScanner {
     suspend fun scanAndRepairProvableTerminalEvents(
         stream: LearningOutboxDescriptor,
+        cursorAccess: LearningReconciliationCursorAccess,
         frozenNowMs: Long,
         limits: LearningBootstrapScanLimits,
     ): LearningBootstrapCoverage
+}
+
+/** Content-free, call-scoped persistence capability; its implementation owns all DB references. */
+interface LearningReconciliationCursorAccess {
+    val streamId: String
+    val replayGeneration: Long
+
+    suspend fun load(): String?
+
+    suspend fun compareAndSet(expectedCursorJson: String?, newCursorJson: String?): Boolean
 }
 
 class LearningBootstrapCoordinator(
@@ -117,14 +134,16 @@ class LearningBootstrapCoordinator(
                     throw LearningBootstrapException(LearningBootstrapFailureCode.HEAD_REWIND)
                 }
 
-                val started = database.checkpointDao().startBootstrap(
-                    streamId = observedDescriptor.streamId.toString(),
-                    replayGeneration = checkpoint.replayGeneration,
-                    bootstrapHeadSeq = fixedHead,
-                    observedHeadSeq = observedDescriptor.headSequence,
-                    updatedAtMs = frozenNowMs,
-                )
-                if (started != 1) throw LearningCheckpointConflictException()
+                if (checkpoint.bootstrapState != LearningBootstrapState.RUNNING.name) {
+                    val started = database.checkpointDao().startBootstrap(
+                        streamId = observedDescriptor.streamId.toString(),
+                        replayGeneration = checkpoint.replayGeneration,
+                        bootstrapHeadSeq = fixedHead,
+                        observedHeadSeq = observedDescriptor.headSequence,
+                        updatedAtMs = frozenNowMs,
+                    )
+                    if (started != 1) throw LearningCheckpointConflictException()
+                }
                 ownedAttempt = BootstrapAttempt(
                     streamId = observedDescriptor.streamId.toString(),
                     replayGeneration = checkpoint.replayGeneration,
@@ -145,6 +164,11 @@ class LearningBootstrapCoordinator(
                 val startedAt = monotonicMs()
                 val scanned = scanner.scanAndRepairProvableTerminalEvents(
                     fixedDescriptor,
+                    cursorAccess(
+                        streamId = fixedDescriptor.streamId.toString(),
+                        replayGeneration = checkpoint.replayGeneration,
+                        updatedAtMs = frozenNowMs,
+                    ),
                     frozenNowMs,
                     LearningBootstrapScanLimits(
                         maxRowsPerPage = replayBatchSize,
@@ -173,6 +197,21 @@ class LearningBootstrapCoordinator(
                 }
 
                 val completedAtMs = safeCompletionTime(frozenNowMs)
+                val completedCursorJson = database.checkpointDao()
+                    .findReconciliationCursor(
+                        streamId = fixedDescriptor.streamId.toString(),
+                        replayGeneration = checkpoint.replayGeneration,
+                    ) ?: throw LearningCheckpointConflictException()
+                val completedCursor = LearningReconciliationCursorV1Codec.decode(
+                    completedCursorJson,
+                ) ?: throw LearningCheckpointConflictException()
+                if (
+                    completedCursor.state != LearningReconciliationCursorStateV1.COMPLETE ||
+                    completedCursor.streamId != fixedDescriptor.streamId.toString() ||
+                    completedCursor.frozenHeadSequence != fixedDescriptor.headSequence
+                ) {
+                    throw LearningCheckpointConflictException()
+                }
                 database.withTransaction {
                     val absorbedSentinel = database.inboxDao().find(
                         streamId = fixedDescriptor.streamId.toString(),
@@ -218,6 +257,10 @@ class LearningBootstrapCoordinator(
                         coverageStartMs = scanned.coverageStartMs,
                         commandCoverageStartMs = scanned.commandCoverageStartMs,
                         executionCoverageStartMs = scanned.executionCoverageStartMs,
+                        sourceAuthorityCoverageStartMs =
+                            scanned.sourceAuthorityCoverageStartMs,
+                        feedbackCoverageStartMs = scanned.feedbackCoverageStartMs,
+                        expectedReconciliationCursorJson = completedCursorJson,
                         updatedAtMs = completedAtMs,
                     )
                     if (completed != 1) throw LearningCheckpointConflictException()
@@ -230,6 +273,8 @@ class LearningBootstrapCoordinator(
         } catch (cancelled: CancellationException) {
             markOwnedAttemptDegraded(ownedAttempt, frozenNowMs, cancelled)
             throw cancelled
+        } catch (workRemains: LearningReconciliationWorkRemainsException) {
+            throw workRemains
         } catch (failure: Exception) {
             markOwnedAttemptDegraded(ownedAttempt, frozenNowMs, failure)
             throw failure
@@ -311,6 +356,8 @@ class LearningBootstrapCoordinator(
         val sourceFloors = listOfNotNull(
             coverage.commandCoverageStartMs,
             coverage.executionCoverageStartMs,
+            coverage.sourceAuthorityCoverageStartMs,
+            coverage.feedbackCoverageStartMs,
         )
         val allValues = listOfNotNull(coverage.coverageStartMs) + sourceFloors
         if (allValues.any { it < 0L || it > frozenNowMs }) {
@@ -342,6 +389,32 @@ class LearningBootstrapCoordinator(
             throw LearningBootstrapException(LearningBootstrapFailureCode.CLOCK_ROLLBACK)
         }
         return current
+    }
+
+    private fun cursorAccess(
+        streamId: String,
+        replayGeneration: Long,
+        updatedAtMs: Long,
+    ): LearningReconciliationCursorAccess {
+        val dao = database.checkpointDao()
+        return object : LearningReconciliationCursorAccess {
+            override val streamId: String = streamId
+            override val replayGeneration: Long = replayGeneration
+
+            override suspend fun load(): String? =
+                dao.findReconciliationCursor(streamId, replayGeneration)
+
+            override suspend fun compareAndSet(
+                expectedCursorJson: String?,
+                newCursorJson: String?,
+            ): Boolean = dao.compareAndSetReconciliationCursor(
+                streamId = streamId,
+                replayGeneration = replayGeneration,
+                expectedCursorJson = expectedCursorJson,
+                newCursorJson = newCursorJson,
+                updatedAtMs = updatedAtMs,
+            ) == 1
+        }
     }
 
     private data class BootstrapAttempt(

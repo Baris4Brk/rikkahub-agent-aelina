@@ -170,6 +170,7 @@ import me.rerere.rikkahub.service.chat.FastPathDecision
 import me.rerere.rikkahub.service.chat.FastPathRouter
 import me.rerere.rikkahub.service.chat.FastPathCommitPlan
 import me.rerere.rikkahub.service.chat.buildFastPathCommitPlan
+import me.rerere.rikkahub.service.chat.toAnchoredUserMessage
 import me.rerere.rikkahub.service.chat.ResumeAfterApprovalCommand
 import me.rerere.rikkahub.service.chat.ResumeQueueCommand
 import me.rerere.rikkahub.service.chat.ClearPendingQueueCommand
@@ -1964,11 +1965,9 @@ class ChatService(
                 is FastPathCommitPlan.NotMatched -> fastPathPlan.userContent
                 is FastPathCommitPlan.Rejected -> emptyList()
             }
-            val anchoredUserMessage = UIMessage(
-                id = branchAnchorMessageId,
-                role = MessageRole.USER,
-                parts = userContent,
-                annotations = content.annotations,
+            val anchoredUserMessage = content.toAnchoredUserMessage(
+                messageId = branchAnchorMessageId,
+                effectiveParts = userContent,
             )
             val existingAnchorIndex = currentConversation.messageNodes.indexOfFirst { node ->
                 node.messages.any { it.id == branchAnchorMessageId }
@@ -2978,12 +2977,7 @@ class ChatService(
             val anchorId = lineage.branchAnchorMessageId
             val admittedConversation = when (val command = envelope.command) {
                 is SendMessageCommand -> {
-                    val message = UIMessage(
-                        id = anchorId,
-                        role = MessageRole.USER,
-                        parts = command.content.parts,
-                        annotations = command.content.annotations,
-                    )
+                    val message = command.content.toAnchoredUserMessage(anchorId)
                     val existing = conversation.messageNodes
                         .flatMap { it.messages }
                         .firstOrNull { it.id == anchorId }
@@ -3409,6 +3403,30 @@ class ChatService(
                 } else {
                     allMessages
                 }
+            }
+            // Stage D needs the exact command authority even when the independently reviewed
+            // Stage-E injection opt-in is off. Merely attaching this content-free identity has no
+            // provider effect; GenerationHandler applies the separate Stage-D and Stage-E gates.
+            if (runControl != null && authoritativeCommandId != null) {
+                durableCommandQueue.findAuthorityRow(authoritativeCommandId)
+                    ?.let(me.rerere.rikkahub.service.chat.CommandLineageContext::fromAuthorityRowOrNull)
+                    ?.let lineage@ { lineage ->
+                        val branchAnchorRevision = lineage.branchAnchorMessageRevision
+                            ?: return@lineage
+                        val scope = privilegeContext.authoritySubjectId?.let { subjectId ->
+                            me.rerere.rikkahub.learning.model.LearningScope.AuthoritySubject(subjectId)
+                        } ?: me.rerere.rikkahub.learning.model.LearningScope.Assistant(assistant.id)
+                        runControl.attachPolicyLearningContext(
+                            me.rerere.rikkahub.learning.exposure.PolicyLearningCommandContext(
+                                scope = scope,
+                                consumingAssistantId = assistant.id,
+                                lineageId = lineage.lineageId,
+                                branchAnchorMessageId = lineage.branchAnchorMessageId,
+                                branchAnchorMessageRevision = branchAnchorRevision,
+                                logicalRunId = runControl.runId,
+                            ),
+                        )
+                    }
             }
             var memoryRetrievalTraceId: String? = null
             val generationMemories = if (!assistant.enableMemory) {
@@ -3916,7 +3934,7 @@ class ChatService(
                                 .flatMap { it.parts.asSequence() }
                                 .filterIsInstance<UIMessagePart.Tool>()
                                 .count(UIMessagePart.Tool::isPending)
-                            agentTiming?.approvalPending(pendingCount)
+                            agentTiming.approvalPending(pendingCount)
                         }
 
                         // Persist immediately when a tool transitions to "execution

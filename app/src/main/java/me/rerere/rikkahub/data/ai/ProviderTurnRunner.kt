@@ -20,6 +20,12 @@ data class ProviderTurnRequest(
     val stream: Boolean,
     /** Per-attempt preparation that must finish before app-provider dispatch (for example lastAccess). */
     val beforeAttempt: (suspend (isRetry: Boolean) -> Unit)? = null,
+    /** Runs only after the provider adapter call has been entered successfully. */
+    val afterAdapterInvocation: (suspend (isRetry: Boolean) -> Unit)? = null,
+    /** Exact authority/config fence evaluated for every attempt immediately before dispatch. */
+    val preDispatchFence: (suspend (attemptOrdinal: Int, isRetry: Boolean) -> Boolean)? = null,
+    /** Optional baseline request selected only if the first learned pre-dispatch fence closes. */
+    val primaryFallback: ProviderPrimaryFallback? = null,
     val streamCall: suspend () -> Flow<MessageChunk>,
     val retryStreamCall: (suspend () -> Flow<MessageChunk>)? = null,
     val singleCall: suspend () -> MessageChunk,
@@ -31,6 +37,19 @@ data class ProviderTurnRequest(
      * timing store so the provider path remains allocation-free when diagnostics are disabled.
      */
     val timingHook: ProviderTurnTimingHook? = null,
+    /**
+     * Durable, attribution-oriented attempt observer. Unlike [timingHook], this callback may
+     * suspend while it records a fenced milestone. Non-cancellation failures are isolated from
+     * provider execution; every watchdog retry is reported with a new one-based ordinal.
+     */
+    val attemptObserver: ProviderAttemptObserver? = null,
+)
+
+data class ProviderPrimaryFallback(
+    val streamCall: suspend () -> Flow<MessageChunk>,
+    val retryStreamCall: (suspend () -> Flow<MessageChunk>)? = null,
+    val singleCall: suspend () -> MessageChunk,
+    val afterAdapterInvocation: (suspend () -> Unit)? = null,
 )
 
 enum class ProviderProgressKind {
@@ -118,13 +137,17 @@ class DefaultProviderTurnRunner(
     override suspend fun run(request: ProviderTurnRequest): ProviderTurnOutcome {
         if (!request.stream) {
             request.timingHook.safeCall { onBeforeAttempt(attemptIndex = 0, isRetry = false) }
-            return runAttemptSafely(
+            val outcome = runAttemptSafely(
                 request = request,
                 streamCall = null,
                 watchdogConfig = null,
                 attemptIndex = 0,
                 isRetry = false,
-            ).toPublicOutcome(request.timingHook, attemptIndex = 0)
+            )
+            if (outcome is ProviderAttemptOutcome.PrimaryFallbackRequired) {
+                return run(request.selectPrimaryFallback(outcome.fallback))
+            }
+            return outcome.toPublicOutcome(request, attemptIndex = 0)
         }
 
         var retry = false
@@ -140,13 +163,27 @@ class DefaultProviderTurnRunner(
                 attemptIndex = attemptIndex,
                 isRetry = retry,
             )) {
+                is ProviderAttemptOutcome.PrimaryFallbackRequired ->
+                    return run(request.selectPrimaryFallback(outcome.fallback))
                 ProviderAttemptOutcome.Completed -> {
+                    request.attemptObserver.safeObserve(
+                        ProviderAttemptEvent.Terminal(
+                            attemptOrdinal = attemptIndex + 1,
+                            outcome = ProviderAttemptTerminalOutcome.COMPLETED,
+                        ),
+                    )
                     request.timingHook.safeCall {
                         onAttemptTerminal(attemptIndex, ProviderAttemptTimingOutcome.COMPLETED)
                     }
                     return ProviderTurnOutcome.Completed
                 }
                 ProviderAttemptOutcome.CancelledForSteering -> {
+                    request.attemptObserver.safeObserve(
+                        ProviderAttemptEvent.Terminal(
+                            attemptOrdinal = attemptIndex + 1,
+                            outcome = ProviderAttemptTerminalOutcome.STEERING_CANCELLED,
+                        ),
+                    )
                     request.timingHook.safeCall {
                         onAttemptTerminal(
                             attemptIndex,
@@ -157,6 +194,12 @@ class DefaultProviderTurnRunner(
                 }
 
                 is ProviderAttemptOutcome.Stalled -> {
+                    request.attemptObserver.safeObserve(
+                        ProviderAttemptEvent.Terminal(
+                            attemptOrdinal = attemptIndex + 1,
+                            outcome = ProviderAttemptTerminalOutcome.STALLED_RETRY,
+                        ),
+                    )
                     request.timingHook.safeCall {
                         onAttemptTerminal(attemptIndex, ProviderAttemptTimingOutcome.STALLED)
                     }
@@ -188,11 +231,23 @@ class DefaultProviderTurnRunner(
     ): ProviderAttemptOutcome = try {
         runAttempt(request, streamCall, watchdogConfig, attemptIndex, isRetry)
     } catch (cancelled: CancellationException) {
+        request.attemptObserver.safeObserve(
+            ProviderAttemptEvent.Terminal(
+                attemptOrdinal = attemptIndex + 1,
+                outcome = ProviderAttemptTerminalOutcome.CANCELLED,
+            ),
+        )
         request.timingHook.safeCall {
             onAttemptTerminal(attemptIndex, ProviderAttemptTimingOutcome.CANCELLED)
         }
         throw cancelled
     } catch (failure: Throwable) {
+        request.attemptObserver.safeObserve(
+            ProviderAttemptEvent.Terminal(
+                attemptOrdinal = attemptIndex + 1,
+                outcome = ProviderAttemptTerminalOutcome.FAILED,
+            ),
+        )
         request.timingHook.safeCall {
             onAttemptTerminal(attemptIndex, ProviderAttemptTimingOutcome.FAILED)
         }
@@ -206,6 +261,16 @@ class DefaultProviderTurnRunner(
         attemptIndex: Int,
         isRetry: Boolean,
     ): ProviderAttemptOutcome = supervisorScope {
+        val fencePassed = request.preDispatchFence?.invoke(attemptIndex + 1, isRetry) != false
+        val attributionPrepared = fencePassed &&
+            request.attemptObserver.safePrepare(attemptIndex + 1, isRetry)
+        if (!fencePassed || !attributionPrepared) {
+            val fallback = request.primaryFallback
+            if (!isRetry && fallback != null) {
+                return@supervisorScope ProviderAttemptOutcome.PrimaryFallbackRequired(fallback)
+            }
+            error("Provider pre-dispatch authority/attribution fence rejected the attempt")
+        }
         val steeringCancellationRequested = AtomicBoolean(false)
         val cancellationOrigin = AtomicReference<ProviderCancellationOrigin?>(null)
         val detectedStall = AtomicReference<ProviderStreamStall?>(null)
@@ -222,12 +287,20 @@ class DefaultProviderTurnRunner(
         val providerChild = async {
             try {
                 request.beforeAttempt?.invoke(isRetry)
+                request.attemptObserver.safeObserve(
+                    ProviderAttemptEvent.HostDispatched(
+                        attemptOrdinal = attemptIndex + 1,
+                        stream = request.stream,
+                    ),
+                )
                 request.timingHook.safeCall {
                     onAppDispatch(attemptIndex, stream = request.stream)
                 }
                 var firstMeaningfulProgressReported = false
                 if (request.stream) {
-                    checkNotNull(streamCall).invoke().collect { chunk ->
+                    val providerFlow = checkNotNull(streamCall).invoke()
+                    request.afterAdapterInvocation?.invoke(isRetry)
+                    providerFlow.collect { chunk ->
                         // Record at the provider boundary, before UI/database work. A slow
                         // collector must never be mistaken for a slow upstream stream.
                         if (progress != null ||
@@ -237,6 +310,12 @@ class DefaultProviderTurnRunner(
                             progress?.record(units)
                             if (units > 0L && !firstMeaningfulProgressReported) {
                                 firstMeaningfulProgressReported = true
+                                request.attemptObserver.safeObserve(
+                                    ProviderAttemptEvent.FirstProgress(
+                                        attemptOrdinal = attemptIndex + 1,
+                                        kind = ProviderProgressKind.STREAM_PROGRESS,
+                                    ),
+                                )
                                 request.timingHook.safeCall {
                                     onFirstMeaningfulProgress(
                                         attemptIndex,
@@ -249,7 +328,16 @@ class DefaultProviderTurnRunner(
                     }
                 } else {
                     val chunk = request.singleCall()
-                    if (request.timingHook != null && progressUnits(chunk) > 0L) {
+                    request.afterAdapterInvocation?.invoke(isRetry)
+                    if ((request.timingHook != null || request.attemptObserver != null) &&
+                        progressUnits(chunk) > 0L
+                    ) {
+                        request.attemptObserver.safeObserve(
+                            ProviderAttemptEvent.FirstProgress(
+                                attemptOrdinal = attemptIndex + 1,
+                                kind = ProviderProgressKind.FULL_RESPONSE,
+                            ),
+                        )
                         request.timingHook.safeCall {
                             onFirstMeaningfulProgress(
                                 attemptIndex,
@@ -259,6 +347,9 @@ class DefaultProviderTurnRunner(
                     }
                     chunks.send(chunk)
                 }
+                request.attemptObserver.safeObserve(
+                    ProviderAttemptEvent.ResponseFinished(attemptOrdinal = attemptIndex + 1),
+                )
                 request.timingHook.safeCall { onProviderResponseFinished(attemptIndex) }
             } catch (error: Throwable) {
                 chunks.close(error)
@@ -334,18 +425,30 @@ class DefaultProviderTurnRunner(
         }
     }
 
-    private fun ProviderAttemptOutcome.toPublicOutcome(
-        timingHook: ProviderTurnTimingHook?,
+    private suspend fun ProviderAttemptOutcome.toPublicOutcome(
+        request: ProviderTurnRequest,
         attemptIndex: Int,
     ): ProviderTurnOutcome = when (this) {
         ProviderAttemptOutcome.Completed -> {
-            timingHook.safeCall {
+            request.attemptObserver.safeObserve(
+                ProviderAttemptEvent.Terminal(
+                    attemptOrdinal = attemptIndex + 1,
+                    outcome = ProviderAttemptTerminalOutcome.COMPLETED,
+                ),
+            )
+            request.timingHook.safeCall {
                 onAttemptTerminal(attemptIndex, ProviderAttemptTimingOutcome.COMPLETED)
             }
             ProviderTurnOutcome.Completed
         }
         ProviderAttemptOutcome.CancelledForSteering -> {
-            timingHook.safeCall {
+            request.attemptObserver.safeObserve(
+                ProviderAttemptEvent.Terminal(
+                    attemptOrdinal = attemptIndex + 1,
+                    outcome = ProviderAttemptTerminalOutcome.STEERING_CANCELLED,
+                ),
+            )
+            request.timingHook.safeCall {
                 onAttemptTerminal(
                     attemptIndex,
                     ProviderAttemptTimingOutcome.STEERING_CANCELLED,
@@ -354,6 +457,9 @@ class DefaultProviderTurnRunner(
             ProviderTurnOutcome.CancelledForSteering
         }
         is ProviderAttemptOutcome.Stalled -> throw ProviderStreamStalledException(stall)
+        is ProviderAttemptOutcome.PrimaryFallbackRequired -> error(
+            "Primary fallback must be resolved before public outcome conversion",
+        )
     }
 }
 
@@ -366,13 +472,54 @@ private inline fun ProviderTurnTimingHook?.safeCall(block: ProviderTurnTimingHoo
     }
 }
 
+private suspend fun ProviderAttemptObserver?.safeObserve(event: ProviderAttemptEvent) {
+    val observer = this ?: return
+    try {
+        observer.observe(event)
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (_: Throwable) {
+        // Attribution is a fail-open sidecar. Losing a milestone must not dispatch a fallback,
+        // duplicate a provider call, or change the provider result.
+    }
+}
+
+private suspend fun ProviderAttemptObserver?.safePrepare(
+    attemptOrdinal: Int,
+    isRetry: Boolean,
+): Boolean {
+    val observer = this ?: return true
+    return try {
+        observer.prepareForDispatch(attemptOrdinal, isRetry)
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (_: Throwable) {
+        false
+    }
+}
+
 private enum class ProviderCancellationOrigin { STEERING, WATCHDOG }
 
 private sealed interface ProviderAttemptOutcome {
     data object Completed : ProviderAttemptOutcome
     data object CancelledForSteering : ProviderAttemptOutcome
     data class Stalled(val stall: ProviderStreamStall) : ProviderAttemptOutcome
+    data class PrimaryFallbackRequired(
+        val fallback: ProviderPrimaryFallback,
+    ) : ProviderAttemptOutcome
 }
+
+private fun ProviderTurnRequest.selectPrimaryFallback(
+    fallback: ProviderPrimaryFallback,
+): ProviderTurnRequest = copy(
+    preDispatchFence = null,
+    primaryFallback = null,
+    attemptObserver = null,
+    streamCall = fallback.streamCall,
+    retryStreamCall = fallback.retryStreamCall,
+    singleCall = fallback.singleCall,
+    afterAdapterInvocation = { _ -> fallback.afterAdapterInvocation?.invoke() },
+)
 
 private data class ProviderProgressSample(val atMillis: Long, val units: Long)
 
