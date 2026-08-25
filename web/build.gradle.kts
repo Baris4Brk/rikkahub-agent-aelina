@@ -10,21 +10,19 @@ val pnpmExecutable = if (System.getProperty("os.name").startsWith("Windows", ign
     "pnpm"
 }
 
-// Install web-ui dependencies. Up-to-date when bun.lock + package.json haven't
-// changed since the last successful install, so it's a no-op on every build
-// after the first. Without this step, the buildWebUi task fails on a clean
-// checkout with `react-router: command not found` until someone manually runs
-// `bun install` in web-ui/.
+// Web arayüzü pnpm-lock.yaml ile yönetiliyor. Temiz bir GitHub Actions
+// checkout'unda bağımlılıkların önce kurulması gerekiyor; aksi halde
+// buildWebUi görevi eksik paketler nedeniyle başarısız olur.
 val installWebUiDeps = tasks.register<Exec>("installWebUiDeps") {
     group = "build"
-    description = "Install web-ui dependencies via bun if the lockfile changed."
+    description = "Install web-ui dependencies via pnpm using the locked dependency graph."
 
     workingDir = webUiDir.asFile
-    commandLine("bun", "install", "--frozen-lockfile")
+    commandLine(pnpmExecutable, "install", "--frozen-lockfile")
 
     inputs.files(
         webUiDir.file("package.json"),
-        webUiDir.file("bun.lock")
+        webUiDir.file("pnpm-lock.yaml")
     )
     outputs.dir(webUiDir.dir("node_modules"))
 }
