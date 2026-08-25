@@ -79,10 +79,10 @@ jobs:
               -dname "CN=RikkaHub CI, OU=Build, O=RikkaHub, L=Istanbul, ST=Istanbul, C=TR"
 
             cat > local.properties <<'EOF'
-RELEASE_STORE_FILE=app/app.key
-RELEASE_STORE_PASSWORD=android
-RELEASE_KEY_ALIAS=release
-RELEASE_KEY_PASSWORD=android
+storeFile=app/app.key
+storePassword=android
+keyAlias=release
+keyPassword=android
 EOF
           fi
 
@@ -94,8 +94,12 @@ EOF
 
       - name: Verify release signing
         run: |
+          set -euo pipefail
           test -s app/app.key
-          grep -E '^RELEASE_(STORE_FILE|STORE_PASSWORD|KEY_ALIAS|KEY_PASSWORD)=' local.properties >/dev/null
+          grep -E '^storeFile=' local.properties >/dev/null
+          grep -E '^storePassword=' local.properties >/dev/null
+          grep -E '^keyAlias=' local.properties >/dev/null
+          grep -E '^keyPassword=' local.properties >/dev/null
           keytool -list -keystore app/app.key -storepass android -alias release >/dev/null
 
       - name: Gradle Build
