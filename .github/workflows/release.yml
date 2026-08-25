@@ -18,20 +18,21 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      # Web UI için pnpm gerekir. web/build.gradle.kts, web-ui içindeki
-      # pnpm-lock.yaml dosyasını kullanarak bağımlılıkları kurar.
+      # pnpm, web/build.gradle.kts tarafından web-ui bağımlılıklarını
+      # pnpm-lock.yaml'a göre kurmak ve web arayüzünü derlemek için kullanılır.
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+          run_install: false
+
+      # Vite 7 ve React Router build zinciri için güncel Node.js kullanılır.
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '22'
           cache: 'pnpm'
           cache-dependency-path: 'web-ui/pnpm-lock.yaml'
-
-      - name: Set up pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 10
-          run_install: false
 
       - name: Verify build toolchain
         run: |
