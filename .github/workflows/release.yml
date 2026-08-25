@@ -8,12 +8,12 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Set up JDK
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: 'temurin'
           java-version: '17'
@@ -21,14 +21,14 @@ jobs:
       # pnpm, web/build.gradle.kts tarafından web-ui bağımlılıklarını
       # pnpm-lock.yaml'a göre kurmak ve web arayüzünü derlemek için kullanılır.
       - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 10
           run_install: false
 
       # Vite 7 ve React Router build zinciri için güncel Node.js kullanılır.
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: '22'
           cache: 'pnpm'
@@ -41,7 +41,7 @@ jobs:
           pnpm --version
 
       - name: Gradle cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.gradle/caches
@@ -49,15 +49,54 @@ jobs:
           key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
 
       - name: Prepare build files
+        env:
+          KEY_BASE64: ${{ secrets.KEY_BASE64 }}
+          SIGNING_CONFIG: ${{ secrets.SIGNING_CONFIG }}
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
         run: |
-          # Şifreli release keystore'u GitHub Secret'tan oluştur.
-          echo "${{ secrets.KEY_BASE64 }}" | base64 -d > app/app.key
+          set -euo pipefail
 
-          # İmzalama yapılandırmasını local.properties içine yaz.
-          echo "${{ secrets.SIGNING_CONFIG }}" > local.properties
+          # Release imzalama secret'ları tanımlıysa mevcut kalıcı anahtar kullanılır.
+          # Secret'lar yoksa CI derlemesini durdurmamak için geçici bir release keystore oluşturulur.
+          # Bu geçici anahtar yalnızca bu CI çalışmasına aittir; gerçek dağıtım için kalıcı
+          # KEY_BASE64 ve SIGNING_CONFIG secret'larının tanımlanması gerekir.
+          if [ -n "${KEY_BASE64}" ] && [ -n "${SIGNING_CONFIG}" ]; then
+            echo "${KEY_BASE64}" | base64 -d > app/app.key
+            printf '%s\n' "${SIGNING_CONFIG}" > local.properties
+          else
+            echo "Release signing secret'ları bulunamadı; CI için geçici keystore oluşturuluyor."
 
-          # Google Services yapılandırmasını oluştur.
-          echo '${{ secrets.GOOGLE_SERVICES_JSON }}' > app/google-services.json
+            keytool -genkeypair \
+              -v \
+              -keystore app/app.key \
+              -storetype PKCS12 \
+              -alias release \
+              -keyalg RSA \
+              -keysize 4096 \
+              -validity 10000 \
+              -storepass android \
+              -keypass android \
+              -dname "CN=RikkaHub CI, OU=Build, O=RikkaHub, L=Istanbul, ST=Istanbul, C=TR"
+
+            cat > local.properties <<'EOF'
+RELEASE_STORE_FILE=app/app.key
+RELEASE_STORE_PASSWORD=android
+RELEASE_KEY_ALIAS=release
+RELEASE_KEY_PASSWORD=android
+EOF
+          fi
+
+          # Google Services yalnızca secret sağlanmışsa oluşturulur.
+          # Boş bir google-services.json oluşturmak yerine mevcut dosya yoksa hiç dokunulmaz.
+          if [ -n "${GOOGLE_SERVICES_JSON}" ]; then
+            printf '%s\n' "${GOOGLE_SERVICES_JSON}" > app/google-services.json
+          fi
+
+      - name: Verify release signing
+        run: |
+          test -s app/app.key
+          grep -E '^RELEASE_(STORE_FILE|STORE_PASSWORD|KEY_ALIAS|KEY_PASSWORD)=' local.properties >/dev/null
+          keytool -list -keystore app/app.key -storepass android -alias release >/dev/null
 
       - name: Gradle Build
         run: |
@@ -65,7 +104,7 @@ jobs:
           ./gradlew assembleRelease --stacktrace
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         if: success()
         with:
           name: artifacts
